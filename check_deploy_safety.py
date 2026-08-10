@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-deploy gate: prove a push to main LOSES NOTHING and still parses.
+"""Pre-deploy gate: prove a push to main REWINDS NOTHING and still parses.
 
 WHY THIS EXISTS
 ---------------
@@ -15,13 +15,33 @@ two days a push nearly cost real content:
 `check_masters_vs_main.py` watches three doc files at COMMIT time. This watches
 EVERY text file at PUSH time — the last moment before production.
 
-WHAT IT CHECKS
---------------
-  1. CONTENT LOSS — for every text file present on origin/main, any non-trivial
-     line that exists there and is absent from the pushed tree. Deleting a whole
-     file counts. This is the check that would have stopped both incidents.
-  2. SYNTAX — every changed .py file must parse (a broken module on main is a
-     broken production).
+THE v898 SPLIT (2026-08-03, operator-approved)
+----------------------------------------------
+The original line-loss check did TWO jobs with one blunt test, and every FAIL
+after install was the wrong job firing: deliberate replacements (reviewed,
+tested, authored on top of main) were blocked exactly like stale-tree clobbers,
+forcing --ack ceremony or "line-additive" code contortions. The jobs are now
+split:
+
+  * STALE-TREE REWIND (the incident class) is caught MECHANICALLY: the
+    candidate must be a descendant of protected main
+    (`git merge-base --is-ancestor`). A push from a tree whose history never
+    contained main's newest lines fails HARD and is NOT acknowledgeable —
+    rebase it, don't ack it.
+  * DELIBERATE EDITS no longer fail. When ancestry holds, every change vs main
+    was authored in a commit being pushed, so line differences are reported as
+    a REPLACEMENT ACCOUNTING (each lost line printed next to the added line
+    that most resembles it, or VANISHED when nothing does) for the deploy log.
+    Whoever deploys reviews that accounting — that is the review step, moved
+    from a blocking gate into the deploy transcript.
+
+WHAT STILL FAILS
+----------------
+  1. ANCESTRY — candidate does not descend from protected main (rewind risk).
+     Never acknowledgeable.
+  2. DELETED FILES — a whole text file present on main and absent from the
+     push. Rare + highest blast radius, so it keeps the --ack ceremony.
+  3. SYNTAX — every changed .py file must parse. Never acknowledgeable.
 
 Trivial lines (blank, pure punctuation, closing braces/fences) are ignored so
 reformatting does not cause noise.
@@ -30,40 +50,32 @@ USAGE
     python check_deploy_safety.py                 # HEAD vs origin/main
     python check_deploy_safety.py --ref REF       # some other ref vs origin/main
     python check_deploy_safety.py --fetch         # fetch origin/main first
-    python check_deploy_safety.py --allow-loss    # report loss but exit 0
-                                                  # (deliberate deletions)
-    python check_deploy_safety.py --ack           # acknowledge THIS exact loss
+    python check_deploy_safety.py --allow-loss    # legacy: also exit 0 on deletions
+    python check_deploy_safety.py --ack           # acknowledge THIS exact deletion set
 
-ACKNOWLEDGING A DELIBERATE REFACTOR (--ack, added 2026-08-03)
--------------------------------------------------------------
-Any refactor that moves or rewords a line reads as "loss" here — that is the
-tripwire working as designed. The problem was the escape hatch: --allow-loss is
-a blanket flag that neither the pre-push hook nor deploy.ps1 passes through, so
-a deliberate refactor forced either `git push --no-verify` (which skips EVERY
-check, including syntax and file-deletion, and is blocked in auto mode) or
-contorting the code to fake zero loss. Both happened in practice.
-
-`--ack` replaces that with a SCOPED acknowledgment. It reviews the current
-loss, then writes `.deploy_ack.json` (gitignored) recording the candidate's
-exact TREE hash plus a fingerprint of the exact lost lines. On any later run —
-including the one inside the pre-push hook and the one inside deploy.ps1 —
-this checker honors the file only when BOTH still match:
+ACKNOWLEDGING A DELIBERATE DELETION (--ack, added 2026-08-03; scope narrowed v898)
+----------------------------------------------------------------------------------
+`--ack` writes `.deploy_ack.json` (gitignored) recording the candidate's exact
+TREE hash plus a fingerprint of the exact loss set. On any later run — including
+the one inside the pre-push hook and the one inside deploy.ps1 — this checker
+honors the file only when BOTH still match:
 
   * a new commit changes the tree hash        -> ack is stale, gate FAILS again
   * the loss set changes in any way           -> ack is stale, gate FAILS again
-  * syntax errors / unverified inputs         -> never acknowledgeable, FAIL
+  * ancestry / syntax / unverified inputs     -> never acknowledgeable, FAIL
 
-So the acknowledgment can never outlive the exact push it approved, a blanket
-flag can never be left switched on, and the hooked push + deploy.ps1 keep
-running every other check. No --no-verify, no code contortion.
+Since v898 an ack is only ever NEEDED for file deletions; it still fingerprints
+line losses too so an ack written by this version satisfies the pre-v898 copy of
+the checker that the pre-push hook runs until this version lands on main.
 
-Exit 0 = safe to deploy. Exit 1 = content or syntax failure. Exit 2 = the
-comparison itself could not be proved; deploy remains blocked.
+Exit 0 = safe to deploy. Exit 1 = ancestry / deletion / syntax failure. Exit 2 =
+the comparison itself could not be proved; deploy remains blocked.
 """
 
 import argparse
 import ast
 from collections import Counter
+import difflib
 import hashlib
 import json
 import os
@@ -214,6 +226,21 @@ def main(argv):
             print("cannot read %s ref %s — deploy blocked" % (label, ref))
             return 2
 
+    # ---- 0. ancestry — the stale-tree tripwire (v898) --------------------
+    # `--is-ancestor` exits 0 (yes), 1 (no), >1 (couldn't tell). A candidate
+    # that does not CONTAIN protected main would rewind whatever main gained
+    # since the histories diverged — the exact 2026-07-30 incident class. Not
+    # acknowledgeable: rebase onto main instead.
+    anc = git("merge-base", "--is-ancestor", args.main, args.ref)
+    if anc.returncode == 0:
+        descendant = True
+    elif anc.returncode == 1:
+        descendant = False
+    else:
+        print("cannot establish ancestry between %s and %s: %s — deploy blocked"
+              % (args.main, args.ref, anc.stderr.strip()[:200]))
+        return 2
+
     try:
         main_files = ls_files(args.main)
         ours_files = set(ls_files(args.ref))
@@ -231,8 +258,9 @@ def main(argv):
     print("DEPLOY SAFETY   %s  ->  %s" % (ours, args.main + " (" + theirs + ")"))
     print("=" * 78)
 
-    # ---- 1. content loss -------------------------------------------------
+    # ---- 1. content loss + replacement accounting ------------------------
     losses = {}
+    added = {}      # path -> lines new in the candidate (the replacement pool)
     gone = []
     unverified = []
     for path in main_files:
@@ -256,6 +284,8 @@ def main(argv):
             missing.extend([line] * max(0, count - ours_counts[line]))
         if missing:
             losses[path] = missing
+            added[path] = [ln for ln, c in ours_counts.items()
+                           for _ in range(max(0, c - theirs_counts[ln]))]
 
     # ---- 2. syntax of changed python -------------------------------------
     diff = git("diff", "--name-only", args.main, args.ref, "--")
@@ -278,10 +308,17 @@ def main(argv):
             broken.append("%s:%s %s" % (path, e.lineno, e.msg))
 
     n_lost = sum(len(v) for v in losses.values())
+    print("candidate descends from %s : %s" % (args.main, "YES" if descendant else "NO"))
     print("files deleted vs %s : %d" % (args.main, len(gone)))
     print("files losing lines   : %d  (%d line(s) total)" % (len(losses), n_lost))
     print("changed .py broken   : %d" % len(broken))
     print("files/checks unread  : %d" % len(unverified))
+
+    if not descendant:
+        print("\nSTALE TREE — the candidate's history does not contain %s." % args.main)
+        print("Pushing it would REWIND main to before the histories diverged (the")
+        print("2026-07-30 incident class). Rebase onto %s; this is never" % args.main)
+        print("acknowledgeable.")
 
     if gone:
         print("\nDELETED FILES:")
@@ -289,18 +326,41 @@ def main(argv):
             print("   %s" % p)
 
     if losses:
-        print("\nCONTENT LOSS — these lines exist on %s and NOT in what you are pushing:" % args.main)
+        # v898 — when ancestry holds these are DELIBERATE edits (each removal
+        # was authored in a commit being pushed), so they are reported for the
+        # deploy log instead of blocking. Each lost line is shown next to the
+        # added line that most resembles it; VANISHED = nothing similar was
+        # added, the shape a stale copy-paste over a newer file would leave —
+        # read those before deploying.
+        vanished_n = 0
+        header = ("REPLACEMENT ACCOUNTING — lines on %s changed by this push:"
+                  if descendant else
+                  "CONTENT AT RISK — these lines exist on %s and NOT in what you are pushing:")
+        print("\n" + header % args.main)
         for path, lines in sorted(losses.items()):
             print("   %s (%d):" % (path, len(lines)))
-            for ln in lines[:5]:
+            # Each added line may vouch for at most ONE lost line — without
+            # consuming the pool, a single new line "replaced" every lost line
+            # it loosely resembled and real vanishings went unflagged.
+            pool = list(added.get(path, []))
+            for ln in lines:
                 # The gate must never die on its own output. A lost line can
                 # contain anything the source does — an emoji in a UI label was
                 # enough to raise UnicodeEncodeError on a cp1252 console and
                 # block every push touching that line (2026-08-05, the 🥁 in the
                 # export modal). Degrade the character, never the check.
-                print("      %s" % _safe(ln[:140]))
-            if len(lines) > 5:
-                print("      … and %d more" % (len(lines) - 5))
+                near = difflib.get_close_matches(ln, pool, n=1, cutoff=0.5)
+                if near:
+                    pool.remove(near[0])
+                    print("      - %s" % _safe(ln.strip()[:110]))
+                    print("        -> %s" % _safe(near[0].strip()[:110]))
+                else:
+                    vanished_n += 1
+                    print("      - %s   [VANISHED — no similar line added]"
+                          % _safe(ln.strip()[:110]))
+        if descendant and vanished_n:
+            print("   %d line(s) VANISHED with no replacement — confirm each was"
+                  " meant to go before deploying." % vanished_n)
 
     if broken:
         print("\nSYNTAX ERRORS in changed python:")
@@ -313,11 +373,15 @@ def main(argv):
             print("   %s" % item)
 
     # ---- scoped acknowledgment (--ack / .deploy_ack.json) -----------------
-    # Only a pure loss can be acknowledged. Broken python or unverified inputs
-    # stay hard failures no matter what — an ack must never widen past loss.
+    # v898: an ack is only ever NEEDED for file deletions. It still fingerprints
+    # line losses too, so an ack written by this version also satisfies the
+    # pre-v898 checker copy that the pre-push hook runs until this version is
+    # itself on main. Ancestry, broken python and unverified inputs stay hard
+    # failures no matter what — an ack must never widen past deletions.
     acknowledged = False
     ack_stale = None
-    if (losses or gone) and not (broken or unverified):
+    ackable = (losses or gone) and not (broken or unverified) and descendant
+    if ackable:
         tree, digest = loss_fingerprint(args.ref, losses, gone)
         if args.ack:
             write_ack(tree, digest, n_lost, len(gone))
@@ -335,34 +399,43 @@ def main(argv):
                     ack_stale = ("%s exists but does not match this push "
                                  "(tree or loss set changed since --ack)." % ACK_FILENAME)
     elif args.ack:
-        if broken or unverified:
+        if not descendant:
+            print("\n--ack refused: a stale tree is never acknowledgeable — rebase onto %s."
+                  % args.main)
+        elif broken or unverified:
             print("\n--ack refused: syntax errors / unverified inputs are never acknowledgeable.")
         else:
-            print("\n--ack: nothing to acknowledge — no content loss in this push.")
+            print("\n--ack: nothing to acknowledge — no deletions or line changes in this push.")
 
-    fail = bool(broken or unverified) or ((losses or gone) and not args.allow_loss)
-    if fail and acknowledged:
-        # A matching ack answers the LOSS only; syntax / unverified failures
-        # (already excluded above before an ack can exist) would still fail.
-        fail = False
+    # v898 verdict: line losses no longer fail on a descendant tree — they are
+    # the accounting above. Deletions keep the ack ceremony. A stale tree fails
+    # regardless of everything else.
+    fail = (bool(broken or unverified)
+            or not descendant
+            or (bool(gone) and not args.allow_loss and not acknowledged))
     if fail:
         print("\nRESULT: FAIL — do not deploy this.")
-        if losses or gone:
+        if not descendant:
+            print("Rebase the work onto %s (git rebase %s), then re-run."
+                  % (args.main, args.main))
+        elif gone and not acknowledged:
             if ack_stale:
                 print("STALE ACK: %s" % ack_stale)
-            print("If the removal is DELIBERATE, re-run with --allow-loss (or push --no-verify).")
+            print("If the deletion is DELIBERATE:")
             print("PREFERRED: python check_deploy_safety.py --ack  — a scoped acknowledgment")
-            print("for exactly this tree + this loss set; the hooked push and deploy.ps1")
+            print("for exactly this tree + this deletion set; the hooked push and deploy.ps1")
             print("then pass with every other check still enforced (no --no-verify).")
-            print("If it is not, restore the missing lines and re-run.")
+            print("If it is not, restore the deleted file(s) and re-run.")
         return 1
 
-    if (losses or gone) and acknowledged and not args.allow_loss:
-        print("\nRESULT: PASS (loss acknowledged via %s — scoped to this exact tree)."
-              % (ACK_FILENAME if not args.ack else "--ack"))
-        return 0
-    if losses or gone:
-        print("\nRESULT: PASS (loss acknowledged via --allow-loss).")
+    if gone and acknowledged:
+        print("\nRESULT: PASS (deletion acknowledged via %s — scoped to this exact tree)."
+              % ("--ack" if args.ack else ACK_FILENAME))
+    elif gone:
+        print("\nRESULT: PASS (deletion allowed via --allow-loss).")
+    elif losses:
+        print("\nRESULT: PASS — %d changed line(s) accounted above; review the"
+              " accounting in this deploy log." % n_lost)
     else:
         print("\nRESULT: PASS — nothing on %s is lost, changed python parses." % args.main)
     return 0
