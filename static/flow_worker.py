@@ -203,31 +203,49 @@ def _bootstrap_browser_driver():
 
     Fetch it here instead, from the same endpoint the companion sync uses.
     """
+    import urllib.request
+
+    base = (os.environ.get("WEB_APP_URL") or "https://kavenobuilder.com").rstrip("/")
+    dest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser_driver.py")
+    url = f"{base}/api/user-worker/download/browser_driver.py"
+
+    # Refresh BEFORE importing, not just when missing. The companion sync in
+    # check_for_updates() runs under __main__, i.e. AFTER this module has already
+    # imported browser_driver — so it writes the new file to disk while the OLD
+    # one is live in memory, and every companion is permanently one launch
+    # behind. Measured 2026-08-10: worker started 23:49:46, browser_driver.py was
+    # rewritten 23:49:55, and the run used the stale module all night (the audio
+    # mute prefs never reached the browser).
+    #
+    # Fail-soft in every direction: any network problem falls through to whatever
+    # copy is already on disk. Only a missing module AND a failed fetch is fatal.
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "flow-worker"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = r.read()
+        if data and data.lstrip().startswith(b'"""'):
+            old = b""
+            if os.path.isfile(dest):
+                try:
+                    with open(dest, "rb") as f:
+                        old = f.read()
+                except OSError:
+                    pass
+            if data != old:
+                with open(dest, "wb") as f:
+                    f.write(data)
+                print(f"[Init] browser_driver refreshed ({len(data)} bytes)", flush=True)
+    except Exception as e:
+        print(f"[Init] browser_driver refresh skipped ({str(e)[:80]}) - using local copy",
+              flush=True)
+
     try:
         import browser_driver as _m
         return _m
     except ImportError:
-        pass
-
-    import urllib.request
-    base = (os.environ.get("WEB_APP_URL") or "https://kavenobuilder.com").rstrip("/")
-    dest = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser_driver.py")
-    url = f"{base}/api/user-worker/download/browser_driver.py"
-    print(f"[Init] browser_driver missing - fetching from {url}", flush=True)
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "flow-worker"})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = r.read()
-        with open(dest, "wb") as f:
-            f.write(data)
-        print(f"[Init] browser_driver fetched ({len(data)} bytes)", flush=True)
-    except Exception as e:
-        print(f"[Init] FATAL: could not fetch browser_driver ({e})", flush=True)
+        print("[Init] FATAL: browser_driver missing and could not be fetched.", flush=True)
         print("[Init] Worker cannot start. Re-run the installer or check WEB_APP_URL.", flush=True)
         raise
-
-    import browser_driver as _m
-    return _m
 
 
 _bd = _bootstrap_browser_driver()
