@@ -123,6 +123,61 @@ def run(api_url, api_key, page, host, poll_s=5, log=print):
     _hb_thread = threading.Thread(target=_heartbeat_loop, name="chatgpt-heartbeat", daemon=True)
     _hb_thread.start()
 
+    # v898 — GRACEFUL SHUTDOWN. Closing the worker used to leave the platform
+    # showing "● Online": nothing ever called release-claims with
+    # going_offline=true, so the heartbeat row survived AND the in-flight node
+    # stayed cg_status=generating with a fresh cg_claimed_at, which the server's
+    # v897 busy-liveness rule reads as proof the worker is alive (operator
+    # 2026-08-03: "i closed the worker but in the platform it still shows it's
+    # online"). The server endpoint has deleted the heartbeat row on
+    # going_offline=true since v516 — this worker simply never called it.
+    #
+    # Releasing the claim also puts the node it was mid-way through back in the
+    # queue instead of stranding it in "generating" until the 10-minute sweep.
+    _shutdown_done = threading.Event()
+
+    def _go_offline(reason=""):
+        if _shutdown_done.is_set():
+            return
+        _shutdown_done.set()
+        _hb_stop.set()                      # stop beating BEFORE clearing the row
+        try:
+            r = requests.post(f"{base}/release-claims",
+                              params={"worker_id": wid, "going_offline": True},
+                              headers=_auth(api_key), timeout=15)
+            j = r.json() if r.ok else {}
+            log(f"going offline{f' ({reason})' if reason else ''} — "
+                f"released {j.get('released', '?')} claim(s), "
+                f"heartbeat_deleted={j.get('heartbeat_deleted', '?')}")
+        except Exception as e:
+            log(f"going offline{f' ({reason})' if reason else ''} — "
+                f"release-claims failed, the platform light will go red on its "
+                f"own within the heartbeat window: {e}")
+
+    import atexit
+    import signal
+    atexit.register(_go_offline, "process exit")
+    for _sig in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        s = getattr(signal, _sig, None)
+        if s is None:
+            continue                        # SIGBREAK is Windows-only
+        try:
+            signal.signal(s, lambda _s, _f: (_go_offline(_sig), sys.exit(0)))
+        except (ValueError, OSError):
+            pass                            # not on the main thread — atexit covers it
+
+    try:
+        _pump(base, api_key, wid, page, poll_s, log)
+    finally:
+        _go_offline("worker loop ended")
+
+
+def _pump(base, api_key, wid, page, poll_s, log):
+    """The claim -> generate -> upload loop. Split out so `run` can wrap it in
+    the graceful-shutdown try/finally without re-indenting the whole body."""
+    import requests
+    from chatgpt_image_backend import generate
+
     while True:
         try:
             r = requests.get(f"{base}/jobs/pending",

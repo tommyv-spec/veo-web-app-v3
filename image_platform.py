@@ -11875,6 +11875,17 @@ WORKER_HEARTBEAT_STALE_SECONDS = 20  # v545: loosened from 10s. The 10s
 # within one UI poll cycle (~2s).
 
 
+# v898 — how long a fresh CLAIM alone may vouch for a worker whose heartbeat has
+# stopped. v897 reused the 10-minute stale-claim sweep window for this, so a
+# worker killed mid-node kept the platform light GREEN for ten minutes (operator
+# 2026-08-03: "i closed the worker but in the platform it still shows it's
+# online"). Both workers now beat every ~4s from a daemon thread, so this
+# fallback only has to survive a short run of failed beats, not a whole render.
+# 90s ≈ 22 missed beats. A pre-v897 worker copy (no beat thread) now reads
+# offline while it renders — that is the honest signal; upgrade the worker.
+WORKER_CLAIM_LIVENESS_SECONDS = 90
+
+
 def _worker_kind(worker_id) -> str:
     """Classify an HTTP worker by id prefix. ChatGPT workers use 'chatgpt-<host>'."""
     return "chatgpt" if (worker_id or "").startswith("chatgpt-") else "flow"
@@ -11909,7 +11920,7 @@ def _split_worker_lights(rows, now):
     return flow, cg
 
 
-def _apply_busy_liveness(light, fresh_claims):
+def _apply_busy_liveness(light, fresh_claims, live_claims=None):
     """v897 — a worker holding a FRESH CLAIM is alive, even with a stale beat.
 
     Heartbeat rows are only written when the worker calls the server
@@ -11927,7 +11938,16 @@ def _apply_busy_liveness(light, fresh_claims):
     idle green. Applies to any lane, so a future worker that forgets to beat
     is covered too.
     """
-    if fresh_claims > 0 and not light["online"]:
+    # v898 — two windows, not one. `live_claims` (short, WORKER_CLAIM_LIVENESS_
+    # SECONDS) is the only thing allowed to OVERRIDE a dead heartbeat, so a
+    # killed worker goes red in seconds instead of staying green for the whole
+    # 10-minute stale-claim window. `fresh_claims` (the 10-minute window) still
+    # decides BUSY, so a worker that is beating normally still reads "working"
+    # deep into a multi-minute render. Callers that pass only fresh_claims keep
+    # the pre-v898 behaviour.
+    if live_claims is None:
+        live_claims = fresh_claims
+    if live_claims > 0 and not light["online"]:
         light["online"] = True
         light["busy"] = True
     else:
@@ -12079,11 +12099,27 @@ def worker_status(
             ImageNode.cg_claimed_at.isnot(None),
             ImageNode.cg_claimed_at >= claim_fresh_cutoff,
         ).count()
+        # v898 — a claim may only vouch for a dead heartbeat while it is RECENT.
+        # Same queries, short window: this is what stops a killed worker from
+        # reading "online" for ten minutes.
+        claim_live_cutoff = now - timedelta(seconds=WORKER_CLAIM_LIVENESS_SECONDS)
+        generating_live = db.query(ImageNode).filter(
+            ImageNode.user_id == current_user.id,
+            ImageNode.status == "generating",
+            ImageNode.claimed_at.isnot(None),
+            ImageNode.claimed_at >= claim_live_cutoff,
+        ).count()
+        cg_generating_live = db.query(ImageNode).filter(
+            ImageNode.user_id == current_user.id,
+            ImageNode.cg_status == "generating",
+            ImageNode.cg_claimed_at.isnot(None),
+            ImageNode.cg_claimed_at >= claim_live_cutoff,
+        ).count()
         # v897 — a fresh claim keeps the lane green and flags it BUSY, so a
         # worker inside a long generation stops reading as offline. Must run
         # BEFORE _lane_stalled, which keys off the (now corrected) light.
-        _apply_busy_liveness(flow_light, generating_fresh)
-        _apply_busy_liveness(cg_light, cg_generating_fresh)
+        _apply_busy_liveness(flow_light, generating_fresh, generating_live)
+        _apply_busy_liveness(cg_light, cg_generating_fresh, cg_generating_live)
         flow_stalled = _lane_stalled(
             flow_light["online"], n_queued, queued_oldest_age, generating_fresh)
         chatgpt_stalled = _lane_stalled(
