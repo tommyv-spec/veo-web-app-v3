@@ -11138,6 +11138,8 @@ _CHATGPT_WORKER_FILES = {
     # v899.2: seeds the Firefox profile from the operator's real Firefox — the
     # SAME method flow_worker uses, not a ChatGPT-specific one
     "firefox_profile_pull.py",
+    # v899.3: decrypts the Chrome-Beta golden's cookies for the Firefox engine
+    "chrome_cookie_bridge.py",
 }
 
 
@@ -11279,7 +11281,7 @@ $files = @(
     "chatgpt_image_worker.py", "chatgpt_image_backend.py", "chatgpt_job_map.py",
     "chatgpt_http_pull.py", "chatgpt_session_pull.py",
     "worker_profile_pull.py", "worker_cookie_extract.py", "tone_correct.py",
-    "browser_driver.py", "firefox_profile_pull.py"
+    "browser_driver.py", "firefox_profile_pull.py", "chrome_cookie_bridge.py"
 )
 foreach ($f in $files) {
     Write-Host "  $f"

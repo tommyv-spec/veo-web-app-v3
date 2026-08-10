@@ -263,6 +263,62 @@ def _sign_in_with_google(page, timeout_s=90):
         return False
 
 
+def _bridge_chrome_cookies(ff_ctx, page):
+    """Inject the Chrome-Beta account's cookies into the Firefox context.
+
+    Source = the lean golden that chatgpt_session_pull built with flow_worker's
+    pull. Both the ChatGPT session-token AND the Google SSO cookies come across,
+    so the worker lands logged in, and any later re-login offers the right
+    account instead of an empty Google form.
+
+    Proven on the operator's box 2026-08-03: 58 cookies read from the golden —
+    __Secure-next-auth.session-token.0/.1 for chatgpt.com plus SID/SAPISID/LSID
+    for google.com + accounts.google.com."""
+    try:
+        import chrome_cookie_bridge as bridge
+    except ImportError:
+        log("  chrome_cookie_bridge.py not in the bundle — skipping")
+        return False
+    seen = []
+    for src in (getattr(backend, "CHROME_GOLDEN_DIR", None), backend.PROFILE_DIR):
+        if not src or not os.path.isdir(src) or src in seen:
+            continue
+        seen.append(src)
+        cookies = bridge.read_cookies(
+            src, ("chatgpt.com", "openai.com", "google.com"), log=log)
+        if not cookies:
+            continue
+        try:
+            ff_ctx.add_cookies(cookies)
+        except Exception as e:
+            # One malformed cookie rejects the whole batch; retry per-cookie so
+            # a single bad row cannot cost the entire session.
+            log(f"  batch inject rejected ({str(e)[:80]}) — injecting one by one")
+            ok = 0
+            for c in cookies:
+                try:
+                    ff_ctx.add_cookies([c])
+                    ok += 1
+                except Exception:
+                    pass
+            log(f"  injected {ok}/{len(cookies)} cookies individually")
+            if not ok:
+                continue
+        try:
+            page.goto(CHATGPT_URL, wait_until="domcontentloaded", timeout=45000)
+            dismiss_cookie_banner(page)
+        except Exception:
+            continue
+        if is_logged_in(page):
+            log(f"  session bridged from {os.path.basename(src)} — no login needed.")
+            return True
+        # Cookies are in but ChatGPT still shows logged out: the Google session
+        # came across even when the ChatGPT one did not, so one-tap can finish it.
+        if _sign_in_with_google(page):
+            return True
+    return False
+
+
 def launch_logged_in(p, email=None):
     """(ctx, page) guaranteed logged in, or None after telling the user why.
 
@@ -293,13 +349,18 @@ def launch_logged_in(p, email=None):
             return ctx, page
         ctx.close()
 
-    # There is deliberately NO Chrome->Firefox path here. flow_worker settled
-    # this: a Chrome profile is unreadable by Firefox and copying one corrupts
-    # the Firefox profile (its own guard), and Chrome holds its cookie DB with
-    # an exclusive lock, so even a read-only file-level bridge cannot open it
-    # while Chrome runs. The sanctioned answer is ONE sign-in per account
-    # (flow_worker ships firefox_login_once.py for exactly this) — done below,
-    # automatically, in the worker's own window instead of a separate script.
+    # 2b. CHROME-BETA BRIDGE — the path for an account that lives only in
+    # Chrome Beta (the normal case here). The session was already collected by
+    # chatgpt_session_pull using flow_worker's own pull: it closes the
+    # NON-STABLE channel to release the file lock, never touching daily stable
+    # Chrome, and copies the durable files into a lean golden. Firefox cannot
+    # READ that chromium profile, but the cookies inside it are ordinary
+    # cookies — decrypt them from the golden and inject them here.
+    log("firefox: bridging the Chrome-Beta session cookies...")
+    ctx, page = launch(p)
+    if _bridge_chrome_cookies(ctx, page) and ensure_logged_in(page, email):
+        return ctx, page
+    ctx.close()
     if not backend._bd.firefox_headless_enabled():
         return None      # the window was already visible and login still failed
     log("firefox: opening a visible window for the one-time sign-in...")
@@ -544,21 +605,27 @@ def main():
         # stable Chrome. Beta is ABE-off (v10 cookies) so the golden decrypts.
         # If the account isn't in Beta (or copy fails), fall back to a one-time
         # login in the worker's own window (ensure_logged_in).
+        # The Chrome-Beta pull runs in BOTH engines — it is how the account's
+        # session is collected, exactly as flow_worker collects it (close the
+        # non-stable channel to release the lock, copy the durable files, never
+        # touch daily stable Chrome). Only the DESTINATION differs: Chrome mode
+        # launches the golden directly; Firefox cannot read a chromium profile,
+        # so the golden is kept beside the Firefox profile and its cookies are
+        # bridged in (see chrome_cookie_bridge).
         if backend.FIREFOX_MODE:
-            # The Beta pull copies CHROMIUM profile files — meaningless (and
-            # corrupting) inside a Firefox profile. Firefox logs in once in its
-            # own window and the session persists in the firefox profile.
-            log("firefox mode: skipping Chrome-Beta session copy (chromium-format "
-                "profile); one-time login in the worker's own window if needed.")
-        else:
-            try:
-                import chatgpt_session_pull
-                if chatgpt_session_pull.pull_chatgpt_session(args.chatgpt_email, backend.PROFILE_DIR):
-                    log("copied ChatGPT session from Chrome Beta — no manual login needed.")
-                else:
-                    log("no Beta session to copy; will wait for a one-time login in the window.")
-            except Exception as _e:
-                log(f"Beta copy failed ({_e}); will wait for a one-time login.")
+            backend.CHROME_GOLDEN_DIR = os.path.join(
+                backend.BASE_DIR, f".chatgpt_chrome_golden_{safe}")
+        _pull_target = (backend.CHROME_GOLDEN_DIR if backend.FIREFOX_MODE
+                        else backend.PROFILE_DIR)
+        try:
+            import chatgpt_session_pull
+            if chatgpt_session_pull.pull_chatgpt_session(args.chatgpt_email, _pull_target):
+                log("copied ChatGPT session from Chrome Beta — no manual login needed."
+                    + (" (firefox: cookies are bridged from it)" if backend.FIREFOX_MODE else ""))
+            else:
+                log("no Beta session to copy; will wait for a one-time login in the window.")
+        except Exception as _e:
+            log(f"Beta copy failed ({_e}); will wait for a one-time login.")
 
     # SESSION MODEL (universal, simple, no admin/registry/ABE): the worker uses its
     # OWN dedicated Chrome profile and the user logs into ChatGPT ONCE in the visible

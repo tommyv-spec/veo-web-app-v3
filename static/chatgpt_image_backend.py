@@ -39,6 +39,11 @@ def _default_profile_dir():
 
 PROFILE_DIR = os.environ.get("CHATGPT_PROFILE_DIR", _default_profile_dir())
 
+# Firefox mode only: the Chrome-format lean golden built by chatgpt_session_pull.
+# Firefox cannot read a chromium profile, so the golden is kept separately and
+# its cookies are bridged into the Firefox context (chrome_cookie_bridge).
+CHROME_GOLDEN_DIR = os.path.join(BASE_DIR, ".chatgpt_chrome_golden")
+
 
 def set_browser_mode(mode):
     """Switch engine at runtime (the worker's --firefox flag). Re-resolves the
