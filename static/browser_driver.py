@@ -79,6 +79,18 @@ def camoufox_launch_kwargs(kwargs, window=None, env=None):
     # wrong default here.
     out["headless"] = firefox_headless_enabled(env)
 
+    # Silence. The Chrome path passes --mute-audio; Firefox has no such flag, so
+    # mute at the pref level. Flow autoplays every generated clip, and a headless
+    # browser still routes audio to the speakers — the window is invisible but the
+    # noise is not. media.volume_scale scales ALL output to zero at the platform
+    # layer, so it cannot be re-enabled by page JS the way muting a video element
+    # can. autoplay.default=5 (BLOCKED_ALL) stops the playback starting at all.
+    prefs = dict(out.get("firefox_user_prefs") or {})
+    prefs.setdefault("media.volume_scale", "0.0")
+    prefs.setdefault("media.autoplay.default", 5)
+    prefs.setdefault("media.autoplay.blocking_policy", 2)
+    out["firefox_user_prefs"] = prefs
+
     # Pin the OS or Camoufox randomises it — it served a macOS user-agent on a
     # Windows host, a mismatch reCAPTCHA can score against.
     out.setdefault("os", "windows")

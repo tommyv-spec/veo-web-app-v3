@@ -86,6 +86,23 @@ def test_firefox_headless_opt_out():
     assert out["headless"] is False
 
 
+def test_firefox_is_muted():
+    # Chrome passes --mute-audio; Firefox has no such flag. A headless browser
+    # still routes audio to the speakers, and Flow autoplays every clip.
+    out = bd.camoufox_launch_kwargs({"user_data_dir": "X"}, env={})
+    prefs = out["firefox_user_prefs"]
+    assert prefs["media.volume_scale"] == "0.0"
+    assert prefs["media.autoplay.default"] == 5
+
+
+def test_firefox_mute_does_not_clobber_caller_prefs():
+    out = bd.camoufox_launch_kwargs(
+        {"user_data_dir": "X", "firefox_user_prefs": {"custom.pref": 1}}, env={})
+    prefs = out["firefox_user_prefs"]
+    assert prefs["custom.pref"] == 1
+    assert prefs["media.volume_scale"] == "0.0"
+
+
 def test_firefox_mode_never_targets_chrome_processes():
     # The golden restore kills by process name then rmtree's the profile with
     # ignore_errors=True. Wrong names => live Firefox keeps its lock => the
