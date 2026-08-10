@@ -93,6 +93,16 @@ SEL = {
     # cookie-consent banner buttons (overlay blocks clicks until dismissed) — EN/IT
     "cookie_dismiss": "button:has-text('Reject non-essential'), button:has-text('Accept all'), "
                       "button:has-text('Rifiuta opzionali'), button:has-text('Accetta tutto')",
+    # buttons that close a blocking ChatGPT dialog (rate-limit notice, upsell,
+    # "what's new"). Its backdrop is `fixed inset-0 z-50` and swallows every click
+    # aimed at the composer, so it must be cleared before typing. EN/IT.
+    "modal_dismiss": "button[data-testid*='close'], button[aria-label='Close'], "
+                     "button[aria-label*='Close'], button[aria-label*='Chiudi'], "
+                     "button:has-text('Got it'), button:has-text('Okay'), "
+                     "button:has-text('OK'), button:has-text('Continue'), "
+                     "button:has-text('Dismiss'), button:has-text('Not now'), "
+                     "button:has-text('Ho capito'), button:has-text('Chiudi'), "
+                     "button:has-text('Continua'), button:has-text('Non ora')",
     # transient generation error bubble — ChatGPT server-errors mid-render; the
     # button regenerates the SAME turn. Seen as "Retry" AND "Try again" ("Image
     # generation failed … Try again"); IT "Riprova".
@@ -173,6 +183,91 @@ def dismiss_cookie_banner(page):
             jitter(0.4, 0.9)
     except Exception:
         pass
+
+
+# A blocking dialog reports itself: ChatGPT wraps each one in a host element whose
+# id/data-testid names it (`modal-conversation-history-rate-limit`), with an open
+# full-screen backdrop inside. Return that NAME so the log says WHICH dialog stopped
+# the node instead of a 30-line Playwright click trace.
+_MODAL_QUERY = r"""
+() => {
+  const open = [...document.querySelectorAll("[data-state='open']")].filter(e => {
+    const r = e.getBoundingClientRect();
+    return r.width > 200 && r.height > 200;        // a real overlay, not a menu
+  });
+  for (const e of open) {
+    const host = e.closest("[data-testid^='modal-'], [id^='modal-'], [role='dialog']");
+    if (host) return host.getAttribute('data-testid') || host.id || 'dialog';
+  }
+  return open.length ? (open[0].getAttribute('data-testid') || open[0].id || 'overlay')
+                     : null;
+};
+"""
+
+
+def _open_modal(page):
+    """Name of the blocking dialog currently covering the page, or None."""
+    try:
+        return page.evaluate(_MODAL_QUERY)
+    except Exception:
+        return None
+
+
+def _dismiss_modal(page, tries=3):
+    """Close a blocking dialog. Returns its name if one was open, else None.
+
+    Node 4738 (2026-08-03): `modal-conversation-history-rate-limit` sat over the
+    composer, its backdrop intercepted every click, and Playwright silently
+    retried for the full 30s default timeout before failing the node — the log
+    was 40 lines of "retrying click action" with no statement of what was in the
+    way. Nothing dismissed dialogs anywhere in this worker."""
+    name = _open_modal(page)
+    if not name:
+        return None
+    log(f"blocking dialog open: {name} — dismissing")
+    if "rate-limit" in (name or ""):
+        log("  NOTE: this is ChatGPT rate-limiting the account, not a worker bug")
+    for _ in range(tries):
+        try:
+            btn = page.locator(SEL["modal_dismiss"]).first
+            if btn.count() > 0 and btn.is_visible():
+                btn.click(timeout=3000)
+            else:
+                page.keyboard.press("Escape")
+        except Exception:
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+        time.sleep(1.0)
+        if not _open_modal(page):
+            log(f"  dialog {name} dismissed")
+            return name
+    log(f"  dialog {name} STILL open after {tries} tries")
+    return name
+
+
+def _click_composer(page, tries=3):
+    """Focus the composer, clearing any overlay that intercepts the click.
+
+    Uses a SHORT per-click timeout: the 30s Playwright default turned one blocked
+    node into 30 wasted seconds and told us nothing. Fail fast, name the dialog."""
+    last = None
+    for i in range(tries):
+        _dismiss_modal(page)
+        comp = page.locator(SEL["composer"]).first
+        try:
+            comp.click(timeout=8000)
+            return comp
+        except Exception as e:
+            last = str(e).splitlines()[0] if str(e) else repr(e)
+            log(f"composer click blocked ({i + 1}/{tries}): {last}")
+            time.sleep(1.5)
+    name = _open_modal(page)
+    raise RuntimeError(
+        "composer unreachable — "
+        + (f"dialog {name} will not close" if name else "no dialog detected")
+        + f" (last click error: {last})")
 
 
 def is_logged_in(page):
@@ -432,8 +527,7 @@ def _resubmit(page, prompt):
     error, where ChatGPT offers no Retry button. Refs already live in the
     conversation, so 'the attached image' still resolves."""
     try:
-        comp = page.locator(SEL["composer"]).first
-        comp.click()
+        comp = _click_composer(page)
         try:
             comp.evaluate("el => el.focus()")
             page.keyboard.insert_text(prompt)
@@ -581,6 +675,7 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
     Returns out_path. Raises on timeout / not-logged-in / no image."""
     page.goto(CHATGPT_URL, wait_until="domcontentloaded")
     dismiss_cookie_banner(page)
+    _dismiss_modal(page)
     if not is_logged_in(page):
         # One reload + recheck before failing — the login probe flickers (a
         # navigation/network blip returns a transient False, then the very next
@@ -601,8 +696,8 @@ def generate(page, prompt, ref_paths, out_path, gen_timeout_s=GEN_TIMEOUT_S):
     if ref_paths:
         _attach_reference_files(page, ref_paths)
         jitter(0.5, 1.0)
-    comp = page.locator(SEL["composer"]).first
-    comp.click(); jitter(0.4, 0.9)
+    comp = _click_composer(page)
+    jitter(0.4, 0.9)
     # Insert the whole prompt in ONE op — char-by-char .type() times out on the
     # ProseMirror editor for the platform's long (2000+ char) prompts. insert_text
     # fires a single insertText event ProseMirror handles instantly.
