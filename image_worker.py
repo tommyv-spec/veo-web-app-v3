@@ -107,7 +107,7 @@ else:
 # CONSTANTS
 # ============================================================
 
-WORKER_VERSION = "img-v586"  # v917 enter the Flow APP (home serves marketing after the v914/v916 session strip)
+WORKER_VERSION = "img-v587"  # v919 a job with known URLs is never resolved by a prompt guess
 FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
 
 # v891d — truthful heartbeat. The heartbeat threads beat every 5s no matter
@@ -5681,7 +5681,15 @@ def _flow_api_pull_submit_try(page, node_id, node_name, prompt, input_paths, var
             node_name=node_name,
             prompt=prompt,
             prompt_key=prompt_key,
-            variants=int(variants or 1),
+            # v919 — expect what can actually ARRIVE, not what was asked for.
+            # Every URL in captured_fife_urls came out of the response body of a
+            # POST we made ourselves, so this count is exact. Registering the
+            # REQUESTED count instead meant a node that lost a variant (content
+            # reject, 5xx) could never satisfy Tier A: it sat in the 90s partial
+            # window, and during that window the Tier B prompt-match fallback
+            # ran and won with 91 aggregated batches — including four images
+            # belonging to node 4768 (operator log 2026-08-10, node 4769).
+            variants=max(1, len(captured_fife_urls)),
             output_dir=out_dir,
             input_items=input_items,
             baseline_urls=set(),  # API path: no DOM baseline needed
@@ -8998,6 +9006,21 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 if not saved_paths:
                     raise RuntimeError("No variants downloaded successfully")
 
+                # v919 — last gate before the platform. The variants endpoint
+                # REPLACES this lane's images, so uploading more than the node
+                # asked for does not merely waste bandwidth: it overwrites the
+                # node with images that may belong to another one. On
+                # 2026-08-10 node 4769 reached this point with 91 files (65MB,
+                # four of them node 4768's) because a prompt-prefix fallback
+                # over-matched. Fail loudly instead — we cannot know WHICH of
+                # an over-sized set is genuinely ours, and a failed node is
+                # retryable while a silently mis-filled one poisons the build.
+                _expected = item.get('expected')
+                if _expected and len(saved_paths) > int(_expected):
+                    raise RuntimeError(
+                        f"attribution over-match: {len(saved_paths)} variant(s) downloaded for a "
+                        f"{_expected}-variant node — refusing to upload a set we cannot trust")
+
                 # Upload + post status
                 print(f"[API:http] node {node_id} ⬆ uploading {len(saved_paths)} variants...", flush=True)
                 _upload_variants_with_health_gate(api_url, api_key, node_id, saved_paths)
@@ -9793,6 +9816,12 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
                 'output_dir': job.output_dir,
                 'cookies': cookies_v521,
                 'user_agent': user_agent_v521,
+                # v919 — what this node is allowed to receive. Checked again at
+                # the upload gate: the variants endpoint REPLACES a lane's
+                # images, so an over-sized set does not just waste bandwidth,
+                # it overwrites the node with images that may belong to someone
+                # else. Cheap assertion at the last point before the platform.
+                'expected': max(1, getattr(job, 'variants', 1) or 1),
             })
             job.status = "completed"
             _gc_pending_submission(job.node_id)  # v730
@@ -9835,6 +9864,17 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
         for job in pending:
             if job.node_id in ids_resolved_jobs:
                 continue
+            # v919 — NEVER guess for a job whose URLs are already known.
+            # The flow_api path writes fife URLs straight into
+            # captured_urls_by_node from the response bodies of its own POSTs,
+            # so that bucket is exact. Tier B matches on a 256-char prompt
+            # prefix, and since the v909 server contract every node opens with
+            # the same header — so it matched 91 unconsumed batches and beat
+            # the exact tier to a job that was merely waiting out its timeout.
+            # A known-attribution job waits for Tier A or times out; it must
+            # never be resolved by a prefix guess.
+            if captured_urls_by_node.get(job.node_id):
+                continue
             matches = _collect_batches_for_prompt(job.prompt, consume=False)
             if not matches:
                 continue
@@ -9847,6 +9887,15 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             age = time.time() - job.submit_time
             if len(collected_urls) < need_count and age < PARTIAL_TIMEOUT:
                 continue
+            # v919 — a job asked for need_count images; more than that means the
+            # prefix matched batches that are not ours. Take only what was
+            # asked for and leave the rest unconsumed for their real owners.
+            if len(collected_urls) > need_count:
+                print(f"[API:scan] [v919] ⚠ Node {job.node_id}: prompt-match produced "
+                      f"{len(collected_urls)} URL(s) for a {need_count}-variant job "
+                      f"— prefix over-matched; keeping the first {need_count}", flush=True)
+                collected_urls = collected_urls[:need_count]
+                matches = matches[:need_count]
             for b in matches:
                 b['consumed'] = True
             if collected_urls:
