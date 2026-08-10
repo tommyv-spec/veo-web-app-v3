@@ -102,12 +102,22 @@ def ensure_logged_in(page, email=None, timeout_s=600):
         return True
 
     who = f" as {email}" if email else ""
+    if backend.FIREFOX_MODE and backend._bd.firefox_headless_enabled():
+        # Headless has no window to log into — polling for 10 minutes would just
+        # look like a hang. Say exactly what to do and stop.
+        log("=" * 60)
+        log(f"  NOT LOGGED IN{who} — firefox mode is HEADLESS by default, so there")
+        log("  is no window to sign in with. One-time setup:")
+        log("      set FIREFOX_HEADLESS=0  (re-run, log in in the window)")
+        log("  then restart without it; the session persists in the firefox profile.")
+        log("=" * 60)
+        return False
     log("=" * 60)
     if isinstance(r, str):
         log(f"  WRONG ACCOUNT: logged in as {r}, but this worker needs {email}.")
         log(f"  In the window: click your profile -> Log out, then Continue{who}.")
     else:
-        log(f"  ACTION NEEDED: log into ChatGPT{who} in the Chrome window that opened —")
+        log(f"  ACTION NEEDED: log into ChatGPT{who} in the browser window that opened —")
         log(f"  click \"Continue{who}\" (or sign in).")
     log("  ONE-TIME: the session is saved in the worker's own profile. Waiting 10 min...")
     log("=" * 60)
@@ -277,7 +287,20 @@ def main():
     ap.add_argument("--chatgpt-email", help="target ChatGPT account. The worker uses "
                     "a clean per-account profile folder and waits for you to log in "
                     "as this account in its own browser window (persisted + reused).")
+    ap.add_argument("--firefox", action="store_true",
+                    help="run on Firefox (Camoufox 0.5.4 + Playwright) — the same "
+                    "stack the flow worker ships. Equivalent to BROWSER_MODE=firefox. "
+                    "Headless by default; set FIREFOX_HEADLESS=0 for the one-time login.")
     args = ap.parse_args()
+
+    # v899 — engine switch BEFORE any profile-path work, so every profile name
+    # below resolves against the right engine. Env BROWSER_MODE=firefox works
+    # too (parity with flow_worker); the flag just sets it.
+    if args.firefox:
+        backend.set_browser_mode("firefox")
+    if backend.FIREFOX_MODE:
+        log("engine: FIREFOX (Camoufox) — profile "
+            f"{os.path.basename(backend.PROFILE_DIR)}")
 
     if args.user_data_dir:
         backend.USER_DATA_DIR = args.user_data_dir
@@ -293,14 +316,24 @@ def main():
     if getattr(args, "chatgpt_email", None):
         import re as _re, glob as _glob, shutil as _shutil
         safe = _re.sub(r"[^A-Za-z0-9._-]", "_", args.chatgpt_email.strip().lower())
-        backend.PROFILE_DIR = os.path.join(backend.BASE_DIR, f".chatgpt_profile_{safe}")
+        # v899: engine-tagged per-account profile — a Firefox run must never
+        # open the Chrome-format folder (mutually unreadable profile formats).
+        _prefix = ".chatgpt_profile_firefox_" if backend.FIREFOX_MODE else ".chatgpt_profile_"
+        backend.PROFILE_DIR = os.path.join(backend.BASE_DIR, f"{_prefix}{safe}")
         # No cookie-file injection in this model — the profile itself holds the login.
         # Point COOKIES_FILE at a path that never exists so inject_cookies is a no-op.
         backend.COOKIES_FILE = os.path.join(backend.BASE_DIR, ".chatgpt_cookies_unused")
+        # v899: keep BOTH engines' profiles for THIS account. The cleanup exists
+        # for cross-ACCOUNT hygiene; without the engine guard, one --firefox run
+        # would rmtree the working Chrome login (and a Chrome run the Firefox one).
+        _keep = {
+            os.path.abspath(os.path.join(backend.BASE_DIR, f".chatgpt_profile_{safe}")),
+            os.path.abspath(os.path.join(backend.BASE_DIR, f".chatgpt_profile_firefox_{safe}")),
+        }
         for _pat in (".chatgpt_profile*", ".chatgpt_cookies*"):
             for _d in _glob.glob(os.path.join(backend.BASE_DIR, _pat)):
-                if os.path.abspath(_d) == os.path.abspath(backend.PROFILE_DIR):
-                    continue  # keep THIS account's persistent profile
+                if os.path.abspath(_d) in _keep:
+                    continue  # keep THIS account's profiles (both engines)
                 if os.path.isdir(_d):
                     _shutil.rmtree(_d, ignore_errors=True)
                 else:
@@ -315,14 +348,21 @@ def main():
         # stable Chrome. Beta is ABE-off (v10 cookies) so the golden decrypts.
         # If the account isn't in Beta (or copy fails), fall back to a one-time
         # login in the worker's own window (ensure_logged_in).
-        try:
-            import chatgpt_session_pull
-            if chatgpt_session_pull.pull_chatgpt_session(args.chatgpt_email, backend.PROFILE_DIR):
-                log("copied ChatGPT session from Chrome Beta — no manual login needed.")
-            else:
-                log("no Beta session to copy; will wait for a one-time login in the window.")
-        except Exception as _e:
-            log(f"Beta copy failed ({_e}); will wait for a one-time login.")
+        if backend.FIREFOX_MODE:
+            # The Beta pull copies CHROMIUM profile files — meaningless (and
+            # corrupting) inside a Firefox profile. Firefox logs in once in its
+            # own window and the session persists in the firefox profile.
+            log("firefox mode: skipping Chrome-Beta session copy (chromium-format "
+                "profile); one-time login in the worker's own window if needed.")
+        else:
+            try:
+                import chatgpt_session_pull
+                if chatgpt_session_pull.pull_chatgpt_session(args.chatgpt_email, backend.PROFILE_DIR):
+                    log("copied ChatGPT session from Chrome Beta — no manual login needed.")
+                else:
+                    log("no Beta session to copy; will wait for a one-time login in the window.")
+            except Exception as _e:
+                log(f"Beta copy failed ({_e}); will wait for a one-time login.")
 
     # SESSION MODEL (universal, simple, no admin/registry/ABE): the worker uses its
     # OWN dedicated Chrome profile and the user logs into ChatGPT ONCE in the visible

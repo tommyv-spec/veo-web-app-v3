@@ -16,9 +16,39 @@ import time
 # CONFIG
 # ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PROFILE_DIR = os.environ.get(
-    "CHATGPT_PROFILE_DIR", os.path.join(BASE_DIR, ".chatgpt_profile")
-)
+sys.path.insert(0, BASE_DIR)
+
+# Browser engine — same switch as flow_worker (v899). BROWSER_MODE=firefox runs
+# the proven Camoufox 0.5.4 (FF152) + plain-Playwright stack; anything else
+# (including unset) stays on Chrome/Patchright, so a typo can never migrate a
+# working Chrome worker. browser_driver.py is the shared single source of truth
+# for the mode rules and the Camoufox launch dialect.
+import browser_driver as _bd
+
+BROWSER_MODE = _bd.resolve_browser_mode()
+FIREFOX_MODE = _bd.is_firefox_mode(BROWSER_MODE)
+
+
+def _default_profile_dir():
+    """Chromium and Firefox profile formats are mutually unreadable — a Firefox
+    run must NEVER open (or half-upgrade) the Chrome profile, so each engine
+    gets its own folder, same pattern as flow_worker's chrome/firefox prefix."""
+    return os.path.join(
+        BASE_DIR, ".chatgpt_profile_firefox" if FIREFOX_MODE else ".chatgpt_profile")
+
+
+PROFILE_DIR = os.environ.get("CHATGPT_PROFILE_DIR", _default_profile_dir())
+
+
+def set_browser_mode(mode):
+    """Switch engine at runtime (the worker's --firefox flag). Re-resolves the
+    mode-dependent globals; an explicit CHATGPT_PROFILE_DIR env still wins."""
+    global BROWSER_MODE, FIREFOX_MODE, PROFILE_DIR
+    os.environ["BROWSER_MODE"] = mode
+    BROWSER_MODE = _bd.resolve_browser_mode()
+    FIREFOX_MODE = _bd.is_firefox_mode(BROWSER_MODE)
+    if not os.environ.get("CHATGPT_PROFILE_DIR"):
+        PROFILE_DIR = _default_profile_dir()
 # Optional: drive your REAL Chrome user-data dir + a specific sub-profile
 # (e.g. the profile already logged into ChatGPT). Chrome MUST be fully closed
 # first, or the profile is locked. Set via --user-data-dir / --profile-directory.
@@ -123,8 +153,47 @@ def jitter(a=None, b=None):
     time.sleep(random.uniform(lo, hi))
 
 
+def _ensure_camoufox():
+    """Auto-install Camoufox for firefox mode — same as flow_worker's bootstrap.
+    Patchright's chromium-only patches break Firefox's page.evaluate outright,
+    and camoufox <0.5.4 dies on any page error (measured; see browser_driver)."""
+    import subprocess
+    try:
+        import camoufox  # noqa: F401
+        return True
+    except ImportError:
+        pass
+    log("Camoufox not found — installing (required for BROWSER_MODE=firefox)...")
+    for cmd in ([sys.executable, "-m", "pip", "install", "camoufox>=0.5.4"],
+                [sys.executable, "-m", "pip", "install", "--user", "camoufox>=0.5.4"]):
+        try:
+            if subprocess.run(cmd, capture_output=True).returncode == 0:
+                break
+        except Exception:
+            continue
+    else:
+        log("ERROR: could not install camoufox — firefox mode will not start")
+        return False
+    try:
+        subprocess.run([sys.executable, "-m", "camoufox", "fetch"], timeout=600)
+        log("Camoufox browser fetched")
+    except Exception as e:
+        log(f"WARNING: camoufox fetch failed ({e}) — launch may fail")
+    return True
+
+
 def _import_playwright():
-    """Prefer Patchright (stealth); fall back to vanilla Playwright."""
+    """Engine-matched driver import.
+
+    Chrome mode: prefer Patchright (its chromium patches ARE the stealth).
+    Firefox mode: plain Playwright ONLY — Patchright breaks Firefox's
+    page.evaluate ("Cannot read properties of undefined (reading '_client')"),
+    and Camoufox owns the fingerprint instead."""
+    if FIREFOX_MODE:
+        _ensure_camoufox()
+        from playwright.sync_api import sync_playwright  # type: ignore
+        log("Firefox mode — Playwright + Camoufox (Patchright is chromium-only)")
+        return sync_playwright, False
     try:
         from patchright.sync_api import sync_playwright  # type: ignore
         log("Patchright ACTIVE (CDP-detection bypass on)")
@@ -138,7 +207,12 @@ def _import_playwright():
 
 def launch(p):
     args = list(CHROME_ARGS)
-    if USER_DATA_DIR:
+    if USER_DATA_DIR and FIREFOX_MODE:
+        # A Chromium data dir means nothing to Firefox — refusing beats
+        # half-upgrading the operator's real Chrome profile into garbage.
+        log("WARNING: --user-data-dir is Chrome-only; firefox mode uses its own "
+            f"profile at {PROFILE_DIR}")
+    if USER_DATA_DIR and not FIREFOX_MODE:
         # Drive the operator's real Chrome data dir + a specific sub-profile.
         udd = USER_DATA_DIR
         if PROFILE_DIRECTORY:
@@ -154,7 +228,11 @@ def launch(p):
         "viewport": {"width": 1280, "height": 900},
         "args": args,
     }
-    ctx = p.chromium.launch_persistent_context(**kwargs)
+    # One launch door for both engines (v899): browser_driver strips the
+    # chromium-only kwargs and applies the Camoufox dialect (headless default,
+    # os pin, uBlock exclusion, muted audio) in firefox mode — the same code
+    # path flow_worker ships on.
+    ctx = _bd.launch_context(p, BROWSER_MODE, **kwargs)
     inject_cookies(ctx)
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     return ctx, page

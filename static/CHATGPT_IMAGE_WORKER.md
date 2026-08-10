@@ -8,6 +8,33 @@ Files:
 - `static/chatgpt_image_worker.py` — the worker (CLI + `--watch` loop).
 - `static/chatgpt_image_backend.py` — the browser drive core.
 - `static/chatgpt_job_map.py` — pure platform-job → prompt mapping.
+- `static/browser_driver.py` — shared engine switch (same file flow_worker uses).
+
+## Firefox mode (v899)
+
+The worker runs on **Firefox (Camoufox 0.5.4 / FF152 + plain Playwright)** — the
+exact stack that fixed the flow worker's reCAPTCHA class — with either:
+
+```bash
+python chatgpt_image_worker.py --firefox --api-url ... --api-key ...
+# or, parity with the flow worker:
+set BROWSER_MODE=firefox
+```
+
+Rules (all inherited from `browser_driver.py`, measured on the flow worker):
+- **Strictly opt-in.** Unset/typo'd env stays on Chrome — a working Chrome worker
+  can never migrate by accident.
+- **Headless by default** (a minimized Firefox window cannot be driven at all).
+  `set FIREFOX_HEADLESS=0` to see the window.
+- **Own profile** — `.chatgpt_profile_firefox[_<email>]`. Chromium and Firefox
+  profile formats are mutually unreadable; the Chrome profile is never touched,
+  and the per-account cleanup keeps BOTH engines' profiles for the account.
+- **First run needs a one-time login**: the Chrome-Beta session copy is
+  chromium-format and is skipped in firefox mode. Run once with
+  `FIREFOX_HEADLESS=0`, sign in in the window, done — the session persists.
+- Camoufox auto-installs (`pip install camoufox>=0.5.4` + `camoufox fetch`) if
+  missing. The fetch downloads from GitHub — Surfshark's MTU issue blocks it
+  (MTU 1280 or VPN off).
 
 ## One-time setup
 
