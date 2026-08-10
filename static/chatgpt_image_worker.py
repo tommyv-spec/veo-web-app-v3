@@ -44,6 +44,7 @@ chatgpt_image_backend.py under SEL with fallbacks. If a step times out, re-pin t
 import argparse
 import json
 import os
+import sys
 
 import chatgpt_job_map as jobmap
 import chatgpt_image_backend as backend
@@ -54,16 +55,31 @@ from chatgpt_image_backend import (
 
 
 def _logged_in_email(page):
-    """The email of the currently logged-in ChatGPT account (via /backend-api/me),
-    or None if not logged in / unreadable."""
+    """The email of the currently logged-in ChatGPT account, or None.
+
+    /backend-api/me stopped identifying the user (2026-08-10: it returns an
+    anonymous ua-* device object with an empty email even on a live session),
+    so /api/auth/session — which still carries user.email — is the fallback.
+    Only the email ever leaves the page: the session endpoint also holds the
+    access token, which must never be logged."""
     try:
         return page.evaluate("""async () => {
             try {
                 const r = await fetch('/backend-api/me', {credentials: 'include'});
-                if (!r.ok) return null;
-                const j = await r.json();
-                return (j && (j.email || (j.account && j.account.email))) || null;
-            } catch (e) { return null; }
+                if (r.ok) {
+                    const j = await r.json();
+                    const em = j && (j.email || (j.account && j.account.email));
+                    if (em) return em;
+                }
+            } catch (e) {}
+            try {
+                const r = await fetch('/api/auth/session', {credentials: 'include'});
+                if (r.ok) {
+                    const j = await r.json();
+                    return (j && j.user && j.user.email) || null;
+                }
+            } catch (e) {}
+            return null;
         }""")
     except Exception:
         return None
@@ -104,13 +120,10 @@ def ensure_logged_in(page, email=None, timeout_s=600):
     who = f" as {email}" if email else ""
     if backend.FIREFOX_MODE and backend._bd.firefox_headless_enabled():
         # Headless has no window to log into — polling for 10 minutes would just
-        # look like a hang. Say exactly what to do and stop.
-        log("=" * 60)
-        log(f"  NOT LOGGED IN{who} — firefox mode is HEADLESS by default, so there")
-        log("  is no window to sign in with. One-time setup:")
-        log("      set FIREFOX_HEADLESS=0  (re-run, log in in the window)")
-        log("  then restart without it; the session persists in the firefox profile.")
-        log("=" * 60)
+        # look like a hang. Return fast; launch_logged_in owns the recovery
+        # (Chrome-session migration, then an automatic visible window).
+        log(f"firefox headless: no saved session{who} — automatic recovery next "
+            "(migrate the Chrome session, else open a sign-in window).")
         return False
     log("=" * 60)
     if isinstance(r, str):
@@ -136,8 +149,162 @@ def ensure_logged_in(page, email=None, timeout_s=600):
     return False
 
 
+def _chrome_profile_candidates():
+    """Chrome-engine profile dirs that may hold a live ChatGPT session, best
+    match first: the current profile's Chrome twin (same account, engine tag
+    stripped), then any other non-firefox worker profile."""
+    import glob as _g
+    name = os.path.basename(backend.PROFILE_DIR)
+    cands = []
+    if "_firefox" in name:
+        cands.append(os.path.join(backend.BASE_DIR, name.replace("_firefox", "", 1)))
+    for d in sorted(_g.glob(os.path.join(backend.BASE_DIR, ".chatgpt_profile*"))):
+        if "_firefox" in os.path.basename(d):
+            continue
+        if os.path.abspath(d) not in [os.path.abspath(c) for c in cands]:
+            cands.append(d)
+    return [d for d in cands if os.path.isdir(d)]
+
+
+def _chatgpt_cookies_only(cookies):
+    """The session cookies worth carrying out of a full browser cookie dump.
+
+    google.com is included ON PURPOSE (operator 2026-08-03: "OpenAI has to know
+    which Google account I want to use"): the ChatGPT login is Google OAuth, so
+    the Google session cookies are what make the account chooser say
+    "Continue as kaveno.biz@gmail.com" — they transport the account identity,
+    not just the ChatGPT session."""
+    return [c for c in (cookies or [])
+            if any(dom in (c.get("domain") or "")
+                   for dom in ("chatgpt.com", "openai.com", "google.com"))]
+
+
+# Runs in a SUBPROCESS: a second sync_playwright driver nested inside the
+# already-running Firefox one hangs (measured 2026-08-03 — the standalone dump
+# takes 5s, the same dump nested never returns). A child process has no loop
+# to collide with.
+_DUMP_SCRIPT = r"""
+import json, sys
+try:
+    from patchright.sync_api import sync_playwright
+except ImportError:
+    from playwright.sync_api import sync_playwright
+src, channel = sys.argv[1], sys.argv[2]
+with sync_playwright() as p:
+    ctx = p.chromium.launch_persistent_context(
+        user_data_dir=src, channel=channel, headless=True,
+        args=["--mute-audio", "--no-sandbox"], timeout=60000)
+    try:
+        cookies = ctx.cookies()
+    finally:
+        ctx.close()
+print(json.dumps(cookies))
+"""
+
+
+def _dump_chrome_cookies(src, timeout_s=120):
+    """Cookie dump of a Chrome profile via a child process. Returns a list
+    (possibly empty) or None on any failure — caller falls through."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c", _DUMP_SCRIPT, src, backend.CHROME_CHANNEL],
+            capture_output=True, text=True, encoding="utf-8", timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        log(f"  cookie dump of {os.path.basename(src)} timed out after {timeout_s}s")
+        return None
+    if r.returncode != 0:
+        first = ((r.stderr or "").strip().splitlines() or ["?"])[-1][:90]
+        log(f"  chrome profile {os.path.basename(src)} unreadable ({first}) — trying next")
+        return None
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        log(f"  cookie dump of {os.path.basename(src)} returned no JSON")
+        return None
+
+
+def _migrate_chrome_session(ff_ctx, page):
+    """v899.1 ZERO-STEP first login for firefox mode.
+
+    The worker's own CHROME profile already holds a live ChatGPT session AND
+    the Google login behind it. Playwright reads its cookies decrypted THROUGH
+    the browser (App-Bound Encryption never matters on this path — same reason
+    the netlog capture worked), so: dump the ChatGPT/OpenAI/Google cookies in a
+    child process, inject them into the Firefox context, reload. No window, no
+    env var, nothing for the operator to do — and if the ChatGPT session itself
+    ever needs a re-login, the migrated Google cookies make the OAuth chooser
+    offer the RIGHT account ("Continue as kaveno.biz@gmail.com") in one click.
+
+    Skips cleanly to the next candidate (and ultimately to the visible-window
+    fallback) when a profile is locked by a running Chrome worker, holds no
+    session, or the cookies do not take."""
+    for src in _chrome_profile_candidates():
+        keep = _chatgpt_cookies_only(_dump_chrome_cookies(src))
+        if not keep:
+            log(f"  no ChatGPT session in {os.path.basename(src)}")
+            continue
+        try:
+            ff_ctx.add_cookies(keep)
+        except Exception as e:
+            log(f"  cookie inject failed: {e}")
+            continue
+        try:
+            page.goto(CHATGPT_URL, wait_until="domcontentloaded", timeout=45000)
+            dismiss_cookie_banner(page)
+        except Exception:
+            continue
+        if is_logged_in(page):
+            log(f"  ✓ session migrated from {os.path.basename(src)} — no login needed.")
+            return True
+        log(f"  cookies from {os.path.basename(src)} did not produce a live session")
+    return False
+
+
+def launch_logged_in(p, email=None):
+    """(ctx, page) guaranteed logged in, or None after telling the user why.
+
+    Firefox first run, in order of least operator effort:
+      1. the saved firefox session (nothing to do)
+      2. ZERO-STEP: migrate the session out of the worker's own Chrome profile
+      3. open a visible window AUTOMATICALLY, wait for the one sign-in, then
+         drop back to headless — no env var, no re-run
+    Chrome behaves exactly as before (its window is already visible)."""
+    ctx, page = launch(p)
+    if ensure_logged_in(page, email):
+        return ctx, page
+    if not backend.FIREFOX_MODE:
+        ctx.close()
+        return None
+    log("firefox: trying the zero-step Chrome-session migration...")
+    if _migrate_chrome_session(ctx, page) and ensure_logged_in(page, email):
+        return ctx, page
+    ctx.close()
+    if not backend._bd.firefox_headless_enabled():
+        return None      # the window was already visible and login still failed
+    log("firefox: opening a visible window for the one-time sign-in...")
+    os.environ["FIREFOX_HEADLESS"] = "0"
+    try:
+        ctx, page = launch(p)
+        ok = ensure_logged_in(page, email)
+        ctx.close()
+    finally:
+        os.environ.pop("FIREFOX_HEADLESS", None)
+    if not ok:
+        return None
+    log("login saved in the firefox profile — dropping back to headless.")
+    ctx, page = launch(p)
+    if ensure_logged_in(page, email):
+        return ctx, page
+    ctx.close()
+    return None
+
+
 def login_flow():
     """Headful manual login. User logs into chatgpt.com, then Ctrl-C / closes."""
+    if backend.FIREFOX_MODE:
+        # --login exists to SHOW a window; headless would show nothing.
+        os.environ["FIREFOX_HEADLESS"] = "0"
     sync_playwright, _ = _import_playwright()
     with sync_playwright() as p:
         ctx, page = launch(p)
@@ -240,10 +407,11 @@ def watch_mode(watch_dir, poll_s=5, email=None):
     log(f"watch mode on {watch_dir}")
     sync_playwright, _ = _import_playwright()
     with sync_playwright() as p:
-        ctx, page = launch(p)
+        lp = launch_logged_in(p, email)
+        if not lp:
+            return
+        ctx, page = lp
         try:
-            if not ensure_logged_in(page, email):
-                return
             import time as _t
             while True:
                 for jp in _scan_pending(watch_dir):
@@ -373,10 +541,11 @@ def main():
         from chatgpt_http_pull import run as http_run
         sync_playwright, _ = _import_playwright()
         with sync_playwright() as p:
-            ctx, page = launch(p)
+            lp = launch_logged_in(p, getattr(args, "chatgpt_email", None))
+            if not lp:
+                return
+            ctx, page = lp
             try:
-                if not ensure_logged_in(page, getattr(args, "chatgpt_email", None)):
-                    return
                 http_run(args.api_url, args.api_key, page, socket.gethostname())
             finally:
                 ctx.close()

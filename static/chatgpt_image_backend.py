@@ -144,7 +144,15 @@ SEL = {
 
 
 def log(msg):
-    print(f"[chatgpt-worker] {msg}", flush=True)
+    # Console-safe: a ✓ in a log line crashed the whole login flow on a cp1252
+    # console (2026-08-03) — same class as the deploy gate's emoji crash.
+    # Degrade the character, never the worker.
+    text = f"[chatgpt-worker] {msg}"
+    try:
+        print(text, flush=True)
+    except UnicodeEncodeError:
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(text.encode(enc, "replace").decode(enc, "replace"), flush=True)
 
 
 def jitter(a=None, b=None):

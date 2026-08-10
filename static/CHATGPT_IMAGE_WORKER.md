@@ -29,9 +29,12 @@ Rules (all inherited from `browser_driver.py`, measured on the flow worker):
 - **Own profile** — `.chatgpt_profile_firefox[_<email>]`. Chromium and Firefox
   profile formats are mutually unreadable; the Chrome profile is never touched,
   and the per-account cleanup keeps BOTH engines' profiles for the account.
-- **First run needs a one-time login**: the Chrome-Beta session copy is
-  chromium-format and is skipped in firefox mode. Run once with
-  `FIREFOX_HEADLESS=0`, sign in in the window, done — the session persists.
+- **First run is ZERO-STEP (v899.1)**: the worker migrates the ChatGPT session
+  — AND the Google login behind it, so OpenAI knows the account is
+  kaveno.biz@gmail.com — out of its own Chrome profile automatically (cookie
+  dump in a child process; a nested driver hangs). Only if no Chrome session
+  exists anywhere does it open a visible sign-in window BY ITSELF and drop
+  back to headless after the login. No env vars, no extra commands, ever.
 - Camoufox auto-installs (`pip install camoufox>=0.5.4` + `camoufox fetch`) if
   missing. The fetch downloads from GitHub — Surfshark's MTU issue blocks it
   (MTU 1280 or VPN off).
