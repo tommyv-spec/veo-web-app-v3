@@ -15183,6 +15183,29 @@ def verify_user_worker_token(
     return token.user_id
 
 
+# v899 — per-worker liveness for the Flow worker: user_id -> (worker_id, ts).
+# UserWorkerToken.last_seen is refreshed by ANY authenticated call on that token,
+# and the operator runs image_worker.py and chatgpt_image_worker.py on the SAME
+# token, so it cannot answer "is the Flow worker up?". Only /heartbeat carries a
+# worker_id and only flow_worker posts there, so this map is Flow-specific.
+_FLOW_WORKER_BEATS = {}
+
+
+def flow_worker_online(user_id, now=None, window_s=15):
+    """True if a FLOW worker heartbeat arrived inside the window.
+
+    Returns None when this user has never sent a worker_id heartbeat, so the
+    caller can fall back to the old token.last_seen behaviour for workers too
+    old to send one. Never let 'unknown' read as 'offline' — that would show a
+    working worker as down.
+    """
+    beat = _FLOW_WORKER_BEATS.get(user_id)
+    if not beat:
+        return None
+    _wid, ts = beat
+    return ((now or datetime.utcnow()) - ts).total_seconds() < window_s
+
+
 @app.post("/api/user-worker/heartbeat")
 async def user_worker_heartbeat(
     request: Request,
@@ -15213,9 +15236,11 @@ async def user_worker_heartbeat(
         raise HTTPException(status_code=401, detail="Invalid or revoked worker token")
 
     going_offline = False
+    worker_id = None
     try:
         body = await request.json()
         going_offline = bool(body.get("going_offline"))
+        worker_id = (body.get("worker_id") or "").strip() or None
     except Exception:
         going_offline = False
 
@@ -15223,11 +15248,22 @@ async def user_worker_heartbeat(
     if going_offline:
         # Backdate beyond the 15s window — UI sees Offline on next poll.
         token.last_seen = now - timedelta(seconds=3600)
+        _FLOW_WORKER_BEATS.pop(token.user_id, None)
         # v780 diagnostic — clean-stop signal landed. Low frequency (once per
         # worker shutdown), so it doesn't spam. Remove once evidence confirms.
         print(f"[v780] user-worker going_offline user={token.user_id}", flush=True)
     else:
         token.last_seen = now
+        # v899 — record liveness for the FLOW worker specifically, not just the
+        # token. last_seen lives on UserWorkerToken and the operator runs several
+        # workers (flow, image_worker, chatgpt_image_worker) on the SAME token, so
+        # any of them refreshing it made the My Worker dot claim the Flow worker
+        # was up when it had been stopped. Only this endpoint carries worker_id,
+        # and only flow_worker calls it, so this key is Flow-specific by
+        # construction. In-memory on purpose (same pattern as _worker_errors): a
+        # Render restart just means the dot waits for the next 5s heartbeat.
+        if worker_id:
+            _FLOW_WORKER_BEATS[token.user_id] = (worker_id, now)
     db.commit()
     return {"ok": True, "going_offline": going_offline}
 
@@ -16636,6 +16672,15 @@ async def user_worker_combined_status(
             # UI to Offline within ~5-15s instead of the old ~30s.
             if (datetime.utcnow() - t.last_seen).total_seconds() < 15:
                 online = True
+
+    # v899 — last_seen alone lies. It is refreshed by ANY call on this token, and
+    # the operator runs image_worker.py / chatgpt_image_worker.py on the SAME
+    # token, so a stopped Flow worker kept showing Online. Prefer the Flow-worker
+    # heartbeat when we have one; fall back to last_seen only for workers old
+    # enough not to send a worker_id (never let 'unknown' read as offline).
+    _flow_live = flow_worker_online(user.id)
+    if _flow_live is not None:
+        online = _flow_live
     
     # Check for active job — only show if updated recently (not stale from a previous run)
     current_job = None
