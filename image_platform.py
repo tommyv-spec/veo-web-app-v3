@@ -11132,6 +11132,12 @@ _CHATGPT_WORKER_FILES = {
     "worker_profile_pull.py", "worker_cookie_extract.py",
     # de-yellows GPT-4o output before upload (generate() -> _tone_correct); Pillow-only
     "tone_correct.py",
+    # v899: shared engine switch (same file flow_worker uses) — firefox mode
+    # ImportErrors without it
+    "browser_driver.py",
+    # v899.2: seeds the Firefox profile from the operator's real Firefox — the
+    # SAME method flow_worker uses, not a ChatGPT-specific one
+    "firefox_profile_pull.py",
 }
 
 
@@ -11256,13 +11262,14 @@ Write-Host "Python: $pythonPath" -ForegroundColor Green
 
 # Install deps if missing
 Write-Host ""
-Write-Host "Checking packages (patchright, requests, pillow)..."
-$check = & $pythonPath -c "import patchright; import requests; import PIL; print('ok')" 2>$null
+Write-Host "Checking packages (patchright, camoufox, requests, pillow)..."
+$check = & $pythonPath -c "import patchright; import camoufox; import requests; import PIL; print('ok')" 2>$null
 if ($check -ne "ok") {
-    Write-Host "Installing patchright + requests + pillow (first run, 1-3 min)..." -ForegroundColor Yellow
-    Start-Process -FilePath $pythonPath -ArgumentList "-m","pip","install","--no-input","patchright","requests","pillow" -NoNewWindow -Wait
-    # Patchright also needs Chromium binaries
+    Write-Host "Installing patchright + camoufox + requests + pillow (first run, 1-3 min)..." -ForegroundColor Yellow
+    Start-Process -FilePath $pythonPath -ArgumentList "-m","pip","install","--no-input","patchright","camoufox>=0.5.4","requests","pillow" -NoNewWindow -Wait
+    # Patchright needs Chromium binaries; Camoufox fetches its Firefox build
     Start-Process -FilePath $pythonPath -ArgumentList "-m","patchright","install","chromium" -NoNewWindow -Wait
+    Start-Process -FilePath $pythonPath -ArgumentList "-m","camoufox","fetch" -NoNewWindow -Wait
 }
 
 # Download the worker bundle (8 files — always fresh so updates propagate)
@@ -11271,7 +11278,8 @@ Write-Host "Downloading ChatGPT worker bundle..."
 $files = @(
     "chatgpt_image_worker.py", "chatgpt_image_backend.py", "chatgpt_job_map.py",
     "chatgpt_http_pull.py", "chatgpt_session_pull.py",
-    "worker_profile_pull.py", "worker_cookie_extract.py", "tone_correct.py"
+    "worker_profile_pull.py", "worker_cookie_extract.py", "tone_correct.py",
+    "browser_driver.py", "firefox_profile_pull.py"
 )
 foreach ($f in $files) {
     Write-Host "  $f"
@@ -11282,14 +11290,15 @@ Write-Host "Saved to: $WorkDir" -ForegroundColor Green
 # Launch the worker
 Write-Host ""
 Write-Host "===============================================" -ForegroundColor Cyan
-Write-Host "  Starting ChatGPT worker..."                    -ForegroundColor Cyan
-Write-Host "  Chrome will open. Login to ChatGPT once."       -ForegroundColor Cyan
-Write-Host "  Keep this window open while generating!"        -ForegroundColor Cyan
+Write-Host "  Starting ChatGPT worker (Firefox, background)..." -ForegroundColor Cyan
+Write-Host "  Your ChatGPT login is copied automatically."      -ForegroundColor Cyan
+Write-Host "  If a sign-in window opens, log in once."          -ForegroundColor Cyan
+Write-Host "  Keep this window open while generating!"          -ForegroundColor Cyan
 Write-Host "===============================================" -ForegroundColor Cyan
 Write-Host ""
 
 Set-Location $WorkDir
-& $pythonPath chatgpt_image_worker.py --api-url $AppUrl --api-key $ApiKey --chatgpt-email $ChatgptEmail
+& $pythonPath chatgpt_image_worker.py --firefox --api-url $AppUrl --api-key $ApiKey --chatgpt-email $ChatgptEmail
 """
 
     # Validate the ChatGPT account email; malformed => empty (worker prompts).
@@ -11689,6 +11698,14 @@ echo         Installing Chromium for Patchright (first time only, ~150MB)...
 !PY! -m patchright install chromium >nul 2>nul
 echo         OK
 
+echo         Installing Firefox engine (Camoufox, first time only, ~180MB)...
+!PY! -m pip install "camoufox>=0.5.4" --quiet --disable-pip-version-check 2>nul
+if errorlevel 1 (
+    !PY! -m pip install "camoufox>=0.5.4" --quiet --user --disable-pip-version-check 2>nul
+)
+!PY! -m camoufox fetch >nul 2>nul
+echo         OK
+
 echo   [3/5] Downloading worker bundle...
 if not exist "%WORKER_DIR%" mkdir "%WORKER_DIR%"
 __DL_LINES__
@@ -11700,13 +11717,16 @@ echo   ======================================================
 echo    Setup complete! Starting ChatGPT worker...
 echo   ======================================================
 echo.
-echo   Chrome will open. Log in to ChatGPT ONCE if prompted,
-echo   then keep this window open while generating.
+echo   The worker runs on Firefox in the BACKGROUND (no window).
+echo   Your ChatGPT login is copied over automatically. Only if
+echo   that is impossible, a sign-in window opens BY ITSELF -
+echo   log in once and it continues on its own.
+echo   Keep this window open while generating.
 echo   Check status: %APP_URL%/
 echo.
 
 cd /d "%WORKER_DIR%"
-!PY! "%WORKER_DIR%\chatgpt_image_worker.py" --api-url %APP_URL% --api-key %API_KEY% --chatgpt-email %CHATGPT_EMAIL%
+!PY! "%WORKER_DIR%\chatgpt_image_worker.py" --firefox --api-url %APP_URL% --api-key %API_KEY% --chatgpt-email %CHATGPT_EMAIL%
 
 echo.
 echo   Worker stopped. Press any key to close.

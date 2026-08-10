@@ -121,9 +121,9 @@ def ensure_logged_in(page, email=None, timeout_s=600):
     if backend.FIREFOX_MODE and backend._bd.firefox_headless_enabled():
         # Headless has no window to log into — polling for 10 minutes would just
         # look like a hang. Return fast; launch_logged_in owns the recovery
-        # (Chrome-session migration, then an automatic visible window).
+        # (seed from real Firefox, else open a sign-in window).
         log(f"firefox headless: no saved session{who} — automatic recovery next "
-            "(migrate the Chrome session, else open a sign-in window).")
+            "(seed from your real Firefox, else open a sign-in window).")
         return False
     log("=" * 60)
     if isinstance(r, str):
@@ -149,126 +149,129 @@ def ensure_logged_in(page, email=None, timeout_s=600):
     return False
 
 
-def _chrome_profile_candidates():
-    """Chrome-engine profile dirs that may hold a live ChatGPT session, best
-    match first: the current profile's Chrome twin (same account, engine tag
-    stripped), then any other non-firefox worker profile."""
-    import glob as _g
-    name = os.path.basename(backend.PROFILE_DIR)
-    cands = []
-    if "_firefox" in name:
-        cands.append(os.path.join(backend.BASE_DIR, name.replace("_firefox", "", 1)))
-    for d in sorted(_g.glob(os.path.join(backend.BASE_DIR, ".chatgpt_profile*"))):
-        if "_firefox" in os.path.basename(d):
-            continue
-        if os.path.abspath(d) not in [os.path.abspath(c) for c in cands]:
-            cands.append(d)
-    return [d for d in cands if os.path.isdir(d)]
+def _seed_firefox_profile(email, log=log):
+    """Seed the worker's Firefox profile from a REAL Firefox profile on this
+    machine — the SAME method flow_worker uses (firefox_profile_pull /
+    build_firefox_golden_from_profile), not a ChatGPT-specific invention.
 
+    Copies durable DATA files only (cookies.sqlite, key4.db, cert9.db,
+    logins.json, permissions.sqlite). Never prefs.js / compatibility.ini:
+    Firefox REFUSES a profile written by a newer Firefox and exits 0 with no
+    error, so a whole-directory copy produces a browser that silently never
+    starts (the real Firefox here is 153, Camoufox ships 152).
 
-def _chatgpt_cookies_only(cookies):
-    """The session cookies worth carrying out of a full browser cookie dump.
-
-    google.com is included ON PURPOSE (operator 2026-08-03: "OpenAI has to know
-    which Google account I want to use"): the ChatGPT login is Google OAuth, so
-    the Google session cookies are what make the account chooser say
-    "Continue as kaveno.biz@gmail.com" — they transport the account identity,
-    not just the ChatGPT session."""
-    return [c for c in (cookies or [])
-            if any(dom in (c.get("domain") or "")
-                   for dom in ("chatgpt.com", "openai.com", "google.com"))]
-
-
-# Runs in a SUBPROCESS: a second sync_playwright driver nested inside the
-# already-running Firefox one hangs (measured 2026-08-03 — the standalone dump
-# takes 5s, the same dump nested never returns). A child process has no loop
-# to collide with.
-_DUMP_SCRIPT = r"""
-import json, sys
-try:
-    from patchright.sync_api import sync_playwright
-except ImportError:
-    from playwright.sync_api import sync_playwright
-src, channel = sys.argv[1], sys.argv[2]
-with sync_playwright() as p:
-    ctx = p.chromium.launch_persistent_context(
-        user_data_dir=src, channel=channel, headless=True,
-        args=["--mute-audio", "--no-sandbox"], timeout=60000)
+    Account note: the Google account signed into Firefox is normally NOT the
+    ChatGPT worker's email — the operator runs different accounts per service.
+    So an exact email match is preferred, and a single unambiguous Firefox
+    session is accepted as the source with the address logged. Only a genuinely
+    ambiguous machine (several Google sessions, none matching) declines."""
     try:
-        cookies = ctx.cookies()
-    finally:
-        ctx.close()
-print(json.dumps(cookies))
-"""
+        import firefox_profile_pull as ffp
+    except ImportError:
+        log("  firefox_profile_pull.py not in the bundle — cannot seed from Firefox")
+        return False
+    if email:
+        # Exact account only. Seeding a DIFFERENT Google account would sign the
+        # worker into ChatGPT as the wrong person: measured 2026-08-03, seeding
+        # the machine's only Firefox profile put a "Continue as Kevin
+        # (shenkevin480@gmail.com)" one-tap on chatgpt.com while the worker was
+        # asked for kaveno.biz@gmail.com. Same rule flow_worker enforces.
+        return ffp.build_firefox_golden_from_profile(
+            email, golden_folder=backend.PROFILE_DIR, label="CHATGPT", log=log)
+    return ffp.build_firefox_golden_from_profile(
+        "", golden_folder=backend.PROFILE_DIR, label="CHATGPT", log=log)
 
 
-def _dump_chrome_cookies(src, timeout_s=120):
-    """Cookie dump of a Chrome profile via a child process. Returns a list
-    (possibly empty) or None on any failure — caller falls through."""
-    import subprocess
+def _sign_in_with_google(page, timeout_s=90):
+    """chatgpt.com -> Log in -> Continue with Google, using the Google session
+    the seeded profile already carries. One-click OAuth, no typing.
+
+    The seeded Firefox profile holds google.com cookies but no chatgpt.com ones
+    (the operator is signed into Google in Firefox, not into ChatGPT), so this
+    is the step that converts one into the other."""
+    import time as _t
+    deadline = _t.time() + timeout_s
     try:
-        r = subprocess.run(
-            [sys.executable, "-c", _DUMP_SCRIPT, src, backend.CHROME_CHANNEL],
-            capture_output=True, text=True, encoding="utf-8", timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        log(f"  cookie dump of {os.path.basename(src)} timed out after {timeout_s}s")
-        return None
-    if r.returncode != 0:
-        first = ((r.stderr or "").strip().splitlines() or ["?"])[-1][:90]
-        log(f"  chrome profile {os.path.basename(src)} unreadable ({first}) — trying next")
-        return None
-    try:
-        return json.loads(r.stdout.strip().splitlines()[-1])
-    except (ValueError, IndexError):
-        log(f"  cookie dump of {os.path.basename(src)} returned no JSON")
-        return None
-
-
-def _migrate_chrome_session(ff_ctx, page):
-    """v899.1 ZERO-STEP first login for firefox mode.
-
-    The worker's own CHROME profile already holds a live ChatGPT session AND
-    the Google login behind it. Playwright reads its cookies decrypted THROUGH
-    the browser (App-Bound Encryption never matters on this path — same reason
-    the netlog capture worked), so: dump the ChatGPT/OpenAI/Google cookies in a
-    child process, inject them into the Firefox context, reload. No window, no
-    env var, nothing for the operator to do — and if the ChatGPT session itself
-    ever needs a re-login, the migrated Google cookies make the OAuth chooser
-    offer the RIGHT account ("Continue as kaveno.biz@gmail.com") in one click.
-
-    Skips cleanly to the next candidate (and ultimately to the visible-window
-    fallback) when a profile is locked by a running Chrome worker, holds no
-    session, or the cookies do not take."""
-    for src in _chrome_profile_candidates():
-        keep = _chatgpt_cookies_only(_dump_chrome_cookies(src))
-        if not keep:
-            log(f"  no ChatGPT session in {os.path.basename(src)}")
-            continue
-        try:
-            ff_ctx.add_cookies(keep)
-        except Exception as e:
-            log(f"  cookie inject failed: {e}")
-            continue
-        try:
-            page.goto(CHATGPT_URL, wait_until="domcontentloaded", timeout=45000)
-            dismiss_cookie_banner(page)
-        except Exception:
-            continue
-        if is_logged_in(page):
-            log(f"  ✓ session migrated from {os.path.basename(src)} — no login needed.")
-            return True
-        log(f"  cookies from {os.path.basename(src)} did not produce a live session")
-    return False
+        page.goto(CHATGPT_URL, wait_until="domcontentloaded", timeout=45000)
+        dismiss_cookie_banner(page)
+        _t.sleep(3)
+        # Google One Tap ("Sign in to OpenAI with Google — Continue as <name>")
+        # renders straight on chatgpt.com when the profile carries a Google
+        # session. That is the shortest path: one click, no auth page at all.
+        for sel in ("button:has-text('Continue as')", "div:has-text('Continue as') button",
+                    "iframe[src*='accounts.google.com']"):
+            try:
+                loc = page.locator(sel).first
+                if loc.count() > 0 and loc.is_visible():
+                    if sel.startswith("iframe"):
+                        frame = page.frame_locator(sel).locator(
+                            "button:has-text('Continue as')").first
+                        frame.click(timeout=10000)
+                    else:
+                        loc.click(timeout=10000)
+                    _t.sleep(5)
+                    if is_logged_in(page):
+                        log("  signed in via Google One Tap")
+                        return True
+                    break
+            except Exception:
+                pass
+        for sel in ("a[href*='/auth/login']", "button:has-text('Log in')",
+                    "a:has-text('Log in')", "button:has-text('Accedi')"):
+            loc = page.locator(sel).first
+            if loc.count() > 0 and loc.is_visible():
+                loc.click(timeout=10000)
+                break
+        else:
+            log("  no Log-in control found on chatgpt.com")
+            return False
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
+        _t.sleep(2)
+        for sel in ("button:has-text('Continue with Google')",
+                    "a:has-text('Continue with Google')",
+                    "button:has-text('Continua con Google')",
+                    "[data-provider='google']"):
+            loc = page.locator(sel).first
+            if loc.count() > 0 and loc.is_visible():
+                loc.click(timeout=15000)
+                break
+        else:
+            log("  no 'Continue with Google' button on the auth page")
+            return False
+        # Google may show an account chooser, a consent screen, or nothing at
+        # all. Poll for the round trip instead of guessing which.
+        while _t.time() < deadline:
+            _t.sleep(2)
+            url = page.url or ""
+            if "chatgpt.com" in url and is_logged_in(page):
+                log("  signed in via Google")
+                return True
+            if "accounts.google.com" in url:
+                for sel in ("div[data-identifier]", "li[class*='account'] div",
+                            "button:has-text('Continue')", "button:has-text('Continua')"):
+                    loc = page.locator(sel).first
+                    try:
+                        if loc.count() > 0 and loc.is_visible():
+                            loc.click(timeout=8000)
+                            break
+                    except Exception:
+                        pass
+        log("  Google sign-in did not complete in time")
+        return False
+    except Exception as e:
+        log(f"  Google sign-in failed: {str(e).splitlines()[0][:110]}")
+        return False
 
 
 def launch_logged_in(p, email=None):
     """(ctx, page) guaranteed logged in, or None after telling the user why.
 
     Firefox first run, in order of least operator effort:
-      1. the saved firefox session (nothing to do)
-      2. ZERO-STEP: migrate the session out of the worker's own Chrome profile
+      1. the saved firefox session (nothing to do — every run after the first)
+      2. seed from a real Firefox profile signed into THIS account, then convert
+         its Google session into a ChatGPT one (flow_worker's method)
       3. open a visible window AUTOMATICALLY, wait for the one sign-in, then
-         drop back to headless — no env var, no re-run
+         drop back to headless — no env var, no re-run, no separate script
     Chrome behaves exactly as before (its window is already visible)."""
     ctx, page = launch(p)
     if ensure_logged_in(page, email):
@@ -276,10 +279,27 @@ def launch_logged_in(p, email=None):
     if not backend.FIREFOX_MODE:
         ctx.close()
         return None
-    log("firefox: trying the zero-step Chrome-session migration...")
-    if _migrate_chrome_session(ctx, page) and ensure_logged_in(page, email):
-        return ctx, page
+
+    # 2a. THE FLOW-WORKER METHOD: seed this profile from a real Firefox profile
+    # on the machine, then convert its Google session into a ChatGPT one.
+    # Seeding REPLACES the profile directory, so it only ever runs here — after
+    # the existing profile has been proven not logged in.
+    log("firefox: seeding the profile from your real Firefox (flow-worker method)...")
     ctx.close()
+    if _seed_firefox_profile(email):
+        ctx, page = launch(p)
+        if ensure_logged_in(page, email) or (
+                _sign_in_with_google(page) and ensure_logged_in(page, email)):
+            return ctx, page
+        ctx.close()
+
+    # There is deliberately NO Chrome->Firefox path here. flow_worker settled
+    # this: a Chrome profile is unreadable by Firefox and copying one corrupts
+    # the Firefox profile (its own guard), and Chrome holds its cookie DB with
+    # an exclusive lock, so even a read-only file-level bridge cannot open it
+    # while Chrome runs. The sanctioned answer is ONE sign-in per account
+    # (flow_worker ships firefox_login_once.py for exactly this) — done below,
+    # automatically, in the worker's own window instead of a separate script.
     if not backend._bd.firefox_headless_enabled():
         return None      # the window was already visible and login still failed
     log("firefox: opening a visible window for the one-time sign-in...")
@@ -292,6 +312,8 @@ def launch_logged_in(p, email=None):
         os.environ.pop("FIREFOX_HEADLESS", None)
     if not ok:
         return None
+    # The persistent profile now HOLDS that session, so this is genuinely
+    # one-time: every later run takes branch 1 and never opens a window.
     log("login saved in the firefox profile — dropping back to headless.")
     ctx, page = launch(p)
     if ensure_logged_in(page, email):
@@ -494,9 +516,15 @@ def main():
         # v899: keep BOTH engines' profiles for THIS account. The cleanup exists
         # for cross-ACCOUNT hygiene; without the engine guard, one --firefox run
         # would rmtree the working Chrome login (and a Chrome run the Firefox one).
+        # The UNTAGGED defaults are kept too (a run without --chatgpt-email lives
+        # there — the operator's installer run deleted a freshly migrated
+        # `.chatgpt_profile_firefox` this way). Account hygiene is not weakened:
+        # ensure_logged_in verifies the account and blocks a readable mismatch.
         _keep = {
-            os.path.abspath(os.path.join(backend.BASE_DIR, f".chatgpt_profile_{safe}")),
-            os.path.abspath(os.path.join(backend.BASE_DIR, f".chatgpt_profile_firefox_{safe}")),
+            os.path.abspath(os.path.join(backend.BASE_DIR, n)) for n in (
+                f".chatgpt_profile_{safe}", f".chatgpt_profile_firefox_{safe}",
+                ".chatgpt_profile", ".chatgpt_profile_firefox",
+            )
         }
         for _pat in (".chatgpt_profile*", ".chatgpt_cookies*"):
             for _d in _glob.glob(os.path.join(backend.BASE_DIR, _pat)):
