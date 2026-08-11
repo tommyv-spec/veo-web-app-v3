@@ -107,7 +107,7 @@ else:
 # CONSTANTS
 # ============================================================
 
-WORKER_VERSION = "img-v587"  # v919 a job with known URLs is never resolved by a prompt guess
+WORKER_VERSION = "img-v588"  # v920 every in-page fetch has a deadline (no more silent forever-hang)
 FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
 
 # v891d — truthful heartbeat. The heartbeat threads beat every 5s no matter
@@ -3927,17 +3927,44 @@ async ([siteKey, action]) => {
 }
 """
 
+# v920 — every in-page fetch carries its own deadline.
+#
+# page.evaluate has NO timeout in Playwright: it blocks until the page resolves
+# the promise. With a bare `await fetch(...)` inside, one stalled request hangs
+# the worker's MAIN THREAD forever, silently — no log, no error, no recovery.
+# Seen 2026-08-11: the worker printed "Switching from job ... to ..." for node
+# 4817 and went quiet for minutes, right after a "server slow or network stall"
+# poll timeout. The v891d wedge guard eventually stops the heartbeat so the
+# platform stops claiming the worker is fine, but nothing rescues the run.
+#
+# AbortController + a timer means the promise ALWAYS settles, so Python regains
+# control and the existing transient/retry/DOM-fallback paths take over
+# ('timed out' is already matched by _is_transient and is NOT an account block).
+# Deadlines are deliberately generous — abandoning a generate POST that Flow
+# actually served costs an orphan render and risks a duplicate submit, so these
+# bound the pathological case without touching a healthy slow one.
+_FA_FETCH_TIMEOUT_MS = 300000       # data plane: generate + upload (observed worst ~127s)
+_FA_TRPC_TIMEOUT_MS = 60000         # control plane: createProject, telemetry — fast or broken
+
 _FA_FETCH_JS = """
-async ([url, method, headers, bodyStr]) => {
+async ([url, method, headers, bodyStr, timeoutMs]) => {
   const opts = { method, headers, credentials: 'include' };
   if (bodyStr !== null) opts.body = bodyStr;
+  const ctl = new AbortController();
+  opts.signal = ctl.signal;
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
   let status = 0, ok = false, text = '';
   try {
     const r = await fetch(url, opts);
     status = r.status; ok = r.ok;
     text = await r.text();
   } catch (e) {
-    return { status: 0, ok: false, data: null, text: 'fetch failed: ' + (e && e.message) };
+    const aborted = (e && e.name === 'AbortError');
+    return { status: 0, ok: false, data: null,
+             text: aborted ? ('fetch timed out after ' + Math.round(timeoutMs / 1000) + 's')
+                           : ('fetch failed: ' + (e && e.message)) };
+  } finally {
+    clearTimeout(timer);
   }
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
@@ -3950,7 +3977,8 @@ def _fa_mint_captcha(page, action):
     return page.evaluate(_FA_CAPTCHA_JS, [_FA_RECAPTCHA_SITE_KEY, action])
 
 
-def _fa_api_fetch(page, url, method, token, body_obj=None, extra_headers=None):
+def _fa_api_fetch(page, url, method, token, body_obj=None, extra_headers=None,
+                  timeout_ms=_FA_FETCH_TIMEOUT_MS):
     headers = {"authorization": f"Bearer {token}"}
     if body_obj is not None:
         headers["content-type"] = "application/json"
@@ -3958,7 +3986,7 @@ def _fa_api_fetch(page, url, method, token, body_obj=None, extra_headers=None):
         headers.update(extra_headers)
     body_str = json.dumps(body_obj) if body_obj is not None else None
     try:
-        return page.evaluate(_FA_FETCH_JS, [url, method, headers, body_str])
+        return page.evaluate(_FA_FETCH_JS, [url, method, headers, body_str, int(timeout_ms)])
     except Exception as e:
         return {"status": 0, "ok": False, "data": None, "text": f"evaluate failed: {e}"}
 
@@ -4108,17 +4136,25 @@ async ([siteKey, action, n]) => {
 """
 
 _FA_BATCH_FETCH_JS = """
-async ([url, method, headers, bodyStrs]) => {
+async ([url, method, headers, bodyStrs, timeoutMs]) => {
   const one = async (bodyStr) => {
     const opts = { method, headers, credentials: 'include' };
     if (bodyStr !== null) opts.body = bodyStr;
+    const ctl = new AbortController();
+    opts.signal = ctl.signal;
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
     let status = 0, ok = false, text = '';
     try {
       const r = await fetch(url, opts);
       status = r.status; ok = r.ok;
       text = await r.text();
     } catch (e) {
-      return { status: 0, ok: false, data: null, text: 'fetch failed: ' + (e && e.message) };
+      const aborted = (e && e.name === 'AbortError');
+      return { status: 0, ok: false, data: null,
+               text: aborted ? ('fetch timed out after ' + Math.round(timeoutMs / 1000) + 's')
+                             : ('fetch failed: ' + (e && e.message)) };
+    } finally {
+      clearTimeout(timer);
     }
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
@@ -4258,7 +4294,8 @@ def _fa_api_fetch_many(page, url, method, token, body_objs, extra_headers=None):
         headers.update(extra_headers)
     body_strs = [json.dumps(b) for b in body_objs]
     try:
-        res = page.evaluate(_FA_BATCH_FETCH_JS, [url, method, headers, body_strs])
+        res = page.evaluate(_FA_BATCH_FETCH_JS,
+                            [url, method, headers, body_strs, int(_FA_FETCH_TIMEOUT_MS)])
     except Exception as e:
         return [{"status": 0, "ok": False, "data": None, "text": f"evaluate failed: {e}"}
                 for _ in body_objs]
@@ -4520,16 +4557,24 @@ def _fa_resolve_image_model_name(label):
 
 # ─── tRPC fetch (labs.google host, session-cookie auth, no Bearer) ───
 _FA_TRPC_FETCH_JS = """
-async ([url, method, bodyStr]) => {
+async ([url, method, bodyStr, timeoutMs]) => {
   const opts = { method, headers: {'content-type': 'application/json', 'accept': '*/*'}, credentials: 'include' };
   if (bodyStr !== null) opts.body = bodyStr;
+  const ctl = new AbortController();
+  opts.signal = ctl.signal;
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
   let status = 0, ok = false, text = '';
   try {
     const r = await fetch(url, opts);
     status = r.status; ok = r.ok;
     text = await r.text();
   } catch (e) {
-    return { status: 0, ok: false, data: null, text: 'fetch failed: ' + (e && e.message) };
+    const aborted = (e && e.name === 'AbortError');
+    return { status: 0, ok: false, data: null,
+             text: aborted ? ('fetch timed out after ' + Math.round(timeoutMs / 1000) + 's')
+                           : ('fetch failed: ' + (e && e.message)) };
+  } finally {
+    clearTimeout(timer);
   }
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
@@ -4538,10 +4583,13 @@ async ([url, method, bodyStr]) => {
 """
 
 
-def _fa_trpc_fetch(page, url, method, body_obj=None):
+def _fa_trpc_fetch(page, url, method, body_obj=None, timeout_ms=_FA_TRPC_TIMEOUT_MS):
+    # v920 — the control plane is where the 2026-08-11 hang landed: a new batch
+    # key meant no prior project, so _ensure_project_ready went straight into
+    # createProject with nothing logged in between. Bounded now.
     body_str = json.dumps(body_obj) if body_obj is not None else None
     try:
-        return page.evaluate(_FA_TRPC_FETCH_JS, [url, method, body_str])
+        return page.evaluate(_FA_TRPC_FETCH_JS, [url, method, body_str, int(timeout_ms)])
     except Exception as e:
         return {"status": 0, "ok": False, "data": None, "text": f"evaluate failed: {e}"}
 
