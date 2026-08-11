@@ -3530,6 +3530,72 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             time.sleep(4)
             continue
 
+        # Google ACCOUNT CHOOSER. The SSO click lands here whenever Google wants
+        # an explicit pick rather than silently reusing the session. NOTHING
+        # clicked it, so the worker just polled "Still redirecting..." until the
+        # job died — observed 2026-08-11 on BOTH accounts, ~5 minutes each, then
+        # "Failed to create project" with the chooser URL as the project URL.
+        # Pick the tile matching this slot's configured email.
+        if "accountchooser" in _cur_url or "/signin/oauth/consent" in _cur_url:
+            _want = ""
+            try:
+                _slot = next((a for a in ACCOUNTS
+                              if a.get("session_folder") == SESSION_FOLDER), None)
+                _want = ((_slot or {}).get("laptop_email")
+                         or ACCOUNTS[0].get("laptop_email") or "").strip()
+            except Exception:
+                _want = ""
+            print(f"[{label}] Google account chooser — picking "
+                  f"{_want or 'the first account'}", flush=True)
+            _picked = False
+            try:
+                if _want:
+                    _tile = page.locator(f"*:has-text('{_want}')").last
+                    if _tile.is_visible(timeout=3000):
+                        human_click_element(page, _tile, f"[{label}] chooser {_want}")
+                        _picked = True
+            except Exception:
+                pass
+            if not _picked:
+                # No email match — take the first listed account rather than
+                # stalling forever. Wrong-account is caught by the ULTRA check.
+                for _sel in ("div[data-identifier]", "li[data-identifier]",
+                             "[role='link']", "form li"):
+                    try:
+                        _t = page.locator(_sel).first
+                        if _t.is_visible(timeout=1500):
+                            human_click_element(page, _t, f"[{label}] chooser first")
+                            _picked = True
+                            break
+                    except Exception:
+                        pass
+            if _picked:
+                _wait_for_page_settle(page, max_seconds=40)
+                time.sleep(3)
+                continue
+            # Chooser present but unclickable => the session really is gone.
+            # Rebuild it from the operator's real Firefox profile (still signed
+            # in), then tell them either way instead of silently spinning.
+            if refresh_firefox_session_from_profile(SESSION_FOLDER, label=label):
+                try:
+                    page.goto(FLOW_HOME_URL, timeout=60000)
+                except Exception:
+                    pass
+                _wait_for_page_settle(page, max_seconds=30)
+                continue
+            try:
+                api_request("POST", "/worker-error", {
+                    "error_type": "session_lost",
+                    "message": (f"{label}: Google account chooser appeared and no "
+                                f"account could be selected — the Flow session is "
+                                f"gone. Re-run the worker to rebuild it from "
+                                f"{_want or 'the configured account'}."),
+                    "account_name": label,
+                })
+                print(f"[{label}] reported session_lost to the dashboard", flush=True)
+            except Exception:
+                pass
+
         if state == 'flow_logged_in':
             if attempt == 0:
                 print(f"[{label}] ✓ Already logged in on Flow", flush=True)
@@ -4575,6 +4641,55 @@ ACCOUNTS = [
 ]
 
 _LAPTOP_COPIED_GOLDENS = set()  # golden paths copied this process (copy once)
+
+
+def refresh_firefox_session_from_profile(session_folder, label=""):
+    """Rebuild a Firefox slot's golden from the operator's REAL Firefox profile
+    and restore it, for use when the live session dies mid-run.
+
+    Restoring the existing golden is NOT enough on a session loss: that golden
+    holds the same cookies that just stopped working. The operator's real Firefox
+    profile is still signed in, so re-pulling from it is what actually recovers.
+    Bypasses the copy-once guard on purpose — that guard exists to avoid
+    re-copying at startup, not to block recovery.
+
+    Returns True if a fresh golden was built. Never raises.
+    """
+    try:
+        if not _bd.is_firefox_mode(BROWSER_MODE):
+            return False
+        golden = get_golden_folder(session_folder)
+        _LAPTOP_COPIED_GOLDENS.discard(golden)
+        import sys as _sys
+        _sys.modules.pop("firefox_profile_pull", None)
+        from firefox_profile_pull import build_firefox_golden_from_profile
+        from worker_profile_pull import load_laptop_email as _lle_r
+
+        acct_num, slot = None, None
+        for i, a in enumerate(ACCOUNTS, start=1):
+            if a.get("session_folder") == session_folder:
+                acct_num, slot = i, a
+                break
+        email = ((slot or {}).get("laptop_email")
+                 or ACCOUNTS[0].get("laptop_email")
+                 or _lle_r(os.path.join(_BASE, "worker_settings.json")))
+        if not email:
+            print(f"[{label}] session refresh: no laptop_email configured", flush=True)
+            return False
+
+        print(f"[{label}] session lost — rebuilding golden from {email}", flush=True)
+        if not build_firefox_golden_from_profile(
+                email, golden, label=label, account_num=acct_num,
+                log=lambda m: print(m, flush=True)):
+            return False
+        _LAPTOP_COPIED_GOLDENS.add(golden)
+        restore_from_golden(session_folder=session_folder, account_label=label,
+                            restore_session=True)
+        print(f"[{label}] ✓ session refreshed from the real Firefox profile", flush=True)
+        return True
+    except Exception as e:
+        print(f"[{label}] session refresh failed ({str(e)[:120]})", flush=True)
+        return False
 
 
 def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
