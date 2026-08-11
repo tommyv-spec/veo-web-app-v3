@@ -3500,6 +3500,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
     max_attempts = 8
     _consecutive_no_buttons = 0
     _sso_attempts = 0
+    _session_rebuilt = False  # rebuild the golden from the real profile at most once
     for attempt in range(max_attempts):
         state = _get_page_state(page)
 
@@ -3573,23 +3574,39 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
                 _wait_for_page_settle(page, max_seconds=40)
                 time.sleep(3)
                 continue
-            # Chooser present but unclickable => the session really is gone.
-            # Rebuild it from the operator's real Firefox profile (still signed
-            # in), then tell them either way instead of silently spinning.
+        # SESSION GENUINELY DEAD -> rebuild the golden from the real profile.
+        #
+        # This automates by hand what the operator did on 2026-08-11: re-pass the
+        # email in the UI so the golden is REBUILT from the still-signed-in local
+        # Firefox profile. Restoring the EXISTING golden cannot work — it holds
+        # the very cookies that just stopped working, which is why the worker span
+        # on the account chooser for ~5 minutes and then died on createProject.
+        #
+        # Fires once per login call, after SSO has been spent or we are parked on
+        # a Google login page with nothing clickable.
+        _stuck_on_google = ("accounts.google.com" in _cur_url
+                            or "accountchooser" in _cur_url
+                            or "/api/auth/signin" in _cur_url)
+        if (not _session_rebuilt and state != 'flow_logged_in'
+                and _stuck_on_google and _sso_attempts >= 2):
+            _session_rebuilt = True
             if refresh_firefox_session_from_profile(SESSION_FOLDER, label=label):
+                _sso_attempts = 0  # fresh cookies deserve a fresh SSO budget
                 try:
                     page.goto(FLOW_HOME_URL, timeout=60000)
                 except Exception:
                     pass
                 _wait_for_page_settle(page, max_seconds=30)
                 continue
+            # Rebuild failed (no local profile signed into this email, or the
+            # pull broke) — only NOW is this something the operator must fix.
             try:
                 api_request("POST", "/worker-error", {
                     "error_type": "session_lost",
-                    "message": (f"{label}: Google account chooser appeared and no "
-                                f"account could be selected — the Flow session is "
-                                f"gone. Re-run the worker to rebuild it from "
-                                f"{_want or 'the configured account'}."),
+                    "message": (f"{label}: the Flow session is gone and it could not "
+                                f"be rebuilt from the local Firefox profile. Sign in "
+                                f"to Google in Firefox as the worker account, then "
+                                f"restart the worker."),
                     "account_name": label,
                 })
                 print(f"[{label}] reported session_lost to the dashboard", flush=True)
