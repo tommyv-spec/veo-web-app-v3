@@ -6508,7 +6508,31 @@ Ambient: same kitchen room tone, soft pour sound.
             'SAFETY_FILTER',             // Veo safety filter
             'ALL_IMAGES_BLACKLISTED',    // worker — every attached image rejected
         ]);
-        
+        // v928 — reject copy per error code. Was inline in
+        // renderClipPolicyViolation only; renderPairedSide now shows the same
+        // wording inside the failed COLUMN of a paired card, so the text lives
+        // in one place and the two paths can never drift.
+        function policyRejectCopy(code) {
+            switch (code || '') {
+                case 'CELEBRITY_FILTER':
+                case 'CELEBRITY_RAI_FILTER':
+                    return {label: '🚫 rejected by celebrity / prominent-person filter',
+                            body: 'Veo rejected this image (face resembles a real person). Upload a different anchor face to retry — every voice clip sharing this anchor will re-submit automatically.'};
+                case 'SAFETY_FILTER':
+                    return {label: '🚫 rejected by safety filter',
+                            body: 'Veo safety filter rejected this image. Upload a replacement to retry — the worker will re-submit automatically.'};
+                case 'ALL_IMAGES_BLACKLISTED':
+                    return {label: '🚫 every input image blacklisted',
+                            body: 'All attached input images were rejected. Upload at least one fresh image to retry.'};
+                case 'CONTENT_POLICY_VIOLATION':
+                    return {label: '🚫 rejected by flow content policy',
+                            body: 'Flow rejected this image\'s content. Upload a replacement to retry — the worker will re-submit automatically.'};
+                default:
+                    return {label: '🚫 rejected by content policy',
+                            body: 'Render rejected this image. Upload a replacement to retry — the worker will re-submit automatically.'};
+            }
+        }
+
         function setActiveState(){
             const c=document.getElementById('appContainer');
             // 3-mode router (2026-05-30) owns state-create/state-browse/state-review.
@@ -11856,7 +11880,17 @@ Ambient: same kitchen room tone, soft pour sound.
             // upload-replacement path. Standalone clips (non-paired) take
             // this branch directly; paired clips (visual_pair + audio_pair)
             // surface the upload button per-side in renderPairedSide.
-            if (IMAGE_ATTRIBUTABLE_CODES.has(c.error_code || '')) {
+            // v928 — a visual_pair WITH an audio twin no longer takes this
+            // branch. Pre-v928 an image-attributable reject on the b-roll side
+            // replaced the WHOLE paired card with the single-column violation
+            // card, so the twin voice clip (often already completed) vanished
+            // from review — the operator could not play or approve it until the
+            // b-roll was fixed. Now the pair keeps its 2-column layout and the
+            // rejected column carries the frame + reason + upload button
+            // (renderPairedSide failed branch). Standalone clips and anchor-only
+            // audio_pair rejects still take the full-card path below.
+            const _v928PairedReject = (c.clip_role||'').toLowerCase() === 'visual_pair' && c._audioTwin;
+            if (IMAGE_ATTRIBUTABLE_CODES.has(c.error_code || '') && !_v928PairedReject) {
                 return renderClipPolicyViolation(c, jid);
             }
             // v700c — paired card for v698A visual_pair clips. When the
@@ -12164,7 +12198,26 @@ Ambient: same kitchen room tone, soft pour sound.
             if (generating) {
                 vid = `<div class="generating-state"><div class="generating-spinner">🎬</div><div class="generating-text">${icon} rendering...</div></div>`;
             } else if (failed) {
-                vid = `<div class="failed-state"><div class="failed-icon">❌</div><div class="failed-text">${icon} failed</div></div>`;
+                // v928 — image-attributable reject shows the REJECTED FRAME +
+                // the reason inside this column (same copy as the standalone
+                // violation card via policyRejectCopy), so the operator sees
+                // what to replace while the twin side keeps playing next to it.
+                // Any other failure keeps the plain ❌ tile.
+                const _pvCopy = IMAGE_ATTRIBUTABLE_CODES.has(clip.error_code || '')
+                    ? policyRejectCopy(clip.error_code) : null;
+                const _pvBn = _pvCopy
+                    ? ((clip.replacement_start_frame || clip.start_frame || '').split('/').pop() || '')
+                    : '';
+                const _pvSrc = _pvBn ? `${API}/jobs/${jid}/images/${encodeURIComponent(_pvBn)}` : '';
+                vid = _pvCopy
+                    ? `<div class="clip-video" style="padding:8px;background:rgba(239,68,68,0.10);border:1px solid rgba(239,68,68,0.45);border-radius:8px;">
+                           <div style="font-size:10px;color:#ef4444;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;">${_pvCopy.label}</div>
+                           ${_pvSrc
+                               ? `<img src="${_pvSrc}" alt="rejected frame" style="width:100%;max-height:240px;object-fit:contain;display:block;border-radius:6px;" onerror="this.style.display='none'">`
+                               : `<div style="display:flex;align-items:center;justify-content:center;aspect-ratio:9/16;max-height:240px;color:#ef4444;">⚠ image</div>`}
+                           <div style="margin-top:6px;font-size:10px;color:var(--text-muted);line-height:1.4;">${_pvCopy.body}</div>
+                       </div>`
+                    : `<div class="failed-state"><div class="failed-icon">❌</div><div class="failed-text">${icon} failed</div></div>`;
             } else if (pending) {
                 vid = `<div class="pending-state"><div class="pending-icon">⏳</div><div class="pending-text">${icon} waiting...</div></div>`;
             } else if (waitingApproval) {
@@ -12572,22 +12625,11 @@ Ambient: same kitchen room tone, soft pour sound.
             // v740 — honest per-code copy. Banana 2 = image policy; Veo
             // celebrity / safety / blacklist each get a tailored message.
             // Upload-replacement flow is identical across all of them.
-            const _vCode = c.error_code || '';
-            let rejectBannerLabel = '🚫 rejected by content policy';
-            let rejectBodyCopy = 'Render rejected this image. Upload a replacement to retry — the worker will re-submit automatically.';
-            if (_vCode === 'CELEBRITY_FILTER' || _vCode === 'CELEBRITY_RAI_FILTER') {
-                rejectBannerLabel = '🚫 rejected by celebrity / prominent-person filter';
-                rejectBodyCopy = 'Veo rejected this image (face resembles a real person). Upload a different anchor face to retry — every voice clip sharing this anchor will re-submit automatically.';
-            } else if (_vCode === 'SAFETY_FILTER') {
-                rejectBannerLabel = '🚫 rejected by safety filter';
-                rejectBodyCopy = 'Veo safety filter rejected this image. Upload a replacement to retry — the worker will re-submit automatically.';
-            } else if (_vCode === 'ALL_IMAGES_BLACKLISTED') {
-                rejectBannerLabel = '🚫 every input image blacklisted';
-                rejectBodyCopy = 'All attached input images were rejected. Upload at least one fresh image to retry.';
-            } else if (_vCode === 'CONTENT_POLICY_VIOLATION') {
-                rejectBannerLabel = '🚫 rejected by flow content policy';
-                rejectBodyCopy = 'Flow rejected this image\'s content. Upload a replacement to retry — the worker will re-submit automatically.';
-            }
+            // v928 — copy moved to the shared policyRejectCopy() so this card
+            // and the paired failed-column never drift apart.
+            const _rejCopy = policyRejectCopy(c.error_code);
+            const rejectBannerLabel = _rejCopy.label;
+            const rejectBodyCopy = _rejCopy.body;
             return `<div class="clip-card clip-rejected" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"
                         style="${isPaired ? 'grid-column: span 2;' : ''}border: 2px solid rgba(239,68,68,0.6);">
                 <div class="clip-content">
