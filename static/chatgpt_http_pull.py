@@ -73,6 +73,32 @@ def _post_retry(url, tries=4, timeout=300, log=print, **kw):
     raise last
 
 
+# Playwright's wording when the browser/context/page is gone. A dead browser is
+# NOT a bad node: marking the node failed here is how one crash burned a whole
+# queue (2026-08-11 — the browser died after a node completed and every later
+# claim failed instantly with "Target page, context or browser has been closed",
+# destroying nodes 4783/4801/... in seconds).
+_BROWSER_DEAD_MARKERS = (
+    "target page, context or browser has been closed",
+    "browser has been closed",
+    "target closed",
+    "browser closed",
+    "connection closed while reading from the driver",
+)
+
+
+def _browser_dead(exc):
+    return any(m in str(exc).lower() for m in _BROWSER_DEAD_MARKERS)
+
+
+def _page_alive(page):
+    """True if this page can still be driven."""
+    try:
+        return page is not None and not page.is_closed()
+    except Exception:
+        return False
+
+
 def _download_refs(refs, api_key, dest_dir):
     import requests
     paths = []
@@ -86,7 +112,7 @@ def _download_refs(refs, api_key, dest_dir):
     return paths
 
 
-def run(api_url, api_key, page, host, poll_s=5, log=print):
+def run(api_url, api_key, page, host, poll_s=5, log=print, relaunch=None):
     import requests
     from chatgpt_image_backend import generate
     wid = make_worker_id(host)
@@ -167,18 +193,44 @@ def run(api_url, api_key, page, host, poll_s=5, log=print):
             pass                            # not on the main thread — atexit covers it
 
     try:
-        _pump(base, api_key, wid, page, poll_s, log)
+        _pump(base, api_key, wid, page, poll_s, log, relaunch=relaunch)
     finally:
         _go_offline("worker loop ended")
 
 
-def _pump(base, api_key, wid, page, poll_s, log):
+def _pump(base, api_key, wid, page, poll_s, log, relaunch=None):
     """The claim -> generate -> upload loop. Split out so `run` can wrap it in
-    the graceful-shutdown try/finally without re-indenting the whole body."""
+    the graceful-shutdown try/finally without re-indenting the whole body.
+
+    `relaunch()` returns a fresh logged-in page (or None). Without it a dead
+    browser is terminal and the worker can only stop."""
     import requests
     from chatgpt_image_backend import generate
 
+    dead_since = 0          # consecutive relaunch failures, for the backoff
+
     while True:
+        # Never claim a node we cannot possibly render. Claiming against a dead
+        # browser is what turned one crash into a queue-wide wipe.
+        if not _page_alive(page):
+            if not relaunch:
+                log("browser is gone and no relaunch is available — stopping so "
+                    "the queue is not burned")
+                return
+            dead_since += 1
+            wait = min(15 * dead_since, 120)
+            log(f"browser is gone — relaunching (attempt {dead_since})")
+            try:
+                page = relaunch()
+            except Exception as e:
+                page = None
+                log(f"  relaunch raised: {str(e).splitlines()[0][:120]}")
+            if not _page_alive(page):
+                log(f"  relaunch failed — retrying in {wait}s")
+                time.sleep(wait)
+                continue
+            log("  browser back up")
+            dead_since = 0
         try:
             r = requests.get(f"{base}/jobs/pending",
                              params={"worker_id": wid, "backend": WORKER_BACKEND},
@@ -232,6 +284,17 @@ def _pump(base, api_key, wid, page, poll_s, log):
                     log(f"  OK node {nid}" + (f" ({nname})" if nname else "")
                         + f" uploaded{tail}")
             except Exception as e:
+                if _browser_dead(e):
+                    # The NODE is fine; the browser died under it. Leave the
+                    # claim alone — the server's stale-claim sweep requeues it —
+                    # and never write status=failed, which is unrecoverable and
+                    # is what destroyed a whole queue on 2026-08-11.
+                    log(f"  browser died during node {nid}"
+                        + (f" ({nname})" if nname else "")
+                        + " — NOT failing it; the claim will be swept back to the "
+                          "queue. Relaunching.")
+                    page = None          # forces the relaunch at the loop top
+                    continue
                 try:
                     requests.post(f"{base}/jobs/{nid}/status", headers=_auth(api_key),
                                   params={"backend": WORKER_BACKEND},

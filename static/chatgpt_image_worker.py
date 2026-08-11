@@ -640,10 +640,34 @@ def main():
             if not lp:
                 return
             ctx, page = lp
+            state = {"ctx": ctx}
+
+            def _relaunch():
+                """A fresh logged-in page after the browser dies mid-run.
+                The saved profile means this is a plain relaunch — no seeding,
+                no sign-in — so recovery costs seconds, not a queue."""
+                old = state.get("ctx")
+                if old is not None:
+                    try:
+                        old.close()
+                    except Exception:
+                        pass          # already dead; closing is best-effort
+                again = launch_logged_in(p, getattr(args, "chatgpt_email", None))
+                if not again:
+                    state["ctx"] = None
+                    return None
+                state["ctx"], new_page = again
+                return new_page
+
             try:
-                http_run(args.api_url, args.api_key, page, socket.gethostname())
+                http_run(args.api_url, args.api_key, page, socket.gethostname(),
+                         relaunch=_relaunch)
             finally:
-                ctx.close()
+                if state.get("ctx") is not None:
+                    try:
+                        state["ctx"].close()
+                    except Exception:
+                        pass
         return
     if args.watch:
         wd = args.watch_dir or os.environ.get("IMAGE_JOBS_DIR") or os.path.join(
