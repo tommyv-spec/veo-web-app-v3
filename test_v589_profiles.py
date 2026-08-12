@@ -176,6 +176,82 @@ def test_providers_and_cli_thread_the_profile():
     assert 'parsed["profile"] = args.profile' in main_src
 
 
+def _install_fake_genai(monkeypatch, response_text):
+    """Minimal google.genai stand-in so the gemini lane runs offline.
+
+    Fakes ONLY the network surface (client, streamed response, the types the
+    inline path constructs). The part under test stays real: call_gemini's own
+    validation gate and the schema_status it hands to the cost ledger.
+    """
+    import sys
+    import types as stdlib_types
+
+    class _Chunk:
+        def __init__(self, text):
+            self.text = text
+            self.usage_metadata = None
+
+    class _Models:
+        def generate_content_stream(self, model, contents, config):
+            return [_Chunk(response_text)]
+
+    class _Client:
+        def __init__(self, api_key=None):
+            self.models = _Models()
+
+    class _Any:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    fake_types = stdlib_types.SimpleNamespace(
+        Blob=_Any, Part=_Any, VideoMetadata=_Any, GenerateContentConfig=_Any)
+    genai_mod = stdlib_types.ModuleType("google.genai")
+    genai_mod.types = fake_types
+    genai_mod.Client = _Client
+    google_pkg = stdlib_types.ModuleType("google")
+    google_pkg.genai = genai_mod
+    monkeypatch.setitem(sys.modules, "google", google_pkg)
+    monkeypatch.setitem(sys.modules, "google.genai", genai_mod)
+
+
+def test_call_gemini_gate_uses_the_call_profile(monkeypatch, tmp_path):
+    """call_gemini validated its OWN response under the default profile.
+
+    The bug: `parse_and_validate_stage4d(resp.text, shots)` with no profile.
+    A fbads-video run therefore graded a response with no ad_read at all as
+    schema_status="pass" in output/gemini_costs.jsonl — the ledger we read to
+    judge whether a decode was good. No network: the client is faked.
+    """
+    data = _minimal_valid_stage4d()          # a valid ugc-reel read; NO ad_read
+    shots = _expected_shots_for(data)
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"\x00" * 32)          # under the inline cap -> no upload
+    logged: dict = {}
+    monkeypatch.setattr(v589, "log_gemini_usage",
+                        lambda *a, **kw: logged.update(kw) or {})
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key-never-sent")
+    _install_fake_genai(monkeypatch, json.dumps(data))
+
+    # default lane: unchanged — this response IS a valid ugc-reel read
+    out = v589.call_gemini(video, shots, "t", [], thinking="default")
+    assert json.loads(out) == data
+    assert logged["schema_status"] == "pass"
+
+    # fbads lane: same response, still no ad_read -> the in-call gate must fail
+    logged.clear()
+    with pytest.raises(v589.Stage4dValidationError, match="ad_read"):
+        v589.call_gemini(video, shots, "t", [], thinking="default",
+                         profile="fbads-video")
+    assert logged["schema_status"] == "fail"
+
+
+def test_call_gemini_gate_names_the_profile_in_source():
+    """Belt to the behavioral brace: pin the exact regression shape."""
+    src = inspect.getsource(v589.call_gemini)
+    assert "parse_and_validate_stage4d(resp.text, shots)" not in src
+    assert "parse_and_validate_stage4d(resp.text, shots, profile=profile)" in src
+
+
 def test_validator_checks_every_schema_required_shot_field():
     """Drift guard. required_top was hand-typed and had silently dropped
     frame_inventory + start_frame_spec; it now derives from the schema. Every

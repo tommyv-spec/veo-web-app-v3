@@ -1527,7 +1527,11 @@ def call_gemini(video_path: Path, shots: list, transcript_summary: str, motion: 
     print(f"[v589] Gemini: generated in {elapsed:.1f}s")
     schema_status = "pass"
     try:
-        parse_and_validate_stage4d(resp.text, shots)
+        # profile= is load-bearing, not decoration: this gate decides the
+        # schema_status written to the cost ledger. Without it a fbads-video
+        # run validated its own response under the DEFAULT ugc-reel contract
+        # and logged "pass" for a response with no ad_read at all.
+        parse_and_validate_stage4d(resp.text, shots, profile=profile)
     except Stage4dValidationError:
         schema_status = "fail"
         raise
