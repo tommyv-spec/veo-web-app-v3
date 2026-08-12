@@ -2301,9 +2301,14 @@ def _process_done_file_sync(done_file: Path):
             # v891.2 - start after any SURVIVING variant. v559 keeps manual
             # uploads through a regenerate, so numbering fresh AI variants from
             # 1 collided with a manual variant already holding 1.
+            # Read post-flush DB state, NOT node.variants: the deletes above are
+            # flushed but the in-memory collection can still hold those rows
+            # until it is expired, which would push each regenerate's numbering
+            # higher and higher (1-4, then 5-8, then 9-12) instead of restarting.
             _kept_idx = [
-                v.variant_index for v in node.variants
-                if v.variant_index is not None
+                r[0] for r in db.query(ImageVariant.variant_index).filter(
+                    ImageVariant.node_id == node.id).all()
+                if r[0] is not None
             ]
             _start_idx = (max(_kept_idx) + 1) if _kept_idx else 1
             n_added = 0
