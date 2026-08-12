@@ -281,6 +281,55 @@ def lint(path):
             )
             (fails if new_era else warns).append(msg)
 
+        # v890d - a composite frame is TWO renders. When any image block names an
+        # assembled production method, the decode must carry both layers with the
+        # pairing declared, or the operator has nothing to assemble.
+        composite_words = re.compile(
+            r"green[- ]?screen|keyed|composite|picture[- ]in[- ]picture|\bpip\b|split[- ]screen|"
+            r"cut[- ]?out|overlaid layer", re.I)
+        layered = re.compile(r"\*\*composite_layer:\*\*", re.I)
+        # v890d.1 - every object in an assembled frame belongs to exactly ONE
+        # layer, and proximity does not decide which. Both a human reader and the
+        # 1fps VLM pass put the source's microphone on the shouting foreground
+        # woman because it sat by her shoulder; one frame showed it monochrome,
+        # cropped by her matte edge and aimed at the man behind her - it was his,
+        # on the plate. Wrong layer = the object renders into the wrong prompt, so
+        # the assembled frame carries two of it and the wrong person gets what it
+        # means. The checker cannot judge an attribution, so it requires the
+        # DECLARATION: each layer block names the tell that put its contents
+        # there. An author made to name a tell has to go look for one.
+        evidence_field = re.compile(r"\*\*layer_evidence:\*\*", re.I)
+        comp_blocks, layer_blocks, no_evidence = [], 0, []
+        for num, body in zip(imgs, blocks):
+            body = re.split(r'^##\s+', body, flags=re.M)[0]
+            if layered.search(body):
+                layer_blocks += 1
+                if not evidence_field.search(body):
+                    no_evidence.append(num)
+            method = re.search(r'^\s*[-*]\s*\*\*production method[^*:]*:\*\*(.*)$',
+                               body, re.M | re.I)
+            if method and composite_words.search(method.group(1)):
+                comp_blocks.append(num)
+        if no_evidence:
+            msg = (
+                "v890d.1: ### Image %s carry `- **composite_layer:**` but no "
+                "`- **layer_evidence:**` - name, for the objects in this layer, the tell that "
+                "puts them HERE (colour grade, which edge occludes which, what moves with the "
+                "subject, where a mic or a hand actually points). An object is not on a layer "
+                "because it sits near someone who is"
+                % ", ".join(no_evidence)
+            )
+            (fails if new_era else warns).append(msg)
+        if comp_blocks and layer_blocks < 2:
+            msg = (
+                "v890d: ### Image %s declare an assembled/composite production method but the "
+                "decode carries %d `- **composite_layer:**` block(s) - a composite is TWO renders "
+                "(background-plate + foreground-keyed), each with its own prompt and its own clip, "
+                "or there is nothing to assemble"
+                % (", ".join(comp_blocks), layer_blocks)
+            )
+            (fails if new_era else warns).append(msg)
+
     status = "FAIL" if fails else "PASS"
     print(f"{path}")
     print(f"  Images {len(imgs)} / Scenes {len(scenes)} / Clips {len(clips)} | {status}")

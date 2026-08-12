@@ -186,11 +186,22 @@ PER_SHOT_SCHEMA = {
                 ),
                 "props_and_objects": _string_schema(
                     "Every object in frame with position relative to a person or another object, colour, "
-                    "material and current state. Include tools, containers, food, packaging and set dressing."
+                    "material and current state. Include tools, containers, food, packaging and set dressing. "
+                    "For EACH object also say WHOSE it is and WHICH LAYER it sits on — an object near a person "
+                    "is not automatically theirs. In an assembled frame the tells are decisive and visible: an "
+                    "object rendered in the background plate's colour grade (monochrome while the subject is in "
+                    "colour), sitting behind the subject's matte edge, or holding still while the subject moves, "
+                    "belongs to the PLATE and to whoever is in it — not to the person keyed in front of it. "
+                    "Write it as 'object — layer — owner — the tell', e.g. 'Shure microphone — background plate "
+                    "— the seated man's, in his studio — monochrome and occluded by her cut-out edge'."
                 ),
                 "on_screen_text_verbatim": _string_schema(
                     "Every legible word on screen, quoted exactly, with where it sits and how it is styled "
-                    "(case, weight, colour, background plate). 'none' when the frame carries no text."
+                    "(case, weight, colour, and whether it sits on a solid plate or is outlined text over the "
+                    "image — these are different treatments and often BOTH appear in one frame). Also record "
+                    "NON-TEXT drawn marks here: hand-drawn scribbles, circles, arrows and doodles added on top "
+                    "of the image, saying what they cover and their style. 'none' when the frame carries "
+                    "neither text nor drawn marks."
                 ),
                 "color_palette": _string_schema(
                     "The three to six dominant colours as plain names, each tied to what carries it "
