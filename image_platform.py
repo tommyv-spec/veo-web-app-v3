@@ -108,6 +108,10 @@ def run_image_platform_migrations():
          "ALTER TABLE image_nodes ADD COLUMN cg_claimed_by TEXT"),
         ("image_nodes", "cg_claimed_at",
          "ALTER TABLE image_nodes ADD COLUMN cg_claimed_at TIMESTAMP"),
+        ("image_nodes", "claimed_prompt_hash",
+         "ALTER TABLE image_nodes ADD COLUMN claimed_prompt_hash TEXT"),
+        ("image_nodes", "cg_claimed_prompt_hash",
+         "ALTER TABLE image_nodes ADD COLUMN cg_claimed_prompt_hash TEXT"),
         # Scene-table import metadata (added v428 — supports "Promote to video")
         ("image_nodes", "batch_id",
          "ALTER TABLE image_nodes ADD COLUMN batch_id TEXT"),
@@ -311,6 +315,10 @@ def run_image_platform_migrations():
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS cg_claimed_by VARCHAR(100)"),
         ("image_nodes", "cg_claimed_at",
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS cg_claimed_at TIMESTAMP"),
+        ("image_nodes", "claimed_prompt_hash",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS claimed_prompt_hash VARCHAR(16)"),
+        ("image_nodes", "cg_claimed_prompt_hash",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS cg_claimed_prompt_hash VARCHAR(16)"),
         ("image_nodes", "batch_id",
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS batch_id VARCHAR(36)"),
         ("image_nodes", "scene_index_in_batch",
@@ -971,6 +979,12 @@ class ImageNode(Base):
     cg_status = Column(String(16), nullable=True)
     cg_claimed_by = Column(String(100), nullable=True)
     cg_claimed_at = Column(DateTime, nullable=True)
+    # v891.4 - sha256[:16] of the prompt each lane was claimed with, so a render
+    # that comes back after the prompt was rewritten can be recognised and
+    # dropped. updated_at cannot serve here: it has onupdate=utcnow, so the
+    # claim's own commit bumps it and every render would look stale.
+    claimed_prompt_hash = Column(String(16), nullable=True)
+    cg_claimed_prompt_hash = Column(String(16), nullable=True)
 
     # Scene-table import metadata. Populated by import_scene_table for every
     # scene node so the Job Overview UI (and the later "Promote to video"
@@ -12816,14 +12830,17 @@ def worker_get_pending_job(
 
     # Claim the job. chatgpt claims the cg lane (leaves node.status untouched so
     # the banana backend can render it in parallel); banana claims node.status.
+    _v891_fp = _prompt_fingerprint(node)
     if is_cg:
         node.cg_status = "generating"
         node.cg_claimed_by = worker_id or "unknown"
         node.cg_claimed_at = datetime.utcnow()
+        node.cg_claimed_prompt_hash = _v891_fp   # v891.4
     else:
         node.status = "generating"
         node.claimed_by_worker = worker_id or "unknown"
         node.claimed_at = datetime.utcnow()
+        node.claimed_prompt_hash = _v891_fp      # v891.4
     db.commit()
 
     # Keep backwards-compat: still emit input_image_urls (flat list) for
@@ -12929,6 +12946,12 @@ def worker_download_file(
     return FileResponse(p)
 
 
+def _prompt_fingerprint(node) -> str:
+    """v891.4 - stable short hash of the text a render will be produced from."""
+    import hashlib as _hl
+    return _hl.sha256((node.prompt or "").encode("utf-8")).hexdigest()[:16]
+
+
 def _variant_replaceable(v, backend) -> bool:
     """A worker re-upload for `backend` may replace only AI variants of the SAME
     backend. Manual variants and the other backend's variants are preserved."""
@@ -12971,6 +12994,30 @@ def worker_upload_variants(
     # banana lane owns node.status; the chatgpt lane owns node.cg_status. The
     # "superseded" guards below must test the lane THIS upload belongs to.
     is_cg = (backend or "banana") == "chatgpt"
+    # v891.4 - a render belongs to the prompt it was COMPILED from. If the node's
+    # prompt was rewritten while the worker was still rendering, the image coming
+    # back depicts the OLD text and must not land. Without this the operator
+    # watched a tile change under him: a chatgpt job claimed before a resync
+    # finished after it and replaced the tile in place (same row, same filename,
+    # different picture), so a scene briefly showed another scene's content.
+    # v891.3 drops stale renders AT rewrite time; this closes the in-flight leg.
+    _claimed_fp = node.cg_claimed_prompt_hash if is_cg else node.claimed_prompt_hash
+    if _claimed_fp and _claimed_fp != _prompt_fingerprint(node):
+        log.info(
+            f"[v891.4] node {node_id} backend={backend}: prompt changed since this "
+            f"job was claimed (claimed={_claimed_fp} now={_prompt_fingerprint(node)}) "
+            f"— discarding {len(files or [])} stale render(s); the pending requeue "
+            f"regenerates from the current prompt"
+        )
+        if is_cg:
+            node.cg_status = "queued"
+            node.cg_claimed_by = None
+            node.cg_claimed_at = None
+            node.cg_claimed_prompt_hash = None
+            db.commit()
+        db.close()
+        return {"ok": True, "superseded": True, "stale_prompt": True,
+                "saved_count": 0, "node_status": node.status}
     lane_generating = (node.cg_status == "generating") if is_cg else (node.status == "generating")
     if not lane_generating:
         # v757 — the node is no longer 'generating'. Only treat the worker's
