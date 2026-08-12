@@ -3438,59 +3438,6 @@ def chatgpt_generate_node(
     return {"ok": True, "node_id": node_id, "cg_status": node.cg_status}
 
 
-class PurgeStaleVariantsRequest(BaseModel):
-    """v891.3 TEMP purge. Remove once the affected batch is clean."""
-    variant_ids: List[int] = []
-    dry_run: bool = True
-
-
-@router.post("/maintenance/purge-stale-variants")
-def maintenance_purge_stale_variants(
-    req: PurgeStaleVariantsRequest,
-    db: Session = Depends(get_db_session),
-    current_user: User = Depends(get_current_user),
-):
-    """TEMPORARY (v891.3) - drop specific variant ROWS that are renders of a
-    superseded prompt.
-
-    Takes an explicit id list rather than guessing from timestamps, so every
-    deletion is auditable. Refuses to touch a variant that is currently chosen,
-    and refuses anything outside the caller's own nodes. Deletes the DB row
-    only and leaves the file on disk/R2, so the image can be recovered.
-    """
-    if not req.variant_ids:
-        raise HTTPException(400, "pass variant_ids")
-
-    report = {"dry_run": req.dry_run, "deleted": [], "skipped": []}
-    for vid in req.variant_ids:
-        v = db.query(ImageVariant).filter(ImageVariant.id == vid).first()
-        if not v:
-            report["skipped"].append({"variant_id": vid, "why": "not found"})
-            continue
-        node = db.query(ImageNode).filter(
-            ImageNode.id == v.node_id,
-            ImageNode.user_id == current_user.id,
-        ).first()
-        if not node:
-            report["skipped"].append({"variant_id": vid, "why": "not your node"})
-            continue
-        if node.chosen_variant_id == v.id:
-            report["skipped"].append({"variant_id": vid, "why": "currently chosen"})
-            continue
-        report["deleted"].append({
-            "variant_id": v.id, "node_id": node.id,
-            "backend": getattr(v, "backend", None), "path": v.image_path,
-        })
-        if not req.dry_run:
-            db.delete(v)
-
-    if not req.dry_run:
-        db.commit()
-        log.info(f"[v891.3 PURGE] dropped {len(report['deleted'])} stale variant row(s)")
-    report["deleted_count"] = len(report["deleted"])
-    return report
-
-
 @router.post("/nodes/{node_id}/choose")
 def choose_variant(
     node_id: int,
