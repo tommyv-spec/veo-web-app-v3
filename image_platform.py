@@ -6247,8 +6247,8 @@ def _import_scene_table_impl(
                 "Omit it to import as a new batch."
             )
         batch_id = resync_batch.id
-        # TEMP DIAGNOSTIC (v891, remove once a real resync is confirmed in prod):
-        # prove the resync branch was taken and against which batch.
+        # v891 AUDIT (permanent, not debug): a resync rewrites prompts and
+        # DELETES rows, so every run leaves a record of which batch it touched.
         print(f"[image_platform] v891 RESYNC start: batch={batch_id} "
               f"user={current_user.id}", flush=True)
     else:
@@ -7901,8 +7901,8 @@ def _import_scene_table_impl(
     db.commit()
 
     if resync_batch is not None:
-        # TEMP DIAGNOSTIC (v891): the per-scene outcome, so operator-side logs
-        # show exactly what a resync rewrote versus left alone.
+        # v891 AUDIT (permanent): the per-scene outcome, so a log reader can see
+        # exactly what a resync rewrote versus left alone without querying the DB.
         print(f"[image_platform] v891 RESYNC done: batch={batch_id} "
               f"updated={resync_report['updated']} "
               f"unchanged={len(resync_report['unchanged'])} "

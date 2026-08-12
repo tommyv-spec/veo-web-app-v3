@@ -472,47 +472,75 @@ Adds a structural backstop AFTER the v588 dense-frame human-walk. Pipeline file 
 
 **(1) LM Studio (free local, recommended)** — user opens the LM Studio app with a vision-capable model loaded (e.g. `gemma-4-E2B-it-GGUF` with mmproj — already cached on most dev machines after a single LM Studio install) and enables the local server at `http://localhost:1234`. Script auto-detects the running server via `GET /v1/models`, picks a vision-capable model from the available list, and sends dense frames + transcript via OpenAI-compatible `/v1/chat/completions`. Zero per-call cost; runs on CPU.
 
-**(2) Gemini API (paid fallback)** — when `GEMINI_API_KEY` is set, native MP4 upload at 1fps + audio + per-second timestamps. ~$0.01 per 45s decode on `gemini-2.5-flash`. Free tier covers many decodes/day.
+**(2) Gemini API (paid fallback)** — when `GEMINI_API_KEY` is set, native MP4 upload at 1fps + audio + per-second timestamps. Default model `gemini-3.6-flash` (`gemini-2.5-flash` rejects NEW API keys since 2026 with 404 "no longer available to new users"); ~$0.02-0.05 per 45s decode with thinking on; free tier covers many decodes/day. Gemini-only knobs: `--thinking minimal|low|medium|high` (default high — forensic perception is a hard task), `--fps 2-5` for fast-motion sources (default 1fps misses fast motion), `--media-resolution low` cheap mode (66 vs 258 tok/frame — not for real decodes), `--upload-timeout`. The request sends the video FIRST and the prompt after (doc-recommended order), a shot→MM:SS timeline map (Gemini's native timestamp format), `system_instruction`, and structured JSON output via `response_json_schema` — the schema is enforced API-side, not repeated in the prompt, and the schema's property order controls generation order (forensic_perception is emitted BEFORE static_composition — verified in live output, preserving the v738 "perceptual math first" discipline). File passing (docs read 2026-08-11): ≤19MB goes INLINE in the request — skips the File API upload round trip (measured 7-26s per decode); bigger files upload via File API and are deleted after each call. The user prompt follows the official Gemini 3 `<context>/<task>/<final_instruction>` template; sampling params stay at model defaults (Google: changing temperature on 3.x can cause looping/degradation). Implicit caching is on by default for 2.5+ models — cache hits land in the ledger as `cached_tokens` and are priced at the ~10% caching rate. Thinking level, measured on the same real reel: `high` = $0.103 and catches ordered multi-beat actions inside a clip (lean → point → chin-rest → point-down); `low` = $0.041 but flattens them to one gist verb — keep `high` for real decodes, `low` for quick looks. For bulk backlogs the Batch API runs identical requests at 50% price with ≤24h turnaround (not wired into the script; ask when needed). Every call appends token usage (modality split) + a standard-paid-tier USD estimate to `output/gemini_costs.jsonl` (override path: `GEMINI_COST_LEDGER` env); print the ledger with `python code/v589_video_understanding.py --costs`.
 
 **(3) Human-walk template (always available)** — when no automated provider is configured, the script writes a `stage4d_vlm.json` template skeleton with empty fields per shot + dense frame paths listed + dialogue overlapping each shot. The human-walking decoder LLM session (Claude in chat) walks the dense frames produced by v588 and fills in the JSON manually. The v589 STRUCTURAL rule still holds — the schema is produced, just by a human walker instead of an API.
 
 The VLM JSON (whichever provider produced it) becomes the **authoritative source for visual action arcs**, parallel to whisper.cpp being authoritative for dialogue.
 
-**The VLM JSON schema** (per `code/v589_video_understanding.py`):
+**The VLM JSON schema — `stage4d.v2` (2026-08-11, per `STAGE4D_JSON_SCHEMA` in `code/v589_video_understanding.py`)**. The top level is an OBJECT, not an array (the pre-v2 per-shot array is retired and hard-fails validation). Inputs now REQUIRE `motion.json` (v585 Stage 4c) next to `shots.json` + `transcript.json`:
 
 ```json
 {
-  "shot": 1,
-  "start": 0.0, "end": 6.47,
-  "summary": "<one sentence: rhetorical function + visible action>",
-  "static_composition": {
-    "subject": "<persona pose + eye direction + mouth state + expression>",
-    "framing": "<camera distance + frame partition + depth layers + crop>",
-    "anchor_props_with_positions": "<every visible prop and its EXACT position>",
-    "lighting_and_palette": "<lighting direction + color palette + mood>"
-  },
-  "action_arc": {
-    "has_state_evolution": true,
-    "start_state": "<foreground prop / subject look at shot start>",
-    "mid_state": "<what's happening at midpoint>",
-    "end_state": "<foreground prop / subject look at shot end>",
-    "magnitude": "COMPLETE",
-    "verbs_observed": ["pour", "melt", "reveal"]
-  },
-  "audio": "<dialogue + ambient sound cues + register>",
-  "veo_reproduction_hints": {
-    "use_first_last_frame_workflow": true,
-    "start_image_caption": "<one paragraph Nano Banana 2 description of optimal start frame>",
-    "end_image_caption": "<one paragraph Nano Banana 2 description of optimal end frame>",
-    "transition_prompt": "<one paragraph Veo 3.1 transition prompt with absolute magnitude language>"
-  },
-  "human_walk_corrections": "<flags any aspect where a midpoint-only human walk would under-describe the arc>"
+  "schema_version": "stage4d.v2",
+  "observed_people": [
+    {"label": "person_1", "identity_markers": "<age range, hair, build>",
+     "wardrobe": "<clothing + accessories, recorded ONCE here — never repeated per shot>",
+     "shots_present": [1, 2]}
+  ],
+  "shots": [{
+    "shot_index": 1,
+    "start": 0.0, "end": 6.47,
+    "summary": "<one sentence: source-derived job + visible action>",
+    "forensic_perception": {
+      "kinematic_traces": [{"body_part_or_object": "…", "pixel_path": "<extremity back to torso>",
+                            "origin_or_owner": "…", "evidence": "<clothing / contact / pixel continuity>"}],
+      "z_depth_layers": {"foreground": "…", "midground": "…", "background": "…"},
+      "literal_vfx_observations": ["<literal impossible VFX; empty list when none>"],
+      "intrinsic_state_isolation": {
+        "focus_object": "…",
+        "axis_1_surface_texture": "…", "axis_2_structural_integrity": "…",
+        "axis_3_volume_shape": "…", "axis_4_color_illumination": "…",
+        "primary_change_axis": "Surface/Texture | Structural Integrity | Volume/Shape | Color/Illumination | NONE",
+        "intrinsic_state_start": "…", "intrinsic_state_end": "…"
+      }
+    },
+    "static_composition": {
+      "subject": "<neutral person label + pose + eye direction + mouth state + expression>",
+      "framing": "<subject-to-subject geometry + detail-density distance + depth + crop-by-omission>",
+      "anchor_props_with_positions": "<every visible prop positioned relative to people/objects>",
+      "lighting_and_palette": "<lighting direction + palette + mood>"
+    },
+    "action_arc": {
+      "has_state_evolution": true,
+      "kinematics": {"start_state": "…", "mid_state": "…", "end_state": "…",
+                     "movement_path": "<ordered path>", "camera_shift": "<movement or static>"},
+      "morphology": {"focus_object": "…", "intrinsic_state_start": "…", "intrinsic_state_end": "…",
+                     "primary_change_axis": "<same enum as above>",
+                     "magnitude": "COMPLETE | PARTIAL | MINIMAL | NONE"},
+      "verbs_observed": ["pour", "melt", "reveal"]
+    },
+    "audio": {"dialogue_verbatim": "<verbatim transcript overlap or none>", "ambient": "…",
+              "music": "…", "voice_register": "…"},
+    "motion_cross_check": {"input_classification": "<copied from motion.json>",
+                           "vlm_observation": "…", "agrees": true, "discrepancy": "none"},
+    "veo_reproduction_hints": {"use_blend_to_next_scene": false,
+                               "needs_platform_future_image_end": false,
+                               "transition_prompt": "<source-faithful motion cue, absolute magnitude when COMPLETE>"},
+    "human_walk_corrections": "none"
+  }]
 }
+```
+
+**Built-in validation gate**: `validate_stage4d_output()` hard-checks top-level shape, shot count/order, exact source timestamps (±0.02s), all required forensic/action blocks, legal `primary_change_axis` + `magnitude` enums, distinct start/end states whenever the axis is not NONE, and leftover template placeholders. A provider result that fails is saved as `.raw.txt` and the run exits 2 — a bad artifact never silently enters the decode handoff. Standalone check of any saved artifact:
+
+```bash
+python code/v589_video_understanding.py --validate-stage4d path/to/stage4d_vlm.json --shots path/to/shots.json
 ```
 
 **The VLM JSON becomes the AUTHORITATIVE source for visual action arcs** — parallel to whisper.cpp being authoritative for dialogue. When Gemini reports *"the fat completely melts away and the abdominal organs are fully revealed"* but the human-walk wrote *"dramatically reduced,"* the VLM correction wins (or at minimum the discrepancy is flagged).
 
-**Cost**: ~300 tokens/sec at default media resolution; a 45s video ≈ 13.5K input tokens + 1-2K output tokens. On `gemini-2.5-flash` that's well under $0.01 per decode. Free tier covers many decodes per day.
+**Cost**: video tokenizes ≈300 tok/sec at default media resolution (≈100 at low); a 45s video ≈ 13.5K video tokens + schema/prompt/output. Measured live 2026-08-11 on `gemini-3.6-flash` ($1.50/M in, $7.50/M out): a 12s smoke decode = $0.021; a 45-60s decode ≈ $0.05-0.10 with thinking. Actual per-call numbers land in `output/gemini_costs.jsonl` (standard-paid-tier estimate; free-tier calls bill $0).
 
 **Setup (LM Studio path — recommended free local)**:
 1. Install LM Studio from `lmstudio.ai`.
@@ -522,19 +550,21 @@ The VLM JSON (whichever provider produced it) becomes the **authoritative source
 
 **Setup (Gemini fallback)**:
 ```bash
-pip install google-genai
-export GEMINI_API_KEY=...   # https://ai.google.dev/
+pip install "google-genai>=2.13.0"   # per code/requirements.txt; older SDKs lack thinking_level/response_json_schema
+export GEMINI_API_KEY=...            # https://aistudio.google.com/apikey
 ```
 
-**Run** (auto-cascades through providers):
+**Run** (auto-cascades through providers; `shots.json` + `transcript.json` + `motion.json` default to the video's folder):
 ```bash
 python code/v589_video_understanding.py path/to/source.mp4 \
     --shots _decode_tmp/.../shots.json \
-    --transcript _decode_tmp/.../transcript.json
-# → writes stage4d_vlm.json next to the video (or per --out)
+    --transcript _decode_tmp/.../transcript.json \
+    --motion _decode_tmp/.../motion.json
+# → writes VALIDATED stage4d_vlm.json next to the video (or per --out); schema-fail exits 2 with .raw.txt
+python code/v589_video_understanding.py --costs   # Gemini spend ledger
 ```
 
-To force a specific provider: `--provider lmstudio | gemini | template`.
+To force a specific provider: `--provider lmstudio | gemini | template`. The template path writes a DRAFT with `<REQUIRED>` placeholders; fill it, then run `--validate-stage4d` before handoff.
 
 **Reconciliation discipline**: the decoder runs Stage 4d AFTER the v588 dense-frame walk and reconciles the two sources before authoring the markdown. The VLM JSON is archived alongside the v579 manifest in `raw/decode_artifacts/<source-id>/stage4d_vlm.json` for audit. When the human-walk template path is used, the decoder LLM session fills in the template by walking the dense frames + dialogue — same schema, same authority.
 
@@ -1078,32 +1108,13 @@ Optional third bullet: `- **narrative_lens:** <LENS>` — corpus-folklore tag fo
 4. v585 `motion.json` (per-shot Farneback classification)
 5. v589 Stage 4d prompt template specifying the schema
 
-**OUTPUT** the LLM must produce — `stage4d.json`:
+**OUTPUT** the LLM must produce — the **`stage4d.v2`** object defined canonically in §v589 Half A above (top-level `schema_version` + `observed_people` + ordered `shots`; per shot: `forensic_perception`, `static_composition`, `action_arc.kinematics` + `action_arc.morphology`, structured `audio`, `motion_cross_check` against the supplied `motion.json`, `veo_reproduction_hints`, `human_walk_corrections`). ANY provider's output must pass the same gate before entering the handoff:
 
-```json
-{
-  "shots": [
-    {
-      "shot_index": 1,
-      "start": 0.0, "end": 5.30,
-      "static_composition": "<v586 six-block compact description>",
-      "action_arc": {
-        "start_state": "<observable state at t=start+0.1>",
-        "mid_state": "<observable state at midpoint>",
-        "end_state": "<observable state at t=end-0.1>",
-        "magnitude": "COMPLETE | PARTIAL | MINIMAL",
-        "verbs_observed": ["<verb1>", "<verb2>", ...]
-      },
-      "audio": {"ambient": "<sound cues>", "music": "<music notes or 'none'>"},
-      "veo_reproduction_hints": {
-        "use_blend_to_next_scene": false,
-        "needs_platform_future_image_end": false,
-        "transition_prompt": "<cue>"
-      }
-    }
-  ]
-}
+```bash
+python code/v589_video_understanding.py --validate-stage4d <stage4d_vlm.json> --shots <shots.json>
 ```
+
+The pre-v2 flat per-shot array (and the older prose `static_composition` string) is retired; the validator hard-fails it.
 
 After Stage 4d output lands, **v594 consolidation** runs over it: per-shot `static_composition` strings cluster into per-composition image descriptions for the `## Images` section.
 
@@ -1115,7 +1126,7 @@ Providers ranked by recommended priority for a typical operator session:
 |---|---|---|---|---|
 | **1** | **Claude in-session** (Claude Code Read tool with PNG image support) | Free for operator (Claude Code subscription) | None — already running | **Default when operating inside Claude Code.** Used for the 2026-05-05 healthylifesage + herbal.health.tips decodes. |
 | 2 | **LM Studio** (local, free) | Free | Install [LM Studio](https://lmstudio.ai); vision-capable GGUF (e.g. `gemma-4-E2B-it-GGUF` with mmproj); local server at port 1234 | Headless / batch decoding |
-| 3 | **Gemini API** | ~$0.01 per 45s on `gemini-2.5-flash` | Set `GEMINI_API_KEY`; native MP4 upload at 1fps + audio + per-second timestamps | Best for motion-heavy / multi-character videos |
+| 3 | **Gemini API** | ~$0.05-0.10 per 45s on `gemini-3.6-flash` (default; 2.5-flash rejects new keys), logged per-call to `output/gemini_costs.jsonl` | Set `GEMINI_API_KEY`; native MP4 upload at 1fps + audio + per-second timestamps; `--fps 2-5` for fast motion | Best for motion-heavy / multi-character videos |
 | 4 | **OpenAI GPT-4o-vision** | ~$0.01-0.02 per dense frame | Set `OPENAI_API_KEY`; image-by-image API | Operator already has OpenAI billing |
 | 5 | **Anthropic Claude API direct** | Similar to GPT-4o per image | Set `ANTHROPIC_API_KEY`; image-by-image API | Headless / non-Claude-Code automation |
 | 6 | **Ollama local with vision model** | Free | `ollama serve` + `llava` / `llama3.2-vision` | Operator wants free + headless |
@@ -1147,16 +1158,19 @@ else:
 
 For provider 1 (Claude-in-session): no script needed. Claude walks the dense frames using the Read tool on `_decode_tmp/<source-id>/frames/shotNN_<label>_<t>s.png`, fills the schema in markdown, then v594-consolidates per composition while authoring the decoded artifact directly.
 
-For providers 2–7 (automated):
+For providers 2–7 (automated; needs `shots.json` + `transcript.json` + `motion.json` next to the mp4 or via flags):
 ```bash
 python code/v589_video_understanding.py path/to/source.mp4
 # auto-cascades through providers; force one with --provider lmstudio|gemini|openai|anthropic|ollama|openrouter|template
+# output is validated against stage4d.v2 before writing; schema-fail exits 2 with .raw.txt
+python code/v589_video_understanding.py --costs   # Gemini spend ledger
 ```
 
 For provider 8 (human-walk template):
 ```bash
 python code/v589_video_understanding.py path/to/source.mp4 --provider template
-# writes _decode_tmp/<source-id>/stage4d_vlm.json with empty fields + frame paths
+# writes a DRAFT stage4d_vlm.json with <REQUIRED> placeholders + frame paths;
+# fill it, then run --validate-stage4d before handoff
 ```
 
 ### What stays unchanged regardless of provider
@@ -1391,7 +1405,9 @@ Two unrelated additions bundled into one v-rule because both surfaced from the s
 
 ### v621a — Decoder narrative lens (3 categories)
 
-When decoding a competitor video, every image description must be framed through ONE of three narrative lenses. The lens shapes how the decoder DESCRIBES the image — which details to emphasize, which to skip.
+> **AMENDMENT (2026-08-09, evidence-to-video Stage 3).** The protected function is the question already stated below: **what is this shot doing for the viewer?** The three lenses are the categories observed in the May source batch, not the allowed universe. **Trigger:** every decoded image needs its viewer job stated before the scene inventory is written. **Decision test:** name the job that decides which visible facts must be preserved for recreation. Use one of the three labels when it fits; otherwise write `UNLISTED — <source-derived job>`. Jobs may overlap; name the dominant one and note the secondary job in plain text. **Boundary:** this is decode observation only; it does not add a cure, symptom, spectacle or sales job the source does not show. **Combination:** the open lens sits after the source-first section read and before the image description; v887's open style/audio/transition fields still describe how that job is delivered.
+
+**Historical May-2026 form (superseded by the open amendment above):** every image description was framed through one of three observed lenses. The lens shapes how the decoder DESCRIBES the image — which details to emphasize, which to skip.
 
 | Lens | When | Decoder emphasis |
 |---|---|---|
@@ -1399,13 +1415,13 @@ When decoding a competitor video, every image description must be framed through
 | **AUGMENTED-SYMPTOMS** | HOOK shock images, problem-callouts, exposed before-state (back acne, varicose veins, distended belly, soaked pillow), thermometer readings, glucose-meter readings, anatomical magnification | The AMPLIFIED visible problem — what the camera is forcing the viewer to see. Crop tight on the symptom. Background props that contextualize (medical room, kitchen, garden). NO solution visible yet — the "before" must read as raw and unresolved. |
 | **GRABBING-ATTENTION** | scroll-stopper cold opens, weird actions without specific cure context, persona introduction shots, transition/movement frames, decorative cuts | The PURE SPECTACLE — motion, magnitude, novelty (per v600 cartoon-physics). What makes the thumb stop. Decoder names what's startling without binding it to a remedy or symptom yet. |
 
-**Per-image declaration**. Every `### Image N` block in a decoded `raw/decoded_*.md` artifact must include:
+**Current per-image declaration (open)**. Every `### Image N` block in a decoded `raw/decoded_*.md` artifact must include:
 
 ```
-- **narrative_lens:** HEALER-SHOWING-CURE
+- **narrative_lens:** <observed label | UNLISTED — source-derived viewer job>
 ```
 
-(or `AUGMENTED-SYMPTOMS` or `GRABBING-ATTENTION`). The field goes alongside `reference_image:` and `product_image:` in the metadata block.
+The three observed labels remain valid when they fit. `UNLISTED` is required when they do not. The field goes alongside `reference_image:` and `product_image:` in the metadata block.
 
 This is a **decoder-side mindset enforcement**, not a parser-required field. The platform parser ignores it. But the decoder has to CLASSIFY before describing — that's the whole point.
 
@@ -1450,7 +1466,7 @@ Before emitting any decoded artifact OR any videos/*.md draft:
 
 ### What v621 does NOT change
 
-- v614 corpus-pattern + adaptation_map — preserved (decoders still classify into Pattern A/B/C/D/E AND into one of the 3 narrative lenses; both classifications are useful).
+- v614 retrieval coverage — preserved in its amended source-led form. A decoder may use the old A–E or three-lens labels as search tags, but neither list gates a valid `UNLISTED` observation.
 - v615 em-dash ban in dialogue — preserved.
 - v619 auto-infer normalization — preserved (operates on `### Image` blocks regardless of narrative_lens).
 - Caption HANDLING in the platform — captions are still added post-generation by the editor; v621b just bans them from the image-generation prompt.
@@ -2450,15 +2466,17 @@ Em-dashes are still natural in `action_note` prose, image-prompt bodies, frontma
 
 ---
 
-## Cross-corpus structural survey + mandatory per-scene adaptation map (v614) — every line must lift from a named corpus parent
+## Cross-corpus retrieval coverage (v614) — derive from the full current corpus, not a frozen menu
 
 **Source: 2026-05-06 owner observation** *"also the script doesn0t make any sense... you have plenty of amazing examples and winning case... adapt and innovate those... not just the ones from korella saffron but all, to see how they structure the video and script."*
 
+> **AMENDMENT (2026-08-09, evidence-to-video Stage 3).** **Protected function:** do not invent a script from memory when relevant proven speech and body structures exist. **Trigger:** any build that authors, adapts or changes spoken lines. **Decision test:** search the current full processed corpus, form the retrieval union, derive the source jobs and causal order, then cite the closest useful structures or write `UNLISTED — <source-derived shape>` when the evidence does not fit a known bank. The 24-file count, five A–E labels, line-count ranges and frequency claims below are a **dated May-2026 observation set, non-normative**; they may guide comparison but may not gate a valid new structure. The old `corpus_pattern:` / `adaptation_map:` form is superseded for new builds by `BODY SHAPE`, the seven-column `SCRIPT DECISION MAP`, `SCRIPT LOCK`, `VISUAL LOCK`, and v790 `SOURCE VISUAL BEATS`. **Boundary:** verbatim decodes observe rather than adapt; hard wording locks still stay exact. **Combination:** AGENTS §3.5 owns complete retrieval, §6.10 derives the causal chain, and the route chosen under §6.13 decides what may change.
+
 v613 introduced corpus-grounding (cite ≥2 raw/decoded files; cell honesty NOTE; HOOK from niche hook table; per-line corpus annotation encouraged). v614 closes the remaining gap: **the LLM was still authoring without surveying the WHOLE corpus first**. Owner caught the test video drifting into melodrama ("Your husband sleeps through this — but watch what 2 a.m. does to her body") despite the corpus containing 24 winning videos with very different structural DNA.
 
-### The cross-corpus survey
+### Historical May-2026 survey bank — comparison only
 
-Before writing a single dialogue line, the LLM must read the dialogue lines of all 24 `raw/decoded_*.md` and `raw/dr_kim_*_decoded.md` files and classify each into one of 5 structural patterns. The survey takes ~30 seconds (1-line-per-file extraction) and changes everything downstream.
+The May procedure read the 24 files then present and grouped them into five observed patterns. Keep this table as dated evidence for comparison. New work follows the amendment above: search the current processed corpus, derive the actual source-led shape, and use `UNLISTED` when none of these patterns fits.
 
 | Pattern | Used by (corpus exemplars) | Structure | Line count |
 |---|---|---|---|
@@ -2468,7 +2486,7 @@ Before writing a single dialogue line, the LLM must read the dialogue lines of a
 | **D — CULTURAL-AUTHORITY TEMPLATE** | master_salvora trilogy (banana/cabbage/salmon — IDENTICAL 10-line template, swap-INGREDIENT) | "if you think X is only for Y, you are mistaken... cut half... bring to boil... say goodbye to..." | 10 (rigid) |
 | **E — PERSONAL-AUTHORITY** | rastajahmeil_fat_melt, master_chen, decoded_meta_papaya_skin | Hook with prankster-lead ("don't drink this too often because your family will think...") / recipe / signature ("my name is X and i am on a mission...") / CTA | 8-16 |
 
-### Universal corpus rules (extracted from all 24)
+### Dated observations from the 24-file sample — not universal gates
 
 1. **12-25 words per line.** Conversational, not literary. Test-video melodrama lines like "Your husband sleeps through this — but watch what 2 a.m. does to her body" (14 words) are within range numerically but VIOLATE the corpus tone. Direct symptom-callouts win.
 2. **4-17 total lines.** Anything outside this range needs a structural rationale. Most winners are 4-10.
@@ -2479,13 +2497,15 @@ Before writing a single dialogue line, the LLM must read the dialogue lines of a
 7. **No melodrama.** Corpus uses direct demonstrative language. *"this is what menopause does at 2 a.m. — soaked sheets, racing heart, no sleep."* NOT *"Your husband sleeps through this — but watch what 2 a.m. does to her body."*
 8. **Negation-pivot is a Pattern C signature.** *"the best thing for X is not Y, not Z, definitely not W."* Strong dismissal of the wrong solutions before naming the right one.
 
-### The rule (v614)
+### Historical v614 procedure — superseded for new builds
 
-**v614a — Cross-corpus pre-survey (mandatory before writing)**:
+The four subrules below explain the old implementation and are retained for provenance. Do not require its fixed 24-file count, A–E classification, `corpus_pattern:`, `adaptation_map:` or per-scene corpus annotations on a new build. The amendment above, AGENTS §3.5, the Evidence Packet, `SCRIPT DECISION MAP`, locks and `SOURCE VISUAL BEATS` are the current implementation.
+
+**Historical v614a — Cross-corpus pre-survey**:
 
 The LLM must, before authoring any dialogue, extract the full set of `- **line:**` entries from all `raw/decoded_*.md` and `raw/dr_kim_*_decoded.md` files (all 24 in the current corpus, more as the corpus grows). This produces a flat list of ~150 corpus dialogue lines. The LLM then classifies each into one of the 5 patterns (A/B/C/D/E) and identifies the 2-4 closest structural matches for the cell being authored.
 
-**v614b — Mandatory `corpus_pattern:` and `adaptation_map:` frontmatter fields**:
+**Historical v614b — `corpus_pattern:` and `adaptation_map:` frontmatter fields**:
 
 Every videos/*.md must declare in its frontmatter:
 
@@ -2501,11 +2521,11 @@ adaptation_map:
 
 Every scene maps to a SPECIFIC corpus line citation with the section label. No scene is allowed to be unmapped — if a scene is genuinely novel, map it as `"[novel — testing]"` with rationale.
 
-**v614c — Mandatory per-scene `[corpus: ...]` annotation (was encouraged in v613c, now mandatory)**:
+**Historical v614c — per-scene `[corpus: ...]` annotation**:
 
 Every scene's `- **action_note:**` MUST begin with a `[corpus: <source-file> L<line> §<section>]` annotation matching the adaptation_map entry for that scene. Mismatch between adaptation_map and the scene's annotation = REJECT.
 
-**v614d — `corpus_compliance_audit:` self-check in frontmatter**:
+**Historical v614d — `corpus_compliance_audit:` self-check in frontmatter**:
 
 Each videos/*.md must declare a self-audit section in frontmatter that reports its compliance with the universal corpus rules:
 
@@ -2521,7 +2541,7 @@ corpus_compliance_audit:
 
 If any field is `no`, the script must explain WHY in a comment immediately below the audit, OR rewrite to comply.
 
-### Pre-output validation gate
+### Historical pre-output checklist — do not apply to new builds
 
 Before emitting any videos/*.md draft:
 
@@ -2548,11 +2568,11 @@ This sounds plausible in isolation but doesn't match any corpus pattern. The clo
 
 Same scene composition (HOOK with main character + patient diagnostic). But now the dialogue tone is corpus-aligned (direct demonstrative, no melodrama, no bystander framing) AND the line is auditable — a reviewer can verify the corpus parent and check fidelity.
 
-### Why v614 vs v613 alone
+### Historical rationale for v614 vs v613 alone
 
 v613 said "cite ≥2 raw/decoded files in Sources" + "per-line corpus annotation encouraged." That was insufficient pressure: under attention load (long prompt body, 4-7 sentence v603 prose, six v606 directives, v610 gender scan, v613 product-binding parity), the LLM dropped corpus-faithfulness and reverted to plausible-but-corporate dialogue. v614 mandates the cross-corpus survey BEFORE writing AND mandates per-scene annotation AFTER writing — closes the loop on both ends.
 
-The cross-corpus survey is the bigger fix. Pre-v614, the LLM would read the niche voiceover-script wiki page (4-5 hooks) and call it done. v614 forces the LLM to read all 24 decoded files' dialogue, see the structural diversity (Pattern A through E), and CHOOSE which pattern matches the cell — making the choice explicit forces corpus-thinking.
+The cross-corpus survey was the bigger fix. Pre-v614, the LLM would read the niche voiceover-script wiki page (4-5 hooks) and call it done. The May implementation forced the LLM to read the 24 files then present and compare their structural diversity. The current rule keeps that full-retrieval function while dropping the frozen count and A–E choice.
 
 ### What v614 does NOT change
 
@@ -11582,7 +11602,9 @@ The list is non-exhaustive; the SPIRIT is "would a middle-schooler draw this ana
 
 #### v736b — Trend-Hijack Mandate
 
-Innovation MUST explicitly name a current viral aesthetic and frame the pain point THROUGH that aesthetic. Allowed catalog (extend as new trends surface):
+> **AMENDMENT (2026-08-09, evidence-to-video Stage 3).** **Protected function:** when a current visual trend is used, borrow the trend's proven camera/action grammar instead of naming it as decoration. **Trigger:** only when retrieval finds a relevant current aesthetic or the chosen source already carries one. **Decision test:** declare `TREND GRAMMAR: <bank slug | UNLISTED — source-derived name | NOT APPLICABLE — source mechanism supplies the grammar> | evidence: <source> | transfer: <the exact camera/action grammar used>`. A named trend with no evidence or no transferred grammar fails; an unlisted evidenced trend is valid; a video whose source mechanism already supplies the visual grammar does not need a trend pasted onto it. **Boundary:** this is a hook-design aid, not a universal innovation mandate and never overrides source fidelity, the chosen route or a stronger parent-owned mechanism. **Combination:** v873 decides the hook message, v539/§6.7 the opening action, v870 the safe composition, and v736c the visible texture only when that texture is actually triggered. The twelve items and five-concept sandbox below remain a dated example bank. For new work, this amendment supersedes every later sentence in v736 that requires a catalog tag or says the trend option should win.
+
+**Historical May-2026 form (superseded by the amendment above):** innovation was required to name a viral aesthetic from this then-current catalog:
 
 - ASMR soap cutting (curls of soap, satisfying slice through pastel block)
 - Hydraulic press crushing (industrial press flattens / explodes object)
@@ -11597,7 +11619,7 @@ Innovation MUST explicitly name a current viral aesthetic and frame the pain poi
 - Wax-seal melt / candle-melt (controlled drip, hardening)
 - Glass-shatter slow-mo (fragments suspended, light catches)
 
-The bundle prompt MUST instruct: *"you MUST frame the [niche] hook using a [trend-name] visual style. Show the satisfying / visceral [destruction / transformation / pull-apart] of the prop BEFORE delivering the medical claim."* The trend-name comes from the catalog above (or a justified addition). Generic "visual hook" / "satisfying action" / "scroll-stopper" wording does NOT satisfy v736b — the trend MUST be named explicitly.
+The old bundle prompt required a catalog trend name. That instruction is retired and must not be copied into new work. Current builds use the amended `TREND GRAMMAR` decision above and may declare `UNLISTED` or `NOT APPLICABLE` when supported by the evidence.
 
 The trend-hijack also enforces composition discipline: ASMR soap cutting forces a top-down macro shot; hydraulic press forces a side-profile industrial framing; power-washing forces a wide angle showing before/after halves; kinetic-sand slicing forces overhead crisp lighting. The trend brings its own visual grammar that the LLM doesn't have to invent.
 
@@ -11643,11 +11665,11 @@ Combine with v720c body-pose discipline (limb-pose structural bans) + v716/v717 
 
 Every `videos/*.md` lift / innovate / create OUTPUT MUST be preceded by a `## Brainstorming Sandbox` section IN THE OUTPUT FILE (not in chat) BEFORE the YAML frontmatter. The sandbox MUST contain:
 
-1. **Five (5) radically different visual hook concepts.** Each concept names: hero prop + texture class (v736c) + force-verb action (v697) + trend-hijack tag (v736b) + 1-line metaphor mapping to the niche pain point.
+1. **Historical sandbox form:** five visual hook concepts, each naming hero prop + texture class (v736c) + force-verb action (v697) + the old trend-hijack tag (v736b) + 1-line metaphor mapping. For new work, use the amended `TREND GRAMMAR` declaration instead.
 2. **Each concept rated 1-10** on "Unhinged TikTok Spectacle" — 10 = absurd / visceral / can't-look-away; 1 = boring / corporate / biology-class diagram.
 3. **The 3 lowest-rated** (most logical / safe) concepts MUST be struck through with `~~text~~`.
 4. **The single most visceral / scroll-stopping concept** MUST be marked `**SELECTED →**`.
-5. **The selected concept's hero prop / texture / trend / force-verb chain** MUST match what appears in `## Images` / `## Storyboard` for the HOOK image.
+5. **The selected concept's hero prop / triggered texture / force-verb and declared trend-grammar decision** must match what appears in `## Images` / `## Storyboard` for the HOOK image.
 
 **Why mandatory in-file (not chat-side)**: linear token generation locks the LLM into the FIRST plausible idea it emits. By forcing the sandbox INTO the output file BEFORE the markdown body begins, the LLM commits 5 concepts to the context window and can self-evaluate before the first scene block locks tone. Sandbox-in-chat does not work — the LLM treats chat as draft and its OUTPUT as final, and the OUTPUT's first scene-image dominates downstream attention.
 
@@ -11656,11 +11678,11 @@ Every `videos/*.md` lift / innovate / create OUTPUT MUST be preceded by a `## Br
 ```markdown
 ## Brainstorming Sandbox
 
-1. ~~Garden hose unkink — dry plastic hose, GRIP + PULL-APART force-verb, [no trend tag], maps "kinked urethra" 1:1. Spectacle: 2/10 (logical, dry, boring, scrolled past in 0.4s).~~
-2. ~~Faucet drip-stop — chrome faucet, mid-drip pause, TIGHTEN force-verb, [no trend tag], maps "leaky bladder" cleanly. Spectacle: 3/10 (clean metal, predictable, no juice).~~
+1. ~~Garden hose unkink — dry plastic hose, GRIP + PULL-APART force-verb, `TREND GRAMMAR: NOT APPLICABLE — direct source action | evidence: source concept | transfer: grip-and-pull close-up`, maps "kinked urethra" 1:1. Spectacle: 2/10 (logical, dry, boring, scrolled past in 0.4s).~~
+2. ~~Faucet drip-stop — chrome faucet, mid-drip pause, TIGHTEN force-verb, `TREND GRAMMAR: NOT APPLICABLE — direct source action | evidence: source concept | transfer: mid-drip tightening close-up`, maps "leaky bladder" cleanly. Spectacle: 3/10 (clean metal, predictable, no juice).~~
 3. ~~Drain clog clear — bathroom drain + plunger, PUSH + RELEASE, "satisfying clog clears", maps "obstruction lifts". Spectacle: 4/10 (logical drain analogy, oversaturated content category).~~
-4. Pomegranate smash — over-ripe pomegranate (oozing / bursting / dripping texture per v736c), SLAM + CASCADE force-verb, [hydraulic-press trend per v736b], juice-cascade maps "trapped pressure releasing." Spectacle: 9/10 (no logical mapping to prostate, fully visceral, juice cascade owns frame).
-5. **SELECTED →** Soaked-sponge wring — kitchen sponge soaked in murky water (gelatinous / dripping / foamy texture per v736c), GRIP + TWIST + CASCADE force-verb, [power-washing trend per v736b — visible released pressure], cascade onto practitioner's bare hands maps "stuck pressure finally moving." Spectacle: 10/10 (texture + cascade + visible release; pomegranate splatters once but sponge sustains the cascade through the full force-verb arc, owns 8 of 8 seconds).
+4. Pomegranate smash — over-ripe pomegranate (oozing / bursting / dripping texture per v736c), SLAM + CASCADE force-verb, `TREND GRAMMAR: UNLISTED — source-derived fruit-impact macro | evidence: source concept | transfer: tight impact-and-cascade framing`, juice-cascade maps "trapped pressure releasing." Spectacle: 9/10 (no logical mapping to prostate, fully visceral, juice cascade owns frame).
+5. **SELECTED →** Soaked-sponge wring — kitchen sponge soaked in murky water (gelatinous / dripping / foamy texture per v736c), GRIP + TWIST + CASCADE force-verb, `TREND GRAMMAR: UNLISTED — source-derived sustained wring-and-cascade macro | evidence: source concept | transfer: sustained two-hand wring close-up`, cascade onto practitioner's bare hands maps "stuck pressure finally moving." Spectacle: 10/10 (texture + cascade + visible release; pomegranate splatters once but sponge sustains the cascade through the full force-verb arc, owns 8 of 8 seconds).
 ```
 
 The HOOK image then renders the soaked-sponge concept; v720c body-pose + v716 anti-normalization + v713(d) negatives all apply on top. The HOOK passes v598 power-test (Q1 yes / Q2 yes / Q3 yes / etc.) AND has spectacle-disconnect (no biology-class metaphor maps to "soaked sponge = prostate" — the visceral release does the rhetorical work).
@@ -11668,7 +11690,7 @@ The HOOK image then renders the soaked-sponge concept; v720c body-pose + v716 an
 **Pre-output validation gates (4)**:
 
 - **gate (v736a)** — grep first hero prop in HOOK image against banned-mapping list above; ANY hit on banned-by-default mapping requires a struck-through entry in sandbox + an explicit alternative selected.
-- **gate (v736b)** — sandbox entries 1-5 each include `[<trend-name>]` tag from v736b catalog (or justified addition); selected entry's trend-name must appear in the HOOK Image's `[Composition]` block or action_note (e.g. "satisfying ASMR-style overhead pour" / "hydraulic-press impact framing" / "power-washing reveal angle").
+- **current gate (v736b)** — each sandbox entry states `TREND GRAMMAR: <bank slug | UNLISTED | NOT APPLICABLE>`, its evidence and exact transferable camera/action grammar. When a trend is used, the selected entry's transferred grammar must appear in the HOOK image/action. A catalog tag alone proves nothing.
 - **gate (v736c)** — selected hero prop's texture-class explicitly named in sandbox AND echoed in HOOK Image body prose (e.g. "thick gelatinous mass" / "soaked / dripping fabric" / "oozing pulp"). Banned-default-texture words (dry / clean / smooth / polished / bare) must NOT appear adjacent to the hero prop in the HOOK body.
 - **gate (v736d)** — `## Brainstorming Sandbox` section present BEFORE YAML frontmatter; contains exactly 5 numbered entries; 3 entries struck-through with `~~text~~`; 1 entry marked `**SELECTED →**`; selected entry's prop / texture / trend / force-verb chain matches HOOK Image content (cross-check by grep).
 
@@ -11678,7 +11700,7 @@ The HOOK image then renders the soaked-sponge concept; v720c body-pose + v716 an
 - **Hybrid "decode + ideation" output (NEW 2026-05-15 carve-out override)**: when the operator's TASK PROMPT explicitly requests a hybrid artifact (e.g. "decode this video AND propose 5 alternative HOOK concepts for future lifts" / "decode + sandbox" / "decode this and prepare ideation for the lift"), the v736 decode-side carve-out is OVERRIDDEN — the decoded artifact MUST include a `## Brainstorming Sandbox` section at the top per v736d. The sandbox in this case captures (a) the source's actual HOOK as one of the 5 entries (struck-through if it fails v736a/b/c, marked SELECTED if it already passes), AND (b) 4 alternative HOOK concepts the operator could swap in at lift time. Output type: `raw/decoded_<id>_with_sandbox.md` (or operator-specified naming). Default decode without sandbox-request keyword in TASK = v736 carve-out applies, no sandbox required. The TASK block in `code/decode_bundle.sh` does NOT request hybrid output by default; operator must opt in.
 - **HOOK image only.** Body / mechanism / RESULT / CTA scenes do not need sandbox treatment (HOOK is where scroll-stop happens; the rest of the script lives or dies on whether the HOOK earned the watch).
 - **Lift-side**: when the decoded source HOOK already passes v736a + v736b + v736c, sandbox MUST cite the source as one of the 5 entries (`from <decoded source file>`) and may select it as winner; otherwise sandbox proceeds normally and the lift may diverge from source HOOK to satisfy v736.
-- **Innovate-side**: the trend-hijack reference (v736b) is the structural advantage of innovate over lift — sandbox SHOULD pick the trend-hijack option as winner unless a different sandbox entry is genuinely more visceral.
+- **Historical innovate-side preference — RETIRED by the amendment above:** the old text treated a trend tag as innovate's structural advantage. New work selects on source-function transfer, audience fit, immediate proof/tension and filmable action.
 - **Create-side**: full sandbox required from cold; no source to anchor against.
 
 **Pairing with existing rules**:
@@ -11687,7 +11709,7 @@ The HOOK image then renders the soaked-sponge concept; v720c body-pose + v716 an
 - **v600 cartoon-physics** — v736c (uncomfortable texture) extends v600's exaggeration mandate from "magnitude" to "texture / state."
 - **v697 force-verb action_arc** — sandbox entries name the force-verb chain; v736 selects FOR force-verb impact.
 - **v713 / v715 / v716 / v717 / v720** composition discipline — apply to the selected concept's HOOK image rendering.
-- **v621 narrative_lens** — sandbox is filed under GRABBING-ATTENTION lens (the spectacle IS the rhetorical move); body / mechanism / RESULT scenes may be HEALER-SHOWING-CURE or AUGMENTED-SYMPTOMS as usual.
+- **v621 narrative_lens** — state the dominant viewer job first. `GRABBING-ATTENTION` and the other two observed labels remain valid search tags; `UNLISTED — <source-derived job>` is equally valid.
 
 **Touched**: `code/template_reference.md` (this deep-dive); `wiki/patterns/conventions.md` (index entry + Latest live version bump v734 → v736); `code/innovate_bundle.sh` + `code/lift_bundle.sh` + `code/create_bundle.sh` (V736 task-prompt section + new validation gate); `CLAUDE.md` (quickref); `wiki/log.md` (timeline). Migration zero required — pre-v736 `videos/*.md` files remain valid (no sandbox section, no enforcement). New / modified `videos/*.md` from this commit forward MUST include sandbox + satisfy gates 1-4. Wiki lint can flag pre-v736 files missing sandbox — advisory not blocking.
 
@@ -11857,7 +11879,7 @@ grep -nE 'Across \d+ seconds|throughout the clip|\[Start beat|\[Mid-clip beat|\[
 **Carve-outs**:
 - Sandbox section (`## Brainstorming Sandbox`) is OUTSIDE Image body — no word ceiling, no meta-ban (sandbox is operator-facing audit, not Banana 2 prompt).
 - Scene action_note is OUTSIDE Image body — beats + temporal language + verbose blocking ARE expected for Veo motion.
-- Frontmatter is OUTSIDE Image body — `corpus_pattern:` / `adaptation_map:` / `corpus_compliance_audit:` (v614) live there.
+- Frontmatter is OUTSIDE Image body. Legacy builds may still carry the retired v614 `corpus_pattern:` / `adaptation_map:` / `corpus_compliance_audit:` fields; new builds use the Evidence Packet plus §0 maps and locks.
 - Drift-guard / ban sentences ARE counted in word-count (they live inside the body since 2026-06-12) — keep them to a 5-8 clause practical ceiling.
 
 **Worked example — the same dual-prostate HOOK shipped two ways**:
@@ -16592,3 +16614,30 @@ No `--external-refs` flag means no external file is read, uploaded, or bound. Tu
 **Composition with existing rules.** v573/v607 still own persona/product identity. v580.4/v682 still own scene continuity. v909 adds narrow outside role plates without replacing those inputs. The existing scene-index compatibility path is deliberately untouched: external refs append after current slots, so option-off output and existing chain slot numbers do not change.
 
 **Sources:** Google AI image-generation documentation (Gemini 3 models: up to 14 mixed reference images; model-specific character/object fidelity guidance) · OpenAI GPT Image 2 model documentation (high-fidelity image inputs) · live platform paths `image_platform.py`, `image_prompt_contract.py`, `image_worker.py`, `static/chatgpt_image_backend.py` · operator 2026-08-06 (“make it a choice to include external images or keep it as it is”).
+
+## v927 — ONE BUILD, ONE DISTINCTIVE SHELL: the setting bank is a menu, never a global lock
+
+Sources: operator 2026-08-10 on the fourth straight lawnmower build in the same room — *"didn't we say to have an attic or a penthouse or whatever, but also here we should have the generic rule to have unique backgrounds that look good, not just one"* · `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` §"Distinctive premium background" clause 4 (2026-07-24: choose PER VIDEO, the bank is a menu) · `wiki/concepts/script-adaptation/visual-hook-construction-rules.md` Rule 26, whose hook-killer list names *"generic office with supplement jars background, reused every video"* · §v870 (where the load-bearing content sits) · root `CLAUDE.md` §13 (the ONE case where repetition is correct).
+
+**The rule.** Every build picks a setting that is its own place, and it may not be the same place the previous build in that family used. The background is a scroll factor, not filler: a room the viewer has already seen four times carries no information and reads as an AI default. Two rules were already on the books and still failed to stop it — the bank said "choose per video" and §8 named a go-forward shell — because a *go-forward shell* was read as a *permanent shell*. It is not. §8 names the shell to reach for FIRST; v927 says a build still has to earn it against what already shipped.
+
+**What a build declares (§0, one line):**
+
+```
+SETTING SHELL: <shell> | source: <bank row | UNLISTED — name> | de-wooded: YES|operator-ask | unique-vs: <path/to/prior-build.md> → <its shell> | why different: <one line>
+```
+
+`unique-vs:` names the PRIOR build this one must not look like — the previous version in the same family, or the last build on the same source line. It is a real path, and the checker opens it.
+
+**Four clauses.**
+
+1. **Different from the prior build.** The declared shell may not equal the shell of the build named in `unique-vs:`. A zone change inside one shell (penthouse island → penthouse terrace → night skyline) counts as different only when the frame reads as a different place; say which zone on the same line.
+2. **The bank is OPEN.** `source: UNLISTED — <name>` is valid. A new shell is legal when it is premium, distinctive, de-wooded (2026-07-25), §8-clean (no clinic, no medical authority) and passes the §13 two-second-USA test. Do not force a build into a bank row just to have a row.
+3. **Distinctive means recognizable in one glance** — architectural character, not "a room". The generic warm living room stays retired; so does any shell that has become this family's default.
+4. **The one legal repeat: a single IG growth run** (root `CLAUDE.md` §13 / `[[account-priming-discipline]]`). Inside one run the set, outfit and framing are LOCKED on purpose, because changing them kills the run. Declare it on the same line and the repeat is correct. Everything outside one growth run varies.
+
+**What this does NOT do.** It does not override §8's persona taste level, it does not retire the Hanbang Penthouse (that is still the first shell to reach for on a Nuri build, with its four brand tokens), and it does not license a shell change inside a locked derivative — a §7.2.1 DIRECTION LOCK that preserves the setting still preserves it. It changes ONE thing: repeating a shell is now a decision you have to make out loud instead of a default you inherit by copying the previous build's prompts.
+
+**Scope:** GENERATE side, forward-only. Auditor gate `setting_shell_unique`: **FAILs** a `unique-vs:` that names a missing file, names this build itself, or names a prior build carrying the SAME shell (the declaration contradicts itself); **WARNs** a missing `SETTING SHELL:` line, a missing `unique-vs:` field (legacy form), or a sibling build in the same family already shipping that exact shell. Measured before shipping: 301 existing builds → 0 FAIL, 301 WARN, so nothing is retro-failed.
+
+**Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` (§"Distinctive premium background"), root `CLAUDE.md` §8, `.claude/skills/build-video/audit_build.py` (`setting_shell_unique`), memory `feedback_distinctive-premium-background`, `wiki/log.md`.

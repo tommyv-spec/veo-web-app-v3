@@ -33,6 +33,8 @@ Append the missing sections instead, then re-run this until B is zero.
 """
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -69,6 +71,32 @@ def read_local(ref, path):
         return None
     with open(full, encoding="utf-8") as fh:
         return fh.read()
+
+
+SUPERSEDED_MANIFEST = os.path.join(HERE, "masters_superseded.json")
+_SUPERSEDED_CACHE = None
+
+
+def _line_hash(line):
+    return hashlib.sha256(line.strip().encode("utf-8")).hexdigest()[:16]
+
+
+def _superseded_hashes(path):
+    """Hashes of main-only lines a later amendment deliberately replaced.
+
+    Declared, not inferred: the manifest names the amendment and the reason for
+    every retired line, so a reviewer can check the claim. A missing or unreadable
+    manifest simply means nothing is exempt.
+    """
+    global _SUPERSEDED_CACHE
+    if _SUPERSEDED_CACHE is None:
+        try:
+            with open(SUPERSEDED_MANIFEST, encoding="utf-8") as fh:
+                _SUPERSEDED_CACHE = json.load(fh)
+        except (OSError, ValueError):
+            _SUPERSEDED_CACHE = {}
+    entry = _SUPERSEDED_CACHE.get(path) or {}
+    return set(entry.get("retired_line_sha256_16") or [])
 
 
 def significant(text):
@@ -123,6 +151,19 @@ def main(argv):
         theirs_lines = significant(theirs)
         ours_set = set(significant(ours))
         missing = [ln for ln in theirs_lines if ln not in ours_set]
+        # A main-only line is LOST unless a deliberate amendment replaced it.
+        # The gate cannot tell those apart by itself, so the difference is
+        # DECLARED in masters_superseded.json: each retired line is recorded by
+        # hash together with the amendment that replaced it and why. Anything
+        # main-only and undeclared still blocks — that is the protection.
+        retired = _superseded_hashes(path)
+        if retired:
+            kept = [ln for ln in missing if _line_hash(ln) not in retired]
+            skipped = len(missing) - len(kept)
+            if skipped:
+                print("       %d main-only line(s) declared SUPERSEDED in %s"
+                      % (skipped, os.path.basename(SUPERSEDED_MANIFEST)))
+            missing = kept
         if missing:
             loss[path] = missing
 
