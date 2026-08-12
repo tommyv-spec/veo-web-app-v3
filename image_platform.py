@@ -6949,7 +6949,7 @@ def _import_scene_table_impl(
             existing.n_variants = img.get("n_variants") or req.n_variants
             existing.status = "draft"
             existing.chosen_variant_index = None
-            db.query(ImageEdge).filter(ImageEdge.child_id == existing.id).delete(
+            db.query(ImageEdge).filter(ImageEdge.child_node_id == existing.id).delete(
                 synchronize_session=False)
             node = existing
             resync_report["updated"].append(image_index)
