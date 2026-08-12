@@ -3823,7 +3823,17 @@ def serve_image_file(
     # wrapper's finally block will call db.close() again (no-op).
     db.close()
 
-    _imm = {"Cache-Control": "public, max-age=31536000, immutable"}
+    # v891.5 — these bytes are NOT immutable. `?v={variant_id}` was meant to
+    # make every regenerated variant a distinct resource, but a worker
+    # re-upload can overwrite the file behind an EXISTING row: variant 16718
+    # was created 20:13 and its file last written 20:45, same URL throughout.
+    # Promising `immutable` for a year then told the browser never to
+    # revalidate — not even on a normal reload — so the operator kept seeing a
+    # replaced image and reported the wrong picture on a scene three separate
+    # times while the server was serving the right one. Revalidation is cheap
+    # here because the response already carries a strong ETag, so a fresh
+    # browser gets a 304 and only changed bytes travel.
+    _imm = {"Cache-Control": "private, max-age=0, must-revalidate"}
 
     # v75y — thumbnail bucketed rel path, reused by the fast path + the mirror.
     thumb_rel = None
