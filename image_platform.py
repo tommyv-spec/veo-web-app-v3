@@ -246,6 +246,11 @@ def run_image_platform_migrations():
          "ALTER TABLE clips ADD COLUMN voiceover_anchor_image_node_id INTEGER"),
         ("clips", "voiceover_line",
          "ALTER TABLE clips ADD COLUMN voiceover_line TEXT"),
+        # v892 — composite layer pairing (video-axis twin of v698A).
+        ("clips", "composite_plate_image_node_id",
+         "ALTER TABLE clips ADD COLUMN composite_plate_image_node_id INTEGER"),
+        ("image_scene_assignments", "composite_plate_image_node_id",
+         "ALTER TABLE image_scene_assignments ADD COLUMN composite_plate_image_node_id INTEGER"),
         # v698A: image_nodes.role discriminator — 'voiceover_anchor' marks an
         # image whose visual is rendered (Banana 2 generates it) but whose
         # role is to serve as the start frame for audio-pair Veo renders only.
@@ -425,6 +430,11 @@ def run_image_platform_migrations():
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS voiceover_anchor_image_node_id INTEGER"),
         ("clips", "voiceover_line",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS voiceover_line TEXT"),
+        # v892 — composite layer pairing (video-axis twin of v698A).
+        ("clips", "composite_plate_image_node_id",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS composite_plate_image_node_id INTEGER"),
+        ("image_scene_assignments", "composite_plate_image_node_id",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS composite_plate_image_node_id INTEGER"),
         ("image_nodes", "role",
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS role VARCHAR(40)"),
         ("image_scene_assignments", "voiceover_anchor_image_node_id",
@@ -1405,6 +1415,11 @@ class ImageSceneAssignment(Base):
     voiceover_anchor_image_node_id = Column(
         Integer, ForeignKey("image_nodes.id"), nullable=True
     )
+    # v892 — background layer of an assembled (green-screen composite) frame.
+    # NULL on every single-render scene.
+    composite_plate_image_node_id = Column(
+        Integer, ForeignKey("image_nodes.id"), nullable=True
+    )
     # v718i (NEW 2026-05-18): per-scene explicit end-frame image binding for
     # v718h-C Option C Veo native end-frame interpolation. When the Scene
     # block carries an `- **end_frame_image:** image_K+1` bullet, the
@@ -1493,6 +1508,9 @@ class ImageSceneAssignment(Base):
             # v698A — anchor binding for voiceover-paired scenes. NULL on
             # non-voiceover assignments.
             "voiceover_anchor_image_node_id": self.voiceover_anchor_image_node_id,
+            # v892 — background layer of an assembled frame. NULL on every
+            # single-render scene.
+            "composite_plate_image_node_id": self.composite_plate_image_node_id,
             # v718i (NEW 2026-05-18) — explicit end-frame image binding for
             # v718h-C Option C Veo native end-frame interpolation. NULL on
             # non-Option-C assignments (default = sequential auto-inference
@@ -4820,6 +4838,24 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # interpolation (cfg.last_frame at veo_generator.py:2605). When
         # absent, the existing sequential auto-inference fires (end_frame =
         # next clip's start image).
+        # v892 — composite layer pairing. A scene whose frame is ASSEMBLED
+        # declares the background layer here; the foreground (this scene's own
+        # `image:`) is what performs and speaks. Two clips get rendered and the
+        # operator keys one over the other, so the plate must never concatenate.
+        composite_plate_image: Optional[int] = None
+        _composite_match = _re.search(
+            r"^\s*[-*]\s*\*\*composite_plate_image:\*\*\s*image_(\d+)\s*$",
+            block, flags=_re.MULTILINE | _re.IGNORECASE,
+        )
+        if _composite_match:
+            composite_plate_image = int(_composite_match.group(1))
+            if composite_plate_image not in known_image_indexes:
+                raise ValueError(
+                    f"Scene {scene_index}: composite_plate_image references "
+                    f"image_{composite_plate_image} but no such image is defined. "
+                    f"Available: {sorted(known_image_indexes) if known_image_indexes else []}"
+                )
+
         end_frame_image: Optional[int] = None
         end_frame_match = _re.search(
             r"^\s*[-*]\s*\*\*end_frame_image:\*\*\s*image_(\d+)\s*$",
@@ -5009,6 +5045,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "bg_color": bg_color,         # v681 — text_card bg color (CSS / hex)
             "duration_s": duration_s,     # v681 — text_card duration in seconds (None → 1.0 at render)
             "voiceover_anchor_image": voiceover_anchor_image,  # v698A — None | int
+            "composite_plate_image": composite_plate_image,  # v892 — None | int; background layer of an assembled frame
             "end_frame_image": end_frame_image,  # v718i (NEW 2026-05-18) — None | int; explicit end-frame image for Veo native interpolation
         })
 
@@ -7824,6 +7861,20 @@ def _import_scene_table_impl(
         # anchors authored per v580.2). NULL on every non-Option-C scene
         # (default = sequential auto-inference of end_frame from next
         # clip's start image, legacy behavior).
+        # v892 — resolve the composite plate image to its node, same shape as
+        # the end-frame resolution below.
+        _plate_md_idx = s.get("composite_plate_image")
+        composite_plate_node_id_resolved = None
+        if _plate_md_idx is not None:
+            _plate_node = created_nodes_by_image_index.get(_plate_md_idx)
+            if _plate_node is None:
+                raise HTTPException(
+                    500,
+                    f"Scene {s['scene_index']}: composite_plate_image references "
+                    f"image_{_plate_md_idx} but no PHASE 1 node was created for it"
+                )
+            composite_plate_node_id_resolved = _plate_node.id
+
         end_frame_md_idx = s.get("end_frame_image")
         end_frame_node_id_resolved = None
         if end_frame_md_idx is not None:
@@ -7865,6 +7916,7 @@ def _import_scene_table_impl(
 
         assignment = ImageSceneAssignment(
             batch_id=batch_id,
+            composite_plate_image_node_id=composite_plate_node_id_resolved,  # v892
             scene_index=s["scene_index"],
             image_node_id=scene_image_node_id,
             clip_mode=(s.get("clip_mode") or "fresh").lower(),  # v782 default fresh
@@ -8944,6 +8996,9 @@ def prepare_batch_for_video(
         # uploaded image list) for voiceover-paired scenes. None on every
         # non-voiceover scene.
         _anchor_node_id = scene.get("voiceover_anchor_image_node_id")
+        # v892 — the composite plate node for this scene, read from the same
+        # prepared scene dict the anchor comes from.
+        _asg_composite_plate_node_id = scene.get("composite_plate_image_node_id")
         _anchor_local_idx = (
             node_id_to_local_index.get(_anchor_node_id)
             if _anchor_node_id is not None
@@ -9212,11 +9267,17 @@ def prepare_batch_for_video(
                 # writer can also read it from `dialogue_text` (they're
                 # equal) but having it explicit makes the role contract
                 # cleaner. None on every non-voiceover line.
+                # v892 — a scene carrying a composite plate renders as TWO
+                # clips. 'composite_key' marks the performing layer; the render
+                # flow spawns its 'composite_plate' sibling from the plate image.
+                # v698A's voiceover pairing wins when both apply, because the
+                # audio twin is what makes a silent b-roll scene speak at all.
                 "clip_role": (
                     "visual_pair"
                     if (scene_speaker_mode or "").lower() == "voiceover"
-                    else None
+                    else ("composite_key" if _asg_composite_plate_node_id else None)
                 ),
+                "composite_plate_image_node_id": _asg_composite_plate_node_id,
                 "voiceover_anchor_image_node_id": (
                     _anchor_node_id
                     if (scene_speaker_mode or "").lower() == "voiceover"

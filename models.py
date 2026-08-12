@@ -374,6 +374,14 @@ class Clip(Base):
     clip_role = Column(String(20), nullable=True)
     paired_clip_id = Column(Integer, ForeignKey("clips.id"), nullable=True)
     voiceover_anchor_image_node_id = Column(Integer, ForeignKey("image_nodes.id"), nullable=True)
+    # v892 — composite layer pairing, the video-axis twin of v698A's audio
+    # pairing. A scene whose frame is ASSEMBLED (green-screen key over a still)
+    # cannot be produced in one render, so it renders as two clips: the
+    # 'composite_key' clip carries the performance and the line, and a
+    # 'composite_plate' sibling renders the background layer from this image.
+    # The operator keys one over the other in post; the plate is deliberately
+    # kept OUT of the concat, exactly as an audio_pair twin is.
+    composite_plate_image_node_id = Column(Integer, ForeignKey("image_nodes.id"), nullable=True)
     voiceover_line = Column(Text, nullable=True)
     # v718i (NEW 2026-05-18): per-clip explicit end-frame image binding for
     # v718h-C Option C Veo native end-frame interpolation. When the Scene

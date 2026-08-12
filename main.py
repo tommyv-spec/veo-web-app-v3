@@ -2369,6 +2369,13 @@ async def _create_job_impl(
             clip_role=clip_role_val,
             voiceover_anchor_image_node_id=voiceover_anchor_node_id,
             voiceover_line=voiceover_line_val,
+            # v892 — background layer of an assembled frame. Set only when the
+            # Scene declared `composite_plate_image:`; the Phase 3a sibling
+            # loop renders it as a 'composite_plate' clip.
+            composite_plate_image_node_id=(
+                line.get('composite_plate_image_node_id')
+                if isinstance(line, dict) else None
+            ),
             # v718i (NEW 2026-05-18) — explicit end-frame image binding for
             # Veo native end-frame interpolation. NULL = sequential auto-inference.
             end_frame_image_node_id=end_frame_image_node_id_val,
@@ -3104,6 +3111,67 @@ async def _setup_job_background(
             print(f"[Background] ✓ All {total_clips} clip prompts committed", flush=True)
             add_job_log(db, job_id, f"✓ All {total_clips} prompts built", "INFO", "system")
             db.commit()
+
+            # v892 Phase 3a-b — composite_plate sibling creation. Exactly the
+            # shape of the audio_pair loop above, but pairing on the VIDEO axis:
+            # a scene whose frame is assembled cannot be produced in one render,
+            # so the performing clip ('composite_key') gets a sibling that
+            # renders the background layer. The operator keys one over the
+            # other; the plate is never concatenated (see the export filter).
+            try:
+                composite_key_clips = db.query(Clip).filter(
+                    Clip.job_id == job_id,
+                    Clip.clip_role == 'composite_key',
+                ).all()
+                if composite_key_clips:
+                    composite_plate_offset = 200000
+                    for ck in composite_key_clips:
+                        if not ck.composite_plate_image_node_id:
+                            print(
+                                f"[v892/Phase3a] clip {ck.clip_index} is composite_key "
+                                f"but carries no composite_plate_image_node_id — "
+                                f"skipping plate creation",
+                                flush=True,
+                            )
+                            continue
+                        existing_plate = db.query(Clip).filter(
+                            Clip.job_id == job_id,
+                            Clip.clip_role == 'composite_plate',
+                            Clip.paired_clip_id == ck.id,
+                        ).first()
+                        if existing_plate:
+                            continue
+                        cp = Clip(
+                            job_id=job_id,
+                            clip_index=composite_plate_offset + ck.clip_index,
+                            dialogue_id=ck.dialogue_id,
+                            # The plate is a silent background layer — no line.
+                            dialogue_text='',
+                            status='preparing',
+                            scene_index=ck.scene_index,
+                            clip_role='composite_plate',
+                            paired_clip_id=ck.id,
+                            # Render the plate from its own image, and hold the
+                            # same duration as the layer it sits under.
+                            composite_plate_image_node_id=ck.composite_plate_image_node_id,
+                            target_duration_s=ck.target_duration_s,
+                            veo_render_duration_s=ck.veo_render_duration_s,
+                            cut_mode='auto',
+                            scene_type='shot',
+                        )
+                        db.add(cp)
+                        print(
+                            f"[v892/Phase3a] composite_plate clip created for "
+                            f"clip_index={ck.clip_index} scene={ck.scene_index} "
+                            f"from image_node={ck.composite_plate_image_node_id}",
+                            flush=True,
+                        )
+                    db.commit()
+            except Exception as _exc_v892:
+                # Never let plate creation take down the render flow; the key
+                # layer still renders and the operator can composite manually.
+                print(f"[v892/Phase3a] WARN composite plate creation failed: {_exc_v892}",
+                      flush=True)
 
             # v698A Phase 3a — audio_pair Clip row creation for voiceover-paired
             # scenes. After the main prompt-build loop completes, every clip
@@ -6287,11 +6355,13 @@ async def update_clip(
     # ─── clip_role (v698A pair discriminator) ────────────────────────────
     if req.clip_role is not None:
         cr = req.clip_role.lower().strip()
-        if cr not in ("single", "visual_pair", "audio_pair"):
+        if cr not in ("single", "visual_pair", "audio_pair",
+                      "composite_key", "composite_plate"):
             raise HTTPException(
                 400,
                 f"Unrecognized clip_role {req.clip_role!r}; expected one of "
-                f"'single', 'visual_pair', 'audio_pair'.",
+                f"'single', 'visual_pair', 'audio_pair', 'composite_key', "
+                f"'composite_plate'.",
             )
         clip.clip_role = cr
 
@@ -9862,6 +9932,18 @@ async def _do_export_final(
     """
     from video_processor import export_final_video as process_export, check_vad_available
 
+    def _v892_not_plate():
+        """Exclude composite_plate clips from the exported timeline.
+
+        A composite frame is assembled from two renders: the performing layer
+        and the background plate it is keyed over. Both are rendered so the
+        operator has both pieces, but only the performing layer belongs in the
+        concat — the plate is a layer, and concatenating it would insert a
+        still frame as its own shot. Mirrors how a v698A audio twin renders
+        without ever entering the visual timeline.
+        """
+        return or_(Clip.clip_role.is_(None), Clip.clip_role != 'composite_plate')
+
     # v865 — phase memory trace. The 2026-07-23 OOMs (2GB cgroup) gave no clue
     # which phase peaked because nothing measured container memory. These lines
     # bracket the heavy phases so the next incident names its own culprit.
@@ -10073,12 +10155,17 @@ async def _do_export_final(
             print(f"[Export] Lineup parse error, falling back to default: {e}", flush=True)
             clips = db.query(Clip).filter(
                 Clip.job_id == job_id,
-                Clip.approval_status == "approved"
+                Clip.approval_status == "approved",
+                # v892 — a composite_plate is a LAYER, not a shot. It renders so
+                # the operator can key the performing layer over it, and it must
+                # never be concatenated into the timeline as its own segment.
+                _v892_not_plate(),
             ).order_by(Clip.clip_index).all()
     else:
         clips = db.query(Clip).filter(
             Clip.job_id == job_id,
-            Clip.approval_status == "approved"
+            Clip.approval_status == "approved",
+            _v892_not_plate(),   # v892 — layer, never a timeline segment
         ).order_by(Clip.clip_index).all()
     
     if not clips:
