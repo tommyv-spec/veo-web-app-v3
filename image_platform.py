@@ -13099,7 +13099,9 @@ def worker_upload_variants(
             if r[0] is not None
         ]
         _next_idx = (max(_existing_idx) + 1) if _existing_idx else 1
-        for offset, (idx, filename, rel_str, target) in enumerate(pending_variants):
+        # The worker's own idx is deliberately discarded — it numbers ITS
+        # delivery from 1, which is exactly what collided.
+        for offset, (_worker_idx, filename, rel_str, target) in enumerate(pending_variants):
             v = ImageVariant(
                 node_id=node2.id,
                 variant_index=_next_idx + offset,
