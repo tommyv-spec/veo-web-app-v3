@@ -6300,24 +6300,39 @@ def _import_scene_table_impl(
             },
         )
 
-    batch = ImageJobBatch(
-        id=batch_id,
-        user_id=current_user.id,
-        name=batch_name,
-        source_markdown=req.markdown,
-        persona=doc_meta.get("persona"),
-        setting=doc_meta.get("setting"),
-        duration_seconds=doc_meta.get("duration_seconds"),
-        structure=doc_meta.get("structure"),
-        total_scenes=len(storyboard_scenes),
-        name_prefix=(prefix or None),
-        subject_node_id=subject.id,
-        # Video-tab hints parsed from md (None → frontend uses defaults)
-        video_mode=doc_meta.get("video_mode"),
-        auto_split=bool(doc_meta.get("auto_split") or False),
-    )
-    db.add(batch)
-    db.flush()
+    if resync_batch is not None:
+        # v891 — the batch row already exists; refresh the fields a corrected
+        # build can legitimately change (the stored markdown above all, since
+        # "Promote to video" replays it) instead of inserting a duplicate key.
+        batch = resync_batch
+        batch.source_markdown = req.markdown
+        batch.persona = doc_meta.get("persona")
+        batch.setting = doc_meta.get("setting")
+        batch.duration_seconds = doc_meta.get("duration_seconds")
+        batch.structure = doc_meta.get("structure")
+        batch.total_scenes = len(storyboard_scenes)
+        batch.video_mode = doc_meta.get("video_mode")
+        batch.auto_split = bool(doc_meta.get("auto_split") or False)
+        db.flush()
+    else:
+        batch = ImageJobBatch(
+            id=batch_id,
+            user_id=current_user.id,
+            name=batch_name,
+            source_markdown=req.markdown,
+            persona=doc_meta.get("persona"),
+            setting=doc_meta.get("setting"),
+            duration_seconds=doc_meta.get("duration_seconds"),
+            structure=doc_meta.get("structure"),
+            total_scenes=len(storyboard_scenes),
+            name_prefix=(prefix or None),
+            subject_node_id=subject.id,
+            # Video-tab hints parsed from md (None → frontend uses defaults)
+            video_mode=doc_meta.get("video_mode"),
+            auto_split=bool(doc_meta.get("auto_split") or False),
+        )
+        db.add(batch)
+        db.flush()
 
     # v512: Anchor-scene reference resolution.
     #
