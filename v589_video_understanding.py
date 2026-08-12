@@ -72,21 +72,33 @@ MORPHOLOGY_MAGNITUDES = ["COMPLETE", "PARTIAL", "MINIMAL", "NONE"]
 # and is byte-identical to the pre-profile behavior. "fbads-video" reads
 # paid Facebook-ad creatives: same per-shot protocol PLUS a top-level
 # ad_read block (offer / CTA / overlays / captions / sound-off / end card).
+# The profile's "context" text declares the format and rides in the <context>
+# data block; its "task" text is an instruction and rides in <task>.
+# The ad_read flag attaches AD_READ_SCHEMA; see schema_for_profile() below.
 
-FBADS_EXTRA_CONTEXT = (
+FBADS_FORMAT_DECLARATION = (
     "This video is a PAID Facebook/Instagram AD CREATIVE (direct response), "
-    "not an organic reel. On top of the per-shot protocol, fill the top-level "
-    "ad_read object: capture every offer element (price, discount, bundle, "
-    "guarantee, urgency/scarcity), every CTA quoted verbatim (spoken + overlay "
-    "+ end card), the full overlay-text timeline, burned-caption style, what a "
-    "MUTED viewer understands (most ad views are sound-off), aspect ratio and "
-    "whether key content sits in center-safe zones, the end card, and every "
-    "logo/product appearance with MM:SS timing.\n\n"
+    "not an organic reel.\n\n"
 )
 
-PROFILES = {
-    "ugc-reel": {"extra_context": "", "ad_read": False},
-    "fbads-video": {"extra_context": FBADS_EXTRA_CONTEXT, "ad_read": True},
+FBADS_READ_INSTRUCTIONS = (
+    "On top of the per-shot protocol, fill the top-level ad_read object: "
+    "capture every offer element (price, discount, bundle, guarantee, "
+    "urgency/scarcity), every CTA quoted verbatim (spoken + overlay + end "
+    "card), the full overlay-text timeline with each overlay's on-screen "
+    "span, burned-caption style, what a MUTED viewer understands (most ad "
+    "views are sound-off), the aspect ratio, whether key content sits in "
+    "center-safe zones, the end card, and every logo/product appearance "
+    "with MM:SS timing.\n"
+)
+
+READING_PROFILES = {
+    "ugc-reel": {"context": "", "task": "", "ad_read": False},
+    "fbads-video": {
+        "context": FBADS_FORMAT_DECLARATION,
+        "task": FBADS_READ_INSTRUCTIONS,
+        "ad_read": True,
+    },
 }
 
 
@@ -406,23 +418,29 @@ AD_READ_SCHEMA = {
     "additionalProperties": False,
     "required": [
         "offer", "cta", "overlay_text_timeline", "captions",
-        "sound_off_comprehension", "aspect_ratio", "end_card", "brand_assets",
+        "sound_off_comprehension", "aspect_ratio", "safe_zones", "end_card",
+        "brand_assets",
     ],
     "properties": {
         "offer": _string_schema(
             "Every offer element shown or spoken: price, discount, bundle, "
-            "guarantee, urgency/scarcity. 'NONE' if absent."),
+            "guarantee, urgency/scarcity. 'none' if absent."),
         "cta": _string_schema(
             "Every call-to-action: spoken line(s), overlay text, end-card "
-            "wording. Quote exactly. 'NONE' if absent."),
+            "wording. Quote exactly. This is the union of ALL CTA wording "
+            "anywhere in the ad. 'none' if absent."),
         "overlay_text_timeline": {
             "type": "array",
+            "description": (
+                "The whole-ad ordered view of the per-shot graphics_geometry "
+                "observations, in chronological order."),
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["time", "text", "style"],
+                "required": ["time", "end", "text", "style"],
                 "properties": {
                     "time": _string_schema("MM:SS the overlay appears."),
+                    "end": _string_schema("MM:SS the overlay disappears."),
                     "text": _string_schema("Exact overlay text, verbatim."),
                     "style": _string_schema(
                         "Weight/color/position/animation in plain words."),
@@ -436,22 +454,34 @@ AD_READ_SCHEMA = {
             "What a MUTED viewer understands from 0-3s and from the whole ad. "
             "Name the visual elements doing that work."),
         "aspect_ratio": _string_schema(
-            "e.g. 9:16, 4:5, 1:1 — plus whether key content sits inside "
-            "center-safe zones."),
+            "e.g. 9:16, 4:5, 1:1."),
+        "safe_zones": _string_schema(
+            "Whether key content (faces, text, CTA) sits inside center-safe "
+            "zones, and what gets clipped if cropped to another placement."),
         "end_card": _string_schema(
             "Final-frame card: product, logo, offer text, CTA button mock. "
-            "'NONE' if the ad just ends."),
+            "Describe the final frame's LAYOUT only — its CTA wording also "
+            "belongs in cta. 'none' if the ad just ends."),
         "brand_assets": _string_schema(
             "Every logo / product-pack appearance with MM:SS timing."),
     },
 }
 
 
+def _reading_profile(name: str) -> dict:
+    try:
+        return READING_PROFILES[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown reading profile {name!r}; choose one of "
+            f"{', '.join(sorted(READING_PROFILES))}") from None
+
+
 def schema_for_profile(profile: str) -> dict:
     """Stage 4d response schema for a reading profile. Default = unchanged."""
     schema = copy.deepcopy(STAGE4D_JSON_SCHEMA)
-    if PROFILES[profile]["ad_read"]:
-        schema["properties"]["ad_read"] = AD_READ_SCHEMA
+    if _reading_profile(profile)["ad_read"]:
+        schema["properties"]["ad_read"] = copy.deepcopy(AD_READ_SCHEMA)
         schema["required"] = list(schema.get("required", [])) + ["ad_read"]
     return schema
 
@@ -781,13 +811,14 @@ def build_user_prompt(shots: list, transcript_summary: str, motion: object,
     # <context>/<task>/<final_instruction> structure per the official Gemini 3
     # prompt-design template (ai.google.dev/gemini-api/docs/prompting-strategies,
     # read 2026-08-11). Data first, then the task, then the closing reminder.
+    profile_spec = _reading_profile(profile)
     schema_block = (
         f"Stage 4d JSON schema:\n{json.dumps(schema_for_profile(profile), indent=2)}\n\n"
         if include_schema else ""
     )
     return (
         "<context>\n"
-        f"{PROFILES[profile]['extra_context']}{extra_context}"
+        f"{profile_spec['context']}{extra_context}"
         f"Shots:\n{json.dumps(shots, indent=2)}\n\n"
         f"Whisper transcript (authoritative for dialogue):\n{transcript_summary}\n\n"
         f"Motion classifications (cross-check; visual evidence wins):\n{json.dumps(motion, indent=2)}\n\n"
@@ -798,6 +829,7 @@ def build_user_prompt(shots: list, transcript_summary: str, motion: object,
         "Cover every shot in order. Use the EXACT shot start/end timestamps "
         "provided. Pay extra attention to action arcs in shots whose dialogue "
         "contains a verb-of-state-change (pour, squeeze, add, stir, mix, melt).\n"
+        f"{profile_spec['task']}"
         "</task>\n\n"
         "<final_instruction>Run the forensic-perception protocol on each shot "
         "BEFORE writing its composition fields. Output: ONLY the JSON object. "
