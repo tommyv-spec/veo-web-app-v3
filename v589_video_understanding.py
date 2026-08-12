@@ -877,19 +877,23 @@ def validate_stage4d_output(data: object, expected_shots: list,
                 elif not _nonempty(value):
                     errors.append(f"ad_read.{field} must be a non-empty string")
 
-    # KNOWN DRIFT, deliberately NOT fixed here (2026-08-12): this list is
-    # hand-typed and is missing frame_inventory + start_frame_spec, both of
-    # which PER_SHOT_SCHEMA["required"] demands — so a provider can omit them
-    # and still pass. Deriving the list from the schema instead is a one-line
-    # fix, but it newly REJECTS 3 of the 6 stage4d.v2 artifacts already saved
-    # under raw/decode_work (Dab3gjQRGrY, saffron-mega-Db1b72NRens x2), which
-    # pass today. Tightening it is an operator call, not a drive-by.
-    # shot_index/start/end are absent on purpose: checked against the SOURCE
-    # shot below, not merely for presence.
-    required_top = [
-        "summary", "forensic_perception", "static_composition", "action_arc",
-        "audio", "motion_cross_check", "veo_reproduction_hints", "human_walk_corrections",
-    ]
+    # DERIVED FROM THE SCHEMA, never retyped. This used to be a hand-typed list
+    # and it had drifted: frame_inventory + start_frame_spec are required by
+    # PER_SHOT_SCHEMA but were not checked, so a provider could omit both and
+    # still pass. Closed 2026-08-12.
+    #
+    # Forward-only, per operator decision. Three stage4d.v2 artifacts saved
+    # BEFORE the tightening are missing those two fields and will FAIL if
+    # re-validated: raw/decode_work/Dab3gjQRGrY/stage4d_vlm.json (132 errors)
+    # and raw/decode_work/saffron-mega-Db1b72NRens/stage4d_vlm{,_opt}.json
+    # (8 each). They are already decoded and consumed and nothing re-validates
+    # them automatically. That is expected, not a bug to chase.
+    #
+    # shot_index/start/end are excluded on purpose: they are checked below
+    # against the SOURCE shot (value equality), which is strictly stronger
+    # than the presence check this loop does.
+    required_top = [k for k in PER_SHOT_SCHEMA["required"]
+                    if k not in ("shot_index", "start", "end")]
     for pos, expected in enumerate(expected_shots, start=1):
         if pos > len(shots) or not isinstance(shots[pos - 1], dict):
             errors.append(f"shot {pos}: missing object")
@@ -1726,6 +1730,18 @@ def main():
         parsed = parse_and_validate_stage4d(raw_output, shots, profile=args.profile)
         # Local stamp so the saved artifact says which profile read it. Written
         # AFTER validation and never added to the provider response schema.
+        #
+        # KNOWN AND DELIBERATE: this makes the saved artifact carry a 4th
+        # top-level key that its own declared schema forbids —
+        # STAGE4D_JSON_SCHEMA sets additionalProperties: False over exactly
+        # [schema_version, observed_people, shots]. Nothing breaks: the
+        # validator here is hand-rolled and ignores unknown top-level keys, and
+        # no jsonschema consumer of this artifact exists anywhere in the repo.
+        # The fix is NOT to add "profile" to the schema: that schema is
+        # serialized verbatim into every include_schema=True prompt, so adding
+        # a key would change the default ugc-reel prompt bytes, and default-lane
+        # byte-identity is the invariant this feature has protected across
+        # three commits. Stamp locally, leave the schema alone.
         parsed["profile"] = args.profile
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(parsed, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

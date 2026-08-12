@@ -38,6 +38,31 @@ def valid_stage4d():
                     "intrinsic_state_start": "clear empty glass", "intrinsic_state_end": "clear empty glass",
                 },
             },
+            # frame_inventory + start_frame_spec are required by PER_SHOT_SCHEMA.
+            # This fixture predates 2026-08-12 and omitted both: validate_stage4d_output
+            # used a hand-typed required list that had drifted from the schema and did
+            # not check them. That list now derives from PER_SHOT_SCHEMA, so the fixture
+            # has to be what it always claimed to be — a complete stage4d.v2 record.
+            "frame_inventory": {
+                "set_and_background": "Domestic kitchen; pale grey counter, white subway tile, window at frame right.",
+                "wardrobe_and_grooming": "person_1 in a mid-blue cotton shirt, sleeves to the wrist, short dark hair.",
+                "props_and_objects": "Clear empty drinking glass, person_1's own, held in the right hand on the subject layer.",
+                "on_screen_text_verbatim": "none",
+                "color_palette": "Warm neutrals: cream tile, pale grey stone, mid-blue shirt.",
+                "production_method": "Single continuous live-action take; no compositing tells.",
+            },
+            "start_frame_spec": {
+                "camera_height_and_angle": "Level with the eyes, straight-on.",
+                "camera_distance_and_lens": "About 1.5 m, neutral ~40mm; ear-to-nose relationship is undistorted.",
+                "subject_placement_and_crop": "Head centred, a palm of headroom, crop at mid-chest below the second shirt button.",
+                "background_depth_and_defocus": "Counter about 1 m behind, softly blurred; tile grout still readable.",
+                "lighting_setup": "Single soft window key from frame right, no fill, gentle falloff to frame left.",
+                "color_temp_and_grade": "Warm daylight near 5200K, neutral grade, no lift in the blacks.",
+                "texture_and_artifacts": "Clean digital capture, fine grain, no visible compression blocking.",
+                "graphics_geometry": "none",
+                "posture_and_gaze": "Squared to camera, gaze into the lens, right hand rising into frame.",
+                "recreation_variable_slots": "Swappable: shirt colour, glass contents, window light direction.",
+            },
             "static_composition": {
                 "subject": "person_1 faces camera and raises one hand", "framing": "face and glass details are sharp",
                 "anchor_props_with_positions": "glass held beside person_1", "lighting_and_palette": "warm window light",

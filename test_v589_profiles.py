@@ -176,15 +176,11 @@ def test_providers_and_cli_thread_the_profile():
     assert 'parsed["profile"] = args.profile' in main_src
 
 
-@pytest.mark.xfail(reason="KNOWN, UNFIXED: validate_stage4d_output's hand-typed "
-                          "required_top omits frame_inventory + start_frame_spec. "
-                          "Deriving it from PER_SHOT_SCHEMA['required'] fixes it but "
-                          "newly rejects 3 of the 6 stage4d.v2 artifacts already saved "
-                          "under raw/decode_work, which pass today. Operator decision — "
-                          "flip this test to a plain pass when the call is made.",
-                   strict=False)
 def test_validator_checks_every_schema_required_shot_field():
-    """Guard against the hand-typed/schema drift that let frame_inventory go unchecked."""
+    """Drift guard. required_top was hand-typed and had silently dropped
+    frame_inventory + start_frame_spec; it now derives from the schema. Every
+    field PER_SHOT_SCHEMA demands must be rejected when absent, so the two can
+    never diverge again."""
     base = _minimal_valid_stage4d()
     # expectations come from the PRISTINE fixture — deriving them from the
     # mutated copy would KeyError on the shot_index/start/end rounds.
