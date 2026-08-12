@@ -3438,6 +3438,59 @@ def chatgpt_generate_node(
     return {"ok": True, "node_id": node_id, "cg_status": node.cg_status}
 
 
+class PurgeStaleVariantsRequest(BaseModel):
+    """v891.3 TEMP purge. Remove once the affected batch is clean."""
+    variant_ids: List[int] = []
+    dry_run: bool = True
+
+
+@router.post("/maintenance/purge-stale-variants")
+def maintenance_purge_stale_variants(
+    req: PurgeStaleVariantsRequest,
+    db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """TEMPORARY (v891.3) - drop specific variant ROWS that are renders of a
+    superseded prompt.
+
+    Takes an explicit id list rather than guessing from timestamps, so every
+    deletion is auditable. Refuses to touch a variant that is currently chosen,
+    and refuses anything outside the caller's own nodes. Deletes the DB row
+    only and leaves the file on disk/R2, so the image can be recovered.
+    """
+    if not req.variant_ids:
+        raise HTTPException(400, "pass variant_ids")
+
+    report = {"dry_run": req.dry_run, "deleted": [], "skipped": []}
+    for vid in req.variant_ids:
+        v = db.query(ImageVariant).filter(ImageVariant.id == vid).first()
+        if not v:
+            report["skipped"].append({"variant_id": vid, "why": "not found"})
+            continue
+        node = db.query(ImageNode).filter(
+            ImageNode.id == v.node_id,
+            ImageNode.user_id == current_user.id,
+        ).first()
+        if not node:
+            report["skipped"].append({"variant_id": vid, "why": "not your node"})
+            continue
+        if node.chosen_variant_id == v.id:
+            report["skipped"].append({"variant_id": vid, "why": "currently chosen"})
+            continue
+        report["deleted"].append({
+            "variant_id": v.id, "node_id": node.id,
+            "backend": getattr(v, "backend", None), "path": v.image_path,
+        })
+        if not req.dry_run:
+            db.delete(v)
+
+    if not req.dry_run:
+        db.commit()
+        log.info(f"[v891.3 PURGE] dropped {len(report['deleted'])} stale variant row(s)")
+    report["deleted_count"] = len(report["deleted"])
+    return report
+
+
 @router.post("/nodes/{node_id}/choose")
 def choose_variant(
     node_id: int,
@@ -7007,10 +7060,25 @@ def _import_scene_table_impl(
             # point of sending the node back to draft for regeneration.
             _v891_stale_pick = existing.chosen_variant_id
             existing.chosen_variant_id = None
+            # v891.3 - an AI variant is just a render of the prompt. Once the
+            # prompt is rewritten those images depict something that is no
+            # longer being asked for, so they have to go with it. Banana's
+            # completion path already wipes AI variants before writing new
+            # ones, but the ChatGPT worker saves through the R2 path, which
+            # never deletes - so pre-rewrite GPT renders survived every resync
+            # and, being oldest, sat at tile 1. Manual uploads are the
+            # operator's own files and are preserved (v559).
+            _v891_dropped = 0
+            for _old_v in list(existing.variants):
+                if getattr(_old_v, "source", "ai") == "manual":
+                    continue
+                db.delete(_old_v)
+                _v891_dropped += 1
             # TEMP DIAGNOSTIC (v891.1) - remove once seen in Render logs.
             log.info(
                 f"[v891.1 RESYNC] node {existing.id} (image_{image_index}) prompt rewritten; "
-                f"cleared stale pick variant_id={_v891_stale_pick}"
+                f"cleared stale pick variant_id={_v891_stale_pick}; "
+                f"dropped {_v891_dropped} stale AI render(s)"
             )
             db.query(ImageEdge).filter(ImageEdge.child_node_id == existing.id).delete(
                 synchronize_session=False)
