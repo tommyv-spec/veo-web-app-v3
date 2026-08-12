@@ -185,11 +185,16 @@ def test_validator_checks_every_schema_required_shot_field():
     # expectations come from the PRISTINE fixture — deriving them from the
     # mutated copy would KeyError on the shot_index/start/end rounds.
     shots = _expected_shots_for(base)
+    # Non-vacuous by construction: the unmutated fixture must PASS, otherwise
+    # every round below would "detect" a failure that was already there.
+    v589.validate_stage4d_output(base, shots)
     for field in v589.PER_SHOT_SCHEMA["required"]:
         data = json.loads(json.dumps(base))
         data["shots"][0].pop(field, None)
         try:
             v589.validate_stage4d_output(data, shots)
-        except v589.Stage4dValidationError:
+        except v589.Stage4dValidationError as exc:
+            # and it must be THIS field that is named, not some other complaint
+            assert field in str(exc), f"{field!r} dropped but not named in: {exc}"
             continue
         raise AssertionError(f"validator accepted a shot missing required field {field!r}")

@@ -125,8 +125,34 @@ class Stage4dContractTests(unittest.TestCase):
     def test_human_template_is_shaped_but_not_handoff_ready(self):
         template = json.loads(v589.write_human_walk_template(self.expected, {"segments": []}, None))
         self.assertEqual(template["schema_version"], "stage4d.v2")
+        # Pin the SHAPE, not just the error. Asserting only that validation
+        # raises "placeholders" is not enough: when the template was missing
+        # frame_inventory + start_frame_spec it also collected two
+        # missing-field errors per shot, still matched the regex, and stayed
+        # green while the generator emitted unvalidatable artifacts. The
+        # template must be structurally complete — only placeholders may block it.
+        self.assertEqual(set(template["shots"][0]), set(v589.PER_SHOT_SCHEMA["required"]))
         with self.assertRaisesRegex(v589.Stage4dValidationError, "placeholders"):
             v589.validate_stage4d_output(template, self.expected)
+
+    def test_filled_in_human_template_reaches_handoff(self):
+        """The lane prints 'fill placeholders, then run --validate-stage4d'.
+        Walk that instruction end to end: every placeholder replaced must
+        validate. This is what a missing schema field silently makes impossible."""
+        template = json.loads(v589.write_human_walk_template(self.expected, {"segments": []}, None))
+
+        def fill(node):
+            if isinstance(node, dict):
+                return {k: fill(v) for k, v in node.items()}
+            if isinstance(node, list):
+                return [fill(v) for v in node]
+            if isinstance(node, str) and ("<REQUIRED" in node or "<COPY FROM" in node):
+                return "observed by the human walk"
+            return node
+
+        filled = fill(template)
+        result = v589.validate_stage4d_output(filled, self.expected)
+        self.assertEqual(result["schema_version"], "stage4d.v2")
 
     def test_parse_and_validate_is_scope_safe(self):
         # Regression: this function once referenced main()'s locals

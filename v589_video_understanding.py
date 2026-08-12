@@ -882,6 +882,13 @@ def validate_stage4d_output(data: object, expected_shots: list,
     # PER_SHOT_SCHEMA but were not checked, so a provider could omit both and
     # still pass. Closed 2026-08-12.
     #
+    # What that bought, precisely: the LIST can no longer diverge from the
+    # schema. Validation DEPTH is unchanged and stops one level up — this loop
+    # checks PRESENCE only, so "frame_inventory": None / {} / "text" are all
+    # still accepted, and emitting the key empty is arguably the likelier
+    # provider failure. That matches the depth already applied to
+    # static_composition and audio; deepening all of them is a separate call.
+    #
     # Forward-only, per operator decision. Three stage4d.v2 artifacts saved
     # BEFORE the tightening are missing those two fields and will FAIL if
     # re-validated: raw/decode_work/Dab3gjQRGrY/stage4d_vlm.json (132 errors)
@@ -946,6 +953,22 @@ def validate_stage4d_output(data: object, expected_shots: list,
                 errors.append(f"shot {pos}: {key} must be a non-empty observation (use 'none' when clear)")
 
     if errors:
+        # An artifact saved before the 2026-08-12 tightening fails with one
+        # line per shot and nothing else — 132 of them on the biggest one, with
+        # the top of the list scrolled off. Say so at the BOTTOM, where the
+        # reader's eye lands, so the answer is in the output and not only in
+        # the source comment above required_top.
+        #
+        # EVERY error must be one of the two for this to fire: a mixed failure
+        # (a legacy field missing AND a real problem) is NOT the known case and
+        # must not be labelled as expected.
+        if all(e.endswith(": missing frame_inventory")
+               or e.endswith(": missing start_frame_spec") for e in errors):
+            errors.append(
+                "NOTE: missing frame_inventory/start_frame_spec only — this is the known "
+                "2026-08-12 forward-only tightening, expected on artifacts saved before it, "
+                "not a new bug. See the comment above required_top."
+            )
         raise Stage4dValidationError("Stage 4d validation failed:\n- " + "\n- ".join(errors))
     return data
 
@@ -1562,6 +1585,19 @@ def write_human_walk_template(shots: list, transcript: dict, frames_dir: Path | 
             "static_composition": {
                 "subject": "<REQUIRED>", "framing": "<REQUIRED>",
                 "anchor_props_with_positions": "<REQUIRED>", "lighting_and_palette": "<REQUIRED>",
+            },
+            # Keys derived from the schema, not retyped: this template is a
+            # GENERATOR, so a hand-typed copy silently produces artifacts that
+            # can never validate — which is exactly what happened to
+            # frame_inventory + start_frame_spec. Deriving also means the next
+            # field added to either block appears here as a placeholder for free.
+            "frame_inventory": {
+                k: "<REQUIRED>"
+                for k in PER_SHOT_SCHEMA["properties"]["frame_inventory"]["required"]
+            },
+            "start_frame_spec": {
+                k: "<REQUIRED>"
+                for k in PER_SHOT_SCHEMA["properties"]["start_frame_spec"]["required"]
             },
             "action_arc": {
                 "has_state_evolution": False,
