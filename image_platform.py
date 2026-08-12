@@ -3433,6 +3433,92 @@ def chatgpt_generate_node(
     return {"ok": True, "node_id": node_id, "cg_status": node.cg_status}
 
 
+class VariantReindexRequest(BaseModel):
+    """v891.2 TEMP repair. Remove this endpoint once the affected batches are clean."""
+    batch_ids: List[str] = []
+    node_ids: List[int] = []
+    clear_picks_for_nodes: List[int] = []
+    dry_run: bool = True
+
+
+@router.post("/maintenance/variant-reindex")
+def maintenance_variant_reindex(
+    req: VariantReindexRequest,
+    db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """TEMPORARY (v891.2) - repair variant numbering left behind by the
+    dual-lane collision, and drop picks that point at a superseded image.
+
+    Two lanes each numbered their own delivery 1..N, so a node fed by both
+    ended up with two rows claiming variant_index=1 and the gallery showed two
+    tiles labelled "1". Renumbering is display-only: rows are preserved in
+    their existing (created_at, id) order and chosen_variant_id is a row FK, so
+    every pick keeps resolving to the very same image file.
+
+    Defaults to dry_run so the change can be read before it is written.
+    """
+    q = db.query(ImageNode).filter(ImageNode.user_id == current_user.id)
+    if req.batch_ids:
+        q = q.filter(ImageNode.batch_id.in_(req.batch_ids))
+    if req.node_ids:
+        q = q.filter(ImageNode.id.in_(req.node_ids))
+    if not req.batch_ids and not req.node_ids:
+        raise HTTPException(400, "pass batch_ids and/or node_ids")
+
+    report = {"dry_run": req.dry_run, "nodes": [], "renumbered": 0,
+              "picks_cleared": 0, "nodes_scanned": 0}
+
+    for node in q.all():
+        report["nodes_scanned"] += 1
+        variants = sorted(
+            list(node.variants),
+            key=lambda v: (v.created_at or datetime.min, v.id),
+        )
+        seen, has_dupe = set(), False
+        for v in variants:
+            if v.variant_index in seen:
+                has_dupe = True
+                break
+            seen.add(v.variant_index)
+
+        entry = {"node_id": node.id, "name": node.name,
+                 "before": [{"variant_id": v.id, "idx": v.variant_index,
+                             "backend": getattr(v, "backend", None),
+                             "path": v.image_path} for v in variants],
+                 "renumbered": False, "pick_cleared": False}
+
+        if has_dupe:
+            for new_idx, v in enumerate(variants, start=1):
+                if v.variant_index != new_idx:
+                    if not req.dry_run:
+                        v.variant_index = new_idx
+                    entry["renumbered"] = True
+            if entry["renumbered"]:
+                report["renumbered"] += 1
+            entry["after"] = [{"variant_id": v.id, "idx": i}
+                              for i, v in enumerate(variants, start=1)]
+
+        if node.id in (req.clear_picks_for_nodes or []):
+            if node.chosen_variant_id is not None:
+                entry["pick_cleared"] = True
+                entry["cleared_variant_id"] = node.chosen_variant_id
+                report["picks_cleared"] += 1
+                if not req.dry_run:
+                    node.chosen_variant_id = None
+
+        if entry["renumbered"] or entry["pick_cleared"]:
+            report["nodes"].append(entry)
+
+    if not req.dry_run:
+        db.commit()
+        log.info(
+            f"[v891.2 REPAIR] renumbered {report['renumbered']} node(s), "
+            f"cleared {report['picks_cleared']} stale pick(s)"
+        )
+    return report
+
+
 @router.post("/nodes/{node_id}/choose")
 def choose_variant(
     node_id: int,
