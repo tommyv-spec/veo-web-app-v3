@@ -1004,6 +1004,24 @@ def _shots_from_clips_tsv(tsv_path: Path) -> list:
     return shots
 
 
+def _load_shots_file(shots_path: Path) -> list:
+    """THE one rule for reading a shots input, shared by the decode path and
+    --validate-stage4d so the two can never disagree about what they accept.
+    v579 Stage 3 writes shots.json; the decode-reel skill writes clips.tsv.
+
+    This used to be inline in load_pipeline_inputs only, so --validate-stage4d
+    ran a bare json.loads and died with a JSONDecodeError on the clips.tsv that
+    the decode path accepts happily — the obvious command, printed in the plan
+    and the decode skill, simply failed."""
+    if shots_path.suffix.lower() == ".tsv":
+        return _shots_from_clips_tsv(shots_path)
+    shots = json.loads(shots_path.read_text(encoding="utf-8-sig"))
+    for s in shots:  # tolerate shot_index from older converters
+        if "shot" not in s and "shot_index" in s:
+            s["shot"] = s["shot_index"]
+    return shots
+
+
 def _farneback_motion(video_path: Path, shots: list) -> list:
     """v585-style per-shot motion classification, computed on the fly when no
     motion.json exists (the decode-reel skill has no separate Stage 4c step).
@@ -1068,13 +1086,7 @@ def load_pipeline_inputs(video_path: Path, shots_path: Path | None,
             f"transcript not found at {transcript_path}. Run v579 Stage 2 or "
             f"`python -m whisper <mp4> --output_format json` first.")
 
-    if shots_path.suffix.lower() == ".tsv":
-        shots = _shots_from_clips_tsv(shots_path)
-    else:
-        shots = json.loads(shots_path.read_text(encoding="utf-8-sig"))
-        for s in shots:  # tolerate shot_index from older converters
-            if "shot" not in s and "shot_index" in s:
-                s["shot"] = s["shot_index"]
+    shots = _load_shots_file(shots_path)
 
     transcript = json.loads(transcript_path.read_text(encoding="utf-8-sig"))
 
@@ -1664,8 +1676,14 @@ def main():
         shots_path = args.shots or args.validate_stage4d.parent / "shots.json"
         if not shots_path.exists():
             p.error(f"shots file not found: {shots_path}")
-        expected = json.loads(shots_path.read_text(encoding="utf-8-sig"))
-        candidate = json.loads(args.validate_stage4d.read_text(encoding="utf-8-sig"))
+        try:
+            # same reader as the decode path: shots.json OR a decode-reel clips.tsv
+            expected = _load_shots_file(shots_path)
+            candidate = json.loads(args.validate_stage4d.read_text(encoding="utf-8-sig"))
+        except (KeyError, ValueError) as exc:
+            # ValueError covers json.JSONDecodeError and the tsv's int()/float();
+            # KeyError is a tsv missing the clip/start_sec/end_sec columns.
+            p.error(f"could not read shots/artifact: {type(exc).__name__}: {exc}")
         try:
             validate_stage4d_output(candidate, expected, profile=args.profile)
         except Stage4dValidationError as exc:

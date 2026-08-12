@@ -162,6 +162,59 @@ class Stage4dContractTests(unittest.TestCase):
         with self.assertRaisesRegex(v589.Stage4dValidationError, "invalid JSON"):
             v589.parse_and_validate_stage4d("not json {", self.expected)
 
+    def test_shots_reader_accepts_tsv_and_json_identically(self):
+        """One reader, one rule. --validate-stage4d used to run a bare
+        json.loads and die on the clips.tsv the decode path accepts."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            tsv = tmp / "clips.tsv"
+            tsv.write_text(
+                "clip\tstart_sec\tstart_frame\tend_sec\tdur_s\timage\tsame_as\n"
+                "1\t0.000\t0\t2.500\t2.500\timage_1\t\n",
+                encoding="utf-8")
+            js = tmp / "shots.json"
+            js.write_text(json.dumps([{"shot": 1, "start": 0.0, "end": 2.5}]), encoding="utf-8")
+
+            from_tsv = v589._load_shots_file(tsv)
+            from_json = v589._load_shots_file(js)
+            for key in ("shot", "start", "end"):
+                self.assertEqual(from_tsv[0][key], from_json[0][key], key)
+            # a shots.json written by an older converter still normalizes
+            old = tmp / "old.json"
+            old.write_text(json.dumps([{"shot_index": 1, "start": 0.0, "end": 2.5}]), encoding="utf-8")
+            self.assertEqual(v589._load_shots_file(old)[0]["shot"], 1)
+
+    def test_validate_cli_accepts_a_clips_tsv(self):
+        """End to end through main(): the invocation printed in the plan and the
+        decode skill must work, not raise JSONDecodeError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "clips.tsv").write_text(
+                "clip\tstart_sec\tstart_frame\tend_sec\tdur_s\timage\tsame_as\n"
+                "1\t0.000\t0\t2.500\t2.500\timage_1\t\n",
+                encoding="utf-8")
+            (tmp / "artifact.json").write_text(
+                json.dumps(valid_stage4d()), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(MODULE_PATH),
+                 "--validate-stage4d", str(tmp / "artifact.json"),
+                 "--shots", str(tmp / "clips.tsv")],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("PASS", result.stdout)
+
+            # and a genuinely malformed shots file still says something useful
+            (tmp / "broken.json").write_text("{not json", encoding="utf-8")
+            broken = subprocess.run(
+                [sys.executable, str(MODULE_PATH),
+                 "--validate-stage4d", str(tmp / "artifact.json"),
+                 "--shots", str(tmp / "broken.json")],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(broken.returncode, 2)
+            self.assertIn("could not read shots", broken.stderr)
+
     def test_help_is_windows_console_safe(self):
         result = subprocess.run(
             [sys.executable, str(MODULE_PATH), "--help"],
