@@ -845,7 +845,8 @@ def _nonempty(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def validate_stage4d_output(data: object, expected_shots: list) -> dict:
+def validate_stage4d_output(data: object, expected_shots: list,
+                            profile: str = "ugc-reel") -> dict:
     """Validate the handoff contract without requiring a third-party package."""
     errors: list[str] = []
     if not isinstance(data, dict):
@@ -863,6 +864,28 @@ def validate_stage4d_output(data: object, expected_shots: list) -> dict:
     if len(shots) != len(expected_shots):
         errors.append(f"shots count {len(shots)} does not match expected {len(expected_shots)}")
 
+    if _reading_profile(profile)["ad_read"]:
+        ad = data.get("ad_read")
+        if not isinstance(ad, dict):
+            errors.append("profile %s requires a top-level ad_read object" % profile)
+        else:
+            for field in AD_READ_SCHEMA["required"]:
+                value = ad.get(field)
+                if field == "overlay_text_timeline":
+                    if not isinstance(value, list):
+                        errors.append("ad_read.overlay_text_timeline must be an array")
+                elif not _nonempty(value):
+                    errors.append(f"ad_read.{field} must be a non-empty string")
+
+    # KNOWN DRIFT, deliberately NOT fixed here (2026-08-12): this list is
+    # hand-typed and is missing frame_inventory + start_frame_spec, both of
+    # which PER_SHOT_SCHEMA["required"] demands — so a provider can omit them
+    # and still pass. Deriving the list from the schema instead is a one-line
+    # fix, but it newly REJECTS 3 of the 6 stage4d.v2 artifacts already saved
+    # under raw/decode_work (Dab3gjQRGrY, saffron-mega-Db1b72NRens x2), which
+    # pass today. Tightening it is an operator call, not a drive-by.
+    # shot_index/start/end are absent on purpose: checked against the SOURCE
+    # shot below, not merely for presence.
     required_top = [
         "summary", "forensic_perception", "static_composition", "action_arc",
         "audio", "motion_cross_check", "veo_reproduction_hints", "human_walk_corrections",
@@ -923,12 +946,13 @@ def validate_stage4d_output(data: object, expected_shots: list) -> dict:
     return data
 
 
-def parse_and_validate_stage4d(raw_output: str, expected_shots: list) -> dict:
+def parse_and_validate_stage4d(raw_output: str, expected_shots: list,
+                               profile: str = "ugc-reel") -> dict:
     try:
         data = json.loads(raw_output)
     except json.JSONDecodeError as exc:
         raise Stage4dValidationError(f"provider returned invalid JSON: {exc}") from exc
-    return validate_stage4d_output(data, expected_shots)
+    return validate_stage4d_output(data, expected_shots, profile=profile)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1072,7 +1096,8 @@ def lmstudio_available(base_url: str = "http://localhost:1234") -> tuple[bool, s
 
 def call_lmstudio(video_path: Path, frames: list[Path], shots: list, transcript_summary: str,
                   motion: object,
-                  base_url: str = "http://localhost:1234", model: str | None = None) -> str:
+                  base_url: str = "http://localhost:1234", model: str | None = None,
+                  profile: str = "ugc-reel") -> str:
     import base64, urllib.request, urllib.error
 
     available, default_model = lmstudio_available(base_url)
@@ -1083,7 +1108,8 @@ def call_lmstudio(video_path: Path, frames: list[Path], shots: list, transcript_
 
     content = [
         {"type": "text", "text": SYSTEM_INSTRUCTION},
-        {"type": "text", "text": build_user_prompt(shots, transcript_summary, motion, include_schema=True)},
+        {"type": "text", "text": build_user_prompt(shots, transcript_summary, motion,
+                                                   include_schema=True, profile=profile)},
     ]
     for f in frames:
         with open(f, "rb") as fh:
@@ -1306,7 +1332,7 @@ def _delete_gemini_upload(client, uploaded) -> None:
 def call_gemini(video_path: Path, shots: list, transcript_summary: str, motion: object,
                 model: str | None = None, thinking: str | None = "high",
                 media_resolution: str | None = None, fps: float | None = None,
-                upload_timeout_s: float = 300) -> str:
+                upload_timeout_s: float = 300, profile: str = "ugc-reel") -> str:
     from google import genai
     from google.genai import types
 
@@ -1386,12 +1412,16 @@ def call_gemini(video_path: Path, shots: list, transcript_summary: str, motion: 
     user_prompt = build_user_prompt(
         shots, transcript_summary, motion, include_schema=False,
         extra_context=f"Video timeline map (MM:SS matches the video's timestamps):\n{timestamp_map}\n\n",
+        profile=profile,
     )
 
+    # The prompt above suppresses the schema block (include_schema=False) — this
+    # is the ONLY place the schema reaches the model on this lane, so it must be
+    # the PROFILE's schema or a non-default profile silently reads as the default.
     config_kwargs: dict = dict(
         system_instruction=SYSTEM_INSTRUCTION,
         response_mime_type="application/json",
-        response_json_schema=STAGE4D_JSON_SCHEMA,
+        response_json_schema=schema_for_profile(profile),
     )
     if media_resolution == "low":
         try:
@@ -1578,6 +1608,8 @@ def main():
                    help="Gemini video sampling fps (default 1.0; raise to 2-5 for fast-motion videos)")
     p.add_argument("--upload-timeout", type=float, default=300,
                    help="seconds to wait for Gemini upload processing (default 300)")
+    p.add_argument("--profile", choices=sorted(READING_PROFILES), default="ugc-reel",
+                   help="reading profile: ugc-reel (default, unchanged) or fbads-video (adds required ad_read block)")
     p.add_argument("--validate-stage4d", type=Path, default=None,
                    help="validate a saved Stage 4d JSON against --shots and exit")
     p.add_argument("--costs", action="store_true",
@@ -1595,7 +1627,7 @@ def main():
         expected = json.loads(shots_path.read_text(encoding="utf-8-sig"))
         candidate = json.loads(args.validate_stage4d.read_text(encoding="utf-8-sig"))
         try:
-            validate_stage4d_output(candidate, expected)
+            validate_stage4d_output(candidate, expected, profile=args.profile)
         except Stage4dValidationError as exc:
             print(f"[v589] FAIL: {exc}", file=sys.stderr)
             sys.exit(2)
@@ -1631,7 +1663,8 @@ def main():
         if not frames:
             print(f"[v589] no dense frames found at {args.video.parent / 'frames'} — run v588 dense extraction first")
             return False
-        raw_output = call_lmstudio(args.video, frames, shots, transcript_summary, motion, args.lmstudio_url, args.model)
+        raw_output = call_lmstudio(args.video, frames, shots, transcript_summary, motion,
+                                   args.lmstudio_url, args.model, profile=args.profile)
         provider_used = "lmstudio"
         return True
 
@@ -1647,6 +1680,7 @@ def main():
             media_resolution=(args.media_resolution if args.media_resolution != "default" else None),
             fps=args.fps,
             upload_timeout_s=args.upload_timeout,
+            profile=args.profile,
         )
         provider_used = "gemini"
         return True
@@ -1689,10 +1723,14 @@ def main():
         return
 
     try:
-        parsed = parse_and_validate_stage4d(raw_output, shots)
+        parsed = parse_and_validate_stage4d(raw_output, shots, profile=args.profile)
+        # Local stamp so the saved artifact says which profile read it. Written
+        # AFTER validation and never added to the provider response schema.
+        parsed["profile"] = args.profile
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(parsed, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        print(f"[v589] wrote {out} ({len(parsed['shots'])} shots) via provider={provider_used}; schema PASS")
+        print(f"[v589] wrote {out} ({len(parsed['shots'])} shots) via provider={provider_used}, "
+              f"profile={args.profile}; schema PASS")
     except Stage4dValidationError as exc:
         out_raw = out.with_suffix(".raw.txt")
         out_raw.parent.mkdir(parents=True, exist_ok=True)
