@@ -118,7 +118,10 @@ following the standard flow):
   Stage 2: faster-whisper transcription   -> transcript.json
   Stage 3: PySceneDetect + Farneback      -> shots.json + motion.json
   Stage 4: dense per-shot frame sampling  -> frames/shotNN_*.png
-  Stage 4d: this prompt + the LLM's vision capability -> stage4d.json
+  Stage 4d: this prompt + the LLM's vision capability -> stage4d_vlm.json
+            (stage4d.v2 OBJECT contract: schema_version + observed_people
+            + ordered shots; validate any saved artifact with
+            python code/v589_video_understanding.py --validate-stage4d)
   Authoring: this prompt's output         -> raw/decoded_<source-id>.md
 
 Total bundle: $((${#BUNDLE_FILES[@]})) canonical files
@@ -2819,11 +2822,12 @@ WORKED EXAMPLE — saffron-saggy-arm HOOK (surfacing case):
     frame to point at the closed flesh loop on the patient's
     extended arm.
 
-OPTIONAL: stage4d_vlm.json may include a "forensic_perception" field
-per shot capturing kinematic_traces / z_depth_layers /
-literal_vfx_observations BEFORE static_composition. Operator can
-review forensic_perception before markdown is written; misattributions
-caught here cost zero Banana 2 credits.
+MANDATORY (stage4d.v2, 2026-08-11): every shot in stage4d_vlm.json
+carries a "forensic_perception" object — kinematic_traces /
+z_depth_layers / literal_vfx_observations / intrinsic_state_isolation
+— BEFORE static_composition. The v589 validator hard-fails a shot
+missing it. Operator can review forensic_perception before markdown
+is written; misattributions caught here cost zero Banana 2 credits.
 
 CARVE-OUTS:
 
@@ -2896,9 +2900,14 @@ code/v589_video_understanding.py):
         texture rough and matte"
       intrinsic_state_end: "grime completely washed away, pink
         surface revealed, surface texture smooth and glossy"
-      primary_change_axis: "Surface/Texture (cleansing)"
+      primary_change_axis: "Surface/Texture"
       magnitude: "COMPLETE"
     }
+
+  primary_change_axis takes the EXACT enum value only (Surface/Texture
+  / Structural Integrity / Volume/Shape / Color/Illumination / NONE);
+  annotations like "(cleansing)" fail v2 validation — put them in the
+  intrinsic_state prose instead.
   }
 
 Kinematics block holds movement. Morphology block holds 4-axis

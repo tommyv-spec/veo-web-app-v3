@@ -1611,41 +1611,29 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
        YES Niche voiceover-script wiki page cited?
        YES Cell honesty NOTE present?
 
-[23] V614 CROSS-CORPUS STRUCTURAL SURVEY + MANDATORY ADAPTATION MAP —
-     before lifting any dialogue, survey ALL raw/decoded_*.md and
-     raw/dr_kim_*_decoded.md files (~24 in current corpus). Classify
-     each into Pattern A (BEFORE/AFTER) / B (RECIPE-LED) / C
-     (DIAGNOSTIC-PIVOT) / D (CULTURAL-AUTHORITY 10-line rigid) /
-     E (PERSONAL-AUTHORITY).
+[23] V614 FULL-CORPUS RETRIEVAL + SOURCE-LED LIFT —
+     search the CURRENT processed corpus before lifting: semantic recall,
+     graph connections, then wiki/ + videos/ file search. Ingest any
+     relevant raw orphan first. Record the union in the Evidence Packet
+     with USED / PROTECTED / REJECTED / NOT APPLICABLE outcomes.
 
-     Universal corpus rules: 12-25 words/line; 4-17 lines total;
-     canonical CTA from 12-of-24 ("comment '<keyword>' / send my
-     full / follow me first"); mechanism = 1 concrete-benefit line,
-     not jargon-academic reframe; authority implicit ("I've seen
-     people go from X to Y"), not corporate ("I'm Dr. X..."); recipe
-     steps short comma-lists; no melodrama; negation-pivot signature.
+     LIFT-SPECIFIC: derive the decoded source's actual section jobs,
+     causal order, line frames and shown process. Preserve them according
+     to METHOD. The old A/B/C/D/E labels are optional search tags, never
+     the route or a closed choice; `UNLISTED — <source-derived shape>` is
+     valid. Do not tighten, cut or refactor merely to hit dated line-count
+     ranges.
 
-     LIFT-SPECIFIC: the decoded source dictates which Pattern this
-     lift adopts. If decoded source is Pattern B (saffron-trilogy),
-     the lift stays Pattern B — don't refactor to A or C. But the
-     lift MAY tighten dialogue to corpus norms when the decoded
-     source has drifted (long-form decoded artifacts often have
-     narrator commentary that should be cut on lift).
-
-     v614b/c/d MANDATORY frontmatter fields (in lifted videos/*.md):
-       corpus_pattern: <pattern from decoded source>
-       adaptation_map: <one entry per scene mapping to decoded
-                        source line + cross-validating corpus file>
-       corpus_compliance_audit: <6-field self-audit>
-
-     Per-scene [corpus: ...] annotation MANDATORY in every action_note.
+     The build carries SCRIPT DECISION MAP + SCRIPT LOCK + VISUAL LOCK +
+     every SBn row in SOURCE VISUAL BEATS. The packet carries retrieval,
+     evidence rank, one exact PRIMARY DELTA and its falsifier.
 
      PRE-OUTPUT VALIDATION:
-       YES corpus_pattern declared (matching decoded source)?
-       YES adaptation_map covers every scene?
-       YES Every action_note opens with [corpus: ...] matching map?
-       YES corpus_compliance_audit declared?
-       YES No corporate voice / no melodrama / canonical CTA?
+       YES current retrieval union and boundary recorded?
+       YES source causal chain derived before labels?
+       YES every source line/job/process is kept or explicitly replaced?
+       YES packet and build PRIMARY DELTA match?
+       YES python tools/check_content_packet.py <build> passes?
 
 [25] V621b ABSOLUTE BAN — NO CAPTION DESCRIPTORS IN IMAGE PROMPTS.
 
@@ -1701,13 +1689,14 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
        on this list, STOP and re-pick something visceral first,
        metaphor second.
 
-     v736b — TREND-HIJACK MANDATE. Lift MUST name a current viral
-       aesthetic from catalog (ASMR soap cutting / hydraulic press /
-       power-washing / kinetic-sand slicing / satisfying paint-mixing
-       / giant water-balloon pop / pomegranate smash / slime-pull /
-       cake-frosting reveal / soaked-sponge wring / wax-seal melt /
-       glass-shatter slow-mo) and frame the pain point THROUGH that
-       aesthetic. Generic "satisfying action" wording FAILS the gate.
+     v736b — TREND-GRAMMAR DECISION. Start with the decoded source's
+       own visual grammar. Use a current viral aesthetic only when
+       retrieval finds relevant evidence and its camera/action grammar
+       transfers without breaking the source job. Declare TREND
+       GRAMMAR: <bank slug | UNLISTED — source-derived name | NOT
+       APPLICABLE — source mechanism supplies the grammar> | evidence:
+       <source> | transfer: <camera/action grammar>. A named trend with
+       no evidence or no transferred grammar fails.
 
      v736c — UNCOMFORTABLE-TEXTURE MANDATE. Hero prop in HOOK MUST
        possess textural / messy state: oozing / bursting / sticky /
@@ -1721,16 +1710,17 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
        with a "## Brainstorming Sandbox" section IN THE OUTPUT FILE
        BEFORE the YAML frontmatter, containing:
          1. Five (5) radically different visual hook concepts. Each
-            names: hero prop + texture class + force-verb + trend tag
-            + 1-line metaphor mapping.
+            names: hero prop + triggered texture + force-verb + TREND
+            GRAMMAR decision/evidence/transfer + 1-line mapping.
          2. Each rated 1-10 "Unhinged TikTok Spectacle".
          3. The 3 lowest-rated concepts struck through with ~~text~~.
          4. The single most visceral concept marked **SELECTED →**.
-         5. Selected concept's prop / texture / trend / force-verb MUST
-            match the HOOK Image content in ## Images / ## Storyboard.
+         5. Selected concept's prop / triggered texture / force-verb and
+            TREND GRAMMAR decision MUST match the HOOK Image content.
 
      LIFT-SPECIFIC: when the decoded source HOOK already passes v736a
-     + v736b + v736c (visceral, no banned mapping, textural prop),
+     + the amended v736b + v736c (visceral, no banned mapping,
+     source-owned or evidenced grammar, textural prop),
      sandbox MUST cite the decoded source as one of the 5 entries
      ("from <decoded_source.md>") and may select it as winner.
      Otherwise sandbox proceeds normally and the lift may diverge
@@ -1744,10 +1734,10 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
      PRE-OUTPUT VALIDATION:
        YES First hero prop in HOOK image NOT on v736a banned list
            (or struck-through entry in sandbox + alternative SELECTED)?
-       YES Each sandbox entry carries a [<trend-name>] tag from v736b
-           catalog?
-       YES Selected entry's trend appears in HOOK Image's
-           [Composition] block or action_note?
+       YES Each sandbox entry carries a TREND GRAMMAR declaration with
+           evidence + transfer, or a specific NOT APPLICABLE reason?
+       YES Selected entry's transferred grammar appears in the HOOK
+           Image composition/action, when applicable?
        YES Selected hero prop's texture-class explicitly named in
            sandbox AND echoed in HOOK Image body prose?
        YES Banned default-texture words (dry / smooth / clean /

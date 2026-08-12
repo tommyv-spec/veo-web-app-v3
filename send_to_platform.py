@@ -481,6 +481,8 @@ def do_import(client, md_text, args, report):
         "subject_node_id": args.subject,
         "n_variants": args.variants,
     }
+    if getattr(args, "resync_batch", None):
+        payload["resync_batch_id"] = args.resync_batch
     if args.name:
         payload["name_prefix"] = args.name
     if args.ingredient:
@@ -496,6 +498,12 @@ def do_import(client, md_text, args, report):
     if getattr(args, "external_reference_nodes", None):
         payload["external_references"] = args.external_reference_nodes
     res = client.post("/api/images/import-scene-table", payload)
+    _rs = res.get("resync")
+    if _rs:
+        print(f"resync into batch {_rs['batch_id']}: "
+              f"{len(_rs['updated'])} scene(s) rewritten+requeued {_rs['updated']}, "
+              f"{len(_rs['unchanged'])} unchanged (variants and picks kept), "
+              f"{len(_rs['created'])} newly added {_rs['created']}", flush=True)
     report["import"] = {k: res.get(k) for k in
                         ("batch_id", "batch_name", "format", "created", "queued",
                          "waiting_on_parent", "scene_assignments_created")}
@@ -896,6 +904,10 @@ def main(argv=None):
                    help="pick variant 1 automatically (default is STOP and let the operator choose in the UI)")
     p.add_argument("--promote", action="store_true",
                    help="promote the batch to a video job once all variants are chosen (default is STOP — the operator triggers promotion)")
+    p.add_argument("--resync-batch", dest="resync_batch", default=None,
+                   help="v891: re-import this build INTO an existing batch instead of "
+                        "creating a new one. Scenes whose prompt changed are rewritten "
+                        "and requeued; unchanged scenes keep their variants and picks.")
     p.add_argument("--resume-batch", help="skip import, resume from an existing batch id")
     p.add_argument("--no-render", action="store_true", help="stop after promote (don't poll clips)")
     p.add_argument("--bindings", action="store_true", dest="bindings_only",

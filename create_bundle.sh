@@ -1698,76 +1698,37 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
        YES HOOK line adapts an Opening line from the niche wiki
            page's ## Hooks table (or [novel — testing] flagged)?
 
-[23] V614 CROSS-CORPUS STRUCTURAL SURVEY + MANDATORY ADAPTATION MAP —
-     before writing any dialogue line, survey ALL raw/decoded_*.md
-     and raw/dr_kim_*_decoded.md files (~24 in current corpus) to
-     extract structural patterns. Classify each into Pattern A/B/C/
-     D/E:
-       A — BEFORE/AFTER (4-6 lines): dr_kim trilogy, decoded_back_bump,
-           decoded_varicose_vein
-       B — RECIPE-LED (4-15 lines): saffron-trilogy, belly_burn_tea,
-           bladder_tea, icelandicwisdom, oldearl_visceralfat
-       C — DIAGNOSTIC/SHOW-PROBLEM-PIVOT (4-17 lines): corella_blood_
-           sugar, oldearl_tonsil, master_chen_three_things
-       D — CULTURAL-AUTHORITY TEMPLATE (10-line rigid): master_salvora
-           trilogy (banana/cabbage/salmon — IDENTICAL template)
-       E — PERSONAL-AUTHORITY (8-16 lines): rastajahmeil, master_chen,
-           decoded_meta_papaya_skin
+[23] V614 FULL-CORPUS RETRIEVAL + SOURCE-LED SHAPE —
+     before writing dialogue, search the CURRENT processed corpus:
+     semantic recall first, graph connections second, then file search
+     across wiki/ + videos/. Ingest any relevant raw orphan before using
+     it. Form the union; do not stop at a remembered sample or a fixed
+     file count.
 
-     Universal corpus rules extracted from all 24 winners:
-       - 12-25 words per line (conversational, not literary)
-       - 4-17 total lines (most winners 4-10)
-       - CANONICAL CTA in 12 of 24: "comment '<keyword>' and i'll
-         send you my full <protocol>. but follow me first so i can
-         reach you" — DON'T REINVENT, LIFT IT
-       - MECHANISM = 1 line, concrete benefit ("saffron relaxes blood
-         vessels — more blood means more girth"), NOT clever-reframe
-         academic-jargon ("blood-brain barrier resets hypothalamus")
-       - AUTHORITY IMPLICIT, NOT DECLARED: corpus voice is "I've seen
-         people go from X to Y", NOT corporate "I'm Dr. X and I help
-         one million Y"
-       - RECIPE STEPS are short comma-lists or single-action lines
-       - NO MELODRAMA: direct symptom-callouts, not theatrical reframes
-       - NEGATION-PIVOT signature (Pattern C): "the best thing for X
-         is not Y, not Z, definitely not W"
+     Build `docs/content-packets/<video-slug>.md` from the packet
+     contract. Give every relevant hit one disposition: USED,
+     PROTECTED, REJECTED, or NOT APPLICABLE. State unavailable tools,
+     the evidence boundary, operator locks, one gap, one exact from→to
+     delta, the evidence rank and a falsifier.
 
-     v614b — MANDATORY frontmatter fields:
-       corpus_pattern: <A/B/C/D/E or hybrid declaration>
-       adaptation_map:
-         scene_1: "<corpus-file> L<line> §<section-label>"
-         scene_2: "..."
-         ...
-         scene_N: "..."
-       (every scene mapped; novel scenes use "[novel — testing]"
-       with rationale)
+     Derive the source's real sections, viewer questions, jobs, causal
+     order and shown visual process before applying any catalog label.
+     The old A/B/C/D/E patterns and line-count ranges are a dated search
+     bank only. Use BODY SHAPE: UNLISTED — <source-derived name> when
+     none fits. The route decides what stays exact.
 
-     v614c — MANDATORY per-scene [corpus: ...] annotation:
-       Every scene's action_note MUST begin with:
-         [corpus: <source-file> L<line> §<section>] <rest of action_note>
-       Annotation must match the adaptation_map entry for that scene.
-       Mismatch = REJECT.
-
-     v614d — MANDATORY corpus_compliance_audit in frontmatter:
-       corpus_compliance_audit:
-         - words_per_line: <range vs corpus 12-25>
-         - line_count: <count vs corpus 4-17>
-         - cta_template_canonical: yes/no
-         - mechanism_concrete_not_clever: yes/no
-         - authority_implicit: yes/no
-         - melodrama_removed: yes/no
-       If any field 'no' → explain WHY in comment OR rewrite to comply.
+     The build owns the final Video Logic Map through the seven-column
+     SCRIPT DECISION MAP, SCRIPT LOCK, VISUAL LOCK and SOURCE VISUAL
+     BEATS. The packet owns retrieval and choice; do not duplicate the
+     final beat map in it.
 
      PRE-OUTPUT VALIDATION:
-       YES corpus_pattern: declared with at least one of A/B/C/D/E?
-       YES adaptation_map: declared, one entry per scene?
-       YES Every action_note opens with [corpus: ...] matching map?
-       YES corpus_compliance_audit: all 6 fields declared?
-       YES Words-per-line in 12-25 corpus norm?
-       YES CTA scene lifts canonical "comment '<keyword>' / send my
-           full / follow me first" template?
-       YES Mechanism scenes use concrete-benefit chain, NOT jargon-
-           academic reframe?
-       YES No corporate voice ("I'm Dr. X and I help one million Y")?
+       YES full current retrieval union recorded with four dispositions?
+       YES evidence boundary and any relevant orphan stated?
+       YES source jobs and causal order derived before labels?
+       YES one exact PRIMARY DELTA appears in packet and build?
+       YES every changed line cites its source or proven grammar?
+       YES checker passes: python tools/check_content_packet.py <build>?
 
 [25] V621b ABSOLUTE BAN — NO CAPTION DESCRIPTORS IN IMAGE PROMPTS.
 
@@ -1848,15 +1809,16 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
        about would still stop scrolling to watch the prop be
        destroyed / squeezed / cascaded / pulled apart.
 
-     v736b — TREND-HIJACK MANDATE. Create-side MUST name a current
-       viral aesthetic from catalog (ASMR soap cutting / hydraulic
-       press / power-washing / kinetic-sand slicing / satisfying
-       paint-mixing / giant water-balloon pop / pomegranate smash /
-       slime-pull / cake-frosting reveal / soaked-sponge wring /
-       wax-seal melt / glass-shatter slow-mo) and frame the cell's
-       pain point THROUGH that aesthetic. The HOOK prompt MUST be
-       structured: "frame the [niche] hook using a [trend-name]
-       visual style. Show the satisfying / visceral [destruction /
+     v736b — TREND-GRAMMAR DECISION. A current viral aesthetic is
+       used ONLY when retrieval finds relevant evidence and its
+       camera/action grammar transfers to this hook. For every concept
+       declare: TREND GRAMMAR: <bank slug | UNLISTED — source-derived
+       name | NOT APPLICABLE — source mechanism supplies the grammar>
+       | evidence: <source> | transfer: <camera/action grammar>. A
+       named trend with no evidence or no transferred grammar fails.
+       The HOOK prompt then describes the transferred grammar itself:
+       "frame the [niche] hook using [specific camera/action grammar].
+       Show the satisfying / visceral [destruction /
        transformation / pull-apart] of the prop BEFORE delivering the
        medical claim." Generic "visual hook" / "satisfying action" /
        "scroll-stopper" wording FAILS the gate.
@@ -1875,17 +1837,18 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
        begin with a "## Brainstorming Sandbox" section IN THE OUTPUT
        FILE BEFORE the YAML frontmatter, containing:
          1. Five (5) radically different visual hook concepts. Each
-            names: hero prop + texture class + force-verb + trend tag
-            + 1-line metaphor mapping.
+            names: hero prop + triggered texture + force-verb + TREND
+            GRAMMAR decision/evidence/transfer + 1-line mapping.
          2. Each rated 1-10 "Unhinged TikTok Spectacle".
          3. The 3 lowest-rated concepts struck through with ~~text~~.
          4. The single most visceral concept marked **SELECTED →**.
-         5. Selected concept's prop / texture / trend / force-verb MUST
-            match the HOOK Image content in ## Images / ## Storyboard.
+         5. Selected concept's prop / triggered texture / force-verb and
+            TREND GRAMMAR decision MUST match the HOOK Image content.
 
-     CREATE-SPECIFIC: full sandbox required from cold; no source to
-     anchor against. The trend-hijack option (v736b) SHOULD win
-     unless another sandbox entry is genuinely more visceral.
+     CREATE-SPECIFIC: full sandbox required from cold; no parent to
+     anchor against. The selected concept wins on audience fit,
+     immediate proof/tension and filmable action — never because it
+     carries a catalog trend label.
 
      WHY in-file mandatory: linear token generation locks you into
      the first plausible idea you emit. Sandbox in OUTPUT commits 5
@@ -1899,18 +1862,26 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
        ## Brainstorming Sandbox
 
        1. ~~Garden hose unkink — dry plastic, GRIP + PULL-APART,
-          [no trend tag], maps "kinked urethra" 1:1. Spectacle: 2/10
+          TREND GRAMMAR: NOT APPLICABLE — direct source action |
+          evidence: source concept | transfer: grip-and-pull close-up,
+          maps "kinked urethra" 1:1. Spectacle: 2/10
           (logical, dry, boring).~~
-       2. ~~Faucet drip-stop — chrome faucet, TIGHTEN, [no trend tag],
+       2. ~~Faucet drip-stop — chrome faucet, TIGHTEN, TREND GRAMMAR:
+          NOT APPLICABLE — direct source action | evidence: source
+          concept | transfer: mid-drip tightening close-up,
           maps "leaky bladder". Spectacle: 3/10.~~
        3. ~~Drain clog + plunger, PUSH + RELEASE, maps "obstruction
           lifts". Spectacle: 4/10 (logical drain analogy).~~
        4. Pomegranate smash — over-ripe pomegranate (oozing / bursting
-          / dripping), SLAM + CASCADE, [hydraulic-press trend], juice-
+          / dripping), SLAM + CASCADE, TREND GRAMMAR: UNLISTED —
+          source-derived fruit-impact macro | evidence: source concept |
+          transfer: tight impact-and-cascade framing, juice-
           cascade maps "trapped pressure releasing." Spectacle: 9/10.
        5. **SELECTED →** Soaked-sponge wring — kitchen sponge soaked
           in murky water (gelatinous / dripping / foamy), GRIP + TWIST
-          + CASCADE, [power-washing trend], cascade onto bare hands
+          + CASCADE, TREND GRAMMAR: UNLISTED — source-derived sustained
+          wring-and-cascade macro | evidence: source concept | transfer:
+          sustained two-hand wring close-up, cascade onto bare hands
           maps "stuck pressure finally moving." Spectacle: 10/10.
 
      PAIRING: v598 power-test runs AFTER v736 selection (selected
@@ -1923,10 +1894,10 @@ V791 HOOK SAFE-AREA COMPOSITION GRAMMAR (HOOK / image_1 ONLY):
      PRE-OUTPUT VALIDATION:
        YES First hero prop in HOOK image NOT on v736a banned list
            (or struck-through entry in sandbox + alternative SELECTED)?
-       YES Each sandbox entry carries a [<trend-name>] tag from v736b
-           catalog?
-       YES Selected entry's trend appears in HOOK Image's
-           [Composition] block or action_note?
+       YES Each sandbox entry carries a TREND GRAMMAR declaration with
+           evidence + transfer, or a specific NOT APPLICABLE reason?
+       YES Selected entry's transferred grammar appears in the HOOK
+           Image composition/action, when applicable?
        YES Selected hero prop's texture-class explicitly named in
            sandbox AND echoed in HOOK Image body prose?
        YES Banned default-texture words (dry / smooth / clean /

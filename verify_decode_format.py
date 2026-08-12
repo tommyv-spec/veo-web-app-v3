@@ -220,6 +220,67 @@ def lint(path):
         dupes = sorted({i for i in imgs if imgs.count(i) > 1})
         fails.append(f"duplicate ### Image N numbers: {dupes}")
 
+    # 6. v890b - a decode's ### Image N block carries the SAME level of detail as
+    #    a build's: a fenced reconstruction prompt you could regenerate the source
+    #    frame from, not a one-line description. Two jobs depend on it - recreating
+    #    the frame with our variables swapped, and comparing backgrounds, palettes,
+    #    props and wardrobe field-by-field across the siblings of a decode family.
+    #    (Operator 2026-08-12: "i need to be able to recreate the images from these
+    #    descriptions... also the decode should have the same level of details,
+    #    because that's what we use to compare variables and constants.")
+    #    Forward-only: decodes written before this rule keep their thin blocks.
+    if imgs:
+        # Forward-only, made MECHANICAL: a decode written on or after the rule
+        # date must comply (FAIL); anything older keeps its thin blocks (WARN).
+        # Prose forward-only rules do not hold - the honest-count rule was broken
+        # twice in the commit that added it - so the era boundary is a date the
+        # linter reads, not a habit.
+        V890B_DATE = "2026-08-12"
+        created = ""
+        cm = re.search(r'^created:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})', t, re.M)
+        if cm:
+            created = cm.group(1)
+        new_era = bool(created) and created >= V890B_DATE
+
+        # Field names may carry an annotation before the colon, e.g.
+        # `- **on-screen text (POST overlay, not rendered):**` - match the NAME.
+        REQUIRED_FIELDS = ("background", "palette", "wardrobe", "props",
+                           "on-screen text", "camera", "lighting")
+
+        def _has_field(body_lc: str, field: str) -> bool:
+            return re.search(r'^\s*[-*]\s*\*\*%s\b[^*:]*:' % re.escape(field),
+                             body_lc, re.M) is not None
+        blocks = re.split(r'^###\s+Image\s+\d+', t, flags=re.M)[1:]
+        thin, missing_fields = [], []
+        for num, body in zip(imgs, blocks):
+            body = re.split(r'^##\s+', body, flags=re.M)[0]
+            if not ("**Image prompt:**" in body and "```" in body):
+                thin.append(num)
+                continue
+            absent = [f for f in REQUIRED_FIELDS if not _has_field(body.lower(), f)]
+            if absent:
+                missing_fields.append("Image %s (%s)" % (num, ", ".join(absent)))
+
+        problems = []
+        if thin:
+            problems.append(
+                "### Image %s carry no fenced `- **Image prompt:**` reconstruction block"
+                % ", ".join(thin)
+            )
+        if missing_fields:
+            problems.append(
+                "comparison fields missing on %s" % "; ".join(missing_fields)
+            )
+        if problems:
+            msg = (
+                "v890b: %s - a decode's image blocks must be REGENERABLE (fenced prompt) and "
+                "COMPARABLE (background/palette/wardrobe/props/on-screen text/camera/lighting), "
+                "same detail level as a build's; compose from stage4d frame_inventory + "
+                "start_frame_spec. Captions stay in the on-screen-text FIELD, never in the prompt."
+                % " AND ".join(problems)
+            )
+            (fails if new_era else warns).append(msg)
+
     status = "FAIL" if fails else "PASS"
     print(f"{path}")
     print(f"  Images {len(imgs)} / Scenes {len(scenes)} / Clips {len(clips)} | {status}")

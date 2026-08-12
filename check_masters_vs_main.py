@@ -41,9 +41,19 @@ import sys
 MASTERS = ("template_reference.md", "template_new_format.md", "template_omni_master.md")
 RULE_HEADING = re.compile(r"(?m)^#{2,4} (v[0-9][0-9a-zA-Z._-]*)")
 
+# The masters live next to this script, inside the `code/` submodule. Every git
+# command and every file read is anchored HERE, so the script gives the same
+# answer whether you run it from `code/` or as `python code/check_masters_vs_main.py`
+# from the wiki root. Before 2026-08-10 it used bare relative paths: from the root
+# it read the ROOT repo (which has no upstream) and reported "cannot read
+# origin/main — is the remote fetched?", which sent readers off fetching a remote
+# that was already fetched.
+HERE = os.path.dirname(os.path.abspath(__file__))
+
 
 def git(*args):
-    return subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8")
+    return subprocess.run(["git", *args], capture_output=True, text=True,
+                          encoding="utf-8", cwd=HERE)
 
 
 def show(ref, path):
@@ -54,9 +64,10 @@ def show(ref, path):
 def read_local(ref, path):
     if ref:
         return show(ref, path)
-    if not os.path.isfile(path):
+    full = os.path.join(HERE, path)
+    if not os.path.isfile(full):
         return None
-    with open(path, encoding="utf-8") as fh:
+    with open(full, encoding="utf-8") as fh:
         return fh.read()
 
 
@@ -77,7 +88,15 @@ def main(argv):
         git("fetch", "-q", remote, branch or "main")
 
     if show(args.main, MASTERS[0]) is None:
-        sys.stderr.write("cannot read %s — is the remote fetched?\n" % args.main)
+        # Separate the two failures instead of blaming the fetch for both.
+        if git("rev-parse", "--verify", "--quiet", args.main).returncode != 0:
+            sys.stderr.write(
+                "cannot resolve ref %s in %s — run with --fetch, or check the remote name.\n"
+                % (args.main, HERE))
+        else:
+            sys.stderr.write(
+                "%s resolves, but it has no %s — wrong ref or the masters moved.\n"
+                % (args.main, MASTERS[0]))
         return 2
 
     branch = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()

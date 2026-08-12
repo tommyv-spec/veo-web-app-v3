@@ -560,23 +560,41 @@ INNOVATE PROCESS (mirrors operator's internal workflow — follow exactly):
 Step 1 — DECOMPOSE the outside-niche source (extract winning structure)
   Read the outside-niche reference. Name explicitly:
 
-  - HOOK family — match to wiki/patterns/hook-openings-catalog.md taxonomy
-    (SHAME-PROXY / VISCERAL-DESTRUCTION sub-variant /
-    VICARIOUS-SHOW-THE-PROBLEM / CURIOSITY-GAP / BEFORE-AFTER / etc.)
-    AND name the v598 power-test answers (Q1-Q8) the source passes.
-  - Pattern (v614 A/B/C/D/E) — BEFORE/AFTER / RECIPE-LED /
-    DIAGNOSTIC-PIVOT / CULTURAL-AUTHORITY / PERSONAL-AUTHORITY
+  - HOOK job — derive what the opening makes the viewer notice, feel,
+    ask and wait for. Then compare it with the open hook bank. Use
+    `UNLISTED — <source-derived hook job>` when no bank label fits.
+  - BODY SHAPE — derive the source's actual section jobs and causal
+    order. A/B/C/D/E remain optional historical search tags only.
   - Force-verb action_arc (v697) — chain of FORCE-verbs the source uses
     (LIFT/SLAM/POUR/CASCADE/SQUEEZE/PRESENT/SCATTER/etc.)
   - Mechanism — concrete-benefit line the source's payoff scene delivers
   - CTA shape — canonical "comment X / follow me first" or variant
-  - Persona archetype — folk-wisdom-elder / clinic-glam / cultural-authority
+  - Persona authority — name the source's actual trust signal and its
+    visible anchors; use an unlisted source-derived name when needed
+
+Step 1.5 — RETRIEVE THE FULL UNION + CREATE THE EVIDENCE PACKET
+  Before choosing the direction, run semantic recall, inspect graph
+  connections, then file-search the current processed corpus across wiki/
+  and videos/. Ingest any relevant raw orphan before using it. List every
+  relevant same-niche, cross-niche, same-style and cross-style hit.
+
+  Create `docs/content-packets/<video-slug>.md` from the packet contract.
+  Give every relevant hit exactly one disposition: USED, PROTECTED,
+  REJECTED, or NOT APPLICABLE. State unavailable retrieval services and
+  the evidence boundary. Record operator locks, evidence rank, one primary
+  gap, one exact from→to PRIMARY DELTA, and a falsifier. The packet owns
+  retrieval and choice; it does not duplicate the final beat map.
+
+  The matching build §0 must point back with:
+    EVIDENCE PROGRAM: v1
+    EVIDENCE PACKET: docs/content-packets/<video-slug>.md
+    PACKET STATUS: DIRECTION LOCKED | PRODUCTION COMPLETE | RESULT RECORDED
 
 Step 2 — DECIDE what to KEEP vs SWAP (preserve-swap method per
   wiki/concepts/script-adaptation/preserve-swap-framework.md)
   KEEP (80% — the structural skeleton):
-    - HOOK family + force-verb chain
-    - Pattern (A/B/C/D/E)
+    - HOOK job + force-verb chain
+    - source section jobs + causal order
     - Scene count + clip rhythm
     - CTA template shape
     - Mechanism BEAT (not the mechanism's words — the rhetorical move)
@@ -584,9 +602,9 @@ Step 2 — DECIDE what to KEEP vs SWAP (preserve-swap method per
   SWAP (20% — the surface):
     - Niche — outside-niche source's niche → target cell's niche
     - Persona — outside-niche persona → target cell's persona
-    - Setting — match target persona's authority pairing
-      (folk-elder → rustic outdoor / clinic-glam → T2 exam room /
-      apothecary → T1 herb-jar wall)
+    - Setting — rebuild the source authority function in a §8-safe home,
+      retail, outdoor, premium-wellness or cultural setting; no clinic,
+      scrubs, exam room, diploma wall or medical-authority staging
     - Product placement — target Korella product per v599 matrix
       (reveal at recipe product-cascade scene + CTA hero-shot)
     - Pain points — target cell's audience x niche vocabulary
@@ -600,7 +618,8 @@ Step 3 — APPLY the innovation moves from
   make-sense / function-transfer test on every borrowed atom).
   Mandatory rules:
     - Innovation must pull from corpus (never hallucinate)
-    - Source's HOOK power-test signal must survive the port (Q1-Q8 still pass)
+    - Source's hook job and v873 coherence/tension/filter contract survive
+      the port; v598's old Q6/Q8 lists apply only when their family triggers
     - Mechanism remains concrete-benefit (1 line, not jargon-academic)
     - Authority implicit, never declared corporate-style
     - CTA template canonical, not reinvented
@@ -621,10 +640,11 @@ Step 4 — APPLY recent v-rules (mandatory, easy to miss)
     NO v604 verbose body-line form (`Use image_K as the exact base frame...`)
 
 Step 5 — OUTPUT shape (per code/template_new_format.md skeleton)
-  YAML frontmatter:
-    persona / niche / audience / cell / corpus_pattern / adaptation_map /
-    corpus_compliance_audit (v614)
-    HOOK family declared + force-verb chain declared
+  §0 decision block:
+    persona / niche / audience / cell / METHOD / BODY SHAPE
+    EVIDENCE PROGRAM / EVIDENCE PACKET / PACKET STATUS / PRIMARY DELTA
+    SCRIPT DECISION MAP / SCRIPT LOCK / VISUAL LOCK / SOURCE VISUAL BEATS
+    hook job declared + force-verb chain declared
   ## Sources — cite outside-niche reference + ≥1 cross-validating Korella
     corpus parent
   ## Ingredients — 5-column table WITH `Attached to` column (v707)
@@ -634,8 +654,8 @@ Step 5 — OUTPUT shape (per code/template_new_format.md skeleton)
   ## Storyboard — Scene N blocks with `image:` / `clip_mode:` (BLEND or FRESH)
     / `speaker:` / `action_arc:` / `- **line:**` (lowercase, ~20w) /
     `- **action_note:**` (single-line prose with [Start/Mid/End beat] markers)
-  ## Comprehension — structural inventory + v-rule inventory + rhetorical
-    structure + persona+setting + corpus_compliance_audit
+  ## Comprehension — structural inventory + v-rule inventory + source-led
+    causal structure + persona/setting authority read
   ## Veo 3.1 Final Prompts — per clip
 
 Step 6 — PRE-OUTPUT VALIDATION GATES (mandatory — fix and re-emit if any fail)
@@ -653,8 +673,11 @@ Step 6 — PRE-OUTPUT VALIDATION GATES (mandatory — fix and re-emit if any fai
   Gate 10 — chained Image bodies have NO `Use image_K as the exact base frame...`
     line (v707 Part B)
   Gate 11 — clip transitions are BLEND or FRESH only (v704)
-  Gate 12 — HOOK image passes v598 Q1-Q8 power-test
-  Gate 13 — corpus_pattern declared + adaptation_map covers every scene (v614)
+  Gate 12 — HOOK passes v873 coherence + tension + audience filter; apply
+    v598 family-conditional checks only when their evidence trigger is present
+  Gate 13 — Evidence Packet exists, every retrieval row has one of the four
+    dispositions, packet/build paths point to each other, and PRIMARY DELTA
+    matches exactly: `python tools/check_content_packet.py <build.md>` PASS
   Gate 14 — v712 decode-side relational composition grammar applied
     (subject-anchored, not coordinate-grid)
   Gate 15 — v713 Banana-2-attached-reference composition discipline
@@ -1118,11 +1141,13 @@ V736 — SPECTACLE-OVER-LOGIC DISCIPLINE (apply BEFORE writing markdown):
   destroyed / squeezed / cascaded / pulled apart.
 
   ----------------------------------------------------------------
-  v736b — TREND-HIJACK MANDATE
+  v736b — TREND-GRAMMAR DECISION
   ----------------------------------------------------------------
 
-  Innovation MUST explicitly name a current viral aesthetic and frame
-  the pain point THROUGH that aesthetic. Catalog:
+  Start with the selected sources' own visual grammar. Use a current
+  viral aesthetic only when retrieval finds relevant evidence and its
+  camera/action grammar transfers to the target hook. The bank below
+  is open comparison evidence, not a mandatory menu:
 
     ASMR soap cutting (curls of soap, satisfying slice)
     Hydraulic press crushing (industrial press flattens / explodes)
@@ -1137,15 +1162,15 @@ V736 — SPECTACLE-OVER-LOGIC DISCIPLINE (apply BEFORE writing markdown):
     Wax-seal melt / candle-melt (controlled drip, hardening)
     Glass-shatter slow-mo (fragments suspended, light catches)
 
-  The HOOK MUST be framed as: "you MUST frame the [niche] hook using
-  a [trend-name] visual style. Show the satisfying / visceral
-  [destruction / transformation / pull-apart] of the prop BEFORE
-  delivering the medical claim."
+  Every sandbox concept declares:
+  TREND GRAMMAR: <bank slug | UNLISTED — source-derived name | NOT
+  APPLICABLE — source mechanism supplies the grammar> | evidence:
+  <source> | transfer: <the exact camera/action grammar used>.
 
-  The trend-name MUST be named explicitly. Generic "visual hook" /
-  "satisfying action" / "scroll-stopper" wording FAILS the gate.
-  The trend brings its own visual grammar — composition / lighting /
-  framing — that you don't have to invent.
+  A named trend with no evidence or no transferred grammar fails. A
+  source-owned mechanism needs no pasted trend. When applicable, the
+  HOOK prompt describes the transferred composition, lighting,
+  framing and action rather than merely naming the trend.
 
   ----------------------------------------------------------------
   v736c — UNCOMFORTABLE-TEXTURE MANDATE
@@ -1190,8 +1215,8 @@ V736 — SPECTACLE-OVER-LOGIC DISCIPLINE (apply BEFORE writing markdown):
   The sandbox MUST contain:
 
     1. Five (5) radically different visual hook concepts. Each concept
-       names: hero prop + texture class (v736c) + force-verb action
-       (v697) + trend-hijack tag (v736b) + 1-line metaphor mapping.
+       names: hero prop + triggered texture state (v736c) + action
+       (v697) + TREND GRAMMAR declaration (v736b) + 1-line mapping.
 
     2. Each concept rated 1-10 on "Unhinged TikTok Spectacle" — 10 =
        absurd / visceral / can't-look-away; 1 = boring / corporate /
@@ -1203,9 +1228,8 @@ V736 — SPECTACLE-OVER-LOGIC DISCIPLINE (apply BEFORE writing markdown):
     4. The single most visceral / scroll-stopping concept MUST be
        marked **SELECTED →**.
 
-    5. The selected concept's hero prop / texture / trend / force-verb
-       chain MUST match what appears in ## Images / ## Storyboard for
-       the HOOK image.
+    5. The selected concept's hero prop / triggered texture / force-verb
+       and TREND GRAMMAR decision MUST match what appears in the HOOK.
 
   WHY mandatory in-file (not chat-side): linear token generation locks
   YOU into the FIRST plausible idea you emit. By forcing the sandbox
@@ -1220,21 +1244,28 @@ V736 — SPECTACLE-OVER-LOGIC DISCIPLINE (apply BEFORE writing markdown):
     ## Brainstorming Sandbox
 
     1. ~~Garden hose unkink — dry plastic hose, GRIP + PULL-APART
-       force-verb, [no trend tag], maps "kinked urethra" 1:1.
+       force-verb, TREND GRAMMAR: NOT APPLICABLE — direct source
+       action | evidence: source concept | transfer: grip-and-pull
+       close-up, maps "kinked urethra" 1:1.
        Spectacle: 2/10 (logical, dry, boring).~~
     2. ~~Faucet drip-stop — chrome faucet, TIGHTEN force-verb,
-       [no trend tag], maps "leaky bladder". Spectacle: 3/10
+       TREND GRAMMAR: NOT APPLICABLE — direct source action | evidence:
+       source concept | transfer: mid-drip tightening close-up,
+       maps "leaky bladder". Spectacle: 3/10
        (clean metal, predictable).~~
     3. ~~Drain clog clear — drain + plunger, PUSH + RELEASE,
        "satisfying clog clears", maps "obstruction lifts".
        Spectacle: 4/10 (logical drain analogy).~~
     4. Pomegranate smash — over-ripe pomegranate (oozing / bursting /
-       dripping per v736c), SLAM + CASCADE force-verb, [hydraulic-
-       press trend per v736b], juice-cascade maps "trapped pressure
+       dripping per v736c), SLAM + CASCADE force-verb, TREND GRAMMAR:
+       UNLISTED — source-derived fruit-impact macro | evidence: source
+       concept | transfer: tight impact-and-cascade framing, juice-cascade maps "trapped pressure
        releasing." Spectacle: 9/10.
     5. **SELECTED →** Soaked-sponge wring — kitchen sponge soaked in
        murky water (gelatinous / dripping / foamy per v736c), GRIP +
-       TWIST + CASCADE force-verb, [power-washing trend per v736b],
+       TWIST + CASCADE force-verb, TREND GRAMMAR: UNLISTED —
+       source-derived sustained wring-and-cascade macro | evidence:
+       source concept | transfer: sustained two-hand wring close-up,
        cascade onto practitioner's bare hands maps "stuck pressure
        finally moving." Spectacle: 10/10 (texture + cascade +
        visible release; sustains through full 8s force-verb arc).
@@ -1243,8 +1274,8 @@ V736 — SPECTACLE-OVER-LOGIC DISCIPLINE (apply BEFORE writing markdown):
 
     - HOOK image only. Body / mechanism / RESULT / CTA scenes don't
       need sandbox treatment.
-    - Innovate-side SHOULD pick trend-hijack option (v736b) as winner
-      unless another sandbox entry is genuinely more visceral.
+    - Select on audience fit, immediate proof/tension, source-function
+      transfer and filmable action — never because a trend tag exists.
     - When the outside-niche source HOOK already passes v736a + v736b
       + v736c, sandbox MUST cite the source as one of the 5 entries
       and may select it as winner.

@@ -5432,6 +5432,19 @@ def _parse_batch_doc_metadata(md_text: str) -> Dict[str, Any]:
 class ImportSceneTableRequest(BaseModel):
     markdown: str
     subject_node_id: int  # upload node to use as subject (image 1)
+    # v891 — RESYNC. A build that has already been imported gets corrected in
+    # place instead of forking a second batch. Pass the existing batch id and
+    # the importer reuses that batch: every scene whose freshly-parsed prompt
+    # differs from the stored one is UPDATED and reset to draft so it
+    # regenerates; scenes whose prompt is unchanged are left completely alone,
+    # keeping their generated variants and the operator's picks. Scenes that do
+    # not exist yet in the batch are created. Nothing is ever deleted.
+    #
+    # Why this exists: before v891 the only way to fix one wrong prompt in a
+    # sent build was to import the whole markdown again, which minted a new
+    # batch and orphaned every variant already chosen. (Operator 2026-08-12:
+    # "don't repush it new, but correct the build you sent to the platform".)
+    resync_batch_id: Optional[str] = None
     aspect_ratio: str = "9:16"
     resolution: str = "2K"
     model: str = "nano_banana_2"
@@ -6220,7 +6233,26 @@ def _import_scene_table_impl(
     # node from this import will carry this batch_id.
     import uuid as _uuid
     import json as _json
-    batch_id = str(_uuid.uuid4())
+    # v891 — resync reuses the caller's batch instead of minting a new one.
+    resync_batch = None
+    if req.resync_batch_id:
+        resync_batch = db.query(ImageJobBatch).filter(
+            ImageJobBatch.id == req.resync_batch_id,
+            ImageJobBatch.user_id == current_user.id,
+        ).first()
+        if resync_batch is None:
+            raise HTTPException(
+                404,
+                f"resync_batch_id {req.resync_batch_id} not found for this user. "
+                "Omit it to import as a new batch."
+            )
+        batch_id = resync_batch.id
+        # TEMP DIAGNOSTIC (v891, remove once a real resync is confirmed in prod):
+        # prove the resync branch was taken and against which batch.
+        print(f"[image_platform] v891 RESYNC start: batch={batch_id} "
+              f"user={current_user.id}", flush=True)
+    else:
+        batch_id = str(_uuid.uuid4())
     doc_meta = _parse_batch_doc_metadata(req.markdown)
 
     # Derive a human-readable batch name. Priority:
@@ -6753,6 +6785,9 @@ def _import_scene_table_impl(
     # data lives in ImageSceneAssignment rows.
 
     created_nodes_by_image_index: Dict[int, ImageNode] = {}
+    # v891 — per-scene resync outcome, surfaced in the response so the caller
+    # can see exactly what changed rather than guessing.
+    resync_report = {"updated": [], "unchanged": [], "created": []}
     queued_count = 0
     draft_count = 0
 
@@ -6868,9 +6903,45 @@ def _import_scene_table_impl(
                 else None
             ),
         )
-        db.add(node)
-        db.flush()
-        created_nodes_by_image_index[image_index] = node
+        # v891 — in resync mode reuse the existing scene node so the operator's
+        # already-generated variants and picks survive. Only a node whose prompt
+        # actually changed is rewritten and reset; an unchanged one is left
+        # untouched and its edges are not rebuilt.
+        existing = None
+        if resync_batch is not None:
+            existing = db.query(ImageNode).filter(
+                ImageNode.batch_id == batch_id,
+                ImageNode.scene_index_in_batch == image_index,
+                ImageNode.user_id == current_user.id,
+            ).first()
+
+        if existing is not None:
+            if (existing.prompt or "") == (final_prompt or ""):
+                resync_report["unchanged"].append(image_index)
+                created_nodes_by_image_index[image_index] = existing
+                db.flush()
+                continue
+            # Prompt changed -> rewrite this node and send it back to draft so
+            # the worker regenerates it. Old parent edges are cleared here
+            # because the binding block below re-attaches them from scratch;
+            # leaving them would double-bind the references.
+            existing.prompt = final_prompt
+            existing.aspect_ratio = img.get("aspect_ratio") or req.aspect_ratio
+            existing.n_variants = img.get("n_variants") or req.n_variants
+            existing.status = "draft"
+            existing.chosen_variant_index = None
+            db.query(ImageEdge).filter(ImageEdge.child_id == existing.id).delete(
+                synchronize_session=False)
+            node = existing
+            resync_report["updated"].append(image_index)
+            db.flush()
+            created_nodes_by_image_index[image_index] = node
+        else:
+            db.add(node)
+            db.flush()
+            created_nodes_by_image_index[image_index] = node
+            if resync_batch is not None:
+                resync_report["created"].append(image_index)
 
         # v509: ingredient-based binding (when ingredients block + node mapping present)
         # —————————————————————————————————————————————————————————————
@@ -7796,6 +7867,14 @@ def _import_scene_table_impl(
 
     db.commit()
 
+    if resync_batch is not None:
+        # TEMP DIAGNOSTIC (v891): the per-scene outcome, so operator-side logs
+        # show exactly what a resync rewrote versus left alone.
+        print(f"[image_platform] v891 RESYNC done: batch={batch_id} "
+              f"updated={resync_report['updated']} "
+              f"unchanged={len(resync_report['unchanged'])} "
+              f"created={resync_report['created']}", flush=True)
+
     return {
         "batch_id": batch_id,
         "batch_name": batch_name,
@@ -7804,6 +7883,17 @@ def _import_scene_table_impl(
         "queued": queued_count,
         "waiting_on_parent": draft_count,
         "scene_assignments_created": assignments_created,
+        # v891 — present only on a resync, so the caller sees exactly which
+        # scenes were rewritten versus left alone with their picks intact.
+        "resync": (
+            {
+                "batch_id": batch_id,
+                "updated": resync_report["updated"],
+                "unchanged": resync_report["unchanged"],
+                "created": resync_report["created"],
+            }
+            if resync_batch is not None else None
+        ),
         "scene_nodes": {
             str(idx): {"node_id": n.id, "status": n.status}
             for idx, n in created_nodes_by_image_index.items()

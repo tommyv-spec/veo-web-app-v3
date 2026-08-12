@@ -119,17 +119,16 @@ python -c "import re; t=open('videos/<file>.md',encoding='utf-8').read(); print(
 
 ANY vision-capable LLM that satisfies Stage 4d input/output contract is valid decode provider.
 
-**Provider priority** (default to #1 inside Claude Code session):
-1. **Claude in-session** (free for operator, Read tool's PNG image support) — DEFAULT for any decode run inside Claude Code
-2. **LM Studio (local, free)** — vision-capable GGUF + local server at `:1234`
-3. **Gemini API** (paid) — `GEMINI_API_KEY` set; native MP4 upload best for motion-heavy videos
+**Provider priority** (operator 2026-08-12: "we don't need to read all the frames, that's why we had gemini implemented" — Gemini is now the DEFAULT decode reader; Claude in-session is the fallback, not the default):
+1. **Gemini API** — DEFAULT for every Stage 4d read. `python code/v589_video_understanding.py <mp4> --provider gemini --thinking low` (add `--fps 4` on fast-cut sources). Accepts the decode-reel skill outputs DIRECTLY: auto-finds `hardcut*/clips.tsv` (converted in-loader), `<stem>.json` whisper transcript, computes Farneback motion inline when `motion.json` is absent, and reads `GEMINI_API_KEY` from the Windows USER registry when the shell didn't inherit it. Default `gemini-3.6-flash` (2.5-flash rejects NEW keys); per-call cost logged to `output/gemini_costs.jsonl`, report via `--costs`. **Known network trap:** Surfshark WireGuard MTU blackholes the MP4 upload (small GETs pass, upload dies with `httpx.RemoteProtocolError`) — fix is `netsh interface ipv4 set subinterface "SurfsharkWireGuard" mtu=1280 store=persistent` (elevated), per `surfshark-github-mtu-blackhole`.
+2. **Claude in-session** (free for operator, Read tool image support) — FALLBACK when Gemini is unavailable; frames read count toward the coverage gate honestly
 4. **OpenAI GPT-4o-vision** (paid) — `OPENAI_API_KEY`
 5. **Anthropic Claude API direct** (paid) — `ANTHROPIC_API_KEY`
 6. **Ollama local vision model** (free) — `llava` / `llama3.2-vision`
 7. **OpenRouter** (paid gateway)
 8. **Human-walk template** (always-available fallback)
 
-Stage 4d input/output contract + provider catalog at `wiki/meta/decode-grammar-checklist.md` §"Stage 4d LLM provider catalog (v595)". Unchanged regardless of provider: v578 whisper / v585 Farneback motion / v588 ffmpeg / v594 consolidation.
+**Output contract = `stage4d.v2`** (2026-08-11): top-level OBJECT (`schema_version` + `observed_people` + ordered `shots`), mandatory per-shot `forensic_perception` + `action_arc.kinematics`/`.morphology` + `motion_cross_check`; inputs require `motion.json` alongside `shots.json` + `transcript.json`. Validate ANY provider's saved artifact: `python code/v589_video_understanding.py --validate-stage4d <json> --shots <shots.json>`. Deep-dive + full schema: `code/template_reference.md` §v589 Half A + §v595; provider catalog quickref also at `wiki/meta/decode-grammar-checklist.md` §"Stage 4d LLM provider catalog (v595)". Unchanged regardless of provider: v578 whisper / v585 Farneback motion / v588 ffmpeg / v594 consolidation.
 
 ---
 
