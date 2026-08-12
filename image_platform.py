@@ -1218,7 +1218,16 @@ class ImageVariant(Base):
             # Same URL would hit the stale cached redirect → ERR_TIMED_OUT
             # for ISP-blocked users. New URL = new cache key = forced
             # revalidation → post-v695 endpoint returns bytes directly.
-            "image_url": f"/api/images/files/{self.image_path}?v={self.id}&cb=v695",
+            # v891.5b — bumped v695 -> v891. Every variant URL served before
+            # v891.5 carried `public, max-age=31536000, immutable`, so those
+            # entries are pinned in the browser for a YEAR and a normal reload
+            # will not revalidate them. Fixing the header only governs NEW
+            # entries; the already-stored ones keep repainting the old picture,
+            # which is why a scene looked fixed and then reverted. Changing the
+            # token changes the cache KEY, so the stale entries become
+            # unreachable and every image is refetched once under the new
+            # revalidating header. Same remedy v695b used for the same reason.
+            "image_url": f"/api/images/files/{self.image_path}?v={self.id}&cb=v891",
             # v530: source = 'ai' or 'manual'. UI uses this to render the
             # 'M' badge / folder icon on manual variants.
             "source": self.source or 'ai',
