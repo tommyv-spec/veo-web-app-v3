@@ -45,6 +45,7 @@ Output: stage4d_vlm.json next to the input video (or per --out).
 """
 from __future__ import annotations
 import argparse
+import copy
 import json
 import os
 import sys
@@ -65,6 +66,28 @@ PRIMARY_CHANGE_AXES = [
     "NONE",
 ]
 MORPHOLOGY_MAGNITUDES = ["COMPLETE", "PARTIAL", "MINIMAL", "NONE"]
+
+# ── Reading profiles (2026-08-12) ─────────────────────────────────────
+# One decode engine, per-format reading profiles. "ugc-reel" is the default
+# and is byte-identical to the pre-profile behavior. "fbads-video" reads
+# paid Facebook-ad creatives: same per-shot protocol PLUS a top-level
+# ad_read block (offer / CTA / overlays / captions / sound-off / end card).
+
+FBADS_EXTRA_CONTEXT = (
+    "This video is a PAID Facebook/Instagram AD CREATIVE (direct response), "
+    "not an organic reel. On top of the per-shot protocol, fill the top-level "
+    "ad_read object: capture every offer element (price, discount, bundle, "
+    "guarantee, urgency/scarcity), every CTA quoted verbatim (spoken + overlay "
+    "+ end card), the full overlay-text timeline, burned-caption style, what a "
+    "MUTED viewer understands (most ad views are sound-off), aspect ratio and "
+    "whether key content sits in center-safe zones, the end card, and every "
+    "logo/product appearance with MM:SS timing.\n\n"
+)
+
+PROFILES = {
+    "ugc-reel": {"extra_context": "", "ad_read": False},
+    "fbads-video": {"extra_context": FBADS_EXTRA_CONTEXT, "ad_read": True},
+}
 
 
 def _string_schema(description: str) -> dict:
@@ -377,6 +400,61 @@ STAGE4D_JSON_SCHEMA = {
         "shots": {"type": "array", "minItems": 1, "items": PER_SHOT_SCHEMA},
     },
 }
+
+AD_READ_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "offer", "cta", "overlay_text_timeline", "captions",
+        "sound_off_comprehension", "aspect_ratio", "end_card", "brand_assets",
+    ],
+    "properties": {
+        "offer": _string_schema(
+            "Every offer element shown or spoken: price, discount, bundle, "
+            "guarantee, urgency/scarcity. 'NONE' if absent."),
+        "cta": _string_schema(
+            "Every call-to-action: spoken line(s), overlay text, end-card "
+            "wording. Quote exactly. 'NONE' if absent."),
+        "overlay_text_timeline": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["time", "text", "style"],
+                "properties": {
+                    "time": _string_schema("MM:SS the overlay appears."),
+                    "text": _string_schema("Exact overlay text, verbatim."),
+                    "style": _string_schema(
+                        "Weight/color/position/animation in plain words."),
+                },
+            },
+        },
+        "captions": _string_schema(
+            "Burned-in captions: present or absent, style, position, and how "
+            "closely they track the spoken words."),
+        "sound_off_comprehension": _string_schema(
+            "What a MUTED viewer understands from 0-3s and from the whole ad. "
+            "Name the visual elements doing that work."),
+        "aspect_ratio": _string_schema(
+            "e.g. 9:16, 4:5, 1:1 — plus whether key content sits inside "
+            "center-safe zones."),
+        "end_card": _string_schema(
+            "Final-frame card: product, logo, offer text, CTA button mock. "
+            "'NONE' if the ad just ends."),
+        "brand_assets": _string_schema(
+            "Every logo / product-pack appearance with MM:SS timing."),
+    },
+}
+
+
+def schema_for_profile(profile: str) -> dict:
+    """Stage 4d response schema for a reading profile. Default = unchanged."""
+    schema = copy.deepcopy(STAGE4D_JSON_SCHEMA)
+    if PROFILES[profile]["ad_read"]:
+        schema["properties"]["ad_read"] = AD_READ_SCHEMA
+        schema["required"] = list(schema.get("required", [])) + ["ad_read"]
+    return schema
+
 
 SYSTEM_INSTRUCTION = """\
 You are a video-understanding assistant for a video reverse-engineering pipeline.
@@ -698,17 +776,18 @@ LAST resort, never on the primary subject geometry sentence.
 
 
 def build_user_prompt(shots: list, transcript_summary: str, motion: object,
-                      include_schema: bool = True, extra_context: str = "") -> str:
+                      include_schema: bool = True, extra_context: str = "",
+                      profile: str = "ugc-reel") -> str:
     # <context>/<task>/<final_instruction> structure per the official Gemini 3
     # prompt-design template (ai.google.dev/gemini-api/docs/prompting-strategies,
     # read 2026-08-11). Data first, then the task, then the closing reminder.
     schema_block = (
-        f"Stage 4d JSON schema:\n{json.dumps(STAGE4D_JSON_SCHEMA, indent=2)}\n\n"
+        f"Stage 4d JSON schema:\n{json.dumps(schema_for_profile(profile), indent=2)}\n\n"
         if include_schema else ""
     )
     return (
         "<context>\n"
-        f"{extra_context}"
+        f"{PROFILES[profile]['extra_context']}{extra_context}"
         f"Shots:\n{json.dumps(shots, indent=2)}\n\n"
         f"Whisper transcript (authoritative for dialogue):\n{transcript_summary}\n\n"
         f"Motion classifications (cross-check; visual evidence wins):\n{json.dumps(motion, indent=2)}\n\n"
