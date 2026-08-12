@@ -7719,6 +7719,20 @@ def _import_scene_table_impl(
         db.flush()
 
     # ===== PHASE 2: Create ImageSceneAssignment rows =====
+    # v891 — a resync re-creates every assignment below, so the batch's existing
+    # rows must go first. Without this the table gains a second full set on each
+    # resync (proven live: one resync turned 20 scene rows into 40), which
+    # corrupts the scene list the video promotion replays. Deleting only the
+    # assignment rows for THIS batch, immediately before they are rebuilt from
+    # the same markdown, keeps the operation a true replace.
+    if resync_batch is not None:
+        _stale = db.query(ImageSceneAssignment).filter(
+            ImageSceneAssignment.batch_id == batch_id
+        ).delete(synchronize_session=False)
+        db.flush()
+        print(f"[image_platform] v891 RESYNC: cleared {_stale} stale scene "
+              f"assignment row(s) for batch={batch_id} before rebuild", flush=True)
+
     #
     # One row per scene in the storyboard. Each row links a scene to an
     # ImageNode (the image to display) and captures the per-scene video
