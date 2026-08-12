@@ -6280,7 +6280,11 @@ def _import_scene_table_impl(
     # Per-user scope (v447): your batch names are independent of other
     # users'. "Nightcap" belonging to user A doesn't block user B from
     # also having a "Nightcap".
-    existing = db.query(ImageJobBatch).filter(
+    # v891 — a resync deliberately targets an existing batch, so its name is
+    # SUPPOSED to match. The duplicate-name guard exists to stop a second batch
+    # quietly shadowing the first; that cannot happen when we are writing back
+    # into the very batch the caller named.
+    existing = None if resync_batch is not None else db.query(ImageJobBatch).filter(
         ImageJobBatch.name == batch_name,
         ImageJobBatch.user_id == current_user.id,
     ).first()
