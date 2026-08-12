@@ -2298,8 +2298,16 @@ def _process_done_file_sync(done_file: Path):
             db.flush()
 
             # Create new variants — store paths relative to images_root()
+            # v891.2 - start after any SURVIVING variant. v559 keeps manual
+            # uploads through a regenerate, so numbering fresh AI variants from
+            # 1 collided with a manual variant already holding 1.
+            _kept_idx = [
+                v.variant_index for v in node.variants
+                if v.variant_index is not None
+            ]
+            _start_idx = (max(_kept_idx) + 1) if _kept_idx else 1
             n_added = 0
-            for idx, rel_or_abs in enumerate(output_paths, start=1):
+            for idx, rel_or_abs in enumerate(output_paths, start=_start_idx):
                 p = Path(rel_or_abs)
                 if not p.is_absolute():
                     p = output_dir / p
@@ -6985,7 +6993,20 @@ def _import_scene_table_impl(
             existing.aspect_ratio = img.get("aspect_ratio") or req.aspect_ratio
             existing.n_variants = img.get("n_variants") or req.n_variants
             existing.status = "draft"
-            existing.chosen_variant_index = None
+            # v891.1 - the column is chosen_variant_id. `chosen_variant_index`
+            # is not on the model, so assigning it just set a stray Python
+            # attribute and the pick was never cleared: a resynced node kept
+            # pointing at an image generated from the SUPERSEDED prompt (live
+            # proof, node 4860 - prompt rewritten 18:45, still chosen to a
+            # 14:30 variant made from the old text). Clearing it is the whole
+            # point of sending the node back to draft for regeneration.
+            _v891_stale_pick = existing.chosen_variant_id
+            existing.chosen_variant_id = None
+            # TEMP DIAGNOSTIC (v891.1) - remove once seen in Render logs.
+            log.info(
+                f"[v891.1 RESYNC] node {existing.id} (image_{image_index}) prompt rewritten; "
+                f"cleared stale pick variant_id={_v891_stale_pick}"
+            )
             db.query(ImageEdge).filter(ImageEdge.child_node_id == existing.id).delete(
                 synchronize_session=False)
             node = existing
@@ -13060,10 +13081,23 @@ def worker_upload_variants(
                 f"(status={node2.status}, cg_status={node2.cg_status}) but no manual variant — "
                 f"inserting worker variants anyway (avoids empty-node 'no variants' failure)"
             )
-        for idx, filename, rel_str, target in pending_variants:
+        # v891.2 - number these AFTER any variant already on the node. The
+        # worker hands us indices 1..N for ITS delivery; writing them raw meant
+        # a node fed by two lanes (chatgpt + banana) ended up with two rows
+        # claiming index 1, and the gallery labels tiles by variant_index, so
+        # the operator saw two tiles both called "1" in an unstable order.
+        # Renders were never wrong - those resolve by chosen_variant_id - but
+        # the picker was unreadable. Same guard the manual-upload path uses.
+        _existing_idx = [
+            r[0] for r in db2.query(ImageVariant.variant_index).filter(
+                ImageVariant.node_id == node2.id).all()
+            if r[0] is not None
+        ]
+        _next_idx = (max(_existing_idx) + 1) if _existing_idx else 1
+        for offset, (idx, filename, rel_str, target) in enumerate(pending_variants):
             v = ImageVariant(
                 node_id=node2.id,
-                variant_index=idx,
+                variant_index=_next_idx + offset,
                 image_path=rel_str,
                 backend=(backend or "banana"),
             )
