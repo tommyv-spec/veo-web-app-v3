@@ -683,7 +683,18 @@ def assert_video_attached(page, mp4, timeout_s=240):
 
 def send(page, prompt):
     box = find(page, "composer", timeout_ms=15000)
-    box.click()
+    # Do not depend on the composer being CLICKABLE. With ten attachment chips
+    # above it the box resolves but never settles as "visible, enabled and
+    # stable", and the click waits out its timeout on a page that is perfectly
+    # usable (2026-08-13). Focus it directly and fall back to a forced click.
+    try:
+        box.click(timeout=8000)
+    except Exception:
+        log("composer not clickable — focusing it directly")
+        try:
+            box.evaluate("el => el.focus()")
+        except Exception:
+            box.click(force=True, timeout=8000)
     # Quill rejects a bulk fill on some builds; insert the text through the
     # clipboard so a 4k-char prompt does not get typed character by character.
     page.evaluate("t => navigator.clipboard.writeText(t)", prompt)
