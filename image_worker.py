@@ -95,7 +95,129 @@ def _ensure_patchright():
         return False
 
 _patchright_ok = _ensure_patchright()
-if _patchright_ok:
+
+
+def _ensure_camoufox():
+    """Auto-install Camoufox — required for BROWSER_MODE=firefox.
+
+    Camoufox is the Firefox-side equivalent of Patchright. Plain Playwright
+    Firefox cannot log in: Google's OAuth refuses it with "This browser or app
+    may not be secure" because navigator.webdriver is true.
+
+    Requires >=0.5.4 (FF152). On 0.4.11 (FF135), Playwright's Node driver dies
+    on any page error, which presents as a dead browser rather than a version
+    problem.
+    """
+    try:
+        import camoufox  # noqa: F401
+        print("[Init] Camoufox already installed", flush=True)
+        return True
+    except ImportError:
+        pass
+
+    print("[Init] Camoufox not found - installing (required for firefox mode)...", flush=True)
+    for cmd, label in (
+        ([sys.executable, "-m", "pip", "install", "camoufox>=0.5.4"], "pip install"),
+        ([sys.executable, "-m", "pip", "install", "--user", "camoufox>=0.5.4"], "pip install --user"),
+    ):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if r.returncode == 0:
+                print(f"[Init] {label} succeeded", flush=True)
+                break
+            print(f"[Init] {label} failed (rc={r.returncode}): {r.stderr[:200]}", flush=True)
+        except Exception as e:
+            print(f"[Init] {label} exception: {e}", flush=True)
+    else:
+        print("[Init] ERROR: could not install camoufox - firefox mode will not start", flush=True)
+        return False
+
+    try:
+        subprocess.run([sys.executable, "-m", "camoufox", "fetch"],
+                       capture_output=True, text=True, timeout=600)
+        print("[Init] Camoufox browser fetched", flush=True)
+    except Exception as e:
+        print(f"[Init] WARNING: camoufox fetch failed ({e}) - launch may fail", flush=True)
+    return True
+
+
+def _bootstrap_browser_driver():
+    """Import browser_driver, fetching it at IMPORT time if absent.
+
+    ORDERING TRAP (this bricked the flow-worker fleet on 2026-08-07): the
+    companion sync in _sync_companion_modules() runs inside main(), i.e. AFTER
+    this module finishes importing. The first worker to auto-update to a
+    version that imports browser_driver would die with ModuleNotFoundError
+    before the sync could ever fetch it. So fetch here, and refresh BEFORE
+    importing — otherwise a live worker runs the stale module all night while
+    the new one sits on disk.
+
+    Fail-soft in every direction: any network problem falls through to the copy
+    on disk, and a missing module leaves the worker on Chrome rather than
+    stopping it.
+    """
+    import urllib.request
+
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    # Repo layout: the canonical module is code/static/browser_driver.py and is
+    # already on disk, so import it in place. Fetching would drop a duplicate
+    # copy at the repo root that could silently drift from the canonical one.
+    _static = os.path.join(here, "static")
+    if os.path.isfile(os.path.join(_static, "browser_driver.py")):
+        if _static not in sys.path:
+            sys.path.insert(0, _static)
+        try:
+            import browser_driver as _m
+            return _m
+        except ImportError:
+            pass
+
+    base = (os.environ.get("WEB_APP_URL") or os.environ.get("APP_URL")
+            or "https://kavenobuilder.com").rstrip("/")
+    dest = os.path.join(here, "browser_driver.py")
+    url = f"{base}/api/user-worker/download/browser_driver.py"
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "image-worker"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = r.read()
+        if data and data.lstrip().startswith(b'"""'):
+            old = b""
+            if os.path.isfile(dest):
+                try:
+                    with open(dest, "rb") as f:
+                        old = f.read()
+                except OSError:
+                    pass
+            if data != old:
+                with open(dest, "wb") as f:
+                    f.write(data)
+                print(f"[Init] browser_driver refreshed ({len(data)} bytes)", flush=True)
+    except Exception as e:
+        print(f"[Init] browser_driver refresh skipped ({str(e)[:80]}) - using local copy",
+              flush=True)
+
+    try:
+        import browser_driver as _m
+        return _m
+    except ImportError:
+        print("[Init] browser_driver unavailable — staying on Chrome", flush=True)
+        return None
+
+
+_bd = _bootstrap_browser_driver()
+BROWSER_MODE = _bd.resolve_browser_mode() if _bd else os.environ.get("BROWSER_MODE", "stealth")
+FIREFOX_MODE = bool(_bd and _bd.is_firefox_mode(BROWSER_MODE))
+
+# Firefox must NOT use Patchright — its chromium-only patches break Firefox's
+# page.evaluate outright ("Cannot read properties of undefined (reading
+# '_client')"), which strands the worker on the Flow landing page.
+if FIREFOX_MODE:
+    _ensure_camoufox()
+    from playwright.sync_api import sync_playwright
+    print("[Init] Firefox mode - using Playwright + Camoufox (Patchright is chromium-only)", flush=True)
+elif _patchright_ok:
     from patchright.sync_api import sync_playwright
     print("[Init] ✓ Using Patchright (undetected Playwright fork)")
 else:
