@@ -31,6 +31,63 @@ def test_schema_default_profile_is_unchanged():
     assert v589.schema_for_profile("ugc-reel") == v589.STAGE4D_JSON_SCHEMA
     # and it is a copy, not the global itself
     assert v589.schema_for_profile("ugc-reel") is not v589.STAGE4D_JSON_SCHEMA
+    # including its shot contract and version, which now come from the profile
+    assert (v589.schema_for_profile("ugc-reel")["properties"]["shots"]["items"]
+            == v589.PER_SHOT_SCHEMA)
+    assert (v589.schema_for_profile("ugc-reel")["properties"]["schema_version"]["enum"]
+            == [v589.STAGE4D_SCHEMA_VERSION] == ["stage4d.v2"])
+
+
+def test_profiles_declare_their_own_shot_schema_and_version():
+    """The profile owns the contract; nothing downstream hardcodes stage4d.v2."""
+    ugc = v589.READING_PROFILES["ugc-reel"]
+    fb = v589.READING_PROFILES["fbads-video"]
+    assert ugc["shot_schema"] is v589.PER_SHOT_SCHEMA
+    assert ugc["schema_version"] == v589.STAGE4D_SCHEMA_VERSION == "stage4d.v2"
+    assert fb["shot_schema"] is v589.LEAN_AD_SHOT_SCHEMA
+    assert fb["schema_version"] == "adread.v1"
+    # a lean artifact must never be mistakable for a full stage4d.v2 one
+    assert fb["schema_version"] != ugc["schema_version"]
+
+
+def test_lean_shot_schema_is_flat_and_open_ended():
+    lean = v589.LEAN_AD_SHOT_SCHEMA
+    assert lean["required"] == [
+        "shot_index", "start", "end", "visual", "on_screen_text",
+        "who_on_camera", "sell_function",
+    ]
+    assert set(lean["properties"]) == set(lean["required"])
+    assert lean["additionalProperties"] is False
+    assert lean["type"] == "object"
+    assert lean["properties"]["shot_index"] == {"type": "integer", "minimum": 1}
+    assert lean["properties"]["start"]["type"] == "number"
+    assert lean["properties"]["end"]["type"] == "number"
+    # DELIBERATE DESIGN RULE (root CLAUDE.md 3.6): creative lists are open
+    # examples, never closed menus. sell_function is a plain string so a beat
+    # that does something unlisted can be NAMED, not forced into a bucket.
+    sell = lean["properties"]["sell_function"]
+    assert sell["type"] == "string"
+    assert "enum" not in sell
+    assert "const" not in sell
+    # every lean field is a flat scalar: no nesting, that is the whole point
+    for name, prop in lean["properties"].items():
+        assert prop["type"] in ("string", "number", "integer"), name
+    # and the description says the list is open
+    assert "not a closed list" in sell["description"].lower()
+
+
+def test_schema_fbads_uses_the_lean_shot_schema():
+    schema = v589.schema_for_profile("fbads-video")
+    assert schema["properties"]["shots"]["items"] == v589.LEAN_AD_SHOT_SCHEMA
+    assert schema["properties"]["shots"]["items"] is not v589.LEAN_AD_SHOT_SCHEMA
+    assert schema["properties"]["schema_version"]["enum"] == ["adread.v1"]
+    # the heavy per-shot contract must be nowhere in it
+    blob = json.dumps(schema)
+    for heavy in ("forensic_perception", "start_frame_spec", "frame_inventory",
+                  "veo_reproduction_hints", "motion_cross_check", "action_arc"):
+        assert heavy not in blob, heavy
+    # and the base globals stay untouched
+    assert v589.STAGE4D_JSON_SCHEMA["properties"]["shots"]["items"] is v589.PER_SHOT_SCHEMA
 
 
 def test_schema_fbads_adds_required_ad_read():
@@ -65,6 +122,29 @@ def test_prompt_carries_fbads_context_only_for_fbads():
     assert v589.build_user_prompt(shots, "t", []) == default_prompt
 
 
+def test_fbads_task_declares_the_structural_per_shot_job():
+    """The lean read is what makes the ad affordable; the prompt must say so.
+
+    Output tokens are 81% of a real 140s ad decode. Two levers live here: the
+    per-shot job is STRUCTURAL (no frame-recreation detail), and whisper
+    already transcribed the dialogue locally and for free, so the model must
+    not spend output tokens re-typing speech into the shots.
+    """
+    shots = [{"shot": 1, "start": 0.0, "end": 3.0}]
+    task = v589.build_user_prompt(shots, "t", [], profile="fbads-video").split("<task>")[1]
+    low = task.lower()
+    assert "sell" in low
+    assert "verbatim" in low                     # on-screen text is quoted exactly
+    assert "not a closed list" in low            # 3.6: open example set
+    # whisper is authoritative; do NOT re-transcribe speech into the shots
+    assert "transcript" in low
+    assert "re-transcribe" in low
+    # and the shared final_instruction's forensic pass is countermanded
+    assert "forensic" in low
+    # the ad layer survives
+    assert "fill the top-level ad_read object" in task
+
+
 def test_fbads_instruction_survives_schema_suppression():
     """The gemini lane suppresses the schema block; the profile text must still land."""
     shots = [{"shot": 1, "start": 0.0, "end": 3.0}]
@@ -91,6 +171,148 @@ def _expected_shots_for(data):
             for s in data["shots"]]
 
 
+def _ad_read_block():
+    return {
+        "offer": "20% off first order", "cta": "Shop Now",
+        "overlay_text_timeline": [{"time": "00:01", "end": "00:04",
+                                   "text": "20% OFF",
+                                   "style": "bold white center"}],
+        "captions": "burned, bottom-center, word-accurate",
+        "sound_off_comprehension": "muted viewer sees product + 20% OFF overlay",
+        "aspect_ratio": "9:16",
+        "safe_zones": "CTA and face inside center-safe area",
+        "end_card": "logo + Shop Now button",
+        "brand_assets": "logo at 00:00 and 00:14",
+    }
+
+
+def _minimal_valid_lean():
+    """A complete adread.v1 artifact, built by hand — this is the whole point.
+
+    Two shots so the per-shot loop actually iterates. Nothing nested: if this
+    fixture ever needs a sub-block, the lean schema stopped being lean.
+    """
+    return {
+        "schema_version": "adread.v1",
+        "observed_people": [
+            {"label": "person_1", "identity_markers": "woman, 60s, grey bob",
+             "wardrobe": "cream cardigan", "shots_present": [1, 2]},
+        ],
+        "ad_read": _ad_read_block(),
+        "shots": [
+            {"shot_index": 1, "start": 0.0, "end": 2.5,
+             "visual": "Older woman sits at a kitchen table holding her wrist.",
+             "on_screen_text": "MY HANDS HURT EVERY MORNING",
+             "who_on_camera": "the older woman, alone",
+             "sell_function": "hook — names the pain in the first frame"},
+            {"shot_index": 2, "start": 2.5, "end": 6.0,
+             "visual": "Close on the jar being opened on the counter.",
+             "on_screen_text": "none",
+             "who_on_camera": "hands only, no face",
+             "sell_function": "proof/demo — shows the product in use"},
+        ],
+    }
+
+
+def _lean_expected_shots():
+    return [{"shot": 1, "start": 0.0, "end": 2.5},
+            {"shot": 2, "start": 2.5, "end": 6.0}]
+
+
+def test_lean_artifact_validates_under_fbads():
+    v589.validate_stage4d_output(_minimal_valid_lean(), _lean_expected_shots(),
+                                 profile="fbads-video")
+
+
+def test_the_two_contracts_do_not_cross_validate():
+    """A lean read must never pass as a stage4d.v2 one, or the reverse."""
+    lean = _minimal_valid_lean()
+    with pytest.raises(v589.Stage4dValidationError) as exc:
+        v589.validate_stage4d_output(lean, _lean_expected_shots())  # default lane
+    msg = str(exc.value)
+    assert "schema_version must be 'stage4d.v2'" in msg
+    assert "missing forensic_perception" in msg          # heavy fields demanded
+
+    heavy = _minimal_valid_stage4d()
+    heavy["ad_read"] = _ad_read_block()
+    with pytest.raises(v589.Stage4dValidationError) as exc2:
+        v589.validate_stage4d_output(heavy, _expected_shots_for(heavy),
+                                     profile="fbads-video")
+    msg2 = str(exc2.value)
+    assert "schema_version must be 'adread.v1'" in msg2
+    assert "missing sell_function" in msg2
+
+
+def test_deep_subblock_checks_do_not_fire_on_lean_shots():
+    """The heavy sub-block checks are gated on the PROFILE's shot schema.
+
+    A lean shot has no forensic_perception / action_arc / morphology at all;
+    running those checks would make every lean artifact unvalidatable.
+    """
+    lean = _minimal_valid_lean()
+    lean["shots"][0]["visual"] = ""     # force a failure so we can read the list
+    with pytest.raises(v589.Stage4dValidationError) as exc:
+        v589.validate_stage4d_output(lean, _lean_expected_shots(),
+                                     profile="fbads-video")
+    msg = str(exc.value)
+    assert "visual must be a non-empty observation" in msg
+    for absent in ("forensic_perception", "action_arc", "morphology",
+                   "primary_change_axis", "magnitude"):
+        assert absent not in msg, absent
+
+
+def test_lean_footer_note_is_a_stage4d_v2_concern_only():
+    """The 2026-08-12 forward-only footer must not fire on a lean artifact."""
+    lean = _minimal_valid_lean()
+    lean["shots"][0].pop("on_screen_text")
+    with pytest.raises(v589.Stage4dValidationError) as exc:
+        v589.validate_stage4d_output(lean, _lean_expected_shots(),
+                                     profile="fbads-video")
+    assert "forward-only tightening" not in str(exc.value)
+
+
+def test_validator_checks_every_lean_required_shot_field():
+    """Lean twin of the ugc-reel drift guard: the checked list must stay
+    derived from LEAN_AD_SHOT_SCHEMA, never hand-typed."""
+    base = _minimal_valid_lean()
+    shots = _lean_expected_shots()
+    v589.validate_stage4d_output(base, shots, profile="fbads-video")  # non-vacuous
+    for field in v589.LEAN_AD_SHOT_SCHEMA["required"]:
+        data = json.loads(json.dumps(base))
+        data["shots"][0].pop(field, None)
+        try:
+            v589.validate_stage4d_output(data, shots, profile="fbads-video")
+        except v589.Stage4dValidationError as exc:
+            assert field in str(exc), f"{field!r} dropped but not named in: {exc}"
+            continue
+        raise AssertionError(f"validator accepted a lean shot missing {field!r}")
+
+
+def test_lean_string_fields_must_carry_an_observation():
+    """'none' is the declared empty answer; an empty string is not."""
+    data = _minimal_valid_lean()
+    data["shots"][1]["on_screen_text"] = "   "
+    with pytest.raises(v589.Stage4dValidationError, match="on_screen_text"):
+        v589.validate_stage4d_output(data, _lean_expected_shots(),
+                                     profile="fbads-video")
+
+
+def test_lean_shot_timestamps_are_still_checked_against_the_source():
+    data = _minimal_valid_lean()
+    data["shots"][1]["end"] = 9.9
+    with pytest.raises(v589.Stage4dValidationError, match="end must match source"):
+        v589.validate_stage4d_output(data, _lean_expected_shots(),
+                                     profile="fbads-video")
+
+
+def test_lean_lane_still_requires_ad_read():
+    data = _minimal_valid_lean()
+    del data["ad_read"]
+    with pytest.raises(v589.Stage4dValidationError, match="ad_read"):
+        v589.validate_stage4d_output(data, _lean_expected_shots(),
+                                     profile="fbads-video")
+
+
 def test_validator_default_profile_ignores_ad_read():
     data = _minimal_valid_stage4d()
     shots = _expected_shots_for(data)
@@ -109,27 +331,15 @@ def test_validator_fbads_requires_ad_read():
 
 
 def test_validator_fbads_passes_with_ad_read():
-    data = _minimal_valid_stage4d()
-    shots = _expected_shots_for(data)
-    data["ad_read"] = {
-        "offer": "20% off first order", "cta": "Shop Now",
-        "overlay_text_timeline": [{"time": "00:01", "end": "00:04",
-                                   "text": "20% OFF",
-                                   "style": "bold white center"}],
-        "captions": "burned, bottom-center, word-accurate",
-        "sound_off_comprehension": "muted viewer sees product + 20% OFF overlay",
-        "aspect_ratio": "9:16",
-        "safe_zones": "CTA and face inside center-safe area",
-        "end_card": "logo + Shop Now button",
-        "brand_assets": "logo at 00:00 and 00:14",
-    }
-    v589.validate_stage4d_output(data, shots, profile="fbads-video")
+    """A COMPLETE fbads artifact is a lean read plus the ad_read block."""
+    v589.validate_stage4d_output(_minimal_valid_lean(), _lean_expected_shots(),
+                                 profile="fbads-video")
 
 
 def test_validator_fbads_names_every_missing_ad_read_field():
     """A half-filled ad_read must report all its gaps, not just the first."""
-    data = _minimal_valid_stage4d()
-    shots = _expected_shots_for(data)
+    data = _minimal_valid_lean()
+    shots = _lean_expected_shots()
     data["ad_read"] = {"offer": "20% off", "overlay_text_timeline": "not an array"}
     try:
         v589.validate_stage4d_output(data, shots, profile="fbads-video")
@@ -274,3 +484,13 @@ def test_validator_checks_every_schema_required_shot_field():
             assert field in str(exc), f"{field!r} dropped but not named in: {exc}"
             continue
         raise AssertionError(f"validator accepted a shot missing required field {field!r}")
+
+
+def test_nonempty_string_rule_did_not_widen_the_default_lane():
+    """The 'required string field must be non-empty' check now derives from the
+    profile's shot schema instead of the hand-typed ("summary",
+    "human_walk_corrections") pair. For ugc-reel the derived set must be
+    EXACTLY that pair, or the default lane's validation behavior changed."""
+    derived = {k for k in v589.PER_SHOT_SCHEMA["required"]
+               if v589.PER_SHOT_SCHEMA["properties"][k].get("type") == "string"}
+    assert derived == {"summary", "human_walk_corrections"}

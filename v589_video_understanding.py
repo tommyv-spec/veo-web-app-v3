@@ -70,11 +70,23 @@ MORPHOLOGY_MAGNITUDES = ["COMPLETE", "PARTIAL", "MINIMAL", "NONE"]
 # ── Reading profiles (2026-08-12) ─────────────────────────────────────
 # One decode engine, per-format reading profiles. "ugc-reel" is the default
 # and is byte-identical to the pre-profile behavior. "fbads-video" reads
-# paid Facebook-ad creatives: same per-shot protocol PLUS a top-level
-# ad_read block (offer / CTA / overlays / captions / sound-off / end card).
+# paid Facebook-ad creatives: a LEAN structural per-shot read PLUS a
+# top-level ad_read block (offer / CTA / overlays / captions / sound-off /
+# end card).
 # The profile's "context" text declares the format and rides in the <context>
 # data block; its "task" text is an instruction and rides in <task>.
 # The ad_read flag attaches AD_READ_SCHEMA; see schema_for_profile() below.
+#
+# 2026-08-13 — each profile now also owns its per-shot contract and its
+# schema_version. WHY, measured on a real 140s Facebook ad: the decode cost
+# $0.20 and the split was input 25547 tok -> $0.0383 (19%) vs output 21676 tok
+# -> $0.1626 (81%). Output is the bill. PER_SHOT_SCHEMA exists to rebuild a
+# frame 1:1 for OUR production; for a COMPETITOR ad we are mining the SELL
+# STRUCTURE (hook / beats / proof / offer / CTA) and will never re-render its
+# frames, so every forensic/lighting/lens field is premium-rate output nobody
+# reads — and the per-shot audio field made the model re-type dialogue whisper
+# had already produced locally, for free. The version differs on purpose: a
+# lean artifact must never be mistakable for a full stage4d.v2 one.
 
 FBADS_FORMAT_DECLARATION = (
     "This video is a PAID Facebook/Instagram AD CREATIVE (direct response), "
@@ -82,7 +94,20 @@ FBADS_FORMAT_DECLARATION = (
 )
 
 FBADS_READ_INSTRUCTIONS = (
-    "On top of the per-shot protocol, fill the top-level ad_read object: "
+    "Read this ad for its SELL STRUCTURE, not for frame recreation. We are "
+    "not re-rendering these frames, so skip the forensic-perception pass and "
+    "every lens/lighting/composition detail: they are not in this profile's "
+    "schema. Per shot record only the source timestamps, one sentence of what "
+    "is on screen, the burned-in on-screen text VERBATIM ('none' when there "
+    "is none), who is visible, and what that beat DOES in the sell. Hook, "
+    "pain, story, credibility, proof/demo, mechanism, objection, offer and "
+    "CTA are the common jobs, but they are EXAMPLES, not a closed list — when "
+    "a beat does something else, name in plain words what it actually does.\n"
+    "The whisper transcript in the context block is supplied and AUTHORITATIVE "
+    "for dialogue. Do NOT re-transcribe speech into the shots; there is no "
+    "per-shot audio field and repeating the transcript wastes the output "
+    "budget this profile exists to protect.\n"
+    "On top of that per-shot read, fill the top-level ad_read object: "
     "capture every offer element (price, discount, bundle, guarantee, "
     "urgency/scarcity), every CTA quoted verbatim (spoken + overlay + end "
     "card), the full overlay-text timeline with each overlay's on-screen "
@@ -91,15 +116,6 @@ FBADS_READ_INSTRUCTIONS = (
     "center-safe zones, the end card, and every logo/product appearance "
     "with MM:SS timing.\n"
 )
-
-READING_PROFILES = {
-    "ugc-reel": {"context": "", "task": "", "ad_read": False},
-    "fbads-video": {
-        "context": FBADS_FORMAT_DECLARATION,
-        "task": FBADS_READ_INSTRUCTIONS,
-        "ad_read": True,
-    },
-}
 
 
 def _string_schema(description: str) -> dict:
@@ -389,6 +405,56 @@ PER_SHOT_SCHEMA = {
 }
 
 
+# ── The lean per-shot read (fbads-video) ──────────────────────────────
+# Flat on purpose: no sub-objects, no arrays. Every field is one short string
+# the model can emit in a line. See the cost note above READING_PROFILES for
+# why this exists rather than reusing PER_SHOT_SCHEMA.
+
+LEAN_AD_SHOT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "shot_index", "start", "end", "visual", "on_screen_text",
+        "who_on_camera", "sell_function",
+    ],
+    "properties": {
+        "shot_index": {"type": "integer", "minimum": 1},
+        "start": {"type": "number"},
+        "end": {"type": "number"},
+        "visual": _string_schema(
+            "One sentence: what is on screen. Setting, who is in frame, what "
+            "they are doing."),
+        "on_screen_text": _string_schema(
+            "The burned-in text or overlay shown during this shot, VERBATIM. "
+            "'none' if there is none."),
+        "who_on_camera": _string_schema(
+            "Who is visible, e.g. 'the older woman, alone', 'hands only, no "
+            "face', 'nobody - product shot'. 'none' if no person is on camera."),
+        "sell_function": _string_schema(
+            "What this beat DOES in the sell, in plain words. Hook, pain, "
+            "story, credibility, proof/demo, mechanism, objection, offer and "
+            "CTA are common ones, but these are EXAMPLES, not a closed list: "
+            "when a beat does something else, name what it actually does."),
+    },
+}
+
+
+READING_PROFILES = {
+    "ugc-reel": {
+        "context": "", "task": "", "ad_read": False,
+        "shot_schema": PER_SHOT_SCHEMA,
+        "schema_version": STAGE4D_SCHEMA_VERSION,
+    },
+    "fbads-video": {
+        "context": FBADS_FORMAT_DECLARATION,
+        "task": FBADS_READ_INSTRUCTIONS,
+        "ad_read": True,
+        "shot_schema": LEAN_AD_SHOT_SCHEMA,
+        "schema_version": "adread.v1",
+    },
+}
+
+
 STAGE4D_JSON_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -478,9 +544,23 @@ def _reading_profile(name: str) -> dict:
 
 
 def schema_for_profile(profile: str) -> dict:
-    """Stage 4d response schema for a reading profile. Default = unchanged."""
+    """Stage 4d response schema for a reading profile. Default = unchanged.
+
+    The envelope (schema_version + observed_people + shots) is shared; the
+    per-shot contract and the version string come from the PROFILE. For
+    "ugc-reel" both are the stage4d.v2 originals, so the returned object is
+    still exactly equal to STAGE4D_JSON_SCHEMA — that equality is the
+    default-lane invariant and a test pins it.
+    """
+    spec = _reading_profile(profile)
     schema = copy.deepcopy(STAGE4D_JSON_SCHEMA)
-    if _reading_profile(profile)["ad_read"]:
+    schema["properties"]["schema_version"] = {
+        "type": "string", "enum": [spec["schema_version"]]}
+    schema["properties"]["shots"] = {
+        "type": "array", "minItems": 1,
+        "items": copy.deepcopy(spec["shot_schema"]),
+    }
+    if spec["ad_read"]:
         schema["properties"]["ad_read"] = copy.deepcopy(AD_READ_SCHEMA)
         schema["required"] = list(schema.get("required", [])) + ["ad_read"]
     return schema
@@ -847,14 +927,24 @@ def _nonempty(value: object) -> bool:
 
 def validate_stage4d_output(data: object, expected_shots: list,
                             profile: str = "ugc-reel") -> dict:
-    """Validate the handoff contract without requiring a third-party package."""
+    """Validate the handoff contract without requiring a third-party package.
+
+    Profile-aware: the expected schema_version, the per-shot required list and
+    WHICH deep sub-block checks run all come from the profile's shot schema.
+    The two contracts must not cross-validate — a lean adread.v1 read is not a
+    stage4d.v2 record and must never be accepted as one.
+    """
+    spec = _reading_profile(profile)
+    shot_schema = spec["shot_schema"]
+    shot_props = shot_schema["properties"]
+    expected_version = spec["schema_version"]
     errors: list[str] = []
     if not isinstance(data, dict):
         raise Stage4dValidationError("top level must be an object, not an array")
     if "<REQUIRED" in json.dumps(data, ensure_ascii=False) or "<COPY FROM" in json.dumps(data, ensure_ascii=False):
         errors.append("template placeholders remain; complete the human walk before handoff")
-    if data.get("schema_version") != STAGE4D_SCHEMA_VERSION:
-        errors.append(f"schema_version must be {STAGE4D_SCHEMA_VERSION!r}")
+    if data.get("schema_version") != expected_version:
+        errors.append(f"schema_version must be {expected_version!r}")
     if not isinstance(data.get("observed_people"), list):
         errors.append("observed_people must be an array")
     shots = data.get("shots")
@@ -877,10 +967,12 @@ def validate_stage4d_output(data: object, expected_shots: list,
                 elif not _nonempty(value):
                     errors.append(f"ad_read.{field} must be a non-empty string")
 
-    # DERIVED FROM THE SCHEMA, never retyped. This used to be a hand-typed list
-    # and it had drifted: frame_inventory + start_frame_spec are required by
-    # PER_SHOT_SCHEMA but were not checked, so a provider could omit both and
-    # still pass. Closed 2026-08-12.
+    # DERIVED FROM THE PROFILE'S SCHEMA, never retyped. This used to be a
+    # hand-typed list off PER_SHOT_SCHEMA and it had drifted: frame_inventory +
+    # start_frame_spec are required by that schema but were not checked, so a
+    # provider could omit both and still pass. Closed 2026-08-12; made
+    # profile-derived 2026-08-13 so the lean fbads contract gets the same
+    # can-never-diverge guarantee for free.
     #
     # What that bought, precisely: the LIST can no longer diverge from the
     # schema. Validation DEPTH is unchanged and stops one level up — this loop
@@ -899,8 +991,15 @@ def validate_stage4d_output(data: object, expected_shots: list,
     # shot_index/start/end are excluded on purpose: they are checked below
     # against the SOURCE shot (value equality), which is strictly stronger
     # than the presence check this loop does.
-    required_top = [k for k in PER_SHOT_SCHEMA["required"]
+    required_top = [k for k in shot_schema["required"]
                     if k not in ("shot_index", "start", "end")]
+    # Same principle one level down: every REQUIRED field declared as a plain
+    # string must carry an actual observation ('none' is the declared empty
+    # answer, "" is not). For ugc-reel this derives to exactly the pair that
+    # used to be hand-typed here — summary + human_walk_corrections — so the
+    # default lane's behavior is unchanged; a test pins that set.
+    required_strings = [k for k in required_top
+                        if shot_props.get(k, {}).get("type") == "string"]
     for pos, expected in enumerate(expected_shots, start=1):
         if pos > len(shots) or not isinstance(shots[pos - 1], dict):
             errors.append(f"shot {pos}: missing object")
@@ -919,36 +1018,44 @@ def validate_stage4d_output(data: object, expected_shots: list,
             if key not in shot:
                 errors.append(f"shot {pos}: missing {key}")
 
-        forensic = shot.get("forensic_perception")
-        if not isinstance(forensic, dict):
-            errors.append(f"shot {pos}: forensic_perception must be an object")
-        else:
-            for key in ("kinematic_traces", "z_depth_layers", "literal_vfx_observations", "intrinsic_state_isolation"):
-                if key not in forensic:
-                    errors.append(f"shot {pos}: forensic_perception missing {key}")
-            isolation = forensic.get("intrinsic_state_isolation", {})
-            if isolation.get("primary_change_axis") not in PRIMARY_CHANGE_AXES:
-                errors.append(f"shot {pos}: invalid forensic primary_change_axis")
-
-        arc = shot.get("action_arc")
-        if not isinstance(arc, dict):
-            errors.append(f"shot {pos}: action_arc must be an object")
-        else:
-            if not isinstance(arc.get("kinematics"), dict):
-                errors.append(f"shot {pos}: action_arc.kinematics must be an object")
-            morphology = arc.get("morphology")
-            if not isinstance(morphology, dict):
-                errors.append(f"shot {pos}: action_arc.morphology must be an object")
+        # The deep sub-block checks below belong to the frame-recreation
+        # contract. Gate them on the PROFILE'S shot schema actually declaring
+        # the field, not on a profile NAME: a lean shot has no
+        # forensic_perception / action_arc at all, and running these on it
+        # would make every lean artifact unvalidatable. Adding a third profile
+        # that keeps only one of the two blocks needs no change here.
+        if "forensic_perception" in shot_props:
+            forensic = shot.get("forensic_perception")
+            if not isinstance(forensic, dict):
+                errors.append(f"shot {pos}: forensic_perception must be an object")
             else:
-                axis = morphology.get("primary_change_axis")
-                magnitude = morphology.get("magnitude")
-                if axis not in PRIMARY_CHANGE_AXES:
-                    errors.append(f"shot {pos}: invalid morphology primary_change_axis")
-                if magnitude not in MORPHOLOGY_MAGNITUDES:
-                    errors.append(f"shot {pos}: invalid morphology magnitude")
-                if axis != "NONE" and morphology.get("intrinsic_state_start") == morphology.get("intrinsic_state_end"):
-                    errors.append(f"shot {pos}: changed morphology needs distinct start/end states")
-        for key in ("summary", "human_walk_corrections"):
+                for key in ("kinematic_traces", "z_depth_layers", "literal_vfx_observations", "intrinsic_state_isolation"):
+                    if key not in forensic:
+                        errors.append(f"shot {pos}: forensic_perception missing {key}")
+                isolation = forensic.get("intrinsic_state_isolation", {})
+                if isolation.get("primary_change_axis") not in PRIMARY_CHANGE_AXES:
+                    errors.append(f"shot {pos}: invalid forensic primary_change_axis")
+
+        if "action_arc" in shot_props:
+            arc = shot.get("action_arc")
+            if not isinstance(arc, dict):
+                errors.append(f"shot {pos}: action_arc must be an object")
+            else:
+                if not isinstance(arc.get("kinematics"), dict):
+                    errors.append(f"shot {pos}: action_arc.kinematics must be an object")
+                morphology = arc.get("morphology")
+                if not isinstance(morphology, dict):
+                    errors.append(f"shot {pos}: action_arc.morphology must be an object")
+                else:
+                    axis = morphology.get("primary_change_axis")
+                    magnitude = morphology.get("magnitude")
+                    if axis not in PRIMARY_CHANGE_AXES:
+                        errors.append(f"shot {pos}: invalid morphology primary_change_axis")
+                    if magnitude not in MORPHOLOGY_MAGNITUDES:
+                        errors.append(f"shot {pos}: invalid morphology magnitude")
+                    if axis != "NONE" and morphology.get("intrinsic_state_start") == morphology.get("intrinsic_state_end"):
+                        errors.append(f"shot {pos}: changed morphology needs distinct start/end states")
+        for key in required_strings:
             if key in shot and not _nonempty(shot[key]):
                 errors.append(f"shot {pos}: {key} must be a non-empty observation (use 'none' when clear)")
 
@@ -962,8 +1069,14 @@ def validate_stage4d_output(data: object, expected_shots: list,
         # EVERY error must be one of the two for this to fire: a mixed failure
         # (a legacy field missing AND a real problem) is NOT the known case and
         # must not be labelled as expected.
-        if all(e.endswith(": missing frame_inventory")
-               or e.endswith(": missing start_frame_spec") for e in errors):
+        #
+        # The note is a stage4d.v2 concern only. Gate it on the profile's own
+        # shot schema declaring those fields: a lean adread.v1 read has neither,
+        # so its errors can never be about the 2026-08-12 tightening and must
+        # never be labelled as expected.
+        if ("frame_inventory" in shot_props and "start_frame_spec" in shot_props
+                and all(e.endswith(": missing frame_inventory")
+                        or e.endswith(": missing start_frame_spec") for e in errors)):
             errors.append(
                 "NOTE: missing frame_inventory/start_frame_spec only — this is the known "
                 "2026-08-12 forward-only tightening, expected on artifacts saved before it, "
@@ -1542,7 +1655,9 @@ def call_gemini(video_path: Path, shots: list, transcript_summary: str, motion: 
                 request_config={
                     "thinking": thinking, "fps": fps,
                     "media_resolution": media_resolution or "default",
-                    "schema_version": STAGE4D_SCHEMA_VERSION,
+                    # the PROFILE'S version, not the module default: a lean
+                    # fbads run must not log itself into the ledger as stage4d.v2
+                    "schema_version": _reading_profile(profile)["schema_version"],
                 },
                 schema_status=schema_status,
             )
@@ -1665,7 +1780,8 @@ def main():
     p.add_argument("--upload-timeout", type=float, default=300,
                    help="seconds to wait for Gemini upload processing (default 300)")
     p.add_argument("--profile", choices=sorted(READING_PROFILES), default="ugc-reel",
-                   help="reading profile: ugc-reel (default, unchanged) or fbads-video (adds required ad_read block)")
+                   help="reading profile: ugc-reel (default, full stage4d.v2 frame-recreation read) "
+                        "or fbads-video (lean adread.v1 structural read + required ad_read block)")
     p.add_argument("--validate-stage4d", type=Path, default=None,
                    help="validate a saved Stage 4d JSON against --shots and exit")
     p.add_argument("--costs", action="store_true",
@@ -1693,7 +1809,8 @@ def main():
         except Stage4dValidationError as exc:
             print(f"[v589] FAIL: {exc}", file=sys.stderr)
             sys.exit(2)
-        print(f"[v589] PASS: {args.validate_stage4d} matches {STAGE4D_SCHEMA_VERSION} and {len(expected)} source shots")
+        print(f"[v589] PASS: {args.validate_stage4d} matches "
+              f"{_reading_profile(args.profile)['schema_version']} and {len(expected)} source shots")
         return
 
     if args.video is None:
@@ -1782,6 +1899,12 @@ def main():
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(raw_output + "\n", encoding="utf-8")
         print(f"[v589] wrote DRAFT template to {out}; fill placeholders, then run --validate-stage4d before handoff")
+        if args.profile != "ugc-reel":
+            # Say it rather than let the operator discover it at --validate time:
+            # the human-walk generator only emits the stage4d.v2 shape.
+            print(f"[v589] WARN: the human-walk template is stage4d.v2 only; it will NOT "
+                  f"validate under --profile {args.profile}. Re-run with a VLM provider "
+                  f"for that profile.")
         return
 
     try:
