@@ -16117,10 +16117,20 @@ Source: the Hooks Masterclass card behind Selling Course Part 9 (`raw/course/hoo
 
 **Clause 3 is often ALREADY SATISFIED by the US callout — never trade it away (operator 2026-07-30).** *"We mention American men to target Americans; without it the video could be shown to other countries on Instagram."* An opening like *"American men, pour baking soda on your soldier"* is doing two jobs at once: it filters the buyer (men, this symptom) AND it routes the distribution (the algorithm reads the demonym — the same lever [[us-audience-priming-strategy]] counts as a SCRIPT signal, and the reason `wiki/concepts/script-adaptation/forbidden-words.md` bans NON-US demonyms in spoken lines). So when a hook is missing tension, the fix is to **ADD the contradiction to the existing callout**, not to replace the callout with it. Wrong: dropping "American men" to make room for "he's 64, but…". Right: *"American men — he's 64, but his soldier still stands every morning."* The audit rule that follows: a hook rewrite that removes a US routing signal is a regression even when it improves the tension score.
 
+**Clause 4 — DESIRE. The contradiction must name what the customer WANTS (added 2026-08-13, forward-only).** Source: the Lib Course "BONUS: Scriptwriting" Loom, transcribed in full at `raw/course/lib-course-bonus-common-mistakes-2026-08-13.md`. Clauses 1-3 came from the same teaching, and this is the half that was missed: *"this tension has to be again related to the desire of the customer… and we also add this desire in the hook. That's the most important thing so that we make it relevant."* A contradiction that is merely surprising does not sell — the B-fact has to be the outcome the viewer wants for himself. Both of the course's worked hooks do it explicitly: *"…because his soldier never went down"* (the ED buyer's desire) and *"if those swollen legs don't change, I'm sleeping with his brother"* (the swollen-legs buyer's desire, stated as the stake). Mechanical test: in `<fact A> BUT <fact B>`, does **fact B** name the result the target is buying? If B is only odd ("he was 60 but he lived in a lighthouse"), the hook has tension and no pull. Relevance is the whole engine here — the same doc's first principle is *"the objective is to sell, and to sell we need to be relevant."*
+
+**The delivery pro-tip that goes with it: RAW, REAL, DIFFERENT — carried by EMOTION.** *"You have to make them feel raw, real and different from everything that's been on the market. It has to be unscripted, it has to feel organic… and how we achieve this is with emotions."* The course's example is a wife speaking with visible anger and frustration. This is a DELIVERY instruction, not a script one: it governs the performance token in the clip prompt (see the angry-tone/dynamic-delivery guidance in [[realistic-ugc-prompt-templates]]) and the phone-shot organic look the seven-axis quality standard already demands. A hook that satisfies clauses 1-4 and is performed flat is still a weak hook.
+
 **What a build declares (§0), one line:**
 
 ```
 HOOK CONTRACT: coherence — <the object + change shown in image_1> | tension — <fact A> BUT <fact B> | filter — <who self-selects, and from what cue>
+```
+
+**From 2026-08-13 the declaration carries clause 4 as well** (legacy builds keep the three-clause form above — forward-only):
+
+```
+HOOK CONTRACT: coherence — <the object + change shown in image_1> | tension — <fact A> BUT <fact B> | filter — <who self-selects, and from what cue> | desire — <the wanted result that fact B names>
 ```
 
 **Interaction with existing rules.** §v791 governs the CAMERA (ultra-wide, close, foreshortened) and §v870 the FRAME (upper two thirds); v873 governs the MESSAGE. A §v791 carve-out does not carve out v873, and vice versa — a carve-out lifts only its own named clause (root `CLAUDE.md` §9). Where a hook has no spoken line (silent b-roll opener), clause 1 reads against the on-screen text overlay and clause 3 against the visible avatar/symptom.
@@ -16128,6 +16138,8 @@ HOOK CONTRACT: coherence — <the object + change shown in image_1> | tension �
 **Scope:** GENERATE side, every build, forward-only. Auditor gate: `hook_contract` (WARN when the §0 line is absent, so no shipped build is retro-failed; the three clauses stay operator-judged).
 
 **Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/concepts/script-adaptation/hook-leverage-rule.md`, `wiki/sources/course/hooks-masterclass-tension.md`, `~/.claude/skills/build-video/audit_build.py`, root `CLAUDE.md` (§12 + §9 tripwire), `wiki/log.md`.
+
+**Touched by the 2026-08-13 amendment (clause 4 + the delivery pro-tip):** this deep-dive, `wiki/patterns/conventions.md`, root `CLAUDE.md` §12, `wiki/sources/course/lib-course-bonus-common-mistakes.md`, `wiki/concepts/script-adaptation/specificity-rule.md`, `wiki/log.md`.
 
 ## v874 — ONE MECHANISM PER VIDEO (effects are never promoted to the cause)
 
