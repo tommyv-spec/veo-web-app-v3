@@ -6458,8 +6458,55 @@ def clear_flow_site_data(page, label=""):
     return ok
 
 
+def capture_failure_evidence(page, label="IMAGE", tag="failure"):
+    """Screenshot + page facts next to the worker, so a failure is diagnosable.
+
+    Added 2026-08-13 after an evening lost to guessing: the worker announced
+    'unusual activity' with no record of what it saw, and the phrase turned out
+    to be a whole-page text match rather than proof of a block. One screenshot
+    settled in seconds what API probing had not.
+    """
+    try:
+        d = os.path.join(BASE_DIR, "failures")
+        os.makedirs(d, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        base = os.path.join(d, f"{stamp}_{re.sub(r'[^A-Za-z0-9_-]', '_', str(label))}_{tag}")
+        try:
+            page.screenshot(path=base + ".png", full_page=False)
+        except Exception:
+            pass
+        facts = page.evaluate("""() => {
+            const body = (document.body && document.body.innerText) || '';
+            const low = body.toLowerCase();
+            const i = low.indexOf('unusual activity');
+            const btn = (re) => Array.from(document.querySelectorAll('button,a'))
+                .filter(e => re.test((e.innerText || '').trim()))
+                .map(e => (e.innerText || '').trim().slice(0, 50));
+            return {
+                url: location.href,
+                unusual_context: i >= 0 ? body.slice(Math.max(0, i - 240), i + 240) : null,
+                new_project: btn(/new project/i),
+                create_with_flow: btn(/create with .*flow/i),
+                body_len: body.length,
+                body_head: body.slice(0, 800),
+            };
+        }""")
+        with open(base + ".json", "w", encoding="utf-8") as f:
+            json.dump(facts, f, indent=2, ensure_ascii=False)
+        print(f"[{label}] 📸 evidence saved: {base}.png / .json  (url={facts.get('url')})", flush=True)
+        return base
+    except Exception as e:
+        print(f"[{label}] evidence capture failed: {str(e)[:90]}", flush=True)
+        return None
+
+
 def page_shows_unusual_activity(page):
-    """True if the Flow page currently shows the 'unusual activity' block."""
+    """True if the Flow page currently shows the 'unusual activity' block.
+
+    NOTE: this is a whole-page text match. It proves the phrase is somewhere in
+    the DOM, not that a generation was refused — so callers that act on it also
+    capture evidence (capture_failure_evidence) rather than trusting the label.
+    """
     try:
         return bool(page.evaluate("""() => {
             const t = ((document.body && document.body.textContent) || '').toLowerCase();
@@ -6536,6 +6583,7 @@ def process_image_job_multi(page, input_paths, prompt, output_dir,
         if not _is_unusual:
             return ok, paths, err
         print(f"[{context}] ⚠ image generation hit 'unusual activity' — attempting refresh-and-resume", flush=True)
+        capture_failure_evidence(page, label=context, tag="unusual")
         if not recover_unusual_activity(page, label=context):
             return False, [], "unusual activity — account blocked after repeated recoveries, retry later"
     return False, [], "unusual activity persisted after recovery retries"
@@ -6946,6 +6994,32 @@ def _process_watch_job(page, job_path, job):
         input_paths = _stage_inputs_with_role_basename(input_dicts, stage_dir)
     else:
         input_paths = []
+
+    # Watch mode must put the page INSIDE a project first. process_image_job_multi
+    # starts at "select Image mode" and assumes it is already there — the
+    # single-shot and API paths both create a project before calling it, and
+    # watch mode did not. Left on Flow home there is no settings button, so
+    # every watch job died with "Settings button not found", which the
+    # whole-page text matcher then reported as 'unusual activity' (measured
+    # 2026-08-13: no watch job had ever completed). API first, DOM fallback —
+    # the same order the API mode uses.
+    try:
+        _proj = _fa_try_create_new_project_api(page, context=jid)
+        if not _proj:
+            _proj = create_new_flow_project(page, context=jid)
+        if not _proj:
+            result = {"id": jid, "status": "failed",
+                      "error": "Could not create a Flow project for this job",
+                      "output_dir": output_dir, "output_paths": []}
+            _write_done_file(job_path, result)
+            return
+        print(f"[{jid}] ✓ project ready: {_proj}", flush=True)
+    except Exception as _pe:
+        result = {"id": jid, "status": "failed",
+                  "error": f"Project creation failed: {_pe}",
+                  "output_dir": output_dir, "output_paths": []}
+        _write_done_file(job_path, result)
+        return
 
     success, output_paths, error = process_image_job_multi(
         page,
