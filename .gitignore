@@ -16,6 +16,10 @@ static/.gemini_profile*/
 static/.gemini_work/
 # Dumped StreamGenerate responses from failed submits (diagnostics only).
 static/.gemini_debug/
+# Same for the AI Studio decode worker: live Google session + failure dumps
+# (DOM, screenshots, captured response bodies). Never knowledge, never shared.
+static/.aistudio_profile*/
+static/.aistudio_debug/
 static/.submit_storage_state.json
 # Written at runtime by image_worker.py (see _worker_chrome_channel) — records
 # which Chrome channel this machine's worker uses. Per-machine, not shared.

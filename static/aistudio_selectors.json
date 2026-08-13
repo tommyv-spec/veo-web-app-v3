@@ -1,0 +1,32 @@
+{
+  "_note": "Learned from a live probe of aistudio.google.com on 2026-08-13 (account shenkevin480@gmail.com, Ultra). Candidates are tried in order; the worker's built-in guesses stay as fallbacks behind these. Re-probe and update after any AI Studio redesign.",
+
+  "consent_accept": [
+    "button[aria-label='Accept terms of service']"
+  ],
+  "consent_checkbox": [
+    "input[type=checkbox]"
+  ],
+
+  "file_input": [
+    "input.file-input",
+    "input[type=file]"
+  ],
+  "prompt_box": [
+    "textarea[aria-label='Enter a prompt']",
+    "textarea.cdk-textarea-autosize"
+  ],
+  "run_button": [
+    "button.ctrl-enter-submits",
+    "button[type=submit]:has-text('Run')"
+  ],
+
+  "model_card": [
+    "button.model-selector-card"
+  ],
+
+  "system_instructions_toggle": [
+    "button[aria-label='System instructions']",
+    "button.system-instructions-card"
+  ]
+}
