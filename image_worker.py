@@ -337,6 +337,42 @@ def chromium_golden_folder(session_folder):
     return get_golden_folder(chrome_equivalent)
 
 
+def should_restore_golden(session_folder, golden_folder, force=False):
+    """True only when the session cannot log in on its own.
+
+    THE GOLDEN IS A LOGIN-RECOVERY ARTIFACT, NOT A STARTUP RITUAL. Measured
+    2026-08-13, both profiles probed in the same minute on the same account:
+
+        golden-restored  -> Flow MARKETING shell, no New-project control, and
+                            /project returns a 161-char empty shell (the app
+                            cannot be minted from it)
+        live session     -> straight into the Flow app, New project available
+
+    The lean golden copies durable files only, so Flow's app entitlement —
+    which lives in site storage, not in the cookie DB — is not in it. Restoring
+    it over a healthy session therefore destroys the ONLY profile that can
+    reach Flow, and that is what stalled every run that day. It got worse, not
+    better, once the laptop pull was re-enabled and the golden started being
+    rebuilt from a Chrome profile that had never opened the Flow app.
+
+    So: keep a session that has a cookie DB. Restore only when there is nothing
+    to keep (no session, or a signed-out one), or when the operator forces it
+    with IMAGE_FORCE_GOLDEN_RESTORE=1.
+    """
+    if not golden_folder or not os.path.isdir(golden_folder):
+        return False
+    if force or os.environ.get("IMAGE_FORCE_GOLDEN_RESTORE", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    if not os.path.isdir(session_folder):
+        return True
+    # A profile with no cookie DB has no login to protect.
+    for rel in (os.path.join("Default", "Network", "Cookies"),
+                os.path.join("Default", "Cookies")):
+        if os.path.isfile(os.path.join(session_folder, rel)):
+            return False
+    return True
+
+
 def _bridge_golden_cookies_if_firefox(mode, ctx, golden, reader=None, log=print):
     """Inject the chromium golden's Google cookies into a Firefox context.
 
@@ -10995,8 +11031,15 @@ def launch_browser(session_folder=SESSION_FOLDER):
     # NEVER on Firefox: copying a chromium profile over a Firefox profile
     # directory produces an unreadable mix. Firefox takes the cookie bridge
     # after launch instead.
-    if os.path.exists(golden) and not FIREFOX_MODE:
+    #
+    # And never over a session that can still log in — see should_restore_golden
+    # for the measurement. This used to run on every launch, which replaced a
+    # profile that reaches the Flow app with one that cannot.
+    if not FIREFOX_MODE and should_restore_golden(session_folder, golden):
         restore_from_golden(session_folder, label="IMAGE")
+    elif os.path.exists(golden):
+        print("[IMAGE] keeping the existing session (golden held in reserve for a signed-out profile)",
+              flush=True)
     
     pw = sync_playwright().start()
     

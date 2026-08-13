@@ -13,6 +13,7 @@ from image_worker import (  # noqa: E402
     chromium_golden_folder,
     get_golden_folder,
     _bridge_golden_cookies_if_firefox,
+    should_restore_golden,
 )
 
 
@@ -114,3 +115,52 @@ def test_bridge_falls_back_to_one_by_one_when_batch_rejected():
         log=lambda m: None)
     assert ok is True
     assert [c["name"] for c in accepted] == ["SID", "HSID"]
+
+
+# ---------------------------------------------------------------------------
+# The golden is a LOGIN-recovery artifact, not a startup ritual.
+#
+# Measured 2026-08-13, same minute, same account: a golden-restored profile
+# lands on Flow's MARKETING shell with no New-project control and cannot mint
+# the app (/project returns a 161-char empty shell), while the live session
+# profile lands straight in the app. The lean golden copies durable files only,
+# so the app entitlement that lives in site storage is not in it. Restoring it
+# over a working session therefore DESTROYS the only profile that can reach
+# Flow — which is exactly what stalled every run that day.
+# ---------------------------------------------------------------------------
+
+def _make_profile(tmp_path, name, with_cookies=True):
+    prof = tmp_path / name
+    (prof / "Default" / "Network").mkdir(parents=True)
+    if with_cookies:
+        (prof / "Default" / "Network" / "Cookies").write_bytes(b"SQLite format 3\x00")
+    return prof
+
+
+def test_healthy_session_is_never_clobbered_by_the_golden(tmp_path):
+    session = _make_profile(tmp_path, "image-chrome-session")
+    golden = _make_profile(tmp_path, "image-chrome-golden")
+    assert should_restore_golden(str(session), str(golden)) is False
+
+
+def test_missing_session_restores_from_golden(tmp_path):
+    golden = _make_profile(tmp_path, "image-chrome-golden")
+    assert should_restore_golden(str(tmp_path / "nope"), str(golden)) is True
+
+
+def test_signed_out_session_restores_from_golden(tmp_path):
+    """No cookie DB = no login. That is what the golden is for."""
+    session = _make_profile(tmp_path, "image-chrome-session", with_cookies=False)
+    golden = _make_profile(tmp_path, "image-chrome-golden")
+    assert should_restore_golden(str(session), str(golden)) is True
+
+
+def test_no_golden_means_nothing_to_restore(tmp_path):
+    session = _make_profile(tmp_path, "image-chrome-session")
+    assert should_restore_golden(str(session), str(tmp_path / "absent")) is False
+
+
+def test_force_overrides_a_healthy_session(tmp_path):
+    session = _make_profile(tmp_path, "image-chrome-session")
+    golden = _make_profile(tmp_path, "image-chrome-golden")
+    assert should_restore_golden(str(session), str(golden), force=True) is True
