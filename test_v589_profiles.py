@@ -53,7 +53,7 @@ def test_profiles_declare_their_own_shot_schema_and_version():
 def test_lean_shot_schema_is_flat_and_open_ended():
     lean = v589.LEAN_AD_SHOT_SCHEMA
     assert lean["required"] == [
-        "shot_index", "start", "end", "visual", "on_screen_text",
+        "shot_index", "start", "end", "shot_type", "visual", "on_screen_text",
         "who_on_camera", "sell_function", "production_method",
     ]
     assert set(lean["properties"]) == set(lean["required"])
@@ -82,7 +82,7 @@ def test_lean_shot_schema_records_production_method():
     a studio shoot decide what we can copy and at what cost. ~10 words a shot.
     """
     lean = v589.LEAN_AD_SHOT_SCHEMA
-    assert len(lean["required"]) == 8
+    assert len(lean["required"]) == 9
     assert "production_method" in lean["required"]
     assert lean["additionalProperties"] is False
     pm = lean["properties"]["production_method"]
@@ -101,6 +101,32 @@ def test_lean_shot_schema_records_production_method():
              ["properties"]["production_method"]["description"].lower())
     assert "how" in heavy and "how" in desc
     assert "not what is in it" in heavy and "not what is in it" in desc
+
+
+def test_lean_shot_schema_records_shot_type():
+    """Operator's ask, in their words: "what's on screen (avatar talking,
+    brolls, etc.)". It lived implicitly inside visual + who_on_camera, so
+    counting an ad's shot mix meant regexing prose. A field answers it.
+    """
+    lean = v589.LEAN_AD_SHOT_SCHEMA
+    assert len(lean["required"]) == 9
+    assert "shot_type" in lean["required"]
+    assert lean["additionalProperties"] is False
+    st = lean["properties"]["shot_type"]
+    # 3.6: open string. A competitor ships shot kinds no enum anticipated.
+    assert st["type"] == "string"
+    assert "enum" not in st
+    assert "const" not in st
+    desc = st["description"].lower()
+    for example in ("talking-head", "b-roll", "demo", "product shot",
+                    "screen recording", "text card", "social proof"):
+        assert example in desc, example
+    assert "not a closed list" in desc
+    # it is the CATEGORY, not a second description — or it just restates visual
+    assert "category" in desc
+    assert "visual" in desc
+    # and it must stay terse, because its value is being countable at a glance
+    assert "count" in desc
 
 
 def test_lean_visual_asks_for_shot_scale():
@@ -243,16 +269,47 @@ def test_fbads_prompt_no_longer_countermands_the_forensic_pass():
     assert "fill the top-level ad_read object" in task
 
 
-def test_no_forensic_order_reaches_the_fbads_prompt_at_all():
-    """The whole fbads request — system instruction, context, task and the
-    closing final_instruction — must never order a protocol it does not have.
-    The default lane keeps that order verbatim."""
+def test_task_preamble_is_profile_owned():
+    """Same defect class as the final_instruction: the shared <task> preamble
+    ordered extra attention to ACTION ARCS and verbs-of-state-change, and the
+    lean schema has no action_arc and no state-evolution field at all."""
+    ugc = v589.READING_PROFILES["ugc-reel"]["task_preamble"]
+    fb = v589.READING_PROFILES["fbads-video"]["task_preamble"]
+    # the default lane's preamble is byte-for-byte what it has always been
+    assert ugc == v589.DEFAULT_TASK_PREAMBLE
+    assert ugc == (
+        "Produce one JSON OBJECT matching the Stage 4d schema. "
+        "Cover every shot in order. Use the EXACT shot start/end timestamps "
+        "provided. Pay extra attention to action arcs in shots whose dialogue "
+        "contains a verb-of-state-change (pour, squeeze, add, stir, mix, melt).\n"
+    )
+    assert fb is v589.FBADS_TASK_PREAMBLE
+    assert fb != ugc
+    # the heavy-lane orders are gone from the lean one
+    low = fb.lower()
+    assert "action arc" not in low
+    assert "verb-of-state-change" not in low
+    # what is genuinely shared applies to BOTH and must survive
+    for shared in ("Cover every shot in order",
+                   "Use the EXACT shot start/end timestamps"):
+        assert shared in ugc, shared
+        assert shared in fb, shared
+    assert "JSON OBJECT" in fb
+
+
+def test_no_heavy_lane_order_reaches_the_fbads_request_at_all():
+    """The whole fbads request — system instruction, context, task preamble,
+    task and the closing final_instruction — must never order work against
+    fields this profile does not have. The default lane keeps every order."""
     shots = [{"shot": 1, "start": 0.0, "end": 3.0}]
     fb = (v589.READING_PROFILES["fbads-video"]["system_instruction"]
           + v589.build_user_prompt(shots, "t", [], profile="fbads-video"))
-    assert "forensic" not in fb.lower()
+    low = fb.lower()
+    for absent in ("forensic", "action arc", "verb-of-state-change"):
+        assert absent not in low, absent
     default = v589.build_user_prompt(shots, "t", [], profile="ugc-reel")
     assert "Run the forensic-perception protocol on each shot" in default
+    assert "Pay extra attention to action arcs" in default
 
 
 def test_lmstudio_sends_the_profile_system_instruction(monkeypatch, tmp_path):
@@ -338,6 +395,7 @@ def _minimal_valid_lean():
         "ad_read": _ad_read_block(),
         "shots": [
             {"shot_index": 1, "start": 0.0, "end": 2.5,
+             "shot_type": "talking-head",
              "visual": "Medium, static: older woman sits at a kitchen table "
                        "holding her wrist.",
              "on_screen_text": "MY HANDS HURT EVERY MORNING",
@@ -346,6 +404,7 @@ def _minimal_valid_lean():
              "production_method": "real UGC handheld, phone camera, natural "
                                   "window light and visible hand shake"},
             {"shot_index": 2, "start": 2.5, "end": 6.0,
+             "shot_type": "b-roll demo",
              "visual": "Close-up, slow push in on the jar being opened on the "
                        "counter.",
              "on_screen_text": "none",
@@ -365,6 +424,20 @@ def _lean_expected_shots():
 def test_lean_artifact_validates_under_fbads():
     v589.validate_stage4d_output(_minimal_valid_lean(), _lean_expected_shots(),
                                  profile="fbads-video")
+
+
+def test_lean_artifact_missing_shot_type_is_rejected():
+    """A required field is only real if the validator rejects its absence."""
+    data = _minimal_valid_lean()
+    del data["shots"][0]["shot_type"]
+    with pytest.raises(v589.Stage4dValidationError, match="missing shot_type"):
+        v589.validate_stage4d_output(data, _lean_expected_shots(),
+                                     profile="fbads-video")
+    data = _minimal_valid_lean()
+    data["shots"][1]["shot_type"] = ""
+    with pytest.raises(v589.Stage4dValidationError, match="shot_type"):
+        v589.validate_stage4d_output(data, _lean_expected_shots(),
+                                     profile="fbads-video")
 
 
 def test_lean_artifact_missing_production_method_is_rejected():

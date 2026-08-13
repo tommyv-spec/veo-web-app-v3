@@ -95,7 +95,8 @@ FBADS_FORMAT_DECLARATION = (
 
 FBADS_READ_INSTRUCTIONS = (
     "Read this ad for its SELL STRUCTURE, not for frame recreation. "
-    "Per shot record only the source timestamps, one sentence of what "
+    "Per shot record only the source timestamps, what KIND of shot it is in "
+    "two or three words, one sentence of what "
     "is on screen, the burned-in on-screen text VERBATIM ('none' when there "
     "is none), who is visible, how the shot was MADE with the tell that shows "
     "it, and what that beat DOES in the sell. Hook, "
@@ -413,13 +414,29 @@ LEAN_AD_SHOT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "shot_index", "start", "end", "visual", "on_screen_text",
+        "shot_index", "start", "end", "shot_type", "visual", "on_screen_text",
         "who_on_camera", "sell_function", "production_method",
     ],
     "properties": {
         "shot_index": {"type": "integer", "minimum": 1},
         "start": {"type": "number"},
         "end": {"type": "number"},
+        # Operator's ask, in their words: "what's on screen (avatar talking,
+        # brolls, etc.)". It was already IN the read, buried inside visual +
+        # who_on_camera, so counting an ad's shot mix (14 talking-head / 47
+        # hands-demo b-roll / 8 no-person) meant regexing prose. The overlap
+        # with visual/who_on_camera is deliberate and it is what makes the
+        # column filterable — it costs ~3 tokens a shot.
+        "shot_type": _string_schema(
+            "The CATEGORY of shot, in two or three words — a label, not a "
+            "sentence. `visual` carries the description; this is the bucket it "
+            "goes in. Talking-head, b-roll, demo, product shot, screen "
+            "recording, text card and social proof are the common ones, but "
+            "they are EXAMPLES, not a closed list: when a shot is something "
+            "else, name what it actually is. Use the SAME wording for the same "
+            "kind of shot every time it appears — the whole point is to scan "
+            "and count the shot mix across eighty shots without reading the "
+            "prose."),
         # Shot scale is in here, not in a field of its own: close-up-on-a-face
         # vs wide-on-a-product is a scroll-stop lever we want to mine, and it
         # costs three words inside a sentence we are already paying for.
@@ -458,11 +475,29 @@ LEAN_AD_SHOT_SCHEMA = {
 }
 
 
-# The closing <final_instruction> is profile-owned for the same reason the
-# system instruction is (see FBADS_SYSTEM_INSTRUCTION below): it ordered the
-# forensic-perception protocol on EVERY lane, and the lean profile has no such
-# protocol and no composition fields to write. "ugc-reel" keeps the exact
-# string it always had, so the default prompt is byte-identical.
+# The <task> preamble and the closing <final_instruction> are profile-owned
+# for the same reason the system instruction is (see FBADS_SYSTEM_INSTRUCTION
+# below): both ordered work against fields only the heavy schema has. The
+# preamble asked for extra attention to ACTION ARCS and verbs-of-state-change;
+# a lean shot has no action_arc and no state-evolution field to put that in.
+# The closing line ordered the forensic-perception protocol, which the lean
+# profile does not define. "ugc-reel" keeps the exact strings it always had,
+# so the default prompt stays byte-identical.
+DEFAULT_TASK_PREAMBLE = (
+    "Produce one JSON OBJECT matching the Stage 4d schema. "
+    "Cover every shot in order. Use the EXACT shot start/end timestamps "
+    "provided. Pay extra attention to action arcs in shots whose dialogue "
+    "contains a verb-of-state-change (pour, squeeze, add, stir, mix, melt).\n"
+)
+
+# Keeps the two clauses that are genuinely shared — cover every shot, use the
+# source timestamps — and drops the rest, which is heavy-schema work.
+FBADS_TASK_PREAMBLE = (
+    "Produce one JSON OBJECT matching the schema you were given. "
+    "Cover every shot in order. Use the EXACT shot start/end timestamps "
+    "provided.\n"
+)
+
 DEFAULT_FINAL_INSTRUCTION = (
     "Run the forensic-perception protocol on each shot "
     "BEFORE writing its composition fields. Output: ONLY the JSON object. "
@@ -481,6 +516,7 @@ READING_PROFILES = {
         "shot_schema": PER_SHOT_SCHEMA,
         "schema_version": STAGE4D_SCHEMA_VERSION,
         "system_instruction": None,   # bound below, after SYSTEM_INSTRUCTION
+        "task_preamble": DEFAULT_TASK_PREAMBLE,
         "final_instruction": DEFAULT_FINAL_INSTRUCTION,
     },
     "fbads-video": {
@@ -490,6 +526,7 @@ READING_PROFILES = {
         "shot_schema": LEAN_AD_SHOT_SCHEMA,
         "schema_version": "adread.v1",
         "system_instruction": None,   # bound below, after the constants
+        "task_preamble": FBADS_TASK_PREAMBLE,
         "final_instruction": FBADS_FINAL_INSTRUCTION,
     },
 }
@@ -992,10 +1029,7 @@ def build_user_prompt(shots: list, transcript_summary: str, motion: object,
         f"{schema_block}"
         "</context>\n\n"
         "<task>\n"
-        "Produce one JSON OBJECT matching the Stage 4d schema. "
-        "Cover every shot in order. Use the EXACT shot start/end timestamps "
-        "provided. Pay extra attention to action arcs in shots whose dialogue "
-        "contains a verb-of-state-change (pour, squeeze, add, stir, mix, melt).\n"
+        f"{profile_spec['task_preamble']}"
         f"{profile_spec['task']}"
         "</task>\n\n"
         f"<final_instruction>{profile_spec['final_instruction']}</final_instruction>"
