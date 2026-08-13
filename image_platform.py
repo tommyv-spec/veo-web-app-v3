@@ -11065,6 +11065,36 @@ def serve_image_worker_script():
                       media_type="text/x-python")
 
 
+_IMAGE_WORKER_COMPANIONS = {
+    # shared engine switch (the same file flow_worker and the chatgpt worker
+    # use) — firefox mode ImportErrors without it
+    "browser_driver.py",
+    # decrypts the Chrome golden's cookies for the Firefox engine, which cannot
+    # read a chromium profile
+    "chrome_cookie_bridge.py",
+    # seeds a Firefox profile from the operator's real Firefox (fallback path)
+    "firefox_profile_pull.py",
+}
+
+
+@router.get("/worker/download/companion/{filename}")
+def download_image_worker_companion(filename: str):
+    """Serve one whitelisted image-worker companion module from code/static/.
+
+    Firefox mode needs these three next to image_worker.py. Kept on its own
+    /companion/ prefix so it can never shadow the literal image_worker.py route
+    above (FastAPI matches in definition order).
+    """
+    from fastapi.responses import Response as FAResponse
+    if filename not in _IMAGE_WORKER_COMPANIONS:
+        raise HTTPException(404, "unknown file")
+    path = Path(__file__).parent / "static" / filename
+    if not path.is_file():
+        raise HTTPException(404, "not found")
+    return FAResponse(content=path.read_text(encoding="utf-8"),
+                      media_type="text/x-python")
+
+
 @router.get("/worker/download/setup.ps1")
 def serve_image_worker_setup_ps1(
     request: Request,
@@ -11185,6 +11215,15 @@ Write-Host "Downloading image_worker.py..."
 $workerPath = Join-Path $WorkDir "image_worker.py"
 Invoke-WebRequest -Uri "$AppUrl/api/images/worker/download/image_worker.py" -OutFile $workerPath -UseBasicParsing
 Write-Host "Saved to: $workerPath" -ForegroundColor Green
+
+# Companion modules — required for BROWSER_MODE=firefox, harmless on Chrome.
+foreach ($f in @("browser_driver.py","chrome_cookie_bridge.py","firefox_profile_pull.py")) {
+  try {
+    Invoke-WebRequest -Uri "$AppUrl/api/images/worker/download/companion/$f" -OutFile (Join-Path $WorkDir $f) -UseBasicParsing
+  } catch {
+    Write-Host "  (optional) $f not fetched: $($_.Exception.Message)" -ForegroundColor DarkGray
+  }
+}
 
 # Launch the worker
 Write-Host ""
