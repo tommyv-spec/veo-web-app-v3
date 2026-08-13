@@ -58,6 +58,8 @@ DEFAULT_MODEL = os.environ.get("GEMINI_DECODE_MODEL", "3.1 Pro")
 UPLOAD_TIMEOUT_S = int(os.environ.get("GEMINI_UPLOAD_TIMEOUT_S", "1200"))
 ANSWER_TIMEOUT_S = int(os.environ.get("GEMINI_ANSWER_TIMEOUT_S", "2400"))
 POLL_EVERY_S = float(os.environ.get("GEMINI_POLL_EVERY_S", "5"))
+# Hard cap the Gemini app enforces on one prompt, video included.
+MAX_ATTACHMENTS = 10
 
 SELECTORS = {
     "composer": [
@@ -167,6 +169,47 @@ def pack_files():
     return manifest, sys_path, canon
 
 
+def swap_self_example(canon, mp4):
+    """Never hand the model a finished decode OF THE VIDEO IT IS DECODING.
+
+    The pack's worked example is simply the newest decode in raw/videos/. On
+    2026-08-13 that happened to be the decode of the very reel under test, and
+    69% of the long sentences in the result came back copied verbatim from it —
+    the run measured nothing. If the shipped example names this source, another
+    decode is attached in its place.
+    """
+    example = next((p for p in canon if os.path.basename(p).startswith("90_")), None)
+    if example is None:
+        return canon
+    ident = {os.path.basename(os.path.dirname(mp4)),
+             os.path.splitext(os.path.basename(mp4))[0]}
+    ident = {i for i in ident if len(i) > 4}
+    try:
+        body = open(example, encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return canon
+    if not any(i in body for i in ident):
+        return canon
+
+    log(f"the shipped worked example is a decode of THIS source ({', '.join(sorted(ident))})")
+    pool = sorted((os.path.join(REPO_ROOT, "raw", "videos", f)
+                   for f in os.listdir(os.path.join(REPO_ROOT, "raw", "videos"))
+                   if f.startswith("decoded_") and f.endswith(".md")),
+                  key=os.path.getmtime, reverse=True)
+    for cand in pool:
+        try:
+            text = open(cand, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
+        if any(i in text for i in ident):
+            continue
+        log(f"  swapped in {os.path.basename(cand)} as the worked example")
+        return [p if p is not example else cand for p in canon]
+
+    log("  no unrelated decode to swap in — dropping the worked example entirely")
+    return [p for p in canon if p is not example]
+
+
 def pack_is_fresh():
     r = subprocess.run(
         [sys.executable, os.path.join(REPO_ROOT, "tools", "build_gemini_decode_pack.py"),
@@ -183,6 +226,79 @@ def instructions(sys_path):
 # ---------------------------------------------------------------------------
 # Steps
 # ---------------------------------------------------------------------------
+
+def source_facts(mp4):
+    """Duration / size / fps straight from ffprobe.
+
+    The model has to put timestamps on every scene, and it cannot measure the
+    file — handing it the measured numbers is evidence, not a rule, and it keeps
+    a long source from being summarised as if it were short.
+    """
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height,r_frame_rate",
+             "-show_entries", "format=duration", "-of", "json", mp4],
+            capture_output=True, text=True, timeout=60)
+        data = json.loads(r.stdout or "{}")
+        st = (data.get("streams") or [{}])[0]
+        dur = float((data.get("format") or {}).get("duration", 0) or 0)
+        num, _, den = (st.get("r_frame_rate") or "0/1").partition("/")
+        fps = float(num) / float(den or 1) if float(den or 1) else 0
+    except Exception as e:
+        log(f"ffprobe unavailable ({e.__class__.__name__}); sending no source facts")
+        return ""
+    if not dur:
+        return ""
+    facts = (f"SOURCE FACTS (measured, use these rather than estimating): "
+             f"duration {dur:.2f}s, {st.get('width')}x{st.get('height')}, {fps:.0f} fps.")
+    log(facts)
+    return facts
+
+
+def prep_block(mp4, prep_dir=None):
+    """Whisper segments + the hardcut clip list, as text the prompt can carry.
+
+    This is what closes the long-form gap. A 133s source has only THREE hard
+    cuts, so cut detection alone yields ~4 scenes; the hand decode reaches 12 by
+    splitting the 119-second middle take on DIALOGUE beats, which needs whisper's
+    timestamps. Gemini has neither instrument, so when the repo pipeline has
+    already produced them, they ride along and outrank its own hearing.
+    """
+    root = prep_dir or os.path.dirname(os.path.abspath(mp4))
+    stem = os.path.splitext(os.path.basename(mp4))[0]
+    parts = []
+
+    clips = os.path.join(root, "hardcut", "clips.tsv")
+    if not os.path.exists(clips):
+        hits = [os.path.join(dp, "clips.tsv") for dp, _, fs in os.walk(root) if "clips.tsv" in fs]
+        clips = hits[0] if hits else None
+    if clips and os.path.exists(clips):
+        parts.append("HARD CUTS (PySceneDetect, authoritative — these are the real "
+                     "shot boundaries):\n" + open(clips, encoding="utf-8").read().strip())
+
+    tr = os.path.join(root, f"{stem}.json")
+    if os.path.exists(tr):
+        try:
+            segs = (json.load(open(tr, encoding="utf-8")) or {}).get("segments") or []
+        except (OSError, ValueError):
+            segs = []
+        if segs:
+            lines = [f"{s.get('start', 0):.2f}-{s.get('end', 0):.2f}  {(s.get('text') or '').strip()}"
+                     for s in segs]
+            parts.append(
+                "SPEECH (whisper, authoritative and verbatim — use these words and "
+                f"these timings, do not re-transcribe by ear; {len(segs)} segments):\n"
+                + "\n".join(lines))
+
+    if not parts:
+        return ""
+    block = ("PREP FROM THE REPO PIPELINE — this outranks your own hearing and your own "
+             "cut detection. A long single take still splits into several scenes at the "
+             "dialogue beats below.\n\n" + "\n\n".join(parts))
+    log(f"prep block attached ({len(block)} chars)")
+    return block
+
 
 def new_chat(page):
     page.goto(GEMINI_URL, wait_until="load")
@@ -271,6 +387,37 @@ def wait_for_uploads(page, count, timeout_s=UPLOAD_TIMEOUT_S):
     raise RuntimeError(f"uploads still busy after {timeout_s}s. Evidence at {where}")
 
 
+def assert_video_attached(page, mp4, timeout_s=240):
+    """Prove the mp4 is in the composer before sending anything.
+
+    An attached video shows as a thumbnail chip carrying its filename and
+    duration. Without this check a dropped upload only surfaces much later, as a
+    decode whose every field reads "not observable" — which looks like a bad read
+    rather than a lost file.
+    """
+    name = os.path.basename(mp4)
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            body = page.locator("body").inner_text()
+        except Exception:
+            body = ""
+        if name in body:
+            log(f"video chip present: {name}")
+            return True
+        # With several attachments the video chip shrinks to a thumbnail whose
+        # only text is its running time, so a filename match alone is not enough.
+        clock = re.search(r"\b\d{1,2}:\d{2}\b", body)
+        if clock:
+            log(f"video chip present (duration {clock.group(0)})")
+            return True
+        time.sleep(POLL_EVERY_S)
+    where = dump_dom(page, "video_not_attached")
+    raise RuntimeError(
+        f"{name} never appeared in the composer — the app kept the other files and "
+        f"dropped the video, so there is nothing to decode. Evidence at {where}")
+
+
 def send(page, prompt):
     box = find(page, "composer", timeout_ms=15000)
     box.click()
@@ -344,6 +491,74 @@ def _from_clipboard(page):
     return None
 
 
+# Rebuild markdown from the rendered answer. The app renders markdown to HTML,
+# and innerText throws the markers away — a 78k-char answer came back with zero
+# `##` headings and the linter reported every section missing (2026-08-13). This
+# walks the response node and puts the markers back.
+HTML_TO_MD_JS = r"""(sel) => {
+  const nodes = [...document.querySelectorAll(sel)];
+  const root = nodes.length ? nodes[nodes.length - 1] : null;
+  if (!root) return '';
+  const out = [];
+  const inline = (el) => {
+    let s = '';
+    for (const n of el.childNodes) {
+      if (n.nodeType === 3) { s += n.textContent; continue; }
+      const t = n.tagName ? n.tagName.toLowerCase() : '';
+      if (t === 'strong' || t === 'b') s += '**' + inline(n).trim() + '**';
+      else if (t === 'em' || t === 'i') s += '*' + inline(n).trim() + '*';
+      else if (t === 'code') s += '`' + n.textContent + '`';
+      else if (t === 'br') s += '\n';
+      else s += inline(n);
+    }
+    return s;
+  };
+  const walk = (el, depth) => {
+    for (const n of el.children) {
+      const t = n.tagName.toLowerCase();
+      if (/^h[1-6]$/.test(t)) out.push('\n' + '#'.repeat(+t[1]) + ' ' + inline(n).trim() + '\n');
+      else if (t === 'p') out.push(inline(n).trim() + '\n');
+      else if (t === 'ul' || t === 'ol') {
+        [...n.children].forEach((li, i) => {
+          const mark = t === 'ol' ? (i + 1) + '.' : '-';
+          out.push('  '.repeat(depth) + mark + ' ' + inline(li).trim());
+          walk(li, depth + 1);
+        });
+        out.push('');
+      } else if (t === 'pre') out.push('```\n' + n.textContent.replace(/\n+$/, '') + '\n```\n');
+      else if (t === 'table') {
+        for (const tr of n.querySelectorAll('tr')) {
+          const cells = [...tr.children].map(td => inline(td).trim().replace(/\|/g, '\\|'));
+          out.push('| ' + cells.join(' | ') + ' |');
+          if (tr.querySelector('th')) out.push('|' + cells.map(() => '---').join('|') + '|');
+        }
+        out.push('');
+      } else if (t === 'hr') out.push('\n---\n');
+      else if (t === 'li') continue;
+      else walk(n, depth);
+    }
+  };
+  walk(root, 0);
+  return out.join('\n');
+}"""
+
+
+def _from_html(page):
+    for sel in SELECTORS["model_turn"] + ["message-content", ".markdown", "model-response"]:
+        try:
+            text = page.evaluate(HTML_TO_MD_JS, sel)
+        except Exception:
+            continue
+        if text and text.strip():
+            return text
+    return None
+
+
+def _looks_like_markdown(text):
+    """A decode carries its section markers. Plain prose is a failed extraction."""
+    return len(re.findall(r"^##\s+\S", text or "", re.M)) >= 3
+
+
 def _from_dom(page):
     turn = find(page, "model_turn", timeout_ms=4000, required=False)
     if turn is None:
@@ -355,16 +570,80 @@ def _from_dom(page):
 
 
 def extract(page):
+    """Length alone is not proof: the DOM path once returned 78k chars of prose
+    with every `##` stripped, and the linter then reported all seven sections
+    missing. Each path must produce something that still reads as markdown.
+    """
+    best = None
     for name, fn in (("clipboard", lambda: _from_clipboard(page)),
+                     ("html", lambda: _from_html(page)),
                      ("dom", lambda: _from_dom(page))):
         text = fn()
-        if text and len(text) > 2000:
+        if not text:
+            continue
+        if len(text) > 2000 and _looks_like_markdown(text):
             log(f"extracted decode via {name} ({len(text)} chars)")
             return text, name
-        if text:
-            log(f"{name} gave only {len(text)} chars — trying the next path")
+        why = "too short" if len(text) <= 2000 else "no markdown headings left"
+        log(f"{name} rejected ({len(text)} chars, {why}) — trying the next path")
+        best = best or (text, name)
     where = dump_dom(page, "extract_failed")
-    raise RuntimeError(f"could not extract the decode. Evidence at {where}")
+    if best:
+        dump(best[0], "extract_failed_text")
+    raise RuntimeError(
+        f"no extraction path returned usable markdown. Evidence at {where}")
+
+
+def sanity_check(body, mp4):
+    """Catch a decode of a video the model never received.
+
+    The linter passed a file whose every field read "not observable — video not
+    uploaded": one scene, one image, no content, exit 0. Structure was perfect
+    and there was nothing in it. These two checks look at substance instead.
+    """
+    low = body.lower()
+    for phrase in ("video not uploaded", "no video was", "video was not provided",
+                   "i cannot see the video", "video is not attached"):
+        if phrase in low:
+            raise RuntimeError(
+                f"the answer says the video never arrived ({phrase!r}) — the upload was "
+                f"dropped, so this file is not a decode of anything")
+    scenes = len(re.findall(r"^###\s+Scene\s+\d+", body, re.M))
+    if not scenes:
+        return True
+
+    # Seconds-per-scene is the WRONG yardstick on its own: a 119-second static
+    # talking head is legitimately one scene, and warning about it is noise
+    # (fired on the EverTide reel, where 3 scenes is the correct read). When the
+    # real cut list is on disk, compare against THAT — a decode with fewer scenes
+    # than the source has hard cuts has genuinely merged something.
+    cuts = hard_cut_count(mp4)
+    if cuts:
+        if scenes < cuts:
+            log(f"WARNING: {scenes} scene(s) but the source has {cuts} hard cuts — "
+                f"at least one cut was merged away, check it by hand")
+        return True
+
+    facts = source_facts(mp4)
+    m = re.search(r"duration ([\d.]+)s", facts)
+    if m and float(m.group(1)) / scenes > 45:
+        log(f"WARNING: {scenes} scene(s) for {m.group(1)}s of video and no cut list "
+            f"on disk to check against — if the source is not a single static take, "
+            f"the read is collapsed")
+    return True
+
+
+def hard_cut_count(mp4):
+    """How many hard cuts PySceneDetect found, when the prep is on disk."""
+    root = os.path.dirname(os.path.abspath(mp4))
+    hits = [os.path.join(dp, "clips.tsv") for dp, _, fs in os.walk(root) if "clips.tsv" in fs]
+    if not hits:
+        return 0
+    try:
+        rows = [r for r in open(hits[0], encoding="utf-8").read().splitlines() if r.strip()]
+    except OSError:
+        return 0
+    return max(0, len(rows) - 1)  # minus the header
 
 
 def clean(text):
@@ -398,18 +677,43 @@ def clean(text):
 # Run
 # ---------------------------------------------------------------------------
 
-def decode(page, mp4, slug, note="", model=DEFAULT_MODEL, out=None, repair_rounds=2):
+def decode(page, mp4, slug, note="", model=DEFAULT_MODEL, out=None, repair_rounds=2,
+           prep=None, use_prep=True):
     manifest, sys_path, canon = pack_files()
     log(f"pack {manifest['pack_sha']} ({manifest['mode']}, built {manifest['built']})")
 
     new_chat(page)
     select_model(page, model)
 
-    files = canon + [mp4]
-    attach(page, files)
-    wait_for_uploads(page, len(files))
+    docs = swap_self_example(canon, mp4)
+    # The app silently keeps the FIRST ten attachments. On 2026-08-13 an eleventh
+    # canon file pushed the mp4 out and the model answered "not observable — video
+    # not uploaded" for every field, which reads like a bad decode, not a lost
+    # upload. Refuse instead of decoding a video that never arrived.
+    if len(docs) + 1 > MAX_ATTACHMENTS:
+        raise RuntimeError(
+            f"{len(docs) + 1} attachments but the app takes {MAX_ATTACHMENTS}; the video "
+            f"would be dropped. Rebuild the pack (tools/build_gemini_decode_pack.py "
+            f"caps the canon at {MAX_ATTACHMENTS - 1} files).")
+
+    # TWO batches, never one. A single set_input_files carrying documents AND a
+    # video loses the video: the app takes the batch, keeps the nine documents and
+    # silently drops the odd one out — verified 2026-08-13 against a composer
+    # screenshot showing nine doc chips and no video. Sent separately, both stay.
+    attach(page, docs)
+    wait_for_uploads(page, len(docs))
+    attach(page, [mp4])
+    wait_for_uploads(page, 1)
+    assert_video_attached(page, mp4)
 
     prompt = instructions(sys_path) + "\n\n---\n\ndecode this video."
+    facts = source_facts(mp4)
+    if facts:
+        prompt += f"\n\n{facts}"
+    if use_prep:
+        block = prep_block(mp4, prep)
+        if block:
+            prompt += f"\n\n{block}"
     if note:
         prompt += f"\n\n{note}"
     send(page, prompt)
@@ -417,7 +721,9 @@ def decode(page, mp4, slug, note="", model=DEFAULT_MODEL, out=None, repair_round
 
     text, how = extract(page)
     out = out or os.path.join(REPO_ROOT, "raw", "videos", f"decoded_{slug}.md")
-    write(out, clean(text), how)
+    body = clean(text)
+    sanity_check(body, mp4)
+    write(out, body, how)
 
     # The linter knows exactly what is missing, and the chat still holds the
     # video and the rules — so hand the failures back and let it repair in place
@@ -433,8 +739,9 @@ def decode(page, mp4, slug, note="", model=DEFAULT_MODEL, out=None, repair_round
                    "the YAML front matter. Keep every observation you already made, "
                    "including every front-matter key; fix only what the checks name.")
         wait_for_answer(page)
-        text, how = extract(page)
-        write(out, clean(text), f"{how}, repair {round_no}")
+        body = clean(text := extract(page)[0])
+        sanity_check(body, mp4)
+        write(out, body, f"repair {round_no}")
     return out
 
 
@@ -464,6 +771,10 @@ def main():
     ap.add_argument("--model", default=DEFAULT_MODEL, help="mode-picker entry, e.g. '3.1 Pro'")
     ap.add_argument("--repair-rounds", type=int, default=2,
                     help="times to hand linter failures back to the chat for repair")
+    ap.add_argument("--prep", help="folder holding hardcut/clips.tsv + the whisper json "
+                                    "(defaults to the video's own folder)")
+    ap.add_argument("--no-prep", action="store_true",
+                    help="ignore prep on disk; decode from the video alone")
     ap.add_argument("--note", default="", help="extra context appended to the prompt")
     ap.add_argument("--allow-stale", action="store_true", help="run even if the pack lags repo canon")
     ap.add_argument("--headless", action="store_true", help="not recommended; Google flags it")
@@ -494,7 +805,7 @@ def main():
                 log("logged in. Profile is warm for later runs.")
                 return 0
             out = decode(page, args.decode, args.slug, args.note, args.model,
-                         args.out, args.repair_rounds)
+                         args.out, args.repair_rounds, args.prep, not args.no_prep)
             return 0 if verify(out)[0] else 2
         finally:
             try:
