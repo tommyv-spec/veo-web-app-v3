@@ -1032,10 +1032,17 @@ def defocus_chrome(page, label=""):
 
 
 def kill_chrome_using_profile(profile_dir, label=""):
-    """Force-kill any Chrome process holding a lock on the given profile."""
+    """Force-kill any browser process holding a lock on the given profile.
+
+    Matches the process names of the ENGINE actually running: matching only
+    chrome.exe on a Firefox run means the golden restore's rmtree silently
+    fails against a live Camoufox (it runs with ignore_errors=True), leaving a
+    half-deleted profile.
+    """
     import platform as _platform
     prefix = f"[{label}] " if label else ""
     abs_profile = os.path.abspath(profile_dir)
+    _proc_names = (_bd.browser_process_names(BROWSER_MODE) if _bd else ("chrome.exe",))
     killed = []
     try:
         if _platform.system() == "Windows":
@@ -1045,31 +1052,32 @@ def kill_chrome_using_profile(profile_dir, label=""):
             # OTHER worker (video worker also uses chrome-session as
             # a folder name). Cross-worker kills confirmed in the log.
             pids_found = []
-            try:
-                r = subprocess.run(
-                    ['wmic', 'process', 'where',
-                     f'name="chrome.exe" and commandline like "%{abs_profile}%"',
-                     'get', 'ProcessId', '/format:value'],
-                    capture_output=True, text=True, timeout=10)
-                for line in r.stdout.splitlines():
-                    line = line.strip()
-                    if line.startswith('ProcessId=') and line[10:].strip().isdigit():
-                        pids_found.append(line[10:].strip())
-            except Exception:
+            for _pname in _proc_names:
                 try:
-                    escaped = abs_profile.replace("'", "''")
-                    ps_cmd = (
-                        f"Get-CimInstance Win32_Process -Filter \"name='chrome.exe'\""
-                        f" | Where-Object {{ $_.CommandLine -like '*{escaped}*' }}"
-                        f" | Select-Object -ExpandProperty ProcessId")
-                    r2 = subprocess.run(
-                        ['powershell', '-NoProfile', '-Command', ps_cmd],
+                    r = subprocess.run(
+                        ['wmic', 'process', 'where',
+                         f'name="{_pname}" and commandline like "%{abs_profile}%"',
+                         'get', 'ProcessId', '/format:value'],
                         capture_output=True, text=True, timeout=10)
-                    for line in r2.stdout.splitlines():
-                        if line.strip().isdigit():
-                            pids_found.append(line.strip())
+                    for line in r.stdout.splitlines():
+                        line = line.strip()
+                        if line.startswith('ProcessId=') and line[10:].strip().isdigit():
+                            pids_found.append(line[10:].strip())
                 except Exception:
-                    pass
+                    try:
+                        escaped = abs_profile.replace("'", "''")
+                        ps_cmd = (
+                            f"Get-CimInstance Win32_Process -Filter \"name='{_pname}'\""
+                            f" | Where-Object {{ $_.CommandLine -like '*{escaped}*' }}"
+                            f" | Select-Object -ExpandProperty ProcessId")
+                        r2 = subprocess.run(
+                            ['powershell', '-NoProfile', '-Command', ps_cmd],
+                            capture_output=True, text=True, timeout=10)
+                        for line in r2.stdout.splitlines():
+                            if line.strip().isdigit():
+                                pids_found.append(line.strip())
+                    except Exception:
+                        pass
             for pid in pids_found:
                 subprocess.run(['taskkill', '/F', '/PID', pid], capture_output=True, timeout=5)
                 killed.append(pid)
@@ -10976,13 +10984,18 @@ def launch_browser(session_folder=SESSION_FOLDER):
     # build the golden directly from the operator's real logged-in Chrome
     # profile BEFORE the golden restore below, so the restored session is
     # already signed in. No-op when no email is configured.
-    golden = get_golden_folder(session_folder)
+    # The golden is ALWAYS the chromium one: the laptop pull writes a chromium
+    # profile, and in Firefox mode it is the source the cookie bridge reads.
+    golden = chromium_golden_folder(session_folder)
     _maybe_pull_laptop_profile(session_folder, golden, label="IMAGE")
 
     # Restore from golden if available (v828 — robust retry loop, parity with
     # flow_worker: the old single-attempt copytree silently failed on WinError
     # 1224/32 file locks and shipped a stale profile that kept the block alive).
-    if os.path.exists(golden):
+    # NEVER on Firefox: copying a chromium profile over a Firefox profile
+    # directory produces an unreadable mix. Firefox takes the cookie bridge
+    # after launch instead.
+    if os.path.exists(golden) and not FIREFOX_MODE:
         restore_from_golden(session_folder, label="IMAGE")
     
     pw = sync_playwright().start()
@@ -10996,7 +11009,9 @@ def launch_browser(session_folder=SESSION_FOLDER):
         '--media-cache-size=1',
     ]
     
-    browser = pw.chromium.launch_persistent_context(
+    # browser_driver strips the Chrome-only kwargs (channel / ignore_default_args
+    # / args) and applies Camoufox's dialect, so both engines take the same call.
+    _launch_kwargs = dict(
         user_data_dir=session_folder,
         channel=_worker_chrome_channel(),  # v814 — sidecar/env, parity with flow_worker
         ignore_default_args=_IGNORE_DEFAULT_ARGS,
@@ -11004,10 +11019,19 @@ def launch_browser(session_folder=SESSION_FOLDER):
         viewport={"width": 1280, "height": 720},
         args=launch_args,
     )
-    
+    if _bd:
+        browser = _bd.launch_context(pw, BROWSER_MODE, **_launch_kwargs)
+    else:
+        browser = pw.chromium.launch_persistent_context(**_launch_kwargs)
+
     page = browser.pages[0] if browser.pages else browser.new_page()
     _stash_profile_on_page(page, session_folder)  # v486
     print("[IMAGE] ✓ Browser launched", flush=True)
+
+    # Firefox cannot read the chromium golden, so its session arrives as cookies.
+    _bridge_golden_cookies_if_firefox(BROWSER_MODE, browser,
+                                      chromium_golden_folder(session_folder),
+                                      log=lambda m: print(m, flush=True))
 
     # Inject the staged laptop-login cookies so this fresh session is already
     # logged into Google — no manual verification code (parity with flow_worker).
@@ -11184,7 +11208,7 @@ Examples:
                 except Exception:
                     pass
                 time.sleep(2)
-                browser = pw.chromium.launch_persistent_context(
+                _relaunch_kwargs = dict(
                     user_data_dir=args.session,
                     channel=_worker_chrome_channel(),  # v814
                     ignore_default_args=_IGNORE_DEFAULT_ARGS,
@@ -11193,8 +11217,15 @@ Examples:
                     args=['--disable-blink-features=AutomationControlled',
                           '--disable-dev-shm-usage', '--no-sandbox'],
                 )
+                if _bd:
+                    browser = _bd.launch_context(pw, BROWSER_MODE, **_relaunch_kwargs)
+                else:
+                    browser = pw.chromium.launch_persistent_context(**_relaunch_kwargs)
                 page = browser.pages[0] if browser.pages else browser.new_page()
                 _stash_profile_on_page(page, args.session)  # v486
+                _bridge_golden_cookies_if_firefox(BROWSER_MODE, browser,
+                                                  chromium_golden_folder(args.session),
+                                                  log=lambda m: print(m, flush=True))
                 _inject_laptop_cookies(browser, "IMAGE")  # re-inject after relaunch
         
         # Navigate to Flow and verify login
