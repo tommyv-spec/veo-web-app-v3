@@ -182,7 +182,83 @@ def _project_page_ok(page, context, deadline_s=10.0):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_FOLDER = os.environ.get("IMAGE_SESSION_FOLDER",
     os.path.join(BASE_DIR, "image-chrome-session"))
-BROWSER_MODE = os.environ.get("BROWSER_MODE", "stealth")
+
+_FIREFOX_MODE_NAMES = ("firefox", "camoufox")
+
+
+def session_folder_for_mode(mode, chrome_session_folder):
+    """Firefox gets its OWN profile dir — the two formats are mutually unreadable.
+
+    Chrome keeps the historical path, so an existing install is untouched and a
+    missing or typo'd BROWSER_MODE can never migrate a working Chrome worker
+    onto a profile it cannot read (default-by-config, never default-by-code).
+    """
+    if (mode or "").strip().lower() not in _FIREFOX_MODE_NAMES:
+        return chrome_session_folder
+    base = os.path.dirname(chrome_session_folder)
+    name = os.path.basename(chrome_session_folder)
+    return os.path.join(base, name.replace("image-chrome-session", "image-firefox-session"))
+
+
+def chromium_golden_folder(session_folder):
+    """The CHROMIUM golden, whichever engine is running.
+
+    Firefox does not get a golden of its own: it cannot read a chromium profile,
+    so its session is bridged in as cookies from this one (see
+    _bridge_golden_cookies_if_firefox). The laptop pull keeps this folder fresh
+    for both engines, so the path must not move when the engine changes.
+    """
+    p = os.path.abspath(session_folder)
+    chrome_equivalent = os.path.join(
+        os.path.dirname(p),
+        os.path.basename(p).replace("image-firefox-session", "image-chrome-session"))
+    return get_golden_folder(chrome_equivalent)
+
+
+def _bridge_golden_cookies_if_firefox(mode, ctx, golden, reader=None, log=print):
+    """Inject the chromium golden's Google cookies into a Firefox context.
+
+    Firefox cannot READ a chromium profile, but the cookies inside it are
+    ordinary cookies — the same move the ChatGPT worker uses to land its
+    Firefox session logged in. No-op on Chrome, which reads its own profile.
+
+    Returns True when cookies were injected.
+    """
+    if (mode or "").strip().lower() not in _FIREFOX_MODE_NAMES:
+        return False
+    if reader is None:
+        try:
+            from chrome_cookie_bridge import read_cookies as reader
+        except ImportError:
+            log("[IMAGE] chrome_cookie_bridge missing — cannot bridge the session")
+            return False
+    try:
+        cookies = reader(golden, ("google.com", "labs.google"), log=log)
+    except Exception as e:
+        log(f"[IMAGE] could not read the golden's cookies ({str(e)[:80]})")
+        return False
+    if not cookies:
+        log("[IMAGE] golden held no Google cookies to bridge")
+        return False
+    try:
+        ctx.add_cookies(cookies)
+    except Exception as e:
+        # One malformed cookie rejects the whole batch, so retry per-cookie: a
+        # single bad row must not cost the entire session.
+        log(f"[IMAGE] batch cookie inject rejected ({str(e)[:80]}) — injecting one by one")
+        ok = 0
+        for c in cookies:
+            try:
+                ctx.add_cookies([c])
+                ok += 1
+            except Exception:
+                pass
+        if not ok:
+            return False
+        log(f"[IMAGE] injected {ok}/{len(cookies)} cookies individually")
+        return True
+    log(f"[IMAGE] bridged {len(cookies)} cookie(s) from the golden into Firefox")
+    return True
 
 
 # ============================================================
