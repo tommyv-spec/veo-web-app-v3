@@ -3781,6 +3781,13 @@ def serve_image_file(
     path: str,
     direct: int = 0,
     w: int = 0,
+    # v891.6b — force a derived thumbnail to be rebuilt from the current
+    # full-res bytes. The mtime self-heal only works when the full-res is on
+    # local disk, and on an ephemeral filesystem it usually is not: gallery
+    # tiles stream the webp straight from R2 and never materialise the source.
+    # So a thumb that went stale BEFORE the purge-at-write fix has no way to
+    # notice. This gives an explicit, idempotent rebuild for those.
+    refresh: int = 0,
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -3867,6 +3874,16 @@ def serve_image_file(
     # (the v695 footgun) and keeps the per-user auth check above.
     if thumb_rel is not None:
         local_thumb = images_root() / thumb_rel
+        if refresh:
+            # v891.6b — drop the cached thumb (local + R2) so the generate path
+            # below rebuilds it from the current full-res.
+            try:
+                _storage_delete(thumb_rel)
+                if local_thumb.exists():
+                    local_thumb.unlink()
+                log.info(f"[v891.6b] forced thumb rebuild: {thumb_rel}")
+            except Exception as _re:
+                log.warning(f"[v891.6b] forced rebuild failed for {thumb_rel}: {_re}")
         if local_thumb.exists():
             # v891.6 — self-heal a thumb whose source was rewritten under it.
             # Only when the full-res is present LOCALLY: a cold node streams its
@@ -3889,7 +3906,7 @@ def serve_image_file(
             except Exception as _se:
                 log.warning(f"[v891.6] thumb freshness check failed for {thumb_rel}: {_se}")
                 return FileResponse(local_thumb, media_type="image/webp", headers=_imm)
-        storage = _storage_or_none()
+        storage = _storage_or_none() if not refresh else None
         if storage is not None:
             try:
                 s = storage.stream_object(_r2_key_for(thumb_rel))
