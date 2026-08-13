@@ -155,6 +155,123 @@ def find(page, key, timeout_ms=10000, required=True):
 # The pack
 # ---------------------------------------------------------------------------
 
+FF_PROFILE_DIR = os.environ.get(
+    "GEMINI_FF_PROFILE_DIR", os.path.join(BASE_DIR, ".gemini_ff_profile"))
+CAMOUFOX_OS = os.environ.get("CAMOUFOX_OS", "windows")
+
+
+def firefox_playwright():
+    """Plain Playwright, NOT patchright.
+
+    `run_firefox_worker_local.py` measured it: patchright + firefox breaks
+    page.evaluate ("Cannot read properties of undefined"), plain playwright +
+    firefox works. Camoufox then supplies the stealth Firefox lacks — plain
+    Playwright Firefox sets navigator.webdriver=True and Google's OAuth refuses
+    it outright.
+    """
+    from playwright.sync_api import sync_playwright
+    return sync_playwright
+
+
+def launch_firefox(p, headless=False):
+    """Camoufox, the same engine the Flow worker runs on.
+
+    Chrome stopped being able to READ uploaded video on 2026-08-13: a 1.4MB clip
+    that decoded cleanly an hour earlier came back "CANNOT OPEN", as did every
+    other file, while the chip kept appearing normally. That is the same
+    engine-side degradation the Flow lane hit, where Firefox works and Chrome
+    scores ~0% (`flow-403-is-recaptcha-token-class`).
+    """
+    from camoufox.sync_api import NewBrowser
+
+    os.makedirs(FF_PROFILE_DIR, exist_ok=True)
+    kwargs = {
+        "user_data_dir": FF_PROFILE_DIR,
+        "headless": headless,
+        # keep the fingerprint coherent with this machine — Camoufox otherwise
+        # picks at random and has served a macOS UA on this Windows box
+        "os": CAMOUFOX_OS,
+        "window": (1400, 1000),
+        "no_viewport": True,
+    }
+    try:
+        from camoufox.addons import DefaultAddons
+
+        # Camoufox >=0.5 hard-fails the launch when its bundled uBlock is
+        # missing, and that download comes from GitHub. Skip it.
+        kwargs["exclude_addons"] = [DefaultAddons.UBO]
+    except ImportError:
+        pass
+
+    ctx = NewBrowser(p, persistent_context=True, **kwargs)
+    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    page.set_default_timeout(30000)
+    log(f"Camoufox ACTIVE (profile {os.path.basename(FF_PROFILE_DIR)})")
+    seed_firefox_session(ctx)
+    return ctx, page
+
+
+def pull_firefox_profile(email):
+    """Seed the Camoufox profile from a REAL Firefox profile on this machine.
+
+    The Firefox counterpart of the Chrome session pull, and the same tool the
+    Flow worker uses. It copies the durable DATA files only — Camoufox ships
+    Firefox 152 and silently refuses a profile written by the machine's 153, so
+    a wholesale directory copy produces a browser that never starts.
+
+    Cookie-bridging Chrome's session into Firefox is NOT enough for Google: 37
+    bridged cookies still landed on a signed-out page offering Flash-Lite
+    (measured 2026-08-13). Google binds the session to the browser, so the
+    session has to come from a Firefox that really signed in.
+    """
+    if not email:
+        return False
+    try:
+        import firefox_profile_pull as ffpull
+    except ImportError:
+        log("firefox_profile_pull not available — Firefox needs a manual sign-in")
+        return False
+    try:
+        ok = ffpull.build_firefox_golden_from_profile(
+            email, FF_PROFILE_DIR, label="GEMINI-FF", log=log)
+    except Exception as e:
+        log(f"firefox profile pull failed ({e.__class__.__name__}: {str(e)[:90]})")
+        return False
+    if ok:
+        log(f"Firefox golden seeded for {email} from a real Firefox profile")
+    return bool(ok)
+
+
+def seed_firefox_session(ctx, golden=None):
+    """Fallback only: bridge the Chrome account's cookies into Firefox.
+
+    Kept because it costs nothing and occasionally helps a same-account
+    handoff, but it does NOT authenticate Google on its own — see
+    pull_firefox_profile. The real seeding path is the Firefox profile pull.
+    """
+    golden = golden or gvw.PROFILE_DIR
+    if not os.path.isdir(golden):
+        log("no Chrome golden to seed from — Firefox will need a manual sign-in")
+        return False
+    try:
+        import chrome_cookie_bridge as bridge
+    except ImportError:
+        log("chrome_cookie_bridge unavailable — Firefox needs a manual sign-in")
+        return False
+
+    cookies = bridge.read_cookies(golden, domains=("google.com",), log=log)
+    if not cookies:
+        log("cookie bridge returned nothing — Firefox needs a manual sign-in")
+        return False
+    try:
+        ctx.add_cookies(cookies)
+    except Exception as e:
+        log(f"could not add cookies to Firefox ({e.__class__.__name__}: {str(e)[:80]})")
+        return False
+    log(f"seeded Firefox with {len(cookies)} Google cookie(s) from the Chrome golden")
+    return True
+
+
 def pack_files():
     mf = os.path.join(PACK_DIR, "MANIFEST.json")
     if not os.path.exists(mf):
@@ -603,11 +720,27 @@ def sanity_check(body, mp4):
     """
     low = body.lower()
     for phrase in ("video not uploaded", "no video was", "video was not provided",
-                   "i cannot see the video", "video is not attached"):
+                   "i cannot see the video", "video is not attached",
+                   "could not be opened", "unable to open the video",
+                   "could not access the video", "video could not be processed"):
         if phrase in low:
             raise RuntimeError(
-                f"the answer says the video never arrived ({phrase!r}) — the upload was "
-                f"dropped, so this file is not a decode of anything")
+                f"the answer says it never read the video ({phrase!r}) — the file was "
+                f"attached but not opened, so this is scaffolding, not a decode")
+
+    # A phrase list only catches wording it was told about. On 2026-08-13 a 40s
+    # 34MB source came back as 72k chars of perfect structure with 47% of its
+    # fields reading "not observable — video file could not be opened", and it
+    # PASSED the linter, because structure was never the thing that was missing.
+    # Measure the emptiness instead of guessing at its phrasing.
+    fields = re.findall(r"^- \*\*[a-z_ /-]+:\*\*\s*(.+)$", body, re.M | re.I)
+    unusable = [f for f in fields if re.search(r"not observable|unknown|n/?a\b", f, re.I)]
+    if fields and len(unusable) / len(fields) > 0.25:
+        raise RuntimeError(
+            f"{len(unusable)} of {len(fields)} fields ({len(unusable)/len(fields):.0%}) say "
+            f"nothing was observable — the model produced the shape of a decode without "
+            f"reading the video. Re-run; if it repeats, the source is too long or too "
+            f"large for the app to process")
     scenes = len(re.findall(r"^###\s+Scene\s+\d+", body, re.M))
     if not scenes:
         return True
@@ -677,7 +810,7 @@ def clean(text):
 # Run
 # ---------------------------------------------------------------------------
 
-def decode(page, mp4, slug, note="", model=DEFAULT_MODEL, out=None, repair_rounds=2,
+def decode(page, mp4, slug, note="", model=DEFAULT_MODEL, out=None, repair_rounds=0,
            prep=None, use_prep=True):
     manifest, sys_path, canon = pack_files()
     log(f"pack {manifest['pack_sha']} ({manifest['mode']}, built {manifest['built']})")
@@ -769,14 +902,20 @@ def main():
     ap.add_argument("--slug", help="output slug -> raw/videos/decoded_<slug>.md")
     ap.add_argument("--out", help="write here instead of raw/videos/decoded_<slug>.md")
     ap.add_argument("--model", default=DEFAULT_MODEL, help="mode-picker entry, e.g. '3.1 Pro'")
-    ap.add_argument("--repair-rounds", type=int, default=2,
-                    help="times to hand linter failures back to the chat for repair")
+    ap.add_argument("--repair-rounds", type=int, default=0,
+                    help="patch failures in the same chat instead of fixing the prompt. "
+                         "Default 0: read the error, improve the prompt, run again.")
     ap.add_argument("--prep", help="folder holding hardcut/clips.tsv + the whisper json "
                                     "(defaults to the video's own folder)")
     ap.add_argument("--no-prep", action="store_true",
                     help="ignore prep on disk; decode from the video alone")
     ap.add_argument("--note", default="", help="extra context appended to the prompt")
     ap.add_argument("--allow-stale", action="store_true", help="run even if the pack lags repo canon")
+    ap.add_argument("--firefox", action="store_true",
+                    help="drive Camoufox instead of Chrome. Use when Chrome stops being "
+                         "able to READ uploads (chip appears, model says it cannot open the file).")
+    ap.add_argument("--reseed-firefox", action="store_true",
+                    help="rebuild the Camoufox profile from this machine's Firefox profile")
     ap.add_argument("--headless", action="store_true", help="not recommended; Google flags it")
     args = ap.parse_args()
 
@@ -796,9 +935,21 @@ def main():
     if args.email:
         gvw.use_account(args.email)
 
-    sync_playwright = gvw._import_playwright()
+    if args.firefox:
+        global FF_PROFILE_DIR
+        if args.email:
+            safe = re.sub(r"[^A-Za-z0-9._-]", "_", args.email.strip().lower())
+            FF_PROFILE_DIR = os.path.join(BASE_DIR, f".gemini_ff_profile_{safe}")
+        # Seed from a REAL Firefox profile on this machine, the same way the
+        # Flow worker does. Chrome's cookies alone do not authenticate Google.
+        if not os.path.isdir(FF_PROFILE_DIR) or args.reseed_firefox:
+            pull_firefox_profile(args.email)
+        sync_playwright = firefox_playwright()
+    else:
+        sync_playwright = gvw._import_playwright()
     with sync_playwright() as p:
-        ctx, page = gvw.launch(p, headless=args.headless)
+        ctx, page = (launch_firefox(p, headless=args.headless) if args.firefox
+                     else gvw.launch(p, headless=args.headless))
         try:
             gvw.ensure_logged_in(page)
             if args.login:
