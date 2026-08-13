@@ -3868,7 +3868,27 @@ def serve_image_file(
     if thumb_rel is not None:
         local_thumb = images_root() / thumb_rel
         if local_thumb.exists():
-            return FileResponse(local_thumb, media_type="image/webp", headers=_imm)
+            # v891.6 — self-heal a thumb whose source was rewritten under it.
+            # Only when the full-res is present LOCALLY: a cold node streams its
+            # thumb from R2 without ever materialising the full-res, so this
+            # cannot re-trigger the v75y "cold flood" (that was caused by a
+            # MISSING local thumb forcing a full-res download + resize). Here the
+            # full-res is already on disk, so regenerating is a local resize.
+            try:
+                if (abs_path.exists()
+                        and abs_path.stat().st_mtime > local_thumb.stat().st_mtime):
+                    log.info(
+                        f"[v891.6] thumb {thumb_rel} is older than its source — "
+                        f"regenerating from current bytes"
+                    )
+                    local_thumb.unlink()
+                    _storage_delete(thumb_rel)
+                else:
+                    return FileResponse(local_thumb, media_type="image/webp",
+                                        headers=_imm)
+            except Exception as _se:
+                log.warning(f"[v891.6] thumb freshness check failed for {thumb_rel}: {_se}")
+                return FileResponse(local_thumb, media_type="image/webp", headers=_imm)
         storage = _storage_or_none()
         if storage is not None:
             try:
@@ -13125,6 +13145,28 @@ def worker_upload_variants(
             continue
         rel = target.relative_to(images_root())
         rel_str = str(rel).replace("\\", "/")
+        # v891.6 — this write OVERWRITES variant_N.png in place, and the derived
+        # thumbnails are keyed by the stem alone (variant_N.w{128,256,512}.webp),
+        # so they survive it and the ?v={id} cache-bust never reaches them. The
+        # serve path's thumb FAST PATH returns an existing webp WITHOUT ever
+        # comparing it to its source, so every gallery tile keeps painting the
+        # PRE-regen image forever while the full-res is correct. That split is
+        # exactly what the operator kept reporting - "the thumbnail is correct
+        # but in the node is messed up" - and it is why fetching the full-res
+        # kept showing the right picture: the UI renders the webp, not the png.
+        # _delete_variant_files already purges these, but only when rows are
+        # deleted; this path rewrites bytes under a surviving row. Measured on
+        # node 4861: cached .w256.webp vs a fresh thumb of the current full-res
+        # differed by a mean of 49.7/255 across the whole frame.
+        for _stale_thumb in _thumb_rels_for(rel_str):
+            try:
+                _storage_delete(_stale_thumb)
+                _tp = images_root() / _stale_thumb
+                if _tp.exists():
+                    _tp.unlink()
+                    log.info(f"[v891.6] purged stale thumb {_stale_thumb}")
+            except Exception as _te:
+                log.warning(f"[v891.6] couldn't purge thumb {_stale_thumb}: {_te}")
         # Mirror to R2 so it survives redeploys on ephemeral filesystems.
         # This is the slow part — no DB connection is held during it.
         try:
