@@ -94,15 +94,23 @@ FBADS_FORMAT_DECLARATION = (
 )
 
 FBADS_READ_INSTRUCTIONS = (
-    "Read this ad for its SELL STRUCTURE, not for frame recreation. "
+    "Read this ad for its SELL STRUCTURE and its MOTION, not for frame "
+    "recreation and not for appearance. A separate pass reads each clip's "
+    "start frame as a still and owns everything a photograph can show — "
+    "wardrobe, props, set dressing, palette, faces, lighting and production "
+    "tells. Do not spend output on any of it here.\n"
     "Per shot record only the source timestamps, what KIND of shot it is in "
-    "two or three words, one sentence of what "
-    "is on screen, the burned-in on-screen text VERBATIM ('none' when there "
-    "is none), who is visible, how the shot was MADE with the tell that shows "
-    "it, and what that beat DOES in the sell. Hook, "
+    "two or three words, every action inside the clip IN ORDER, how the camera "
+    "moves and how fast, the state the frame LANDS in at the end, the "
+    "burned-in on-screen text VERBATIM ('none' when there "
+    "is none), and what that beat DOES in the sell. Hook, "
     "pain, story, credibility, proof/demo, mechanism, objection, offer and "
     "CTA are the common jobs, but they are EXAMPLES, not a closed list — when "
     "a beat does something else, name in plain words what it actually does.\n"
+    "A clip usually holds several beats: she lifts the jar, then twists the "
+    "lid, then tips it toward the lens. Record all of them, in order. A "
+    "ONE-VERB summary of a multi-beat clip is the failure this read exists to "
+    "prevent.\n"
     "The whisper transcript in the context block is supplied and AUTHORITATIVE "
     "for dialogue. Do NOT re-transcribe speech into the shots; there is no "
     "per-shot audio field and repeating the transcript wastes the output "
@@ -409,68 +417,103 @@ PER_SHOT_SCHEMA = {
 # Flat on purpose: no sub-objects, no arrays. Every field is one short string
 # the model can emit in a line. See the cost note above READING_PROFILES for
 # why this exists rather than reusing PER_SHOT_SCHEMA.
+#
+# 2026-08-13 — DESCRIPTION -> ACTION. Measured on a real 140s / 80-clip
+# Facebook ad, and driven by the operator's actual requirement: "what's really
+# important is the script and the start frame of each clip and what happens in
+# that clip (so we can animate properly with dialogue and action each scene)",
+# then "the actions taking place in each clip are very important".
+#
+# The division of labour testing settled on — each source doing only what the
+# others cannot:
+#   * the SCRIPT per clip  -> whisper spans intersected with the clip spans.
+#     No model at all: free and exact.
+#   * WHAT HAPPENS in the clip -> this pass. ~$0.073 per ad.
+#   * the START FRAME's composition -> a separate per-frame pass over the
+#     native-resolution JPG, ~$0.006 a frame.
+#   * offer / CTA / end card -> ad_read, which rides this same video pass.
+#
+# Because a separate pass owns the start frame at full resolution, THIS pass
+# must stop describing appearance. `visual`, `who_on_camera` and
+# `production_method` are all appearance/method facts a still photograph shows,
+# and the frame pass is measurably BETTER at them — it caught a peacock-feather
+# print and "wire-rimmed glasses, blue jeans, beige apron" that the video pass
+# missed or got wrong. Paying premium output rate twice for the worse of the
+# two answers is what made `visual` both expensive and vague.
+#
+# `on_screen_text` stays, on a SCOPE argument rather than a habit one: burned-in
+# captions CHANGE DURING a clip, so a still start-frame read structurally cannot
+# cover them. Different scope, not duplication.
+#
+# All plain strings, no enums — root CLAUDE.md §3.6, creative lists are open
+# examples, never closed menus. A competitor ships camera moves and shot kinds
+# no seven-item enum anticipated.
 
 LEAN_AD_SHOT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "shot_index", "start", "end", "shot_type", "visual", "on_screen_text",
-        "who_on_camera", "sell_function", "production_method",
+        "shot_index", "start", "end", "shot_type", "action", "camera_move",
+        "end_state", "on_screen_text", "sell_function",
     ],
     "properties": {
         "shot_index": {"type": "integer", "minimum": 1},
         "start": {"type": "number"},
         "end": {"type": "number"},
         # Operator's ask, in their words: "what's on screen (avatar talking,
-        # brolls, etc.)". It was already IN the read, buried inside visual +
-        # who_on_camera, so counting an ad's shot mix (14 talking-head / 47
-        # hands-demo b-roll / 8 no-person) meant regexing prose. The overlap
-        # with visual/who_on_camera is deliberate and it is what makes the
-        # column filterable — it costs ~3 tokens a shot.
+        # brolls, etc.)" — the countable column. 14 talking-head / 47 hands-demo
+        # b-roll / 8 no-person is a shot mix you can read at a glance; the same
+        # fact spread through prose has to be regexed out. ~3 tokens a shot.
         "shot_type": _string_schema(
             "The CATEGORY of shot, in two or three words — a label, not a "
-            "sentence. `visual` carries the description; this is the bucket it "
-            "goes in. Talking-head, b-roll, demo, product shot, screen "
+            "sentence. Talking-head, b-roll, demo, product shot, screen "
             "recording, text card and social proof are the common ones, but "
             "they are EXAMPLES, not a closed list: when a shot is something "
             "else, name what it actually is. Use the SAME wording for the same "
             "kind of shot every time it appears — the whole point is to scan "
             "and count the shot mix across eighty shots without reading the "
             "prose."),
-        # Shot scale is in here, not in a field of its own: close-up-on-a-face
-        # vs wide-on-a-product is a scroll-stop lever we want to mine, and it
-        # costs three words inside a sentence we are already paying for.
-        "visual": _string_schema(
-            "One sentence: what is on screen. Shot scale (close-up / medium / "
-            "wide), setting, who is in frame, what they are doing, and whether "
-            "the camera moves or holds still."),
+        # THE field this profile now exists for. One flowing sentence rather
+        # than an array: an array of beat objects is the same information at
+        # roughly double the token cost in braces and keys, and the model
+        # sequences fine on "then".
+        "action": _string_schema(
+            "Every action inside this clip, IN ORDER, as one flowing sentence "
+            "using 'then' between the beats. A clip usually holds several: "
+            "'her hands lift the hem, then she turns it toward the lens, then "
+            "the fabric ripples as she tugs it.' A ONE-VERB summary of a "
+            "multi-beat clip is the failure this field exists to prevent — if "
+            "three things happen, write all three, in the order they happen. A "
+            "single verb is correct ONLY when genuinely nothing else moves. "
+            "Write 'held still' when nothing moves at all. Describe the "
+            "movement itself, not what the people or objects look like."),
+        "camera_move": _string_schema(
+            "How the CAMERA moves during this clip, and how fast. Static, "
+            "handheld drift, pan, push in, pull out, whip and tilt are the "
+            "common ones, but they are EXAMPLES, not a closed list — name what "
+            "the camera actually does. Always say the speed as well: slow, "
+            "steady, fast, or a snap. Write 'static' when the frame is locked "
+            "off and 'handheld drift' when it only breathes."),
+        "end_state": _string_schema(
+            "Where the frame LANDS at the end of this clip — what is DIFFERENT "
+            "from how it started: final pose and position, the state of any "
+            "object that changed, who is still in frame, how tight the framing "
+            "ended up. This is the end frame an animator interpolates TOWARD, "
+            "so it must describe a STATE, not a repeat of the action: 'the jar "
+            "sits open on the counter, her hands out of frame' — not 'she "
+            "opens the jar'. Write 'unchanged from the start' when the clip "
+            "lands exactly where it began."),
         "on_screen_text": _string_schema(
             "The burned-in text or overlay shown during this shot, VERBATIM. "
-            "'none' if there is none."),
-        "who_on_camera": _string_schema(
-            "Who is visible, e.g. 'the older woman, alone', 'hands only, no "
-            "face', 'nobody - product shot'. 'none' if no person is on camera."),
+            "'none' if there is none. This stays a per-clip job because "
+            "burned-in captions and overlays CHANGE DURING a clip — a read of "
+            "the start frame alone cannot see text that appears, swaps or "
+            "leaves mid-clip. Record each text state in the order it appears."),
         "sell_function": _string_schema(
             "What this beat DOES in the sell, in plain words. Hook, pain, "
             "story, credibility, proof/demo, mechanism, objection, offer and "
             "CTA are common ones, but these are EXAMPLES, not a closed list: "
             "when a beat does something else, name what it actually does."),
-        # The single most actionable fact about a competitor's creative: it
-        # decides what we can copy and at what cost. Deliberately open (3.6) —
-        # a competitor will ship a hybrid no five-item enum anticipated. Same
-        # question the heavy lane asks in frame_inventory.production_method, at
-        # one line instead of a paragraph, so the two lanes speak one language.
-        "production_method": _string_schema(
-            "HOW this shot was MADE, not what is in it. Real UGC filmed on a "
-            "phone, AI-generated, licensed stock, a screen recording, a studio "
-            "shoot, or a graphics-only card — and say which visible TELL shows "
-            "it. A bare label is a guess and is worth little; the tell is what "
-            "makes it usable. Examples of the shape: 'real UGC handheld, phone "
-            "camera, natural window light'; 'AI-generated, plastic skin texture "
-            "and background detail that drifts between frames'; 'licensed "
-            "stock, professional grade and studio lighting'; 'screen recording "
-            "of a website'. Write 'unclear' when nothing in the frame gives it "
-            "away."),
     },
 }
 
@@ -976,24 +1019,40 @@ FBADS_SYSTEM_INSTRUCTION = """\
 You are a video-understanding assistant for a competitor-ad research pipeline.
 
 Your job: watch a PAID Facebook/Instagram ad that a competitor is running and
-record how it is BUILT — its shot structure, its on-screen text, and what each
-beat does in the sell.
+record WHAT HAPPENS IN IT — the motion inside each clip, in the order it
+happens — plus its shot structure, its on-screen text, and what each beat does
+in the sell.
 
 For each shot, output a JSON object matching the schema in your prompt.
+
+SOMEONE ELSE IS DESCRIBING THE STILL FRAMES. A separate pass reads each clip's
+start frame at full resolution and owns everything a photograph can show:
+wardrobe, props, set dressing, palette, faces, lighting, and how the frame was
+produced. So do NOT describe appearance here. The test is simple - IF A STILL
+PHOTOGRAPH COULD SHOW IT, IT IS NOT THIS PASS'S JOB. Describing it again here
+costs premium output tokens for a worse answer than the pass that owns it.
+
+What IS your job is WHAT MOVES: every action inside the clip in the order it
+happens, how the camera moves, and the state the frame lands in at the end.
+Downstream, a start frame is generated from the other pass's read and an
+animator drives it through the motion you record here, so record the motion the
+way someone who has to reproduce it needs to read it.
 
 Hard rules:
 - The whisper transcript supplied in the prompt is AUTHORITATIVE for the
   dialogue. Do NOT re-transcribe speech into the shots. There is no per-shot
   audio field, and re-typing words we already have costs output and buys
   nothing.
+- A ONE-VERB summary of a multi-beat clip is the failure to avoid. A clip can
+  hold several beats - she lifts the jar, then twists the lid, then tips it
+  toward the lens. Record every one of them, in order.
 - Record what is VISIBLE, and name the TELL that shows it. A bare label is a
-  guess; "AI-generated - plastic skin texture and background detail that
-  drifts between frames" is an observation. Never infer what the frame does
-  not show. When something is genuinely unreadable, say so instead of
-  guessing confidently.
-- Quote burned-in on-screen text EXACTLY, case and punctuation included. It is
-  often the strongest single element in the frame and it is the first thing a
-  port rewrites.
+  guess; "she staggers - her front foot skids and her shoulder drops" is an
+  observation. Never infer what the frame does not show. When something is
+  genuinely unreadable, say so instead of guessing confidently.
+- Quote burned-in on-screen text EXACTLY, case and punctuation included. Text
+  that CHANGES during a clip belongs here: the still-frame pass sees only the
+  first frame and structurally cannot catch it.
 - This is an OBSERVATION RECORD. Nothing here gets rebuilt frame by frame, so
   there is no lens / lighting / composition contract to satisfy and no
   perceptual protocol to run - those fields are not in this profile's schema.

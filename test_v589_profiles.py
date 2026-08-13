@@ -50,12 +50,19 @@ def test_profiles_declare_their_own_shot_schema_and_version():
     assert fb["schema_version"] != ugc["schema_version"]
 
 
+LEAN_FIELDS = [
+    "shot_index", "start", "end", "shot_type", "action", "camera_move",
+    "end_state", "on_screen_text", "sell_function",
+]
+
+
 def test_lean_shot_schema_is_flat_and_open_ended():
     lean = v589.LEAN_AD_SHOT_SCHEMA
-    assert lean["required"] == [
-        "shot_index", "start", "end", "shot_type", "visual", "on_screen_text",
-        "who_on_camera", "sell_function", "production_method",
-    ]
+    assert lean["required"] == LEAN_FIELDS
+    # ORDER is part of the contract: the model emits fields in schema order and
+    # we read the artifact as a table, so timestamps -> what kind -> what
+    # happens -> how the camera moves -> where it lands -> text -> sell job.
+    assert list(lean["properties"]) == LEAN_FIELDS
     assert set(lean["properties"]) == set(lean["required"])
     assert lean["additionalProperties"] is False
     assert lean["type"] == "object"
@@ -76,37 +83,85 @@ def test_lean_shot_schema_is_flat_and_open_ended():
     assert "not a closed list" in sell["description"].lower()
 
 
-def test_lean_shot_schema_records_production_method():
-    """For a COMPETITOR ad, how the footage was MADE is the most actionable
-    single fact: real UGC, AI-generated, licensed stock, a screen recording or
-    a studio shoot decide what we can copy and at what cost. ~10 words a shot.
+def test_lean_schema_no_longer_describes_appearance():
+    """A separate per-frame pass reads the start frame at native resolution and
+    owns appearance — measurably better at it (it caught a peacock-feather
+    print and 'wire-rimmed glasses, blue jeans, beige apron' this pass missed).
+    Paying the video pass to describe the same thing is the waste being cut.
+
+    Assert ABSENCE, not just the new shape: a stale field left in the schema
+    still ships to the model and still bills output tokens for every shot.
     """
     lean = v589.LEAN_AD_SHOT_SCHEMA
-    assert len(lean["required"]) == 9
-    assert "production_method" in lean["required"]
-    assert lean["additionalProperties"] is False
-    pm = lean["properties"]["production_method"]
-    # 3.6 again: an open string, never an enum of five blessed labels — a
-    # competitor will ship a hybrid we have not seen.
-    assert pm["type"] == "string"
-    assert "enum" not in pm
-    assert "const" not in pm
-    desc = pm["description"].lower()
-    # the TELL is the ask; a bare label is an unsupported guess
-    assert "tell" in desc
-    for example in ("ugc", "ai-generated", "stock", "screen recording"):
+    for gone in ("visual", "who_on_camera", "production_method"):
+        assert gone not in lean["properties"], gone
+        assert gone not in lean["required"], gone
+    blob = json.dumps(v589.schema_for_profile("fbads-video"))
+    for gone in ("who_on_camera", "production_method"):
+        assert gone not in blob, gone
+
+
+def test_lean_shot_schema_records_the_action_in_order():
+    """Operator: "the actions taking place in each clip are very important".
+    A clip holds several beats; a one-verb summary is the named failure mode.
+    """
+    lean = v589.LEAN_AD_SHOT_SCHEMA
+    assert "action" in lean["required"]
+    act = lean["properties"]["action"]
+    assert act["type"] == "string"
+    assert "enum" not in act and "const" not in act
+    desc = act["description"].lower()
+    assert "in order" in desc
+    assert "then" in desc            # the connector that forces the sequence
+    assert "one-verb" in desc        # the failure mode is named, not implied
+    assert "failure" in desc
+    assert "held still" in desc      # the declared answer when nothing moves
+
+
+def test_lean_shot_schema_records_the_camera_move():
+    lean = v589.LEAN_AD_SHOT_SCHEMA
+    assert "camera_move" in lean["required"]
+    cam = lean["properties"]["camera_move"]
+    assert cam["type"] == "string"
+    assert "enum" not in cam and "const" not in cam
+    desc = cam["description"].lower()
+    for example in ("static", "handheld", "pan", "push in", "pull out",
+                    "whip", "tilt"):
         assert example in desc, example
-    # consistent in spirit with the heavy lane's frame_inventory.production_method
-    heavy = (v589.PER_SHOT_SCHEMA["properties"]["frame_inventory"]
-             ["properties"]["production_method"]["description"].lower())
-    assert "how" in heavy and "how" in desc
-    assert "not what is in it" in heavy and "not what is in it" in desc
+    assert "fast" in desc            # speed is part of the ask
+    assert "not a closed list" in desc
+
+
+def test_lean_shot_schema_records_the_end_state():
+    """The end frame an animator interpolates TOWARD. A STATE, not a replay."""
+    lean = v589.LEAN_AD_SHOT_SCHEMA
+    assert "end_state" in lean["required"]
+    end = lean["properties"]["end_state"]
+    assert end["type"] == "string"
+    assert "enum" not in end and "const" not in end
+    desc = end["description"].lower()
+    assert "state" in desc
+    assert "not a repeat of the action" in desc
+    for token in ("lands", "start"):
+        assert token in desc, token
+
+
+def test_on_screen_text_states_why_it_is_not_the_frame_pass_job():
+    """It survives the cut on a SCOPE argument, not a habit one: burned-in
+    captions change DURING a clip, so a still start-frame read cannot see them.
+    """
+    desc = (v589.LEAN_AD_SHOT_SCHEMA["properties"]["on_screen_text"]
+            ["description"].lower())
+    assert "verbatim" in desc
+    assert "'none'" in desc
+    assert "change" in desc          # the scope argument is written down
+    assert "start frame" in desc or "start-frame" in desc
 
 
 def test_lean_shot_schema_records_shot_type():
     """Operator's ask, in their words: "what's on screen (avatar talking,
-    brolls, etc.)". It lived implicitly inside visual + who_on_camera, so
-    counting an ad's shot mix meant regexing prose. A field answers it.
+    brolls, etc.)". Spread through prose, counting an ad's shot mix meant
+    regexing it back out. A dedicated label field answers it at a glance.
     """
     lean = v589.LEAN_AD_SHOT_SCHEMA
     assert len(lean["required"]) == 9
@@ -122,21 +177,11 @@ def test_lean_shot_schema_records_shot_type():
                     "screen recording", "text card", "social proof"):
         assert example in desc, example
     assert "not a closed list" in desc
-    # it is the CATEGORY, not a second description — or it just restates visual
+    # it is the CATEGORY, a label — not a second description
     assert "category" in desc
-    assert "visual" in desc
+    assert "label, not a sentence" in desc
     # and it must stay terse, because its value is being countable at a glance
     assert "count" in desc
-
-
-def test_lean_visual_asks_for_shot_scale():
-    """Close-up-on-face vs wide-product is a scroll-stop lever worth mining."""
-    desc = v589.LEAN_AD_SHOT_SCHEMA["properties"]["visual"]["description"].lower()
-    for token in ("close-up", "medium", "wide", "camera"):
-        assert token in desc, token
-    # the original asks survive
-    for token in ("setting", "in frame", "doing"):
-        assert token in desc, token
 
 
 def test_schema_fbads_uses_the_lean_shot_schema():
@@ -254,6 +299,39 @@ def test_fbads_system_instruction_is_written_for_the_lean_job():
     # nothing to countermand means nothing to argue with.
     for heavy in ("forensic", "re-render", "veo", "state-evolution"):
         assert heavy not in low, heavy
+
+
+def test_fbads_brief_hands_the_still_frame_to_the_other_pass():
+    """The division of labour, stated in the prompt.
+
+    A separate per-frame pass reads each clip's start frame at native
+    resolution for $0.006/frame and owns composition and appearance. So the
+    VIDEO pass must stop describing appearance: it pays premium output rate
+    for a worse answer. Its job is what MOVES, in order, so an animator can
+    drive a generated start frame through the same motion.
+    """
+    fb = v589.READING_PROFILES["fbads-video"]["system_instruction"]
+    # collapse whitespace: these are prose assertions and must not be hostage
+    # to where a line happens to wrap in the source literal.
+    low = " ".join((fb + v589.FBADS_READ_INSTRUCTIONS).lower().split())
+    # the handoff is stated outright, not left to be inferred
+    assert "separate pass" in low
+    assert "still" in low
+    assert "if a still photograph could show it" in low
+    # the positive job is motion
+    for token in ("what moves", "in order", "camera", "animator"):
+        assert token in low, token
+    # the one-verb failure mode is named where the model will read it
+    assert "one-verb" in low
+    # the OLD positive orders to describe appearance are gone from both texts
+    for gone in ("one sentence of what is on screen", "who is visible",
+                 "how the shot was made", "shot scale", "close-up / medium"):
+        assert gone not in low, gone
+    # and the discipline that must SURVIVE the rewrite
+    assert "transcript" in low and "authoritative" in low
+    assert "re-transcribe" in low
+    assert "tell" in low              # name the tell, never infer
+    assert "unreadable" in low or "unclear" in low
 
 
 def test_fbads_prompt_no_longer_countermands_the_forensic_pass():
@@ -396,24 +474,69 @@ def _minimal_valid_lean():
         "shots": [
             {"shot_index": 1, "start": 0.0, "end": 2.5,
              "shot_type": "talking-head",
+             "action": "she rubs her right wrist with her left thumb, then "
+                       "winces and looks down at it, then lifts her eyes back "
+                       "to the lens and shakes her head",
+             "camera_move": "static, locked off",
+             "end_state": "her hands are back in her lap and she is looking "
+                          "straight at the lens, jaw set",
+             "on_screen_text": "MY HANDS HURT EVERY MORNING",
+             "sell_function": "hook — names the pain in the first frame"},
+            {"shot_index": 2, "start": 2.5, "end": 6.0,
+             "shot_type": "b-roll demo",
+             "action": "her thumb twists the lid, then the lid lifts clear, "
+                       "then she tips the open jar toward the lens",
+             "camera_move": "slow push in, steady",
+             "end_state": "the open jar is tilted toward the lens with the lid "
+                          "resting on the counter beside it",
+             "on_screen_text": "none",
+             "sell_function": "proof/demo — shows the product in use"},
+        ],
+    }
+
+
+def _old_shape_lean_artifact():
+    """The pre-rework lean read: visual / who_on_camera / production_method.
+
+    Kept as a fixture on purpose — the point of the rework is that this shape
+    no longer validates, and an artifact is the only honest way to prove it.
+    """
+    return {
+        "schema_version": "adread.v1",
+        "observed_people": [
+            {"label": "person_1", "identity_markers": "woman, 60s, grey bob",
+             "wardrobe": "cream cardigan", "shots_present": [1, 2]},
+        ],
+        "ad_read": _ad_read_block(),
+        "shots": [
+            {"shot_index": 1, "start": 0.0, "end": 2.5,
+             "shot_type": "talking-head",
              "visual": "Medium, static: older woman sits at a kitchen table "
                        "holding her wrist.",
              "on_screen_text": "MY HANDS HURT EVERY MORNING",
              "who_on_camera": "the older woman, alone",
              "sell_function": "hook — names the pain in the first frame",
-             "production_method": "real UGC handheld, phone camera, natural "
-                                  "window light and visible hand shake"},
+             "production_method": "real UGC handheld, phone camera"},
             {"shot_index": 2, "start": 2.5, "end": 6.0,
              "shot_type": "b-roll demo",
-             "visual": "Close-up, slow push in on the jar being opened on the "
-                       "counter.",
+             "visual": "Close-up, slow push in on the jar being opened.",
              "on_screen_text": "none",
              "who_on_camera": "hands only, no face",
              "sell_function": "proof/demo — shows the product in use",
-             "production_method": "licensed stock, professional grade and "
-                                  "even studio lighting"},
+             "production_method": "licensed stock"},
         ],
     }
+
+
+def test_old_lean_shape_no_longer_validates():
+    """An artifact carrying the retired shape must FAIL, naming the new fields."""
+    with pytest.raises(v589.Stage4dValidationError) as exc:
+        v589.validate_stage4d_output(_old_shape_lean_artifact(),
+                                     _lean_expected_shots(),
+                                     profile="fbads-video")
+    msg = str(exc.value)
+    for field in ("action", "camera_move", "end_state"):
+        assert f"missing {field}" in msg, field
 
 
 def _lean_expected_shots():
@@ -440,18 +563,17 @@ def test_lean_artifact_missing_shot_type_is_rejected():
                                      profile="fbads-video")
 
 
-def test_lean_artifact_missing_production_method_is_rejected():
+def test_lean_artifact_missing_action_is_rejected():
     """A required field is only real if the validator rejects its absence."""
     data = _minimal_valid_lean()
-    del data["shots"][0]["production_method"]
-    with pytest.raises(v589.Stage4dValidationError,
-                       match="missing production_method"):
+    del data["shots"][0]["action"]
+    with pytest.raises(v589.Stage4dValidationError, match="missing action"):
         v589.validate_stage4d_output(data, _lean_expected_shots(),
                                      profile="fbads-video")
-    # and an empty one is not an observation either ('unclear' is the answer)
+    # and an empty one is not an observation either ('held still' is the answer)
     data = _minimal_valid_lean()
-    data["shots"][1]["production_method"] = "  "
-    with pytest.raises(v589.Stage4dValidationError, match="production_method"):
+    data["shots"][1]["action"] = "  "
+    with pytest.raises(v589.Stage4dValidationError, match="action"):
         v589.validate_stage4d_output(data, _lean_expected_shots(),
                                      profile="fbads-video")
 
@@ -482,12 +604,12 @@ def test_deep_subblock_checks_do_not_fire_on_lean_shots():
     running those checks would make every lean artifact unvalidatable.
     """
     lean = _minimal_valid_lean()
-    lean["shots"][0]["visual"] = ""     # force a failure so we can read the list
+    lean["shots"][0]["action"] = ""     # force a failure so we can read the list
     with pytest.raises(v589.Stage4dValidationError) as exc:
         v589.validate_stage4d_output(lean, _lean_expected_shots(),
                                      profile="fbads-video")
     msg = str(exc.value)
-    assert "visual must be a non-empty observation" in msg
+    assert "action must be a non-empty observation" in msg
     for absent in ("forensic_perception", "action_arc", "morphology",
                    "primary_change_axis", "magnitude"):
         assert absent not in msg, absent
