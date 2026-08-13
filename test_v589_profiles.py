@@ -93,12 +93,18 @@ def test_lean_schema_no_longer_describes_appearance():
     still ships to the model and still bills output tokens for every shot.
     """
     lean = v589.LEAN_AD_SHOT_SCHEMA
+    assert len(lean["required"]) == 9
     for gone in ("visual", "who_on_camera", "production_method"):
         assert gone not in lean["properties"], gone
         assert gone not in lean["required"], gone
-    blob = json.dumps(v589.schema_for_profile("fbads-video"))
-    for gone in ("who_on_camera", "production_method"):
-        assert gone not in blob, gone
+    # scoped to the PER-SHOT items on purpose: production_method survives at
+    # AD level (one line for the whole creative) and that is the point — what
+    # must never come back is the per-shot copy that cost 742 tokens to repeat
+    # one boilerplate sentence eighty times.
+    items = json.dumps(v589.schema_for_profile("fbads-video")
+                       ["properties"]["shots"]["items"])
+    for gone in ("who_on_camera", "production_method", '"visual"'):
+        assert gone not in items, gone
 
 
 def test_lean_shot_schema_records_the_action_in_order():
@@ -198,6 +204,69 @@ def test_schema_fbads_uses_the_lean_shot_schema():
     assert v589.STAGE4D_JSON_SCHEMA["properties"]["shots"]["items"] is v589.PER_SHOT_SCHEMA
 
 
+def test_ad_read_owns_production_method_at_ad_level():
+    """The one thing the per-frame pass structurally cannot recover.
+
+    Dropping per-shot production_method was right — 742 tokens to repeat one
+    boilerplate sentence eighty times. But the frame pass reads a STILL, and
+    the strongest AI tells are TEMPORAL: detail that drifts between frames,
+    flicker, morphing background geometry, hands or faces that change across a
+    cut. None of those exist in one frame. Only the video pass can see them,
+    and "is this competitor shooting real UGC or generating it?" decides
+    whether we can copy a creative at all. So it lives once, for the whole ad.
+    """
+    ad = v589.AD_READ_SCHEMA
+    assert len(ad["required"]) == 10
+    assert "production_method" in ad["required"]
+    assert "production_method" in ad["properties"]
+    assert ad["additionalProperties"] is False
+    pm = ad["properties"]["production_method"]
+    # 3.6: open string, never an enum of blessed labels
+    assert pm["type"] == "string"
+    assert "enum" not in pm and "const" not in pm
+    desc = " ".join(pm["description"].lower().split())
+    # the TELL is the ask, as everywhere else in this profile
+    assert "tell" in desc
+    # the TEMPORAL tells specifically — the ones a still cannot show
+    for temporal in ("between frames", "flicker", "morph", "across"):
+        assert temporal in desc, temporal
+    assert "hands" in desc and "faces" in desc
+    assert "still" in desc          # says why these are the video pass's job
+    # a MIXED ad must not be forced into one label
+    assert "mixed" in desc
+    assert "which shots" in desc
+    # and the common kinds are named as examples, not a closed set
+    for example in ("ugc", "ai-generated", "stock", "screen recording"):
+        assert example in desc, example
+    assert "not a closed list" in desc
+
+
+def test_ad_read_missing_production_method_is_rejected():
+    data = _minimal_valid_lean()
+    del data["ad_read"]["production_method"]
+    with pytest.raises(v589.Stage4dValidationError,
+                       match="ad_read.production_method"):
+        v589.validate_stage4d_output(data, _lean_expected_shots(),
+                                     profile="fbads-video")
+    # blank is not an observation either
+    data = _minimal_valid_lean()
+    data["ad_read"]["production_method"] = "   "
+    with pytest.raises(v589.Stage4dValidationError,
+                       match="ad_read.production_method"):
+        v589.validate_stage4d_output(data, _lean_expected_shots(),
+                                     profile="fbads-video")
+
+
+def test_fbads_task_asks_for_the_ad_level_production_method():
+    """The schema description alone is not the brief; the task text must ask."""
+    shots = [{"shot": 1, "start": 0.0, "end": 3.0}]
+    task = v589.build_user_prompt(shots, "t", [], profile="fbads-video").split("<task>")[1]
+    low = " ".join(task.lower().split())
+    assert "how the ad as a whole was made" in low
+    assert "between frames" in low
+    assert "mixed" in low
+
+
 def test_schema_fbads_adds_required_ad_read():
     schema = v589.schema_for_profile("fbads-video")
     assert "ad_read" in schema["properties"]
@@ -209,7 +278,7 @@ def test_schema_fbads_adds_required_ad_read():
     ad = schema["properties"]["ad_read"]
     for field in ("offer", "cta", "overlay_text_timeline", "captions",
                   "sound_off_comprehension", "aspect_ratio", "safe_zones",
-                  "end_card", "brand_assets"):
+                  "end_card", "brand_assets", "production_method"):
         assert field in ad["properties"], field
         assert field in ad["required"], field
 
@@ -455,6 +524,10 @@ def _ad_read_block():
         "safe_zones": "CTA and face inside center-safe area",
         "end_card": "logo + Shop Now button",
         "brand_assets": "logo at 00:00 and 00:14",
+        "production_method": "mixed - the talking-head shots are real UGC on a "
+                             "phone, but shots 6-9 are AI-generated: the "
+                             "counter tiles drift between frames and her left "
+                             "hand gains a finger across the cut at 00:07",
     }
 
 
@@ -702,7 +775,8 @@ def test_validator_fbads_names_every_missing_ad_read_field():
         msg = str(exc)
         assert "ad_read.overlay_text_timeline must be an array" in msg
         for field in ("cta", "captions", "sound_off_comprehension", "aspect_ratio",
-                      "safe_zones", "end_card", "brand_assets"):
+                      "safe_zones", "end_card", "brand_assets",
+                      "production_method"):
             assert f"ad_read.{field}" in msg, field
         assert "ad_read.offer" not in msg
 

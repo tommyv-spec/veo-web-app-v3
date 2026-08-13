@@ -123,6 +123,14 @@ FBADS_READ_INSTRUCTIONS = (
     "views are sound-off), the aspect ratio, whether key content sits in "
     "center-safe zones, the end card, and every logo/product appearance "
     "with MM:SS timing.\n"
+    "That block also carries the ONE place appearance still belongs to you: "
+    "how the ad as a whole was made, with the tell. Judge it on the tells only "
+    "a moving video shows — detail that drifts between frames, flicker, "
+    "background geometry that morphs while the camera holds, hands or faces "
+    "that change across a cut. A still frame cannot show any of those, so "
+    "nobody else can answer it. A MIXED ad is normal here: when the real "
+    "talking-head is cut together with stock or generated b-roll, say 'mixed' "
+    "and name which shots differ instead of labelling the whole creative.\n"
 )
 
 
@@ -605,7 +613,7 @@ AD_READ_SCHEMA = {
     "required": [
         "offer", "cta", "overlay_text_timeline", "captions",
         "sound_off_comprehension", "aspect_ratio", "safe_zones", "end_card",
-        "brand_assets",
+        "brand_assets", "production_method",
     ],
     "properties": {
         "offer": _string_schema(
@@ -650,6 +658,33 @@ AD_READ_SCHEMA = {
             "belongs in cta. 'none' if the ad just ends."),
         "brand_assets": _string_schema(
             "Every logo / product-pack appearance with MM:SS timing."),
+        # AD-LEVEL, once for the whole creative. The per-shot version was cut
+        # in the ACTION rework because a separate per-frame pass owns
+        # appearance — but that pass reads a STILL, and the strongest AI tells
+        # are TEMPORAL: detail that drifts between frames, flicker, morphing
+        # background geometry, hands or faces that change across a cut. None of
+        # those exist inside one frame, so only the video pass can see them,
+        # and "is this competitor shooting real UGC or generating it?" decides
+        # whether we can copy a creative at all and at what cost. Measured on
+        # the real 80-shot ad, per-shot cost 742 output tokens to repeat one
+        # boilerplate sentence eighty times; ad-level costs ~20-30 and keeps
+        # the answer. Open string (3.6) — a competitor ships hybrids.
+        "production_method": _string_schema(
+            "HOW THE AD AS A WHOLE WAS MADE, not what is in it — one answer "
+            "for the whole creative, and name the visible TELL for it. Real "
+            "UGC filmed on a phone, AI-generated, licensed stock, a screen "
+            "recording, a studio shoot and a graphics-only card are the common "
+            "ones, but they are EXAMPLES, not a closed list. Weigh the "
+            "TEMPORAL tells first, because they are the ones only a moving "
+            "video shows and a still frame cannot: detail that drifts or "
+            "crawls BETWEEN FRAMES, flicker, background geometry that morphs "
+            "while the camera holds, hands or faces that change ACROSS a cut, "
+            "physics that does not carry through a movement. A MIXED ad is "
+            "common and normal in this niche — a real talking-head cut "
+            "together with stock or generated b-roll. When the ad is mixed, "
+            "say 'mixed' and name WHICH SHOTS differ and what each of them is, "
+            "rather than forcing one label onto the whole creative. Write "
+            "'unclear' when nothing in the footage gives it away."),
     },
 }
 
