@@ -11171,13 +11171,32 @@ Examples:
         help='Model (default: nano_banana_2)')
     
     # Browser
-    parser.add_argument('--session', type=str, default=SESSION_FOLDER,
-        help='Chrome session folder path')
+    parser.add_argument('--session', type=str, default=None,
+        help='browser session folder path (defaults per engine: '
+             'image-chrome-session, or image-firefox-session in firefox mode)')
+    parser.add_argument('--firefox', action='store_true',
+        help="run on Firefox (Camoufox) instead of Chrome — the engine that mints "
+             "accepted reCAPTCHA tokens. Set BROWSER_MODE=firefox in the environment "
+             "as well: the browser driver is chosen when this module is imported, "
+             "which happens before this flag can be read.")
     parser.add_argument('--no-warmup', action='store_true',
         help='Skip Chrome warmup (faster but may trigger reCAPTCHA)')
     
     args = parser.parse_args()
-    
+
+    # --firefox cannot change which sync_playwright was imported (that happened
+    # at module load), so it only reports the mismatch and picks the right
+    # profile. Setting BROWSER_MODE=firefox in the environment is what actually
+    # selects the engine.
+    if args.firefox and not FIREFOX_MODE:
+        print("[IMAGE] ⚠ --firefox was passed but the module imported the Chrome driver. "
+              "Relaunch with BROWSER_MODE=firefox set in the environment.", flush=True)
+    if args.session is None:
+        args.session = session_folder_for_mode(BROWSER_MODE, SESSION_FOLDER)
+    if FIREFOX_MODE:
+        print(f"[IMAGE] engine: FIREFOX (Camoufox) — profile "
+              f"{os.path.basename(args.session)}", flush=True)
+
     # Validate
     if not args.interactive and not args.input_dir and not args.watch and not args.api_url and not args.prompt:
         parser.print_help()
