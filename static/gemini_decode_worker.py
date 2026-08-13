@@ -207,7 +207,11 @@ def launch_firefox(p, headless=False):
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     page.set_default_timeout(30000)
     log(f"Camoufox ACTIVE (profile {os.path.basename(FF_PROFILE_DIR)})")
-    seed_firefox_session(ctx)
+    # DO NOT bridge Chrome's cookies in here. Chrome-bound SID/SAPISID values
+    # layered over a freshly pulled Firefox session INVALIDATE it: the identical
+    # pull signs in on Pro without the bridge and signs out with it (measured
+    # 2026-08-13, twice each way). The Firefox profile pull is the whole seeding
+    # story for this lane.
     return ctx, page
 
 
@@ -231,6 +235,20 @@ def pull_firefox_profile(email):
     except ImportError:
         log("firefox_profile_pull not available — Firefox needs a manual sign-in")
         return False
+
+    # SEED INTO A PROFILE CAMOUFOX HAS NEVER OPENED. Pulling on top of a
+    # directory that has already been launched leaves that launch's
+    # cookies.sqlite-wal behind, Firefox replays it over the imported database,
+    # and the session is silently wiped — the page then renders signed-out on
+    # Flash-Lite while the cookie table still LOOKS full. Measured 2026-08-13:
+    # same pull, same account, dirty dir signed out / clean dir signed in on
+    # Pro. flow_worker never hits this because it restores its golden into a
+    # fresh session folder.
+    if os.path.isdir(FF_PROFILE_DIR):
+        import shutil
+
+        shutil.rmtree(FF_PROFILE_DIR, ignore_errors=True)
+        log("cleared the old Camoufox profile so the pulled session is not replayed over")
     try:
         ok = ffpull.build_firefox_golden_from_profile(
             email, FF_PROFILE_DIR, label="GEMINI-FF", log=log)
@@ -240,6 +258,126 @@ def pull_firefox_profile(email):
     if ok:
         log(f"Firefox golden seeded for {email} from a real Firefox profile")
     return bool(ok)
+
+
+def signed_in(page):
+    """Positively prove a live session before doing anything else.
+
+    The inherited check passed a SIGNED-OUT page (2026-08-13): it looked for a
+    composer, and the logged-out landing page has one. Everything downstream
+    then ran against a stranger's Gemini — Flash-Lite, no upload menu, and a
+    model picker whose entries are all disabled.
+
+    So check the things only a session has, and the thing only a logged-out page
+    has, and require both to agree.
+    """
+    # DO NOT judge by page text. Camoufox returns ~55 chars of body text for a
+    # perfectly signed-in Gemini (the app renders where inner_text does not
+    # reach), so a length test calls a working session "signed out" — it did,
+    # repeatedly, on 2026-08-13 while the operator was looking at a live window.
+    # Judge by controls that only ever exist on one side of the line.
+    try:
+        if page.locator("button:has-text('Sign in'), a:has-text('Sign in')").first.is_visible():
+            return False
+    except Exception:
+        pass
+    for sel in ("button[aria-label*='Upload' i]",          # composer upload menu
+                "button[aria-label*='mode picker' i]"):     # model switcher
+        try:
+            loc = page.locator(sel).first
+            if not loc.count():
+                continue
+            if "mode picker" in sel:
+                # the logged-out landing page pins Flash-Lite and offers nothing
+                # else; a session shows whatever mode the account can actually use
+                label = (loc.get_attribute("aria-label") or "").lower()
+                if "flash-lite" in label:
+                    continue
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def ensure_session(page, email, firefox=False):
+    """Never decode against a signed-out tab. Verify, recover, verify again."""
+    page.goto(GEMINI_URL, wait_until="load")
+    for _ in range(12):
+        time.sleep(2)
+        if signed_in(page):
+            log("session verified — signed in")
+            return True
+    if firefox:
+        log("signed out — trying the account chooser")
+        if firefox_login(page, email) and signed_in(page):
+            log("session recovered via the account chooser")
+            return True
+    where = dump_dom(page, "signed_out")
+    raise RuntimeError(
+        f"the browser is NOT signed in, so anything it produced would be a "
+        f"stranger's Gemini. Evidence at {where}. For Firefox, reseed with "
+        f"--reseed-firefox (the pull must land in a profile Camoufox has never "
+        f"opened, or the old WAL replays over the session)")
+
+
+def firefox_pick_account(page, email, tries=3):
+    """Resume the transplanted session by PICKING the account, the way
+    flow_worker does it.
+
+    A pulled Firefox profile carries the identity but not the live session:
+    myaccount.google.com renders an account chooser reading "Kevin Shen …
+    Signed out". Nothing is broken — Google just wants an explicit pick before
+    it reuses the session. flow_worker (~line 3540) handles exactly this by
+    clicking the tile whose text matches the configured email, and that is why
+    its Firefox workers never need a manual sign-in.
+    """
+    for attempt in range(1, tries + 1):
+        url = page.url or ""
+        if "accounts.google.com" not in url and "accountchooser" not in url:
+            return True
+        log(f"account chooser (attempt {attempt}) — picking {email or 'the first account'}")
+        picked = False
+        if email:
+            try:
+                tile = page.locator(f"*:has-text('{email}')").last
+                if tile.count() and tile.is_visible():
+                    tile.click()
+                    picked = True
+            except Exception:
+                pass
+        if not picked:
+            # no email match: take the first listed account rather than stalling
+            for sel in ("div[data-identifier]", "li[data-identifier]",
+                        "[role='link']", "form li"):
+                try:
+                    t = page.locator(sel).first
+                    if t.count() and t.is_visible():
+                        t.click()
+                        picked = True
+                        break
+                except Exception:
+                    continue
+        if not picked:
+            break
+        time.sleep(6)
+    return "accounts.google.com" not in (page.url or "")
+
+
+def firefox_login(page, email):
+    """Land on Gemini signed in, without a human at the keyboard."""
+    page.goto("https://myaccount.google.com/", wait_until="domcontentloaded")
+    time.sleep(5)
+    firefox_pick_account(page, email)
+    page.goto(GEMINI_URL, wait_until="load")
+    time.sleep(8)
+    firefox_pick_account(page, email)
+    try:
+        body = page.locator("body").inner_text()
+    except Exception:
+        body = ""
+    ok = len(body) > 800 and "sign in" not in body.lower()[:600]
+    log("Gemini session " + ("live" if ok else "still signed out"))
+    return ok
 
 
 def seed_firefox_session(ctx, golden=None):
@@ -436,7 +574,9 @@ def select_model(page, want):
         log("no model picker found; leaving the default mode")
         return None
     current = (btn.get_attribute("aria-label") or "").split("currently")[-1].strip()
-    if want.lower() in current.lower():
+    # The picker labels the live mode loosely ("Pro") while the menu entry is
+    # exact ("3.1 Pro"), so compare BOTH directions before deciding to click.
+    if current and (want.lower() in current.lower() or current.lower() in want.lower()):
         log(f"model already {current!r}")
         return current
     btn.click()
@@ -445,6 +585,12 @@ def select_model(page, want):
     if not opt.count():
         where = dump_dom(page, "model_option_miss")
         raise RuntimeError(f"mode {want!r} not in the picker. Evidence at {where}")
+    # An already-active entry renders aria-disabled — clicking it waits forever.
+    if (opt.get_attribute("aria-disabled") or "").lower() == "true":
+        log(f"model {want!r} is already the active mode (menu entry disabled)")
+        page.keyboard.press("Escape")
+        jitter()
+        return want
     opt.click()
     jitter(1.0, 2.0)
     btn = find(page, "model_picker", timeout_ms=8000, required=False)
@@ -914,8 +1060,9 @@ def main():
     ap.add_argument("--firefox", action="store_true",
                     help="drive Camoufox instead of Chrome. Use when Chrome stops being "
                          "able to READ uploads (chip appears, model says it cannot open the file).")
-    ap.add_argument("--reseed-firefox", action="store_true",
-                    help="rebuild the Camoufox profile from this machine's Firefox profile")
+    ap.add_argument("--no-reseed", action="store_true",
+                    help="skip the per-run Firefox profile pull (it is on by default; "
+                         "the transplanted session only survives one launch)")
     ap.add_argument("--headless", action="store_true", help="not recommended; Google flags it")
     args = ap.parse_args()
 
@@ -937,12 +1084,26 @@ def main():
 
     if args.firefox:
         global FF_PROFILE_DIR
-        if args.email:
+        if os.environ.get("GEMINI_FF_PROFILE_DIR"):
+            FF_PROFILE_DIR = os.environ["GEMINI_FF_PROFILE_DIR"]
+        elif args.email:
+            # A per-RUN directory. Camoufox leaves state behind that survives an
+            # rmtree of the same path (a live process still holding files makes
+            # the delete a silent no-op), and a profile that has been launched
+            # once no longer accepts the pulled session. A path that never
+            # existed before cannot carry that history.
             safe = re.sub(r"[^A-Za-z0-9._-]", "_", args.email.strip().lower())
-            FF_PROFILE_DIR = os.path.join(BASE_DIR, f".gemini_ff_profile_{safe}")
+            FF_PROFILE_DIR = os.path.join(
+                BASE_DIR, f".gemini_ff_run_{safe}_{os.getpid()}")
         # Seed from a REAL Firefox profile on this machine, the same way the
         # Flow worker does. Chrome's cookies alone do not authenticate Google.
-        if not os.path.isdir(FF_PROFILE_DIR) or args.reseed_firefox:
+        #
+        # EVERY RUN, not just the first. The transplanted session survives one
+        # Camoufox launch and is gone by the next (measured 2026-08-13: clean
+        # pull -> signed in on Pro; relaunch the same profile -> signed out on
+        # Flash-Lite). The pull costs six file copies, so re-seeding beats
+        # decoding against a stranger's Gemini.
+        if not args.no_reseed:
             pull_firefox_profile(args.email)
         sync_playwright = firefox_playwright()
     else:
@@ -951,7 +1112,9 @@ def main():
         ctx, page = (launch_firefox(p, headless=args.headless) if args.firefox
                      else gvw.launch(p, headless=args.headless))
         try:
-            gvw.ensure_logged_in(page)
+            # Prove the session EVERY run. The inherited check passed a
+            # signed-out page and everything after it was worthless.
+            ensure_session(page, args.email, firefox=args.firefox)
             if args.login:
                 log("logged in. Profile is warm for later runs.")
                 return 0
