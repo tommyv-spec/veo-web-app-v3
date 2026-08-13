@@ -61,11 +61,18 @@ LEAN_SCHEMA_VERSION = "adread.v1"
 ACTION_FIELD = "action"
 LEGACY_ACTION_FIELD = "visual"
 
-# Sequence and list separators only. Deliberately generous: "as" and "while"
-# mark simultaneity rather than a new beat and are left out, and any comma or
-# "and" is enough to save a value from being called single-beat. The bias is
-# toward UNDER-flagging, so a flag means something.
-_BEAT_SPLIT = re.compile(r"\bthen\b|\band\b|;|,", re.IGNORECASE)
+# Sequence and list separators. "as" and "while" mark simultaneity rather than
+# a new beat and are left out. Any comma is enough to save a value from being
+# called single-beat, so the bias stays toward UNDER-flagging.
+#
+# Bare "and" was a separator here until it was checked against the real corpus,
+# where EVERY value it split turned out to be a false positive: "hands stitch
+# fabric with yellow needle and thread", "adjust a completed red and lace
+# decorative bow", "the elderly woman and girl sitting together" — noun
+# conjunctions, not beats — plus compound verbs describing one continuous
+# movement ("lift and adjust", "open and flip", "smiles and nods"). Not one
+# genuine sequential pair among them. It is gone.
+_BEAT_SPLIT = re.compile(r"\bthen\b|;|,", re.IGNORECASE)
 
 _NO_MOTION = (
     "held still", "holds still", "no movement", "nothing moves", "no motion",
@@ -85,6 +92,33 @@ _CAMERA_MOVES = (
 )
 _CAMERA_STILL = ("static", "locked", "no movement", "held still", "none")
 
+# ── The two duration thresholds, which answer DIFFERENT questions ─────
+#
+# MIN_BEAT_SECONDS is a FLAG FLOOR: "could this clip physically have held two
+# beats?" Below it, "you only recorded one beat" is not an accusation, it is a
+# description of the clip, and flagging it is noise. The real 80-clip ad had a
+# 0.3s clip carrying the highest optical flow in the whole ad; there is no such
+# thing as a multi-beat 0.3s clip.
+#
+# HONEST PROVENANCE: this is a PHYSICAL floor, not a corpus-derived one, because
+# the corpus could not supply one. Checking every clip in both reads of the real
+# ad that scored >=2 beats found ZERO genuine sequential pairs at ANY duration —
+# they were all noun conjunctions or compound verbs (see _BEAT_SPLIT). With no
+# multi-beat records anywhere in the data there is no empirical cliff to read a
+# floor off, and dressing one up as data-derived would be a fabricated number.
+#
+# So it rests on gesture timing instead: one discrete manual beat (reach, grasp,
+# turn, release) runs ~0.3-0.5s, so showing two needs ~1s at minimum. The floor
+# only ever SUPPRESSES flags, so erring high costs recall and never precision.
+# Override with --min-beat-seconds; the report prints the value used and how many
+# clips it excluded, because a silent filter is what this report exists to
+# prevent.
+MIN_BEAT_SECONDS = 1.0
+
+# LONG_CLIP_S is the STATISTIC's bar: not "could it hold two beats" but "is it
+# long enough that several beats would be unremarkable". Deliberately well above
+# the flag floor, and reported next to the ad's median clip duration, because a
+# single-beat share means nothing without the ad's cutting rhythm as denominator.
 LONG_CLIP_S = 2.5
 
 # Measured on the real 80-shot ad refurb-competitor-051 with cl100k: the
@@ -169,7 +203,8 @@ def load_artifact(path: Path) -> dict:
     return data
 
 
-def cross_check(artifact: dict, motion: list) -> dict:
+def cross_check(artifact: dict, motion: list,
+                min_beat_seconds: float = MIN_BEAT_SECONDS) -> dict:
     """Join the two sources and collect contradictions. Pure; no I/O."""
     shots = artifact.get("shots") or []
     by_shot = {m.get("shot"): m for m in motion if isinstance(m, dict)}
@@ -185,8 +220,10 @@ def cross_check(artifact: dict, motion: list) -> dict:
         "n_shots": len(shots),
         "n_motion": len(by_shot),
         "missing_motion": [], "missing_shots": [],
-        "class_a": [], "class_b": [], "class_c": [],
+        "class_a": [], "class_b": [], "class_c": [], "class_d": [],
         "joined": 0,
+        "min_beat_seconds": min_beat_seconds,
+        "excluded_short": [],
     }
 
     motion_indices = set(by_shot)
@@ -197,6 +234,7 @@ def cross_check(artifact: dict, motion: list) -> dict:
                                      if i is not None)
 
     token_lens: list[int] = []
+    durations: list[float] = []
     long_clips = 0
     long_single_beat: list[int] = []
 
@@ -211,6 +249,7 @@ def cross_check(artifact: dict, motion: list) -> dict:
             duration = float(shot["end"]) - float(shot["start"])
         except (KeyError, TypeError, ValueError):
             duration = 0.0
+        durations.append(duration)
         if duration >= LONG_CLIP_S:
             long_clips += 1
             if beats <= 1 or no_motion:
@@ -223,12 +262,27 @@ def cross_check(artifact: dict, motion: list) -> dict:
         level = m.get("motion")
         flow = m.get("mean_flow_mag")
 
-        if level == "high" and (no_motion or beats <= 1):
-            report["class_a"].append({
-                "shot": idx, "flow": flow, "duration": round(duration, 2),
-                "beats": 0 if no_motion else beats,
-                "text": str(action)[:110],
-            })
+        thin = no_motion or beats <= 1
+        if level == "high" and thin:
+            if duration >= min_beat_seconds:
+                report["class_a"].append({
+                    "shot": idx, "flow": flow, "duration": round(duration, 2),
+                    "beats": 0 if no_motion else beats,
+                    "text": str(action)[:110],
+                })
+            else:
+                # Too short to have held two beats — never a class A flag. But
+                # the flow still has to be explained by SOMETHING: if the camera
+                # is also declared locked off, the two sources still disagree,
+                # and folding that into silence is what the floor must not do.
+                report["excluded_short"].append(idx)
+                if not names_a_camera_move(shot.get("camera_move")):
+                    report["class_d"].append({
+                        "shot": idx, "flow": flow,
+                        "duration": round(duration, 2),
+                        "text": f"camera={str(shot.get('camera_move'))[:40]!r} "
+                                f"action={str(action)[:60]!r}",
+                    })
         if level == "high" and says_unchanged(shot.get("end_state")):
             report["class_b"].append({
                 "shot": idx, "flow": flow,
@@ -240,13 +294,16 @@ def cross_check(artifact: dict, motion: list) -> dict:
                 "text": str(shot.get("camera_move"))[:110],
             })
 
-    for key in ("class_a", "class_b", "class_c"):
+    for key in ("class_a", "class_b", "class_c", "class_d"):
         report[key].sort(key=lambda r: (r["flow"] is None, -(r["flow"] or 0)))
+    report["excluded_short"].sort()
 
     report["stats"] = {
         "median_action_tokens": (round(statistics.median(token_lens), 1)
                                  if token_lens else 0.0),
         "tokenizer": _tokenizer_name(),
+        "median_clip_s": (round(statistics.median(durations), 2)
+                          if durations else None),
         "long_clips": long_clips,
         "long_single_beat": long_single_beat,
         "long_single_beat_share": (round(len(long_single_beat) / long_clips, 3)
@@ -294,21 +351,41 @@ def format_report(report: dict, artifact_path: Path, motion_path: Path) -> str:
     add("")
     a = report["class_a"]
     label = report["field"]
-    add(f"  {len(a)} of {joined} clips: Farneback=high but `{label}` reads as a "
-        f"single beat or says nothing moved")
+    floor = report["min_beat_seconds"]
+    excluded = report["excluded_short"]
+    eligible = joined - len(excluded)
+    add(f"  {len(a)} of {eligible} eligible clips: Farneback=high but `{label}` "
+        f"reads as a single beat or says nothing moved")
+    add(f"    eligible = clip is at least {floor}s. {len(excluded)} clip(s) "
+        f"excluded as too short to hold two beats"
+        + (f": shots {excluded[:20]}" if excluded else "."))
     if a:
         add(f"    shots {_shot_list(a)}")
         add("    worst by optical flow:")
         for row in a[:8]:
             add(f"      shot {row['shot']:>3}  flow={row['flow']:<8} "
                 f"{row['duration']}s  beats={row['beats']}  {row['text']!r}")
+        add("    LIMIT: optical flow cannot tell ONE long gesture from TWO")
+        add("           beats. A long clip holding a single continuous")
+        add("           movement lands here and is a correct record. This is a")
+        add("           question to open, never a verdict.")
 
-    b, c = report["class_b"], report["class_c"]
+    b, c, d = report["class_b"], report["class_c"], report["class_d"]
     add("")
     add(f"  secondary - {len(b)} clips: Farneback=high but `end_state` says "
         f"unchanged" + (f" - shots {_shot_list(b)}" if b else ""))
     add(f"  secondary - {len(c)} clips: `camera_move` names a move but "
         f"Farneback=low" + (f" - shots {_shot_list(c)}" if c else ""))
+    add(f"  secondary - {len(d)} clips under {floor}s: Farneback=high, thin "
+        f"action AND `camera_move` says the camera held still"
+        + (f" - shots {_shot_list(d)}" if d else ""))
+    if d:
+        add("    The floor excuses a short clip from holding two beats. It does")
+        add("    not excuse fast pixels with a locked-off camera and nothing")
+        add("    recorded moving - something moved, and nobody wrote it down.")
+        for row in d[:5]:
+            add(f"      shot {row['shot']:>3}  flow={row['flow']:<8} "
+                f"{row['duration']}s  {row['text']}")
 
     st = report["stats"]
     add("")
@@ -323,13 +400,18 @@ def format_report(report: dict, artifact_path: Path, motion_path: Path) -> str:
         f"with all fields populated,")
     add(f"      is the shape of a collapse to one-verb summaries.")
     share = st["long_single_beat_share"]
+    add(f"    median clip duration        : {st['median_clip_s']}s "
+        f"(the ad's cutting rhythm - the denominator for the line below)")
     add(f"    clips >= {LONG_CLIP_S}s              : {st['long_clips']}")
     add(f"      of those, single-beat    : {len(st['long_single_beat'])}"
         + (f"  ({share:.0%})" if share is not None else "  (n/a)"))
     if st["long_single_beat"]:
         add(f"      shots {st['long_single_beat'][:20]}")
-    add("      A few are normal - a long clip can honestly hold one beat. A "
-        "HIGH share is the tell.")
+    add("      A high share is a tell ONLY relative to that rhythm. A fast-cut")
+    add("      ad whose clips each hold one gesture will legitimately sit near")
+    add("      100% and be completely honest. Compare an ad against ITSELF over")
+    add("      time, or against an ad cut at a similar pace - never against a")
+    add("      fixed target.")
     add("")
     add("  This report never fails a build. Open the shots above and judge them.")
     return "\n".join(out)
@@ -342,6 +424,11 @@ def main(argv: list | None = None) -> int:
     p.add_argument("artifact", type=Path, help="path to a lean stage4d_vlm.json")
     p.add_argument("--motion", type=Path, default=None,
                    help="motion.json (default: beside the artifact)")
+    p.add_argument("--min-beat-seconds", type=float, default=MIN_BEAT_SECONDS,
+                   help=f"clips shorter than this are never flagged for being "
+                        f"single-beat - they cannot physically hold two "
+                        f"(default {MIN_BEAT_SECONDS}s; the report prints the "
+                        f"value used and how many clips it excluded)")
     args = p.parse_args(argv)
 
     if not args.artifact.exists():
@@ -376,8 +463,9 @@ def main(argv: list | None = None) -> int:
               f"classifications.")
         return 0
 
-    print(format_report(cross_check(artifact, motion), args.artifact,
-                        motion_path))
+    report = cross_check(artifact, motion,
+                         min_beat_seconds=args.min_beat_seconds)
+    print(format_report(report, args.artifact, motion_path))
     return 0
 
 
