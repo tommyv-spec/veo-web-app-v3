@@ -561,12 +561,77 @@ FBADS_FINAL_INSTRUCTION = (
 )
 
 
+# v893 — the MOTION half of the split-lane decode. Built by pruning the
+# stage4d.v2 per-shot contract down to the fields that describe CHANGE OVER
+# TIME, and dropping every field that describes a single frame's contents.
+# Claude reads those from the frames themselves (see the decode-reel skill
+# §1i), because that is precisely where the VLM misattributes: it credited the
+# foreground woman's raised pointing hand to the man in the background plate
+# while its own kinematic trace recorded the arm as hers.
+#
+# production_method survives inside frame_inventory: "one take or assembled?"
+# is a judgement across frames, not within one, and the VLM answers it well.
+def _motion_shot_schema():
+    import copy as _copy
+    s = _copy.deepcopy(PER_SHOT_SCHEMA)
+    for gone in ("static_composition", "start_frame_spec"):
+        s["properties"].pop(gone, None)
+    fi = s["properties"].get("frame_inventory")
+    if fi is not None:
+        keep = "production_method"
+        fi["properties"] = {k: v for k, v in fi["properties"].items() if k == keep}
+        fi["required"] = [keep]
+    s["required"] = [r for r in s.get("required", [])
+                     if r not in ("static_composition", "start_frame_spec")]
+    return s
+
+
+MOTION_SHOT_SCHEMA = _motion_shot_schema()
+
+MOTION_FORMAT_DECLARATION = (
+    "<context>\n"
+    "This read is ONE HALF of a two-lane decode. You are the MOTION lane.\n"
+    "A human reader inspects the actual frames at native resolution and owns "
+    "everything that is true of a single frame: composition, framing, camera "
+    "and lens, wardrobe, props, on-screen text, colour palette, and which "
+    "composite LAYER each object belongs to.\n"
+    "</context>\n"
+)
+
+MOTION_READ_INSTRUCTIONS = (
+    "Report only what CHANGES ACROSS TIME, plus the production method.\n"
+    "- Every action inside each shot, in order, with the verb and its object.\n"
+    "- What each prop STARTS as and BECOMES, and when inside the shot it turns.\n"
+    "- Kinematic traces: what moves, along what path, and WHOSE it is. Judge "
+    "ownership from motion — an object that holds still while a subject moves "
+    "is not that subject's, and an arm that enters on a body belongs to that "
+    "body. This is the one attribution cue a single frame cannot show, so it "
+    "is genuinely yours.\n"
+    "- Speech verbatim, ambient sound, music, voice register.\n"
+    "- Whether the frame was captured in one take or ASSEMBLED, and the tell.\n"
+    "\n"
+    "Do NOT describe wardrobe, props, background dressing, on-screen text or "
+    "framing as standing facts. You are not scored on them and a guess there "
+    "becomes a wrong build. If a static detail matters only because it MOVES "
+    "or CHANGES, report the change, not the inventory.\n"
+)
+
 READING_PROFILES = {
     "ugc-reel": {
         "context": "", "task": "", "ad_read": False,
         "shot_schema": PER_SHOT_SCHEMA,
         "schema_version": STAGE4D_SCHEMA_VERSION,
         "system_instruction": None,   # bound below, after SYSTEM_INSTRUCTION
+        "task_preamble": DEFAULT_TASK_PREAMBLE,
+        "final_instruction": DEFAULT_FINAL_INSTRUCTION,
+    },
+    "ugc-reel-motion": {
+        "context": MOTION_FORMAT_DECLARATION,
+        "task": MOTION_READ_INSTRUCTIONS,
+        "ad_read": False,
+        "shot_schema": MOTION_SHOT_SCHEMA,
+        "schema_version": "stage4d.motion.v1",
+        "system_instruction": None,   # bound below, next to ugc-reel's
         "task_preamble": DEFAULT_TASK_PREAMBLE,
         "final_instruction": DEFAULT_FINAL_INSTRUCTION,
     },
@@ -1101,6 +1166,9 @@ Hard rules:
 # callers reference it by name.
 READING_PROFILES["ugc-reel"]["system_instruction"] = SYSTEM_INSTRUCTION
 READING_PROFILES["fbads-video"]["system_instruction"] = FBADS_SYSTEM_INSTRUCTION
+# v893 — the motion lane reuses the ugc-reel system prompt; its
+# profile context + task narrow the job to change-over-time.
+READING_PROFILES["ugc-reel-motion"]["system_instruction"] = SYSTEM_INSTRUCTION
 
 
 def build_user_prompt(shots: list, transcript_summary: str, motion: object,
