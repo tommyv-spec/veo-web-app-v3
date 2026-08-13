@@ -118,6 +118,108 @@ def test_high_flow_against_a_single_beat_action_is_a_contradiction():
     assert rep["class_a"][0]["beats"] == 0                 # explicit no-motion
 
 
+# ── the per-ad flow cut ───────────────────────────────────────────────
+
+def _flat_motion(n=20, mag=1.0):
+    return _motion([(i, i, i + 1, "high", mag) for i in range(1, n + 1)])
+
+
+def test_the_cut_comes_from_the_ads_own_median():
+    """v585 cuts `high` at 0.7. The real ad's MEDIAN is 1.539, so `high` was
+    true of 60 of 80 clips - a predicate true of three quarters of the corpus
+    by construction cannot discriminate."""
+    mot = _motion([(i, i, i + 1, "high", float(i)) for i in range(1, 21)])
+    fl = mcc.flow_cut_for(mot)          # values 1..20, median 10.5
+    assert fl["basis"] == "distribution"
+    assert fl["median"] == 10.5
+    assert fl["cut"] == 21.0            # 2.0x median
+    assert fl["n"] == 20
+    assert mcc.FLOW_MULTIPLE == 2.0
+
+
+def test_a_uniform_ad_can_come_back_empty():
+    """The reason for a multiple of the median over p90: a percentile is a
+    fixed RATE and flags the top 10% of every ad by construction, so a flawless
+    artifact still reports flags. A shape measure can return nothing."""
+    art = _artifact([_shot(i, i, i + 1.5, "she talks") for i in range(1, 21)])
+    rep = mcc.cross_check(art, _flat_motion(20, mag=1.0))
+    assert rep["flow"]["basis"] == "distribution"
+    assert rep["class_a"] == []          # nothing is 2x the median here
+    # and the same clips WOULD all have fired under the categorical label
+    assert all(m["motion"] == "high" for m in _flat_motion(20, mag=1.0))
+
+
+def test_only_clips_above_the_cut_reach_the_primary_class():
+    mags = [1.0] * 18 + [1.2, 9.0]       # median 1.0 -> cut 2.0
+    art = _artifact([_shot(i, i, i + 1.5, "she talks") for i in range(1, 21)])
+    mot = _motion([(i, i, i + 1, "high", mags[i - 1]) for i in range(1, 21)])
+    rep = mcc.cross_check(art, mot)
+    assert rep["flow"]["cut"] == 2.0
+    assert [r["shot"] for r in rep["class_a"]] == [20]   # only the 9.0 one
+
+
+def test_the_cut_is_configurable_and_printed_with_its_basis():
+    art = _artifact([_shot(i, i, i + 1.5, "she talks") for i in range(1, 21)])
+    mot = _motion([(i, i, i + 1, "high", 1.0 if i < 20 else 9.0)
+                   for i in range(1, 21)])
+    loose = mcc.cross_check(art, mot, flow_multiple=1.0)
+    strict = mcc.cross_check(art, mot, flow_multiple=8.0)
+    assert len(loose["class_a"]) > len(strict["class_a"])
+    text = mcc.format_report(mcc.cross_check(art, mot), Path("a.json"),
+                             Path("m.json"))
+    # the reader must see what "high" MEANT for this ad, not trust the word
+    assert "2.0x THIS AD's median flow" in text
+    assert "flow >= 2.0" in text
+    assert "which is its p" in text
+    assert "--flow-multiple" in text
+
+
+def test_small_n_falls_back_to_the_categorical_and_says_so():
+    """A median off five clips is a confident number about nothing."""
+    art = _artifact([_shot(i, i, i + 1.5, "she talks") for i in range(1, 6)])
+    mot = _motion([(i, i, i + 1, "high", float(i)) for i in range(1, 6)])
+    rep = mcc.cross_check(art, mot)
+    assert rep["flow"]["basis"] == "categorical"
+    assert rep["flow"]["cut"] is None
+    assert len(rep["class_a"]) == 5              # categorical `high` applies
+    text = mcc.format_report(rep, Path("a.json"), Path("m.json"))
+    assert "v585's categorical label" in text
+    assert "indicative" in text
+
+
+def test_an_all_still_ad_does_not_get_a_zero_threshold():
+    mot = _motion([(i, i, i + 1, "low", 0.0) for i in range(1, 21)])
+    assert mcc.flow_cut_for(mot)["basis"] == "categorical"
+
+
+def test_secondary_end_state_and_camera_classes_keep_the_categorical():
+    """Held fixed on purpose so their counts stay comparable across runs."""
+    art = _artifact([
+        _shot(i, i, i + 1.5, "a, b, c",
+              end_state="unchanged from the start") for i in range(1, 21)])
+    mot = _motion([(i, i, i + 1, "high", 1.0) for i in range(1, 21)])
+    rep = mcc.cross_check(art, mot)
+    assert rep["flow"]["cut"] == 2.0             # nothing reaches the cut
+    assert rep["class_a"] == []                  # primary sees no high motion
+    assert len(rep["class_b"]) == 20             # secondary still fires
+
+
+def test_class_d_shares_the_primary_cut_not_the_categorical():
+    """Class D is the primary's SUB-FLOOR overflow. If the two disagreed about
+    what "moved a lot" means, they would disagree about the same clip."""
+    art = _artifact([_shot(i, i, i + 0.5, "held still", camera="static")
+                     for i in range(1, 21)])
+    mot = _motion([(i, i, i + 1, "high", 1.0 if i < 20 else 9.0)
+                   for i in range(1, 21)])
+    rep = mcc.cross_check(art, mot)
+    assert rep["flow"]["cut"] == 2.0
+    assert [r["shot"] for r in rep["class_d"]] == [20]
+    # every clip is sub-floor, but only ONE would have been flagged, so only
+    # one flag was suppressed. Conflating the two makes the denominator lie.
+    assert len(rep["short_clips"]) == 20
+    assert rep["excluded_short"] == [20]
+
+
 # ── the duration floor ────────────────────────────────────────────────
 
 def test_a_short_clip_is_never_flagged_for_being_single_beat():
@@ -140,7 +242,8 @@ def test_the_floor_and_its_exclusions_are_printed_never_silent():
     text = mcc.format_report(mcc.cross_check(art, mot), Path("a.json"),
                              Path("m.json"))
     assert "at least 1.0s" in text
-    assert "1 clip(s) excluded as too short" in text
+    assert "1 of 2 joined clips are shorter" in text
+    assert "suppressed 1 flag(s)" in text
     assert "shots [1]" in text
     assert "1 of 1 eligible clips" in text          # only shot 2 is eligible
 

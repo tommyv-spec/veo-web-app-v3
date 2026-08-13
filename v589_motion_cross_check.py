@@ -115,6 +115,44 @@ _CAMERA_STILL = ("static", "locked", "no movement", "held still", "none")
 # prevent.
 MIN_BEAT_SECONDS = 1.0
 
+# ── What "high motion" means, per ad ──────────────────────────────────
+#
+# The primary class used v585's CATEGORICAL motion label. That label cuts at
+# mean_flow_mag > 0.7, and on the real 80-clip ad the MEDIAN flow is 1.539 —
+# more than double the cut — so "high" was true of 60 of 80 clips. A predicate
+# true of three quarters of the corpus by construction cannot discriminate, and
+# no duration floor repairs that.
+#
+# So the primary class reads the CONTINUOUS mean_flow_mag against the ad's OWN
+# distribution: high means high FOR THIS AD.
+#
+# 2x the median rather than p90, deliberately. A percentile is a fixed RATE: p90
+# flags the top 10% of every ad by construction, so a flawless artifact still
+# reports ~8 flags on 80 clips and the number says nothing. A multiple of the
+# median is a SHAPE measure — an ad whose clips all move about the same amount
+# produces few or ZERO clips above 2x median, which is what a clean result has
+# to be able to look like. Both are scale-invariant; only one can come back
+# empty. The report prints the cut value AND the percentile it landed on, so a
+# reader sees what "high" meant here instead of trusting the word.
+FLOW_MULTIPLE = 2.0
+
+# Below this many joined clips a median is not stable — one outlier moves it —
+# so a per-ad distribution would be a confident number off almost no samples.
+# A judgement call, not a derivation, and said out loud here for the same reason
+# MIN_BEAT_SECONDS is: 12 is where a median stops swinging on a single clip.
+# Under it the report falls back to v585's categorical label and SAYS it did.
+MIN_CLIPS_FOR_DISTRIBUTION = 12
+
+# NOT A CHANGE TO v585. `motion.json`'s categorical `motion` field is shared —
+# the heavy stage4d.v2 lane's per-shot motion_cross_check reads it, and so does
+# anything else consuming that file. This module changes only how THIS REPORT
+# reads the continuous value sitting next to it. Do not "fix" the inconsistency
+# by moving v585's threshold: the categorical label is not wrong, it is calibrated
+# for a different question, and re-cutting it would silently change every other
+# consumer. Classes B and C still read the categorical on purpose, so their counts
+# stay comparable across runs; class D shares the primary's cut because it is the
+# primary's sub-floor overflow and the two must agree about the same clip.
+
 # LONG_CLIP_S is the STATISTIC's bar: not "could it hold two beats" but "is it
 # long enough that several beats would be unremarkable". Deliberately well above
 # the flag floor, and reported next to the ad's median clip duration, because a
@@ -203,8 +241,36 @@ def load_artifact(path: Path) -> dict:
     return data
 
 
+def flow_cut_for(motion: list, multiple: float = FLOW_MULTIPLE) -> dict:
+    """What counts as high motion FOR THIS AD, read off its own distribution.
+
+    Returns the cut, the median it came from, the percentile the cut landed on,
+    and — when the sample is too small for a median to mean anything — a
+    `basis` of "categorical" so the caller falls back to v585's label and the
+    report can say it did rather than print a confident number off five clips.
+    """
+    values = sorted(float(m["mean_flow_mag"]) for m in motion
+                    if isinstance(m, dict)
+                    and isinstance(m.get("mean_flow_mag"), (int, float)))
+    if len(values) < MIN_CLIPS_FOR_DISTRIBUTION:
+        return {"basis": "categorical", "cut": None, "median": None,
+                "percentile": None, "n": len(values), "multiple": multiple}
+    median = statistics.median(values)
+    if median <= 0:
+        # Every clip is a still. A multiple of zero is not a threshold.
+        return {"basis": "categorical", "cut": None, "median": median,
+                "percentile": None, "n": len(values), "multiple": multiple}
+    cut = multiple * median
+    at_or_below = sum(1 for v in values if v < cut)
+    return {"basis": "distribution", "cut": round(cut, 4),
+            "median": round(median, 4),
+            "percentile": round(100 * at_or_below / len(values)),
+            "n": len(values), "multiple": multiple}
+
+
 def cross_check(artifact: dict, motion: list,
-                min_beat_seconds: float = MIN_BEAT_SECONDS) -> dict:
+                min_beat_seconds: float = MIN_BEAT_SECONDS,
+                flow_multiple: float = FLOW_MULTIPLE) -> dict:
     """Join the two sources and collect contradictions. Pure; no I/O."""
     shots = artifact.get("shots") or []
     by_shot = {m.get("shot"): m for m in motion if isinstance(m, dict)}
@@ -223,8 +289,27 @@ def cross_check(artifact: dict, motion: list,
         "class_a": [], "class_b": [], "class_c": [], "class_d": [],
         "joined": 0,
         "min_beat_seconds": min_beat_seconds,
+        # Two DIFFERENT numbers, kept apart because conflating them makes the
+        # denominator lie: `short_clips` is every joined clip below the floor
+        # (the ineligible population), `excluded_short` is only those the floor
+        # actually stopped from being flagged (the suppressed flags).
+        "short_clips": [],
         "excluded_short": [],
+        "flow": flow_cut_for(motion, flow_multiple),
     }
+    cut = report["flow"]["cut"]
+
+    def moved_a_lot(level: object, flow: object) -> bool:
+        """Used by the PRIMARY class and by class D, which is the primary's
+        sub-floor overflow and must share its definition of "moved a lot" or
+        the two disagree about the same clip. Classes B and C keep v585's
+        categorical label: they are independent questions about end_state and
+        camera_move, and holding them fixed keeps their counts comparable
+        across runs. Falls back to the label when there is no per-ad cut or the
+        entry carries no numeric flow."""
+        if cut is None or not isinstance(flow, (int, float)):
+            return level == "high"
+        return float(flow) >= cut
 
     motion_indices = set(by_shot)
     shot_indices = {s.get("shot_index") for s in shots}
@@ -261,9 +346,11 @@ def cross_check(artifact: dict, motion: list,
         report["joined"] += 1
         level = m.get("motion")
         flow = m.get("mean_flow_mag")
+        if duration < min_beat_seconds:
+            report["short_clips"].append(idx)
 
         thin = no_motion or beats <= 1
-        if level == "high" and thin:
+        if moved_a_lot(level, flow) and thin:
             if duration >= min_beat_seconds:
                 report["class_a"].append({
                     "shot": idx, "flow": flow, "duration": round(duration, 2),
@@ -297,6 +384,7 @@ def cross_check(artifact: dict, motion: list,
     for key in ("class_a", "class_b", "class_c", "class_d"):
         report[key].sort(key=lambda r: (r["flow"] is None, -(r["flow"] or 0)))
     report["excluded_short"].sort()
+    report["short_clips"].sort()
 
     report["stats"] = {
         "median_action_tokens": (round(statistics.median(token_lens), 1)
@@ -353,11 +441,34 @@ def format_report(report: dict, artifact_path: Path, motion_path: Path) -> str:
     label = report["field"]
     floor = report["min_beat_seconds"]
     excluded = report["excluded_short"]
-    eligible = joined - len(excluded)
-    add(f"  {len(a)} of {eligible} eligible clips: Farneback=high but `{label}` "
+    eligible = joined - len(report["short_clips"])
+    fl = report["flow"]
+    if fl["basis"] == "distribution":
+        highdesc = f"flow >= {fl['cut']}"
+    else:
+        highdesc = "Farneback=high"
+    add(f"  {len(a)} of {eligible} eligible clips: {highdesc} but `{label}` "
         f"reads as a single beat or says nothing moved")
-    add(f"    eligible = clip is at least {floor}s. {len(excluded)} clip(s) "
-        f"excluded as too short to hold two beats"
+    if fl["basis"] == "distribution":
+        add(f"    high motion = {fl['multiple']}x THIS AD's median flow "
+            f"({fl['median']}) = {fl['cut']}, which is its p{fl['percentile']} "
+            f"over {fl['n']} clips.")
+        add(f"    Read off the ad's own distribution, not a fixed threshold: "
+            f"v585's categorical")
+        add(f"    `high` cuts at 0.7 and was true of most of this ad by "
+            f"construction. A multiple of")
+        add(f"    the median can also come back EMPTY on an ad whose clips all "
+            f"move alike - a")
+        add(f"    percentile never can. Override with --flow-multiple.")
+    else:
+        add(f"    high motion = v585's categorical label: only {fl['n']} clips "
+            f"carry a numeric flow,")
+        add(f"    below the {MIN_CLIPS_FOR_DISTRIBUTION} a per-ad median needs "
+            f"to mean anything. Treat the count as indicative.")
+    add(f"    eligible = clip is at least {floor}s; "
+        f"{len(report['short_clips'])} of {joined} joined clips are shorter.")
+    add(f"    The floor suppressed {len(excluded)} flag(s) on clips too short "
+        f"to hold two beats"
         + (f": shots {excluded[:20]}" if excluded else "."))
     if a:
         add(f"    shots {_shot_list(a)}")
@@ -376,7 +487,7 @@ def format_report(report: dict, artifact_path: Path, motion_path: Path) -> str:
         f"unchanged" + (f" - shots {_shot_list(b)}" if b else ""))
     add(f"  secondary - {len(c)} clips: `camera_move` names a move but "
         f"Farneback=low" + (f" - shots {_shot_list(c)}" if c else ""))
-    add(f"  secondary - {len(d)} clips under {floor}s: Farneback=high, thin "
+    add(f"  secondary - {len(d)} clips under {floor}s: {highdesc}, thin "
         f"action AND `camera_move` says the camera held still"
         + (f" - shots {_shot_list(d)}" if d else ""))
     if d:
@@ -429,6 +540,13 @@ def main(argv: list | None = None) -> int:
                         f"single-beat - they cannot physically hold two "
                         f"(default {MIN_BEAT_SECONDS}s; the report prints the "
                         f"value used and how many clips it excluded)")
+    p.add_argument("--flow-multiple", type=float, default=FLOW_MULTIPLE,
+                   help=f"what counts as high motion for the PRIMARY class, as "
+                        f"a multiple of THIS AD's median mean_flow_mag "
+                        f"(default {FLOW_MULTIPLE}). Falls back to v585's "
+                        f"categorical label under "
+                        f"{MIN_CLIPS_FOR_DISTRIBUTION} clips; the report prints "
+                        f"the cut, the median and the percentile it landed on")
     args = p.parse_args(argv)
 
     if not args.artifact.exists():
@@ -464,7 +582,8 @@ def main(argv: list | None = None) -> int:
         return 0
 
     report = cross_check(artifact, motion,
-                         min_beat_seconds=args.min_beat_seconds)
+                         min_beat_seconds=args.min_beat_seconds,
+                         flow_multiple=args.flow_multiple)
     print(format_report(report, args.artifact, motion_path))
     return 0
 
