@@ -94,12 +94,11 @@ FBADS_FORMAT_DECLARATION = (
 )
 
 FBADS_READ_INSTRUCTIONS = (
-    "Read this ad for its SELL STRUCTURE, not for frame recreation. We are "
-    "not re-rendering these frames, so skip the forensic-perception pass and "
-    "every lens/lighting/composition detail: they are not in this profile's "
-    "schema. Per shot record only the source timestamps, one sentence of what "
+    "Read this ad for its SELL STRUCTURE, not for frame recreation. "
+    "Per shot record only the source timestamps, one sentence of what "
     "is on screen, the burned-in on-screen text VERBATIM ('none' when there "
-    "is none), who is visible, and what that beat DOES in the sell. Hook, "
+    "is none), who is visible, how the shot was MADE with the tell that shows "
+    "it, and what that beat DOES in the sell. Hook, "
     "pain, story, credibility, proof/demo, mechanism, objection, offer and "
     "CTA are the common jobs, but they are EXAMPLES, not a closed list — when "
     "a beat does something else, name in plain words what it actually does.\n"
@@ -415,15 +414,19 @@ LEAN_AD_SHOT_SCHEMA = {
     "additionalProperties": False,
     "required": [
         "shot_index", "start", "end", "visual", "on_screen_text",
-        "who_on_camera", "sell_function",
+        "who_on_camera", "sell_function", "production_method",
     ],
     "properties": {
         "shot_index": {"type": "integer", "minimum": 1},
         "start": {"type": "number"},
         "end": {"type": "number"},
+        # Shot scale is in here, not in a field of its own: close-up-on-a-face
+        # vs wide-on-a-product is a scroll-stop lever we want to mine, and it
+        # costs three words inside a sentence we are already paying for.
         "visual": _string_schema(
-            "One sentence: what is on screen. Setting, who is in frame, what "
-            "they are doing."),
+            "One sentence: what is on screen. Shot scale (close-up / medium / "
+            "wide), setting, who is in frame, what they are doing, and whether "
+            "the camera moves or holds still."),
         "on_screen_text": _string_schema(
             "The burned-in text or overlay shown during this shot, VERBATIM. "
             "'none' if there is none."),
@@ -435,8 +438,41 @@ LEAN_AD_SHOT_SCHEMA = {
             "story, credibility, proof/demo, mechanism, objection, offer and "
             "CTA are common ones, but these are EXAMPLES, not a closed list: "
             "when a beat does something else, name what it actually does."),
+        # The single most actionable fact about a competitor's creative: it
+        # decides what we can copy and at what cost. Deliberately open (3.6) —
+        # a competitor will ship a hybrid no five-item enum anticipated. Same
+        # question the heavy lane asks in frame_inventory.production_method, at
+        # one line instead of a paragraph, so the two lanes speak one language.
+        "production_method": _string_schema(
+            "HOW this shot was MADE, not what is in it. Real UGC filmed on a "
+            "phone, AI-generated, licensed stock, a screen recording, a studio "
+            "shoot, or a graphics-only card — and say which visible TELL shows "
+            "it. A bare label is a guess and is worth little; the tell is what "
+            "makes it usable. Examples of the shape: 'real UGC handheld, phone "
+            "camera, natural window light'; 'AI-generated, plastic skin texture "
+            "and background detail that drifts between frames'; 'licensed "
+            "stock, professional grade and studio lighting'; 'screen recording "
+            "of a website'. Write 'unclear' when nothing in the frame gives it "
+            "away."),
     },
 }
+
+
+# The closing <final_instruction> is profile-owned for the same reason the
+# system instruction is (see FBADS_SYSTEM_INSTRUCTION below): it ordered the
+# forensic-perception protocol on EVERY lane, and the lean profile has no such
+# protocol and no composition fields to write. "ugc-reel" keeps the exact
+# string it always had, so the default prompt is byte-identical.
+DEFAULT_FINAL_INSTRUCTION = (
+    "Run the forensic-perception protocol on each shot "
+    "BEFORE writing its composition fields. Output: ONLY the JSON object. "
+    "No prose preamble, no code fences."
+)
+
+FBADS_FINAL_INSTRUCTION = (
+    "One clear sentence per field. Output: ONLY the JSON object. "
+    "No prose preamble, no code fences."
+)
 
 
 READING_PROFILES = {
@@ -444,6 +480,8 @@ READING_PROFILES = {
         "context": "", "task": "", "ad_read": False,
         "shot_schema": PER_SHOT_SCHEMA,
         "schema_version": STAGE4D_SCHEMA_VERSION,
+        "system_instruction": None,   # bound below, after SYSTEM_INSTRUCTION
+        "final_instruction": DEFAULT_FINAL_INSTRUCTION,
     },
     "fbads-video": {
         "context": FBADS_FORMAT_DECLARATION,
@@ -451,6 +489,8 @@ READING_PROFILES = {
         "ad_read": True,
         "shot_schema": LEAN_AD_SHOT_SCHEMA,
         "schema_version": "adread.v1",
+        "system_instruction": None,   # bound below, after the constants
+        "final_instruction": FBADS_FINAL_INSTRUCTION,
     },
 }
 
@@ -885,6 +925,53 @@ LAST resort, never on the primary subject geometry sentence.
 """
 
 
+# ── The fbads-video system instruction ────────────────────────────────
+# SYSTEM_INSTRUCTION above is written for OUR production lane: describe a shot
+# with the precision Veo 3.1 needs to re-render it, and run the v718 forensic
+# perception protocol first. The fbads task text used to countermand both
+# inline, which is a prompt fighting itself — it costs premium output rate on
+# padding that creeps back into `visual`, and it pulls the model toward a job
+# the lean schema has no fields for. So the profile owns its brief instead of
+# arguing with a shared one, and this text never raises the forensic pass at
+# all: there is nothing to countermand.
+
+FBADS_SYSTEM_INSTRUCTION = """\
+You are a video-understanding assistant for a competitor-ad research pipeline.
+
+Your job: watch a PAID Facebook/Instagram ad that a competitor is running and
+record how it is BUILT — its shot structure, its on-screen text, and what each
+beat does in the sell.
+
+For each shot, output a JSON object matching the schema in your prompt.
+
+Hard rules:
+- The whisper transcript supplied in the prompt is AUTHORITATIVE for the
+  dialogue. Do NOT re-transcribe speech into the shots. There is no per-shot
+  audio field, and re-typing words we already have costs output and buys
+  nothing.
+- Record what is VISIBLE, and name the TELL that shows it. A bare label is a
+  guess; "AI-generated - plastic skin texture and background detail that
+  drifts between frames" is an observation. Never infer what the frame does
+  not show. When something is genuinely unreadable, say so instead of
+  guessing confidently.
+- Quote burned-in on-screen text EXACTLY, case and punctuation included. It is
+  often the strongest single element in the frame and it is the first thing a
+  port rewrites.
+- This is an OBSERVATION RECORD. Nothing here gets rebuilt frame by frame, so
+  there is no lens / lighting / composition contract to satisfy and no
+  perceptual protocol to run - those fields are not in this profile's schema.
+  Write ONE clear sentence per field. No padding, no restating the field name,
+  no hedging preamble.
+"""
+
+
+# Bound here rather than inside the literal above: SYSTEM_INSTRUCTION is
+# defined after READING_PROFILES and stays exactly where it was, because other
+# callers reference it by name.
+READING_PROFILES["ugc-reel"]["system_instruction"] = SYSTEM_INSTRUCTION
+READING_PROFILES["fbads-video"]["system_instruction"] = FBADS_SYSTEM_INSTRUCTION
+
+
 def build_user_prompt(shots: list, transcript_summary: str, motion: object,
                       include_schema: bool = True, extra_context: str = "",
                       profile: str = "ugc-reel") -> str:
@@ -911,9 +998,7 @@ def build_user_prompt(shots: list, transcript_summary: str, motion: object,
         "contains a verb-of-state-change (pour, squeeze, add, stir, mix, melt).\n"
         f"{profile_spec['task']}"
         "</task>\n\n"
-        "<final_instruction>Run the forensic-perception protocol on each shot "
-        "BEFORE writing its composition fields. Output: ONLY the JSON object. "
-        "No prose preamble, no code fences.</final_instruction>"
+        f"<final_instruction>{profile_spec['final_instruction']}</final_instruction>"
     )
 
 
@@ -1259,7 +1344,9 @@ def call_lmstudio(video_path: Path, frames: list[Path], shots: list, transcript_
     print(f"[v589] LM Studio: model={model}, sending {len(frames)} dense frames + transcript")
 
     content = [
-        {"type": "text", "text": SYSTEM_INSTRUCTION},
+        # the PROFILE's brief, not the module constant: a lean fbads read must
+        # not be handed the heavy lane's re-render + forensic-protocol job.
+        {"type": "text", "text": _reading_profile(profile)["system_instruction"]},
         {"type": "text", "text": build_user_prompt(shots, transcript_summary, motion,
                                                    include_schema=True, profile=profile)},
     ]
@@ -1570,8 +1657,10 @@ def call_gemini(video_path: Path, shots: list, transcript_summary: str, motion: 
     # The prompt above suppresses the schema block (include_schema=False) — this
     # is the ONLY place the schema reaches the model on this lane, so it must be
     # the PROFILE's schema or a non-default profile silently reads as the default.
+    # Same argument for system_instruction: it also travels out-of-band, so a
+    # hardcoded constant would give a fbads run the heavy lane's brief.
     config_kwargs: dict = dict(
-        system_instruction=SYSTEM_INSTRUCTION,
+        system_instruction=_reading_profile(profile)["system_instruction"],
         response_mime_type="application/json",
         response_json_schema=schema_for_profile(profile),
     )

@@ -54,7 +54,7 @@ def test_lean_shot_schema_is_flat_and_open_ended():
     lean = v589.LEAN_AD_SHOT_SCHEMA
     assert lean["required"] == [
         "shot_index", "start", "end", "visual", "on_screen_text",
-        "who_on_camera", "sell_function",
+        "who_on_camera", "sell_function", "production_method",
     ]
     assert set(lean["properties"]) == set(lean["required"])
     assert lean["additionalProperties"] is False
@@ -74,6 +74,43 @@ def test_lean_shot_schema_is_flat_and_open_ended():
         assert prop["type"] in ("string", "number", "integer"), name
     # and the description says the list is open
     assert "not a closed list" in sell["description"].lower()
+
+
+def test_lean_shot_schema_records_production_method():
+    """For a COMPETITOR ad, how the footage was MADE is the most actionable
+    single fact: real UGC, AI-generated, licensed stock, a screen recording or
+    a studio shoot decide what we can copy and at what cost. ~10 words a shot.
+    """
+    lean = v589.LEAN_AD_SHOT_SCHEMA
+    assert len(lean["required"]) == 8
+    assert "production_method" in lean["required"]
+    assert lean["additionalProperties"] is False
+    pm = lean["properties"]["production_method"]
+    # 3.6 again: an open string, never an enum of five blessed labels — a
+    # competitor will ship a hybrid we have not seen.
+    assert pm["type"] == "string"
+    assert "enum" not in pm
+    assert "const" not in pm
+    desc = pm["description"].lower()
+    # the TELL is the ask; a bare label is an unsupported guess
+    assert "tell" in desc
+    for example in ("ugc", "ai-generated", "stock", "screen recording"):
+        assert example in desc, example
+    # consistent in spirit with the heavy lane's frame_inventory.production_method
+    heavy = (v589.PER_SHOT_SCHEMA["properties"]["frame_inventory"]
+             ["properties"]["production_method"]["description"].lower())
+    assert "how" in heavy and "how" in desc
+    assert "not what is in it" in heavy and "not what is in it" in desc
+
+
+def test_lean_visual_asks_for_shot_scale():
+    """Close-up-on-face vs wide-product is a scroll-stop lever worth mining."""
+    desc = v589.LEAN_AD_SHOT_SCHEMA["properties"]["visual"]["description"].lower()
+    for token in ("close-up", "medium", "wide", "camera"):
+        assert token in desc, token
+    # the original asks survive
+    for token in ("setting", "in frame", "doing"):
+        assert token in desc, token
 
 
 def test_schema_fbads_uses_the_lean_shot_schema():
@@ -139,8 +176,6 @@ def test_fbads_task_declares_the_structural_per_shot_job():
     # whisper is authoritative; do NOT re-transcribe speech into the shots
     assert "transcript" in low
     assert "re-transcribe" in low
-    # and the shared final_instruction's forensic pass is countermanded
-    assert "forensic" in low
     # the ad layer survives
     assert "fill the top-level ad_read object" in task
 
@@ -153,6 +188,108 @@ def test_fbads_instruction_survives_schema_suppression():
     assert "PAID" in p
     assert "fill the top-level ad_read object" in p
     assert "Stage 4d JSON schema:" not in p
+
+
+# ── FIX 3: the profile owns its system instruction ────────────────────
+# The shared SYSTEM_INSTRUCTION is written for the heavy lane (RE-RENDER
+# precision + the forensic-perception protocol). The fbads task text used to
+# countermand it inline, which is a prompt arguing with itself: verbosity
+# creeps back into `visual` at premium output rates and the model is pulled
+# toward a job the lean schema does not have.
+
+
+def test_each_profile_owns_a_system_instruction():
+    ugc = v589.READING_PROFILES["ugc-reel"]["system_instruction"]
+    fb = v589.READING_PROFILES["fbads-video"]["system_instruction"]
+    # the default lane keeps the exact module-level object, not a copy of it
+    assert ugc is v589.SYSTEM_INSTRUCTION
+    assert fb is v589.FBADS_SYSTEM_INSTRUCTION
+    assert fb != ugc
+
+
+def test_fbads_system_instruction_is_written_for_the_lean_job():
+    fb = v589.READING_PROFILES["fbads-video"]["system_instruction"]
+    low = fb.lower()
+    # the actual job
+    assert "ad" in low and "sell" in low
+    # whisper is supplied and authoritative; speech is NOT re-typed into shots
+    assert "transcript" in low
+    assert "authoritative" in low
+    assert "re-transcribe" in low
+    # observation, with the tell named, never inference
+    assert "visible" in low
+    assert "tell" in low
+    # verbatim on-screen text is the mining payload
+    assert "exactly" in low
+    # one sentence per field, no padding
+    assert "one clear sentence per field" in low
+    assert "padding" in low
+    # and NONE of the heavy lane's re-render / forensic language survives:
+    # nothing to countermand means nothing to argue with.
+    for heavy in ("forensic", "re-render", "veo", "state-evolution"):
+        assert heavy not in low, heavy
+
+
+def test_fbads_prompt_no_longer_countermands_the_forensic_pass():
+    """The countermand moved into the fbads system instruction as a positive
+    statement of the job, so the task text must not carry it any more."""
+    task = v589.FBADS_READ_INSTRUCTIONS
+    assert "skip the forensic-perception pass" not in task
+    assert "forensic" not in task.lower()
+    # what is still load-bearing there must NOT have gone with it
+    assert "SELL STRUCTURE" in task
+    assert "VERBATIM" in task
+    assert "re-transcribe" in task
+    assert "fill the top-level ad_read object" in task
+
+
+def test_no_forensic_order_reaches_the_fbads_prompt_at_all():
+    """The whole fbads request — system instruction, context, task and the
+    closing final_instruction — must never order a protocol it does not have.
+    The default lane keeps that order verbatim."""
+    shots = [{"shot": 1, "start": 0.0, "end": 3.0}]
+    fb = (v589.READING_PROFILES["fbads-video"]["system_instruction"]
+          + v589.build_user_prompt(shots, "t", [], profile="fbads-video"))
+    assert "forensic" not in fb.lower()
+    default = v589.build_user_prompt(shots, "t", [], profile="ugc-reel")
+    assert "Run the forensic-perception protocol on each shot" in default
+
+
+def test_lmstudio_sends_the_profile_system_instruction(monkeypatch, tmp_path):
+    """Behavioral pin, no network: the request body must carry the PROFILE's
+    system instruction, not the module-level heavy-lane constant."""
+    import urllib.request
+
+    sent: list[dict] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": "{}"}}]}).encode()
+
+    def _fake_urlopen(req, timeout=None):
+        sent.append(json.loads(req.data.decode()))
+        return _Resp()
+
+    monkeypatch.setattr(v589, "lmstudio_available", lambda base_url: (True, "m"))
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    def _first_text(body):
+        return body["messages"][0]["content"][0]["text"]
+
+    v589.call_lmstudio(tmp_path / "v.mp4", [], [], "t", [])
+    assert _first_text(sent[-1]) is not None
+    assert _first_text(sent[-1]) == v589.SYSTEM_INSTRUCTION
+
+    v589.call_lmstudio(tmp_path / "v.mp4", [], [], "t", [], profile="fbads-video")
+    assert _first_text(sent[-1]) == v589.FBADS_SYSTEM_INSTRUCTION
+    assert "forensic" not in _first_text(sent[-1]).lower()
 
 
 def test_unknown_profile_names_the_valid_choices():
@@ -201,15 +338,21 @@ def _minimal_valid_lean():
         "ad_read": _ad_read_block(),
         "shots": [
             {"shot_index": 1, "start": 0.0, "end": 2.5,
-             "visual": "Older woman sits at a kitchen table holding her wrist.",
+             "visual": "Medium, static: older woman sits at a kitchen table "
+                       "holding her wrist.",
              "on_screen_text": "MY HANDS HURT EVERY MORNING",
              "who_on_camera": "the older woman, alone",
-             "sell_function": "hook — names the pain in the first frame"},
+             "sell_function": "hook — names the pain in the first frame",
+             "production_method": "real UGC handheld, phone camera, natural "
+                                  "window light and visible hand shake"},
             {"shot_index": 2, "start": 2.5, "end": 6.0,
-             "visual": "Close on the jar being opened on the counter.",
+             "visual": "Close-up, slow push in on the jar being opened on the "
+                       "counter.",
              "on_screen_text": "none",
              "who_on_camera": "hands only, no face",
-             "sell_function": "proof/demo — shows the product in use"},
+             "sell_function": "proof/demo — shows the product in use",
+             "production_method": "licensed stock, professional grade and "
+                                  "even studio lighting"},
         ],
     }
 
@@ -222,6 +365,22 @@ def _lean_expected_shots():
 def test_lean_artifact_validates_under_fbads():
     v589.validate_stage4d_output(_minimal_valid_lean(), _lean_expected_shots(),
                                  profile="fbads-video")
+
+
+def test_lean_artifact_missing_production_method_is_rejected():
+    """A required field is only real if the validator rejects its absence."""
+    data = _minimal_valid_lean()
+    del data["shots"][0]["production_method"]
+    with pytest.raises(v589.Stage4dValidationError,
+                       match="missing production_method"):
+        v589.validate_stage4d_output(data, _lean_expected_shots(),
+                                     profile="fbads-video")
+    # and an empty one is not an observation either ('unclear' is the answer)
+    data = _minimal_valid_lean()
+    data["shots"][1]["production_method"] = "  "
+    with pytest.raises(v589.Stage4dValidationError, match="production_method"):
+        v589.validate_stage4d_output(data, _lean_expected_shots(),
+                                     profile="fbads-video")
 
 
 def test_the_two_contracts_do_not_cross_validate():
@@ -386,12 +545,13 @@ def test_providers_and_cli_thread_the_profile():
     assert 'parsed["profile"] = args.profile' in main_src
 
 
-def _install_fake_genai(monkeypatch, response_text):
+def _install_fake_genai(monkeypatch, response_text, captured=None):
     """Minimal google.genai stand-in so the gemini lane runs offline.
 
     Fakes ONLY the network surface (client, streamed response, the types the
     inline path constructs). The part under test stays real: call_gemini's own
-    validation gate and the schema_status it hands to the cost ledger.
+    validation gate, the config it builds, and the schema_status it hands to
+    the cost ledger. Pass `captured` (a list) to record each request's config.
     """
     import sys
     import types as stdlib_types
@@ -403,6 +563,8 @@ def _install_fake_genai(monkeypatch, response_text):
 
     class _Models:
         def generate_content_stream(self, model, contents, config):
+            if captured is not None:
+                captured.append(config)
             return [_Chunk(response_text)]
 
     class _Client:
@@ -453,6 +615,33 @@ def test_call_gemini_gate_uses_the_call_profile(monkeypatch, tmp_path):
         v589.call_gemini(video, shots, "t", [], thinking="default",
                          profile="fbads-video")
     assert logged["schema_status"] == "fail"
+
+
+def test_call_gemini_sends_the_profile_system_instruction(monkeypatch, tmp_path):
+    """Behavioral pin on the risky path — FIX 3 edits the request builder.
+
+    system_instruction reaches Gemini out-of-band, exactly like the schema, so
+    a hardcoded module constant would silently give a fbads run the heavy
+    lane's RE-RENDER + forensic-protocol brief. No network: client is faked.
+    """
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"\x00" * 32)
+    monkeypatch.setattr(v589, "log_gemini_usage", lambda *a, **kw: {})
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key-never-sent")
+
+    heavy = _minimal_valid_stage4d()
+    configs: list = []
+    _install_fake_genai(monkeypatch, json.dumps(heavy), captured=configs)
+    v589.call_gemini(video, _expected_shots_for(heavy), "t", [], thinking="default")
+    assert configs[-1].system_instruction is v589.SYSTEM_INSTRUCTION
+
+    lean = _minimal_valid_lean()
+    configs.clear()
+    _install_fake_genai(monkeypatch, json.dumps(lean), captured=configs)
+    v589.call_gemini(video, _lean_expected_shots(), "t", [], thinking="default",
+                     profile="fbads-video")
+    assert configs[-1].system_instruction is v589.FBADS_SYSTEM_INSTRUCTION
+    assert "forensic" not in configs[-1].system_instruction.lower()
 
 
 def test_call_gemini_gate_names_the_profile_in_source():
