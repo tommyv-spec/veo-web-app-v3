@@ -9931,6 +9931,11 @@ async def _do_export_final(
     - Never trim start frames from clips that start a "cut" transition scene
     """
     from video_processor import export_final_video as process_export, check_vad_available
+    # `or_` is not imported at module level in this file — every other user of it
+    # imports it locally (see lines 4565, 5684, 13912, 15440, ...). _v892_not_plate
+    # below closes over it, so without this line the export dies on a NameError the
+    # moment it builds the clip query. Cost one production export run on 2026-08-13.
+    from sqlalchemy import or_
 
     def _v892_not_plate():
         """Exclude composite_plate clips from the exported timeline.
@@ -10167,7 +10172,12 @@ async def _do_export_final(
             Clip.approval_status == "approved",
             _v892_not_plate(),   # v892 — layer, never a timeline segment
         ).order_by(Clip.clip_index).all()
-    
+
+    # TEMP DIAGNOSTIC (2026-08-13, remove once an export is confirmed green) — the
+    # v892 clip query crashed on a missing `or_` import and produced no evidence at
+    # all past "START". This line proves the query ran and says what it selected.
+    print(f"[Export][v892] clip query OK: {len(clips)} clips selected for job={job_id}", flush=True)
+
     if not clips:
         raise HTTPException(status_code=400, detail="No approved clips to export")
     
