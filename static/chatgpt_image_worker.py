@@ -447,6 +447,19 @@ def batch(jobs_file=None, single=None):
 def _is_chatgpt_job(job):
     return (job or {}).get("model") == "chatgpt"
 
+
+def _fresh_context_per_job():
+    """Whether watch mode should open a clean browser page per image.
+
+    ChatGPT's image page can keep stale animation/navigation state after a
+    completed turn. A new page in the same signed-in browser is fast, avoids
+    Firefox profile-lock races, and keeps one slow turn from poisoning the jobs
+    that follow it.
+    """
+    return os.environ.get("CHATGPT_FRESH_CONTEXT_PER_JOB", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
 def _scan_pending(watch_dir):
     """chatgpt job files with no sibling .done.json, oldest first."""
     out = []
@@ -469,6 +482,70 @@ def _write_done(job_path, payload):
     with open(job_path.replace(".json", ".done.json"), "w", encoding="utf-8") as _f:
         _f.write(json.dumps(payload))
 
+def _close_stray_pages(ctx, keep):
+    """Close every page in the context except the ones we still need.
+
+    Firefox opens each new_page() as its own WINDOW, and the handoff's
+    old_page.close() is wrapped in a bare except — so any close that fails leaves
+    a blank window on the operator's screen for the rest of the session. They
+    accumulated to 16 on 2026-08-15. Sweeping after each job bounds the count at
+    the active page plus the tone tab, whatever caused the leak.
+    """
+    keep_ids = {id(p) for p in keep if p is not None}
+    closed = 0
+    try:
+        pages = list(ctx.pages)
+    except Exception:
+        return 0
+    for p in pages:
+        if id(p) in keep_ids:
+            continue
+        try:
+            if not p.is_closed():
+                p.close()
+                closed += 1
+        except Exception:
+            pass
+    if closed:
+        log(f"closed {closed} stray browser window(s)")
+    return closed
+
+
+def _home_ready_state(page, home):
+    """What the readiness check can see right now. Returned so a failure can say WHY."""
+    state = {"url": None, "count": None, "visible": None, "error": None}
+    try:
+        state["url"] = (page.url or "").split("#", 1)[0].split("?", 1)[0].rstrip("/")
+        comp = page.locator(SEL["composer"]).first
+        state["count"] = comp.count()
+        state["visible"] = comp.is_visible() if state["count"] else False
+    except Exception as exc:
+        state["error"] = str(exc).splitlines()[0][:120]
+    state["ready"] = bool(state["url"] == home and state["count"] and state["visible"])
+    return state
+
+
+def _wait_home_ready(page, home, label, seconds=30):
+    """Poll until the ChatGPT home composer is usable. Logs WHY it gave up.
+
+    Both watch-mode handoff paths used to carry their own copy of this loop and
+    reported only 'not ready', which said nothing about which of the three
+    conditions failed. DIAGNOSTIC (2026-08-14): remove the last-state log once the
+    handoff has been stable for a full queue.
+    """
+    import time as _t
+    deadline = _t.time() + seconds
+    last = None
+    while _t.time() < deadline:
+        last = _home_ready_state(page, home)
+        if last["ready"]:
+            return True
+        _t.sleep(0.5)
+    log(f"{label} not ready after {seconds}s — url={last['url']!r} expected={home!r} "
+        f"composer_count={last['count']} visible={last['visible']} err={last['error']}")
+    return False
+
+
 def _process_platform_job(page, job_path, job):
     """Generate ONE image (variants clamped to 1) and write the .done.json."""
     jid = job.get("id") or os.path.basename(job_path).replace(".json", "")
@@ -488,6 +565,9 @@ def _process_platform_job(page, job_path, job):
 def watch_mode(watch_dir, poll_s=5, email=None):
     """Poll the platform job folder; process chatgpt jobs one at a time."""
     log(f"watch mode on {watch_dir}")
+    fresh_each = _fresh_context_per_job()
+    if fresh_each:
+        log("fresh browser page after every image is enabled")
     sync_playwright, _ = _import_playwright()
     with sync_playwright() as p:
         lp = launch_logged_in(p, email)
@@ -516,10 +596,77 @@ def watch_mode(watch_dir, poll_s=5, email=None):
                             os.remove(claim)
                         except OSError:
                             pass
-                    jitter(4.0, 9.0)
+                    if fresh_each:
+                        old_page = page
+                        try:
+                            page = ctx.new_page()
+                        except Exception as exc:
+                            log(f"fresh page failed; stopping watch mode: {exc}")
+                            return
+                        # Trigger navigation without Playwright's blocking goto
+                        # waiter. A ChatGPT navigation can complete in Firefox
+                        # while goto itself never returns. Poll the visible home
+                        # composer instead so this handoff has a hard deadline.
+                        try:
+                            page.evaluate(
+                                "url => { window.location.replace(url); }", CHATGPT_URL)
+                        except Exception:
+                            pass
+                        home = CHATGPT_URL.rstrip("/")
+                        ready = _wait_home_ready(page, home, "fresh tab")
+                        if not ready:
+                            # Some Firefox builds leave a newly opened blank tab
+                            # unable to navigate. Reuse the completed conversation
+                            # tab as a bounded fallback instead of stopping the
+                            # queue or reopening the whole browser profile.
+                            try:
+                                page.close()
+                            except Exception:
+                                pass
+                            page = old_page
+                            try:
+                                page.evaluate(
+                                    "url => { window.location.replace(url); }", CHATGPT_URL)
+                            except Exception:
+                                pass
+                            ready = _wait_home_ready(page, home, "reused tab")
+                            if not ready:
+                                # Last resort before giving up the whole queue: a real
+                                # goto on the reused tab. window.location.replace is
+                                # silent when the page blocks script navigation, and
+                                # stopping here strands every remaining job.
+                                try:
+                                    page.goto(CHATGPT_URL, wait_until="domcontentloaded",
+                                              timeout=45000)
+                                    ready = _wait_home_ready(page, home, "reused tab after goto", 20)
+                                except Exception as exc:
+                                    log(f"reused-tab goto failed: {str(exc).splitlines()[0][:120]}")
+                            if not ready:
+                                log("neither fresh nor reused ChatGPT page became ready; stopping watch mode")
+                                return
+                            log("reused ChatGPT page returned home after fresh-tab miss")
+                        else:
+                            try:
+                                old_page.close()
+                            except Exception:
+                                pass
+                            log("fresh ChatGPT home page ready")
+                        # whatever path we took, leave at most the active page and
+                        # the reused gpt-tone tab alive
+                        try:
+                            import chatgpt_image_backend as _bk
+                            _close_stray_pages(ctx, [page, getattr(_bk, "_TONE_TAB", None)])
+                        except Exception as exc:
+                            log(f"stray-page sweep skipped: {str(exc).splitlines()[0][:90]}")
+                        jitter(1.0, 2.0)
+                    else:
+                        jitter(4.0, 9.0)
                 _t.sleep(poll_s)
         finally:
-            ctx.close()
+            try:
+                ctx.close()
+            except Exception:
+                pass
 
 
 def main():
@@ -570,7 +717,9 @@ def main():
         # v899: engine-tagged per-account profile — a Firefox run must never
         # open the Chrome-format folder (mutually unreadable profile formats).
         _prefix = ".chatgpt_profile_firefox_" if backend.FIREFOX_MODE else ".chatgpt_profile_"
-        backend.PROFILE_DIR = os.path.join(backend.BASE_DIR, f"{_prefix}{safe}")
+        _explicit_profile = os.environ.get("CHATGPT_PROFILE_DIR", "").strip()
+        backend.PROFILE_DIR = (os.path.abspath(_explicit_profile) if _explicit_profile
+                               else os.path.join(backend.BASE_DIR, f"{_prefix}{safe}"))
         # No cookie-file injection in this model — the profile itself holds the login.
         # Point COOKIES_FILE at a path that never exists so inject_cookies is a no-op.
         backend.COOKIES_FILE = os.path.join(backend.BASE_DIR, ".chatgpt_cookies_unused")
@@ -587,18 +736,21 @@ def main():
                 ".chatgpt_profile", ".chatgpt_profile_firefox",
             )
         }
-        for _pat in (".chatgpt_profile*", ".chatgpt_cookies*"):
-            for _d in _glob.glob(os.path.join(backend.BASE_DIR, _pat)):
-                if os.path.abspath(_d) in _keep:
-                    continue  # keep THIS account's profiles (both engines)
-                if os.path.isdir(_d):
-                    _shutil.rmtree(_d, ignore_errors=True)
-                else:
-                    try:
-                        os.remove(_d)
-                    except OSError:
-                        pass
-                log(f"deleted stale: {os.path.basename(_d)}")
+        if not _explicit_profile:
+            for _pat in (".chatgpt_profile*", ".chatgpt_cookies*"):
+                for _d in _glob.glob(os.path.join(backend.BASE_DIR, _pat)):
+                    if os.path.abspath(_d) in _keep:
+                        continue  # keep THIS account's profiles (both engines)
+                    if os.path.isdir(_d):
+                        _shutil.rmtree(_d, ignore_errors=True)
+                    else:
+                        try:
+                            os.remove(_d)
+                        except OSError:
+                            pass
+                    log(f"deleted stale: {os.path.basename(_d)}")
+        else:
+            log("using explicit account profile; cross-account cleanup is skipped")
         log(f"using clean per-account profile: {os.path.basename(backend.PROFILE_DIR)}")
         # COPY the session from the account in Chrome BETA (exactly like the video
         # worker) — closes ONLY that one Beta profile's window, never the daily

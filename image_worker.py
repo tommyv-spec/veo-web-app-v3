@@ -229,7 +229,7 @@ else:
 # CONSTANTS
 # ============================================================
 
-WORKER_VERSION = "img-v588"  # v920 every in-page fetch has a deadline (no more silent forever-hang)
+WORKER_VERSION = "img-v591"  # account-routed Firefox sessions + strict API-only benchmark mode
 FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
 
 # v891d — truthful heartbeat. The heartbeat threads beat every 5s no matter
@@ -322,13 +322,29 @@ def session_folder_for_mode(mode, chrome_session_folder):
     return os.path.join(base, name.replace("image-chrome-session", "image-firefox-session"))
 
 
-def chromium_golden_folder(session_folder):
-    """The CHROMIUM golden, whichever engine is running.
+def account_scoped_session_folder(mode, chrome_session_folder, email=""):
+    """Return a separate native browser profile for one configured account.
 
-    Firefox does not get a golden of its own: it cannot read a chromium profile,
-    so its session is bridged in as cookies from this one (see
-    _bridge_golden_cookies_if_firefox). The laptop pull keeps this folder fresh
-    for both engines, so the path must not move when the engine changes.
+    The email chooses the source Firefox profile and must also choose the
+    destination worker profile. Otherwise two accounts overwrite one session
+    and the later launch appears to be randomly logged out or on the wrong
+    account. Blank email keeps the historical single-account path.
+    """
+    base = session_folder_for_mode(mode, chrome_session_folder)
+    email = (email or "").strip().lower()
+    if not email:
+        return base
+    slug = email.replace("@", "_at_")
+    slug = re.sub(r"[^a-z0-9._-]+", "_", slug).strip("._-")
+    return f"{base}-{slug}" if slug else base
+
+
+def chromium_golden_folder(session_folder):
+    """The legacy Chromium golden corresponding to a session path.
+
+    Kept for compatibility with focused cookie-bridge tests and older callers.
+    Live Firefox launches now use get_golden_folder(session_folder), matching
+    flow_worker's native Firefox profile/golden route.
     """
     p = os.path.abspath(session_folder)
     chrome_equivalent = os.path.join(
@@ -367,7 +383,8 @@ def should_restore_golden(session_folder, golden_folder, force=False):
         return True
     # A profile with no cookie DB has no login to protect.
     for rel in (os.path.join("Default", "Network", "Cookies"),
-                os.path.join("Default", "Cookies")):
+                os.path.join("Default", "Cookies"),
+                "cookies.sqlite"):
         if os.path.isfile(os.path.join(session_folder, rel)):
             return False
     return True
@@ -432,7 +449,7 @@ _COOKIE_MARKER = os.path.join(BASE_DIR, ".worker_injected_cookies.json")
 
 
 def _sync_companion_modules(base_url):
-    """Download worker_profile_pull.py + worker_cookie_extract.py next to this
+    """Download the login/profile helpers next to this
     worker (same as flow_worker's auto-update companion sync). The image
     installer only fetches image_worker.py, so without this the laptop-login
     helpers are absent in production and the pull silently no-ops. Best-effort:
@@ -441,9 +458,14 @@ def _sync_companion_modules(base_url):
         return
     import urllib.request as _urllib
     base = base_url.rstrip("/")
-    for _comp in ("worker_profile_pull.py", "worker_cookie_extract.py"):
+    _companions = {
+        "worker_profile_pull.py": "/api/user-worker/download/worker_profile_pull.py",
+        "worker_cookie_extract.py": "/api/user-worker/download/worker_cookie_extract.py",
+        "firefox_profile_pull.py": "/api/images/worker/download/companion/firefox_profile_pull.py",
+    }
+    for _comp, _route in _companions.items():
         try:
-            _url = f"{base}/api/user-worker/download/{_comp}"
+            _url = f"{base}{_route}"
             _req = _urllib.Request(_url, headers={"User-Agent": f"image-worker/{WORKER_VERSION}"})
             with _urllib.urlopen(_req, timeout=15) as _resp:
                 _bytes = _resp.read()
@@ -467,17 +489,15 @@ _LAPTOP_COPIED_GOLDENS = set()
 
 
 def _maybe_pull_laptop_profile(session_folder, golden_folder, label="IMAGE"):
-    """v814 — COPY-MODE laptop login, EXACTLY like flow_worker's startup: build
-    the golden DIRECTLY from the operator's real Chrome profile logged into
-    laptop_email (ACCOUNT1_LAPTOP_EMAIL env / worker_settings.json), so the
-    worker launches an already-logged-in session with no verification code.
-    Copies only the durable file set (build_lean_golden_from_profile), rewrites
-    Local State to a single `Default` profile, and reads the profile ONLY.
+    """Build the engine-native golden from the operator's matching profile.
 
-    Replaces the retired net-log capture+inject (Flow rejected the
-    reconstituted session for some accounts AND repeatedly driving the real
-    profile signed it out — same reason flow_worker retired it). Requires
-    App-Bound Encryption disabled (HKCU policy). Copy ONCE per process.
+    Chrome copies the real Chrome profile selected by laptop_email. Firefox
+    uses firefox_profile_pull to find a real Firefox profile signed into that
+    exact address and copies only its durable session files, matching
+    flow_worker. Both source profiles are read-only.
+
+    Chrome still requires App-Bound Encryption disabled for copy-mode. Firefox
+    does not. Copy once per process.
     Fail-safe: any error logged, never raises; on failure the worker falls
     back to a manual login that run. LAPTOP_PULL_DISABLED=1 turns it off."""
     try:
@@ -498,11 +518,30 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label="IMAGE"):
         from worker_profile_pull import (build_lean_golden_from_profile, locate_profile,
                                          close_laptop_chrome, load_laptop_email as _lle)
         # load_laptop_email reads ACCOUNT1_LAPTOP_EMAIL env first, then the file.
-        email = _lle(os.path.join(BASE_DIR, "worker_settings.json"))
+        email = (os.environ.get("IMAGE_FLOW_ACCOUNT_EMAIL", "").strip()
+                 or _lle(os.path.join(BASE_DIR, "worker_settings.json")))
         if not email:
             return
         if golden_folder in _LAPTOP_COPIED_GOLDENS:
             print(f"[{label}] laptop copy: golden already built this session — reusing", flush=True)
+            return
+        if FIREFOX_MODE:
+            # Same route as flow_worker: Camoufox is seeded only from a real
+            # Firefox profile already signed into this exact Google account.
+            # Chrome cookie injection reaches Google's chooser, but it does not
+            # reproduce Flow's complete Firefox session.
+            sys.modules.pop("firefox_profile_pull", None)
+            from firefox_profile_pull import build_firefox_golden_from_profile
+            print(f"[{label}] firefox pull: looking for {email} in real Firefox profiles",
+                  flush=True)
+            if build_firefox_golden_from_profile(
+                    email, golden_folder, label=label,
+                    log=lambda m: print(m, flush=True)):
+                _LAPTOP_COPIED_GOLDENS.add(golden_folder)
+                print(f"[{label}] firefox pull: ✓ native Firefox golden ready", flush=True)
+            else:
+                print(f"[{label}] firefox pull: no matching signed-in Firefox profile — "
+                      f"visible one-time login required", flush=True)
             return
         # v892 — check the account in Chrome BETA (non-stable channels) FIRST,
         # exactly like the chatgpt worker: a Beta copy never touches the
@@ -1443,17 +1482,21 @@ def ensure_logged_into_flow(page, label="IMAGE", timeout_minutes=10):
         if "accounts.google" in url:
             return 'google_login'
         if is_flow_url(url):
-            if is_flow_project(url):
-                return 'flow_logged_in'
+            # A /project/... URL is not proof of a live Flow session. When OAuth
+            # has expired, Flow briefly keeps that URL while rendering the
+            # marketing shell and then redirects to Google. Require a real app
+            # control instead of trusting the route alone.
             logged_in_selectors = [
-                "img[src*='googleusercontent.com']",
-                "img[src*='lh3.googleusercontent']",
                 "button:has-text('New project')",
                 "button:has-text('Nuovo progetto')",
                 "button:has-text('Nuevo proyecto')",
                 "button:has-text('Nouveau projet')",
                 "button:has-text('Neues Projekt')",
                 "button:has(i:text('add_2'))",
+                "button[aria-label*='Settings' i]",
+                "button:has-text('Settings')",
+                "textarea",
+                "[contenteditable='true']",
             ]
             for selector in logged_in_selectors:
                 try:
@@ -1556,6 +1599,53 @@ def ensure_logged_into_flow(page, label="IMAGE", timeout_minutes=10):
     
     # Main logic
     for attempt in range(5):
+        # Firefox SSO often stops on Google's account chooser even when valid
+        # Google cookies are present. The platform Flow worker already handles
+        # this state; the image worker must do the same or it mislabels the
+        # chooser as a generic login failure and falls back to the marketing page.
+        try:
+            current_url = page.url.lower()
+        except Exception:
+            current_url = ""
+        if "accountchooser" in current_url or "/signin/oauth/consent" in current_url:
+            wanted_email = os.environ.get("IMAGE_FLOW_ACCOUNT_EMAIL", "").strip()
+            print(f"[{label}] Google account chooser — picking "
+                  f"{wanted_email or 'the first account'}", flush=True)
+            picked = False
+            if wanted_email:
+                try:
+                    tile = page.locator(f"*:has-text('{wanted_email}')").last
+                    if tile.is_visible(timeout=3000):
+                        picked = human_click_element(
+                            page, tile, f"[{label}] chooser {wanted_email}")
+                except Exception:
+                    pass
+            if not picked:
+                for selector in ("div[data-identifier]", "li[data-identifier]",
+                                 "[role='link']", "form li"):
+                    try:
+                        tile = page.locator(selector).first
+                        if tile.is_visible(timeout=1500):
+                            picked = human_click_element(
+                                page, tile, f"[{label}] chooser first")
+                            if picked:
+                                break
+                    except Exception:
+                        pass
+            if picked:
+                try:
+                    page.wait_for_url(re.compile(r"labs\.google/fx/tools/flow"),
+                                      wait_until="domcontentloaded", timeout=20000)
+                    print(f"[{label}] Google chooser callback reached Flow: "
+                          f"{page.url}", flush=True)
+                except Exception as e:
+                    print(f"[{label}] Google chooser callback timeout: "
+                          f"{str(e)[:160]} | url={page.url}", flush=True)
+                    if "accounts.google" in page.url.lower():
+                        _wait_for_user_login(page)
+                time.sleep(3)
+                continue
+
         state = _get_page_state(page)
         if state == 'flow_logged_in':
             if attempt == 0:
@@ -4980,14 +5070,23 @@ def _fa_try_create_new_project_api(page, context=""):
             print(f"{pfx}[flow_api] navigation to {project_url} failed: {e} — falling back to DOM click", flush=True)
             return None
 
-    # Wait for the project SPA to hydrate. Best-effort, log + continue on timeout.
-    try:
-        hydration_loc = page.locator(
-            "button[aria-haspopup='dialog']:has(i:text('add_2'))"
-        ).first
-        hydration_loc.wait_for(state="visible", timeout=20000)
-    except Exception:
-        print(f"{pfx}[flow_api] project page hydration probe timed out (20s) — continuing", flush=True)
+    # Local API benchmarks do not need the project UI controls. On some Flow
+    # builds this best-effort locator can hang even after its timeout while the
+    # API page is otherwise ready. Keep the normal path unchanged and allow the
+    # benchmark runner to skip only this UI probe.
+    skip_hydration = os.environ.get("FLOW_API_SKIP_HYDRATION", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if skip_hydration:
+        print(f"{pfx}[flow_api] benchmark fast path: skipped UI hydration probe", flush=True)
+    else:
+        try:
+            hydration_loc = page.locator(
+                "button[aria-haspopup='dialog']:has(i:text('add_2'))"
+            ).first
+            hydration_loc.wait_for(state="visible", timeout=20000)
+        except Exception:
+            print(f"{pfx}[flow_api] project page hydration probe timed out (20s) — continuing", flush=True)
 
     print(f"{pfx}[flow_api] ✓ Created project via API: {project_url}", flush=True)
 
@@ -5321,6 +5420,12 @@ def _flow_api_mode_enabled():
     """Default ON (automatic). Set FLOW_API_MODE=off to disable, falling back to the
     DOM-click path globally. Any value other than the off-set re-enables it."""
     return os.environ.get("FLOW_API_MODE", "on").strip().lower() not in ("off", "0", "false", "no")
+
+
+def _flow_api_required():
+    """Fail instead of clicking Flow's generation UI when the API path fails."""
+    return os.environ.get("FLOW_API_REQUIRED", "off").strip().lower() in (
+        "on", "1", "true", "yes")
 
 
 def _fa_api_retry_cooldown_s():
@@ -6615,6 +6720,21 @@ def _process_image_job_multi_once(page, input_paths, prompt, output_dir,
     print(f"{prefix}{'='*60}")
 
     try:
+        # FLOW_API_REQUIRED means the job must use the API. Its request already
+        # carries model, aspect ratio, variant count, prompt and references, so
+        # changing the matching UI controls first only adds delay and failure
+        # points. Go straight to the required path.
+        if _flow_api_required():
+            print(f"{prefix}[flow_api] required path: bypassing DOM settings", flush=True)
+            api_saved = _flow_api_image_multi_try(
+                page, input_paths, prompt, aspect_ratio, model, variants,
+                output_dir, context=context,
+            )
+            if api_saved:
+                print(f"{prefix}✓ [flow_api] saved {len(api_saved)} variant(s) to: {output_dir}", flush=True)
+                return True, api_saved, None
+            return False, [], "FLOW_API_REQUIRED is enabled and API generation failed"
+
         # 1) Select Image mode
         if not select_image_mode(page, context=context):
             return False, [], "Failed to switch to Image mode"
@@ -7003,10 +7123,30 @@ def _process_watch_job(page, job_path, job):
     # whole-page text matcher then reported as 'unusual activity' (measured
     # 2026-08-13: no watch job had ever completed). API first, DOM fallback —
     # the same order the API mode uses.
+    # v929 SPEED: reuse the project across jobs in one watch session. The batch path
+    # has always done this (reuse_project = i > 0); watch mode created a brand-new
+    # project for EVERY render, which is the slowest step and the one that hangs —
+    # measured 2026-08-15: a worker sat 21 minutes on "Creating new Flow project...".
+    # Reuse while the page is still inside a project; fall back to creating one when
+    # the session is fresh or Flow has navigated us out. Set FLOW_NEW_PROJECT_PER_JOB=1
+    # to restore the old behaviour if a shared project ever causes cross-job bleed.
+    _per_job = os.environ.get("FLOW_NEW_PROJECT_PER_JOB", "").strip().lower() in ("1", "true", "yes")
+    _reusable = None
+    if not _per_job:
+        try:
+            _cur = page.url or ""
+            if "/project/" in _cur:
+                _reusable = _cur
+        except Exception:
+            _reusable = None
     try:
-        _proj = _fa_try_create_new_project_api(page, context=jid)
-        if not _proj:
-            _proj = create_new_flow_project(page, context=jid)
+        if _reusable:
+            _proj = _reusable
+            print(f"[{jid}] [speed] reusing existing Flow project (no create): {_proj}", flush=True)
+        else:
+            _proj = _fa_try_create_new_project_api(page, context=jid)
+            if not _proj:
+                _proj = create_new_flow_project(page, context=jid)
         if not _proj:
             result = {"id": jid, "status": "failed",
                       "error": "Could not create a Flow project for this job",
@@ -11081,7 +11221,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
 # ============================================================
 
 def launch_browser(session_folder=SESSION_FOLDER):
-    """Launch Chrome with Patchright, return (playwright, browser, page)."""
+    """Launch the configured browser and return (playwright, browser, page)."""
     
     # Kill any stale Chrome using this profile
     kill_chrome_using_profile(session_folder, label="IMAGE")
@@ -11090,26 +11230,19 @@ def launch_browser(session_folder=SESSION_FOLDER):
     # Ensure session folder exists
     os.makedirs(session_folder, exist_ok=True)
 
-    # v814 — laptop-login COPY-MODE (exact parity with flow_worker startup):
-    # build the golden directly from the operator's real logged-in Chrome
-    # profile BEFORE the golden restore below, so the restored session is
-    # already signed in. No-op when no email is configured.
-    # The golden is ALWAYS the chromium one: the laptop pull writes a chromium
-    # profile, and in Firefox mode it is the source the cookie bridge reads.
-    golden = chromium_golden_folder(session_folder)
+    # Match flow_worker: each engine has its own native golden. Chrome pulls a
+    # Chrome profile; Firefox pulls a real Firefox profile. The formats and
+    # complete login state are not interchangeable.
+    golden = get_golden_folder(session_folder)
     _maybe_pull_laptop_profile(session_folder, golden, label="IMAGE")
 
     # Restore from golden if available (v828 — robust retry loop, parity with
     # flow_worker: the old single-attempt copytree silently failed on WinError
     # 1224/32 file locks and shipped a stale profile that kept the block alive).
-    # NEVER on Firefox: copying a chromium profile over a Firefox profile
-    # directory produces an unreadable mix. Firefox takes the cookie bridge
-    # after launch instead.
-    #
     # And never over a session that can still log in — see should_restore_golden
     # for the measurement. This used to run on every launch, which replaced a
     # profile that reaches the Flow app with one that cannot.
-    if not FIREFOX_MODE and should_restore_golden(session_folder, golden):
+    if should_restore_golden(session_folder, golden):
         restore_from_golden(session_folder, label="IMAGE")
     elif os.path.exists(golden):
         print("[IMAGE] keeping the existing session (golden held in reserve for a signed-out profile)",
@@ -11145,10 +11278,9 @@ def launch_browser(session_folder=SESSION_FOLDER):
     _stash_profile_on_page(page, session_folder)  # v486
     print("[IMAGE] ✓ Browser launched", flush=True)
 
-    # Firefox cannot read the chromium golden, so its session arrives as cookies.
-    _bridge_golden_cookies_if_firefox(BROWSER_MODE, browser,
-                                      chromium_golden_folder(session_folder),
-                                      log=lambda m: print(m, flush=True))
+    if FIREFOX_MODE:
+        print("[IMAGE] Firefox session source: native Firefox profile (Chrome cookie bridge disabled)",
+              flush=True)
 
     # Inject the staged laptop-login cookies so this fresh session is already
     # logged into Google — no manual verification code (parity with flow_worker).
@@ -11168,8 +11300,11 @@ def launch_browser(session_folder=SESSION_FOLDER):
         # Tiny delay so Chrome has time to actually open the window
         # before we try to find + minimize its HWND.
         time.sleep(0.5)
-        minimize_chrome_window(page, label="IMAGE")
-        defocus_chrome(page, label="IMAGE")
+        if not FIREFOX_MODE:
+            minimize_chrome_window(page, label="IMAGE")
+            defocus_chrome(page, label="IMAGE")
+        elif os.environ.get("FIREFOX_HEADLESS", "").strip().lower() in ("0", "false", "no", "off"):
+            print("[IMAGE] Firefox window left visible for login/session verification", flush=True)
     except Exception as e:
         print(f"[IMAGE] ⚠ Couldn't minimize Chrome window (non-fatal): {e}", flush=True)
 
@@ -11291,6 +11426,9 @@ Examples:
     parser.add_argument('--session', type=str, default=None,
         help='browser session folder path (defaults per engine: '
              'image-chrome-session, or image-firefox-session in firefox mode)')
+    parser.add_argument('--flow-email', type=str, default='',
+        help='Google Flow account email. Selects the matching real Firefox profile '
+             'and an account-specific worker session/golden.')
     parser.add_argument('--firefox', action='store_true',
         help="run on Firefox (Camoufox) instead of Chrome — the engine that mints "
              "accepted reCAPTCHA tokens. Set BROWSER_MODE=firefox in the environment "
@@ -11308,8 +11446,12 @@ Examples:
     if args.firefox and not FIREFOX_MODE:
         print("[IMAGE] ⚠ --firefox was passed but the module imported the Chrome driver. "
               "Relaunch with BROWSER_MODE=firefox set in the environment.", flush=True)
+    if args.flow_email:
+        os.environ["IMAGE_FLOW_ACCOUNT_EMAIL"] = args.flow_email.strip()
     if args.session is None:
-        args.session = session_folder_for_mode(BROWSER_MODE, SESSION_FOLDER)
+        args.session = account_scoped_session_folder(
+            BROWSER_MODE, SESSION_FOLDER,
+            os.environ.get("IMAGE_FLOW_ACCOUNT_EMAIL", ""))
     if FIREFOX_MODE:
         print(f"[IMAGE] engine: FIREFOX (Camoufox) — profile "
               f"{os.path.basename(args.session)}", flush=True)
@@ -11359,26 +11501,51 @@ Examples:
                     browser = pw.chromium.launch_persistent_context(**_relaunch_kwargs)
                 page = browser.pages[0] if browser.pages else browser.new_page()
                 _stash_profile_on_page(page, args.session)  # v486
-                _bridge_golden_cookies_if_firefox(BROWSER_MODE, browser,
-                                                  chromium_golden_folder(args.session),
-                                                  log=lambda m: print(m, flush=True))
                 _inject_laptop_cookies(browser, "IMAGE")  # re-inject after relaunch
         
         # Navigate to Flow and verify login
-        print("[IMAGE] Navigating to Flow...", flush=True)
-        page.goto(FLOW_HOME_URL)
+        boot_url = os.environ.get("IMAGE_FLOW_BOOT_URL", "").strip() or FLOW_HOME_URL
+        print(f"[IMAGE] Navigating to Flow: {boot_url}", flush=True)
+        try:
+            page.goto(boot_url, wait_until="domcontentloaded", timeout=45000)
+            print(f"[IMAGE] Flow DOM ready: {page.url}", flush=True)
+        except Exception as e:
+            # Flow keeps background requests open, especially on Firefox. A full
+            # load wait can hang even when the usable app shell is already there.
+            # Continue into the login/app checks, which inspect the real UI.
+            print(f"[IMAGE] Flow navigation timed out; checking the live page: "
+                  f"{str(e)[:180]} | url={page.url}", flush=True)
+        print("[IMAGE] startup gesture check: begin", flush=True)
         human_delay(2, 4)
         human_mouse_move(page)
+        print("[IMAGE] startup gesture check: mouse complete", flush=True)
         human_delay(1, 2)
         scroll_randomly(page)
+        print("[IMAGE] startup gesture check: scroll complete", flush=True)
         human_delay(0.5, 1)
-        
+
+        print("[IMAGE] checking Flow login state", flush=True)
         ensure_logged_into_flow(page, "IMAGE")
+        print(f"[IMAGE] login-state check returned: {page.url}", flush=True)
         # v917 — signed in is not the same as inside the app. After a golden
         # restore the Flow session is stripped (v914/v916), so home serves the
         # marketing page and the first job dies on "New project button not
         # visible". Mint the session now, at startup, once.
-        ensure_flow_app_entered(page, "IMAGE")
+        project_app_ready = False
+        if is_flow_project(page.url):
+            for selector in ("button[aria-label*='Settings' i]",
+                             "button:has-text('Settings')", "textarea",
+                             "[contenteditable='true']"):
+                try:
+                    if page.locator(selector).first.is_visible(timeout=1500):
+                        project_app_ready = True
+                        break
+                except Exception:
+                    pass
+        if project_app_ready:
+            print("[IMAGE] Flow app confirmed by live project controls", flush=True)
+        else:
+            ensure_flow_app_entered(page, "IMAGE")
         print("[IMAGE] ✓ Logged in and ready\n", flush=True)
         
         # Route to mode
