@@ -16700,3 +16700,22 @@ This is the same collision v789 fixed for audio twins, so it takes the same shap
 **Scope:** forward-only. Builds with no composite scene are untouched; the audio-twin map is unchanged (verified against a shipped `.audio` build: 6 audio keys, 10 visual keys, 0 plate keys before and after).
 
 **Touched:** this deep-dive (canonical), `code/veo_prompt_overrides.py` (suffix routing + plate parser/attacher), `code/image_platform.py` (parse/attach + `composite_plate_image_local_index` + `composite_plate_prompt_override` on every line), `code/main.py` (`DialogueLine` fields + v892.1 Phase 3b), `wiki/patterns/conventions.md` (index rows).
+
+---
+
+### v892.2 — THE PLATE HAS TO REACH THE RENDERER: THREE LINKS, ALL SILENT
+
+v892.1 gave the plate clip a prompt and a start frame. It still never rendered, because the two links BEFORE Phase 3b were also missing. Operator, on the exported duet open: *"the black and white which should be paired with the screaming man is nowhere."* Traced on job `1f35eac2`, whose open shipped as the keyed man over nothing.
+
+| Link | File | What was wrong |
+|---|---|---|
+| 1. payload | `static/index.html` | The promote payload enumerates fields ONE BY ONE. It sent `clip_role`, so the performing clip was correctly marked `composite_key` — but it never sent `composite_plate_image_node_id`. The Clip row got NULL, and Phase 3a logged *"composite_key but carries no composite_plate_image_node_id — skipping plate creation"*. |
+| 2. model | `main.py` `DialogueLineInput` | The field was not declared, so even a correct payload was dropped by pydantic at job creation. |
+| 3. upload set | `image_platform.py` `referenced_image_node_ids` | Collected scene images + v698A anchors + v718i end-frames, never the plate. The plate node is referenced ONLY by `composite_plate_image:`, never by a scene's own `image:`, so no frame was ever uploaded — `node_id_to_local_index` had no entry, `composite_plate_image_local_index` came out None, and Phase 3b would have skipped every plate as "local index None unusable". |
+
+All three now mirror the shape v698A and v718i already use. `DialogueLineInput` keeps the field through `model_dump()` (verified), the plate node joins the upload set with a `[v892.2][TEMP]` log line as evidence, and Phase 3b binds it.
+
+**The lesson, and it is the same one as v892.1 one level up.** A per-scene binding in this platform crosses FOUR boundaries — markdown parse → scene assignment → promote payload → Clip row — and **every boundary enumerates its fields by hand.** A new binding that is added at one boundary and not the others fails silently at whichever link is missing, and the symptom appears at the far end (here: a render with no background layer) with nothing in between to point at the gap. When adding any per-scene binding, walk all four and grep the two nearest precedents (`voiceover_anchor_image_node_id`, `end_frame_image_node_id`) — if the new field does not appear in exactly the same places they do, it is not wired.
+
+**Process note worth keeping:** v892.1 was shipped labelled "code-verified only, needs a live render". The label was honest and still insufficient — the fix was made at the END of a broken chain, and only the live render would have shown the front of it was dead too. Verify the whole path, not the part you changed.
+

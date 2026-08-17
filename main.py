@@ -252,6 +252,12 @@ class DialogueLineInput(BaseModel):
     # composite_plate Clip's start frame. composite_plate_prompt_override is
     # the operator-authored `### Clip S.L.plate` text. All NULL on every
     # non-composite line.
+    # v892.2 — the plate's node id MUST be declared here too. It is what the
+    # Clip writer stores as Clip.composite_plate_image_node_id, and Phase 3a
+    # refuses to create a plate clip without it. Undeclared, pydantic dropped
+    # it out of the payload at job creation and the field reached the Clip row
+    # as NULL — the silent middle link in the v892 chain.
+    composite_plate_image_node_id: Optional[int] = None
     composite_plate_image_local_index: Optional[int] = None
     composite_plate_prompt_override: Optional[str] = None
     # v718i (NEW 2026-05-18) — Veo native end-frame interpolation binding.

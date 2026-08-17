@@ -8763,6 +8763,28 @@ def prepare_batch_for_video(
         if end_frame_nid is not None and end_frame_nid not in seen:
             referenced_image_node_ids.append(end_frame_nid)
             seen.add(end_frame_nid)
+        # v892.2 (NEW 2026-08-18) — the composite PLATE image needs uploading
+        # for exactly the same reason as the two above: the v892 plate clip
+        # renders FROM it, so without a frame on disk there is nothing to
+        # render. This block was missing, and it silently disabled the whole
+        # v892 feature end to end. The plate node is referenced ONLY by
+        # `composite_plate_image:`, never by a scene's own `image:`, so it
+        # never entered the upload set; `node_id_to_local_index` therefore had
+        # no entry, `composite_plate_image_local_index` came out None, and
+        # v892.1 Phase 3b skipped every plate as "local index None unusable".
+        # Caught on job 1f35eac2, whose duet open shipped with the keyed man
+        # and no black-and-white plate behind him at all.
+        plate_nid = scene.get("composite_plate_image_node_id")
+        if plate_nid is not None and plate_nid not in seen:
+            referenced_image_node_ids.append(plate_nid)
+            seen.add(plate_nid)
+            # TEMP DIAGNOSTIC (2026-08-18, remove once a composite open is
+            # confirmed rendered end to end) — proves the plate reached the
+            # upload set, which is the link that was missing entirely.
+            log.info(
+                f"[v892.2][TEMP] plate image_node={plate_nid} added to the "
+                f"upload set for scene {scene.get('scene_index')}"
+            )
 
     # Build a map node_id → node object for quick lookup
     nodes_by_id = {n.id: n for n in nodes}

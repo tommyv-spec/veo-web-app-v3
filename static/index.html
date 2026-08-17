@@ -10407,6 +10407,29 @@ Ambient: same kitchen room tone, soft pour sound.
                             (promoteMeta.end_frame_image_local_index !== undefined
                                 ? promoteMeta.end_frame_image_local_index
                                 : null),
+                        // v892.2 (NEW 2026-08-18) — the composite PLATE
+                        // binding, plumbed for exactly the same reason as
+                        // the two blocks above. `clip_role` was already
+                        // being sent, so the backend correctly marked the
+                        // performing clip 'composite_key' — but the plate's
+                        // node id was NOT sent, so Clip.composite_plate_
+                        // image_node_id landed NULL and Phase 3a logged
+                        // "composite_key but carries no composite_plate_
+                        // image_node_id — skipping plate creation". The
+                        // duet open on job 1f35eac2 shipped with the keyed
+                        // man and no black-and-white plate behind him.
+                        // The local index is what Phase 3b binds as the
+                        // plate clip's start frame.
+                        composite_plate_image_node_id:
+                            (promoteMeta.composite_plate_image_node_id !== undefined
+                                ? promoteMeta.composite_plate_image_node_id
+                                : null),
+                        composite_plate_image_local_index:
+                            (promoteMeta.composite_plate_image_local_index !== undefined
+                                ? promoteMeta.composite_plate_image_local_index
+                                : null),
+                        composite_plate_prompt_override:
+                            promoteMeta.composite_plate_prompt_override || null,
                         _isTextCard: isTextCardLine,  // used by filter below
                         _isSilent: isSilentLine,
                     };
