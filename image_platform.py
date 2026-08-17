@@ -11756,6 +11756,7 @@ def download_image_worker_installer(
     update_only: int = Query(0),
     parallel: int = Query(2, ge=1, le=8),
     laptop_email: str = Query(""),
+    browser_mode: str = Query("firefox", regex="^(firefox|camoufox|stealth|chrome)$"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db_session),
 ):
@@ -11776,6 +11777,14 @@ def download_image_worker_installer(
                 grows, scroll-extract slows). v571: was hardcoded to the
                 worker's CLI default (2); now user-selectable in the UI
                 before download.
+      browser_mode: 'firefox' (default) | 'stealth' (Chrome). v921 — a fresh
+                install now starts on Firefox, because reCAPTCHA scores the
+                ENGINE: measured 2026-08-07, Camoufox minted 10/10 real 0cA
+                tokens while Chrome minted ~0% the same day. The worker's own
+                default stays Chrome on purpose (browser_driver: "default-by-
+                config, never default-by-code"), so an existing install is
+                never migrated by a code change — only the .env this installer
+                writes selects Firefox. Pass browser_mode=stealth to opt back.
     """
     from fastapi.responses import Response as FAResponse
 
@@ -11806,10 +11815,13 @@ def download_image_worker_installer(
             r'^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$', _laptop_email):
         _laptop_email = ""
 
+    _browser_mode = (browser_mode or "firefox").strip().lower()
+
     if os == "windows":
         content = _generate_image_windows_installer(
             effective_key, app_url, bool(reset), bool(update_only),
-            parallel_slots=parallel, laptop_email=_laptop_email)
+            parallel_slots=parallel, laptop_email=_laptop_email,
+            browser_mode=_browser_mode)
         return FAResponse(
             content=content,
             media_type="application/x-bat",
@@ -11825,7 +11837,8 @@ def download_image_worker_installer(
         import io
         content = _generate_image_unix_installer(
             effective_key, app_url, bool(reset), bool(update_only),
-            parallel_slots=parallel, laptop_email=_laptop_email)
+            parallel_slots=parallel, laptop_email=_laptop_email,
+            browser_mode=_browser_mode)
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             import time as _t
@@ -11845,7 +11858,7 @@ def download_image_worker_installer(
 
 def _generate_image_windows_installer(
     api_key: str, app_url: str, reset: bool = False, update_only: bool = False,
-    parallel_slots: int = 2, laptop_email: str = "",
+    parallel_slots: int = 2, laptop_email: str = "", browser_mode: str = "firefox",
 ) -> str:
     """Windows .bat installer. Mirrors video worker installer structure.
 
@@ -11965,6 +11978,7 @@ echo IMAGE_SESSION_FOLDER=%WORKER_DIR%\\image-chrome-session
 echo LOCAL_WORKER_API_KEY=%API_KEY%
 echo PARALLEL_SLOTS={parallel_slots}
 echo ACCOUNT1_LAPTOP_EMAIL={laptop_email}
+echo BROWSER_MODE={browser_mode}
 ) > "%WORKER_DIR%\\.env"
 echo         OK
 
@@ -12116,7 +12130,7 @@ pause >nul
 
 def _generate_image_unix_installer(
     api_key: str, app_url: str, reset: bool = False, update_only: bool = False,
-    parallel_slots: int = 2, laptop_email: str = "",
+    parallel_slots: int = 2, laptop_email: str = "", browser_mode: str = "firefox",
 ) -> str:
     """Mac/Linux .command installer. Mirrors video worker installer."""
     reset_cmds = ""
@@ -12205,6 +12219,7 @@ IMAGE_SESSION_FOLDER=$DIR/image-chrome-session
 LOCAL_WORKER_API_KEY={api_key}
 PARALLEL_SLOTS={parallel_slots}
 ACCOUNT1_LAPTOP_EMAIL={laptop_email}
+BROWSER_MODE={browser_mode}
 ENVEOF
 log ".env written"
 echo "        OK"
