@@ -11868,19 +11868,32 @@ def _generate_image_windows_installer(
         image-chrome-session\\
         image-chrome-golden\\      (created by worker on first complete run)
     """
-    # Reset block — wipe Chrome sessions + golden profile.
+    # v921 — the worker keeps Chrome and Firefox profiles in separate trees
+    # (the two formats are mutually unreadable), so the banner and the reset
+    # sweep both have to follow the selected engine. Wiping only the chrome
+    # dirs on a Firefox install made reset=1 a silent no-op.
+    _ff = str(browser_mode).strip().lower() in ("firefox", "camoufox")
+    browser_banner = (
+        "Firefox runs headless - no window appears. Keep this window open."
+        if _ff else
+        "Chrome will open minimized. Log in to Google Flow ONCE if prompted."
+    )
+    _profile_kinds = ("firefox", "chrome") if _ff else ("chrome",)
+
+    # Reset block — wipe sessions + golden profile for the selected engine.
     # Note: wipes numbered variants too so future multi-account support
     # doesn't leave stale data around, even though we don't use them yet.
     reset_cmds = ""
     if reset:
-        reset_cmds = (
-            'echo   Resetting sessions...\n'
-            'if exist "%WORKER_DIR%\\image-chrome-session" rmdir /s /q "%WORKER_DIR%\\image-chrome-session" 2>nul\n'
-            'if exist "%WORKER_DIR%\\image-chrome-golden" rmdir /s /q "%WORKER_DIR%\\image-chrome-golden" 2>nul\n'
-        )
-        for n in range(2, 5):
-            reset_cmds += f'if exist "%WORKER_DIR%\\image-chrome-session-{n}" rmdir /s /q "%WORKER_DIR%\\image-chrome-session-{n}" 2>nul\n'
-            reset_cmds += f'if exist "%WORKER_DIR%\\image-chrome-golden-{n}" rmdir /s /q "%WORKER_DIR%\\image-chrome-golden-{n}" 2>nul\n'
+        reset_cmds = 'echo   Resetting sessions...\n'
+        for kind in _profile_kinds:
+            reset_cmds += (
+                f'if exist "%WORKER_DIR%\\image-{kind}-session" rmdir /s /q "%WORKER_DIR%\\image-{kind}-session" 2>nul\n'
+                f'if exist "%WORKER_DIR%\\image-{kind}-golden" rmdir /s /q "%WORKER_DIR%\\image-{kind}-golden" 2>nul\n'
+            )
+            for n in range(2, 5):
+                reset_cmds += f'if exist "%WORKER_DIR%\\image-{kind}-session-{n}" rmdir /s /q "%WORKER_DIR%\\image-{kind}-session-{n}" 2>nul\n'
+                reset_cmds += f'if exist "%WORKER_DIR%\\image-{kind}-golden-{n}" rmdir /s /q "%WORKER_DIR%\\image-{kind}-golden-{n}" 2>nul\n'
         reset_cmds += 'echo   [OK] Sessions reset\necho.\n'
 
     if update_only:
@@ -11988,8 +12001,7 @@ echo   ======================================================
 echo    Setup complete! Starting worker...
 echo   ======================================================
 echo.
-echo   Chrome will open minimized. Log in to Google Flow ONCE
-echo   if prompted, then close nothing - keep this window open.
+echo   {browser_banner}
 echo   Check status: %APP_URL%/
 echo.
 

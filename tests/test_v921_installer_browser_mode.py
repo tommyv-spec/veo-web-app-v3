@@ -60,6 +60,29 @@ def test_the_worker_default_is_untouched():
     assert browser_driver.is_firefox_mode("camoufox") is True
 
 
+def test_banner_matches_the_selected_engine():
+    """"Chrome will open minimized" on a headless Firefox install is a lie the
+    operator would act on — they told me "it opened chrome"."""
+    ff = ip._generate_image_windows_installer("K", "u")
+    assert "headless" in ff and "minimized" not in ff
+
+    chrome = ip._generate_image_windows_installer("K", "u", browser_mode="stealth")
+    assert "minimized" in chrome
+
+
+def test_reset_wipes_the_profiles_the_selected_engine_actually_uses():
+    """Chrome and Firefox profiles live in separate trees, so wiping only the
+    chrome dirs made reset=1 a silent no-op on a Firefox install."""
+    ff = ip._generate_image_windows_installer("K", "u", reset=True)
+    assert "image-firefox-session" in ff and "image-firefox-golden" in ff
+    assert "image-chrome-session" in ff          # chrome leftovers cleared too
+
+    chrome = ip._generate_image_windows_installer("K", "u", reset=True,
+                                                  browser_mode="stealth")
+    assert "image-firefox-session" not in chrome
+    assert "image-chrome-session" in chrome
+
+
 def test_installer_endpoint_offers_only_known_modes():
     import inspect
     src = inspect.getsource(ip.download_image_worker_installer)
