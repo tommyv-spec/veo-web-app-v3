@@ -1285,6 +1285,8 @@ v598 elevates the hook-image-power decision from "implicit" (buried in hook-patt
 
 > **AMENDMENT (2026-08-09, forward-only — HANDOFF rev 277/278 Stage 0).** The PRINCIPLE above stands and is the rule: *the background must signal, and match, this persona's authority type.* The pairing matrix below is a dated observation of the May-2026 corpus and is **non-normative**. Its clinical rows are **RETIRED**: root `CLAUDE.md` §8 bans ALL medical-authority creatives (doctor personas, exam rooms, framed diplomas, clinical anchors — `feedback_compliance-no-medical-authority`). Do not stage any "required setting" or "required anchor" from a clinical row. Authority today is built §8-style: warm-knowing tone, sourced ingredients, ancestral/wellness lineage, distinctive premium setting (see §8 setting bank + `realistic-ugc-prompt-templates` §"Distinctive premium background"). **Q6 decision test:** does the setting confer THIS persona's authority type, within §8, with ≥2 visible anchors of that authority in the 0-2s frame? Any persona×setting pair passing that test is valid, listed below or not.
 
+> **SETTING REGISTER CORRECTION (2026-08-14 — supersedes only the “premium setting” phrase above).** Authority still needs the right visible anchors, but the room is now a **distinctive realistic setting chosen by the action**, not an expensive register. The test is: does the setting fit the action, look like a real relatable American place, confer this persona's §8-safe authority type and carry the required anchors? See root `CLAUDE.md` §8 and `realistic-ugc-prompt-templates` §"Distinctive realistic background".
+
 **Corpus-grounded persona × setting authority pairings** (24-decode audit, 2026-05-06):
 
 | Persona archetype | Required setting | Required visible anchors (0-2s) | What BREAKS authority |
@@ -16653,3 +16655,48 @@ SETTING SHELL: <shell> | source: <bank row | UNLISTED — name> | de-wooded: YES
 **Scope:** GENERATE side, forward-only. Auditor gate `setting_shell_unique`: **FAILs** a `unique-vs:` that names a missing file, names this build itself, or names a prior build carrying the SAME shell (the declaration contradicts itself); **WARNs** a missing `SETTING SHELL:` line, a missing `unique-vs:` field (legacy form), or a sibling build in the same family already shipping that exact shell. Measured before shipping: 301 existing builds → 0 FAIL, 301 WARN, so nothing is retro-failed.
 
 **Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` (§"Distinctive premium background"), root `CLAUDE.md` §8, `.claude/skills/build-video/audit_build.py` (`setting_shell_unique`), memory `feedback_distinctive-premium-background`, `wiki/log.md`.
+
+**2026-08-14 SETTING CORRECTION — supersedes v927's old “§8 names the shell to reach for FIRST” and “premium” clauses.** Operator: *"always pick the mentors."* No shell is now the automatic first choice. The action picks the room type; realistic-relatable applies on every lane; the specific shell must look real, be distinctive, de-wooded, §8-clean, pass the two-second-USA test and differ from the prior family build. The Hanbang Penthouse remains in the bank only for an action that genuinely belongs there; it is not the default. The four Nuri brand tokens remain required. A §7.2.1 lock that preserves the setting still preserves it, and a single IG growth run remains the one legal deliberate repeat.
+
+---
+
+## v892 — COMPOSITE SCENE = ONE SCENE, TWO CLIPS (the video-axis twin of v698A)
+
+**Protected function.** A frame that was ASSEMBLED — a green-screen key, a subject over a still, a picture-in-picture inset, a split screen — cannot be produced by one render. v890d says the decode and the build must emit TWO `### Image N` blocks for it. v892 is the platform half: the scene stays ONE scene with ONE line, and the platform renders the second layer for you.
+
+**How a build declares it.** The scene points its `- **image:**` at the layer that PERFORMS — the one that moves, speaks and sets the duration — and names the background layer on its own line:
+
+```markdown
+### Scene 1
+- **image:** image_2                      ← the performing layer (keyed reactor)
+- **composite_plate_image:** image_1      ← the background layer (still plate)
+- **line:** listen to what she said before this gets taken down.
+```
+
+**What the platform does with it.** `image_platform.py` parses `composite_plate_image:` into the scene's `ImageSceneAssignment`, and the performing clip is tagged `clip_role='composite_key'`. After the main prompt loop, `main.py` Phase 3a spawns a sibling `Clip` with `clip_role='composite_plate'` at `clip_index = 200000 + key.clip_index`, empty dialogue, and the same duration. The export filter (`_v892_not_plate()`) excludes plates from the timeline: **a plate is a LAYER, never a segment.** The operator keys the performing clip over the plate in post.
+
+### v892.1 — THE PLATE DECLARES ITSELF WITH `.plate`, AND IT ACTUALLY RENDERS
+
+Two bugs, both found on `videos/nuri-korella-ed-reaction-duet-three-things-anti-diy-one-spice-korella-saffron-selling-v1.md` (2026-08-17), both fixed here.
+
+**Bug 1 — the plate's prompt was stealing the speaking clip's prompt.** The platform keys every authored prompt by `(scene_index, line_index)` read straight off the `### Clip S.L` header — nothing else in the block is consulted. A composite scene has ONE line, so exactly one block may own `(1, 1)`. The build had written the plate as `### Clip 1.1` and the performing reactor as `### Clip 1.2`, which means:
+
+- the man's clip asked for `(1, 1)` and was handed *"…in which nothing moves… Silent."*
+- his real speaking prompt sat at `(1, 2)`, a key no clip ever asks for, and was dropped.
+
+This is the same collision v789 fixed for audio twins, so it takes the same shape. **The plate block now declares itself with a `.plate` suffix and the performing layer takes the bare number:**
+
+```markdown
+### Clip 1.1 — the keyed reactor (PERFORMING layer, carries the line)
+### Clip 1.1.plate — the background plate (silent, frozen)
+```
+
+`_CLIP_HEADER_RE` captures `.audio|.plate`; `_split_into_clip_blocks` returns the suffix as a string; `parse_veo_prompts_block` skips ANY suffixed block, so no sibling layer can ever take the visual key again. `parse_veo_plate_prompt_overrides()` collects the plate blocks into their own map keyed by the PERFORMING clip's key (a plate has no line of its own, so it is addressed by the clip it sits under), and `attach_veo_plate_prompts_to_scenes()` rides it into the existing `veo_prompts` entry as a `plate_prompt` key — same no-migration carrier trick as v789's `audio_prompt`. Plates may also live under their own `## Composite plate layers` heading, the same escape hatch the audio twins get.
+
+**Bug 2 — the plate clip was created and then never rendered.** Phase 3a made the row and stopped: no `prompt_text`, no `start_frame`, `status='preparing'` forever. So the background layer of every composite open silently did not exist, and the operator had nothing to key over. **v892.1 adds Phase 3b**, shaped like v698A's: for each plate clip it resolves the plate image's position in the upload list (`composite_plate_image_local_index`, new on the line payload), binds `start_frame`, writes `prompt_text`, and flips the row to `pending` so the worker picks it up. The authored `.plate` text wins; the fallback is a literal hold-still line rather than a `build_prompt` call, because `build_prompt` writes motion and performance into a frame that must not move.
+
+**The general lesson, worth more than the fix.** *A block's header is its whole identity to the parser.* Prose inside it — "LAYER 1 of 2", "background plate", "never concatenated" — is invisible. Any time a scene grows a second render, that second render needs its own key or its own suffix; sharing a key means the later block wins and the earlier one is thrown away in silence. Every such failure in this codebase (v789 audio twins, v892.1 plates) has had exactly this shape.
+
+**Scope:** forward-only. Builds with no composite scene are untouched; the audio-twin map is unchanged (verified against a shipped `.audio` build: 6 audio keys, 10 visual keys, 0 plate keys before and after).
+
+**Touched:** this deep-dive (canonical), `code/veo_prompt_overrides.py` (suffix routing + plate parser/attacher), `code/image_platform.py` (parse/attach + `composite_plate_image_local_index` + `composite_plate_prompt_override` on every line), `code/main.py` (`DialogueLine` fields + v892.1 Phase 3b), `wiki/patterns/conventions.md` (index rows).

@@ -83,7 +83,7 @@ _SECTION_HEADER_RE = re.compile(
 # correctly. Pre-v682i these artifacts hit zero matches → empty
 # prompts_by_key → no veo_prompt_override on any line at submission.
 _CLIP_HEADER_RE = re.compile(
-    r"^###\s+Clip\s+(\d+)(?:\.(\d+))?(\.audio)?\b[^\n]*$",
+    r"^###\s+Clip\s+(\d+)(?:\.(\d+))?(\.audio|\.plate)?\b[^\n]*$",
     re.MULTILINE | re.IGNORECASE,
 )
 # v789 (NEW 2026-06-11) — group(3) captures the `.audio` suffix on
@@ -94,6 +94,20 @@ _CLIP_HEADER_RE = re.compile(
 # visual clip's operator-authored prompt (dict last-wins). v789 routes
 # audio blocks into their own map (parse_veo_audio_prompt_overrides) and
 # excludes them from the visual map.
+#
+# v892.1 (NEW 2026-08-17) — `.plate` is the same idea on the VIDEO axis.
+# A v892 composite scene renders TWO clips: the performing layer (the
+# scene's own image, which carries the line) and a silent background
+# plate spawned from `composite_plate_image:`. Builds were writing the
+# plate as a plain `### Clip 1.1` and the performing layer as
+# `### Clip 1.2` — but the platform keys prompts by (scene, line), and a
+# composite scene has ONE line. So the plate's "nothing moves, silent"
+# text landed on the SPEAKING clip and the real prompt sat at (1, 2),
+# a key no clip ever asks for, and was dropped. Caught live on
+# videos/nuri-korella-ed-reaction-duet-three-things-anti-diy-one-spice-
+# korella-saffron-selling-v1.md. The plate now declares itself as
+# `### Clip S.L.plate`, is excluded from the visual map here, and is
+# routed to the plate clip by parse_veo_plate_prompt_overrides.
 
 # Field labels — bold ** wrapping is required to match the rest of the
 # scene-table convention.
@@ -171,28 +185,34 @@ def _slice_section(md_text: str) -> Optional[str]:
     return md_text[body_start:]
 
 
-def _split_into_clip_blocks(section_body: str) -> List[Tuple[int, int, bool, str]]:
+def _split_into_clip_blocks(section_body: str) -> List[Tuple[int, int, str, str]]:
     """Split the section body into per-clip blocks. Each entry is
-    (scene_index, line_index, is_audio, block_text). The block_text is
-    the content of one `### Clip S.L` (or `### Clip S.L.audio`) block,
-    ending at the next `### Clip` header or end-of-section. v789 —
-    is_audio=True flags the v698A audio-twin anchor blocks.
+    (scene_index, line_index, suffix, block_text). The block_text is
+    the content of one `### Clip S.L` (or `### Clip S.L.audio` /
+    `### Clip S.L.plate`) block, ending at the next `### Clip` header or
+    end-of-section.
+
+    `suffix` is '' for a normal visual clip, 'audio' for a v698A
+    audio-twin block (v789) and 'plate' for a v892 composite background
+    layer (v892.1). It is a plain string rather than the pre-v892.1
+    is_audio bool, but '' is falsy and 'audio' is truthy, so the old
+    truthiness reads behave the same.
     """
     matches = list(_CLIP_HEADER_RE.finditer(section_body))
     if not matches:
         return []
-    blocks: List[Tuple[int, int, bool, str]] = []
+    blocks: List[Tuple[int, int, str, str]] = []
     for i, m in enumerate(matches):
         scene_idx = int(m.group(1))
         # v682i — line index optional; default to 1 when absent.
         line_idx = int(m.group(2)) if m.group(2) else 1
-        is_audio = bool(m.group(3))
+        suffix = (m.group(3) or "").lstrip(".").lower()
         block_start = m.end()
         if i + 1 < len(matches):
             block_end = matches[i + 1].start()
         else:
             block_end = len(section_body)
-        blocks.append((scene_idx, line_idx, is_audio, section_body[block_start:block_end]))
+        blocks.append((scene_idx, line_idx, suffix, section_body[block_start:block_end]))
     return blocks
 
 
@@ -325,12 +345,15 @@ def parse_veo_prompts_block(md_text: str) -> Dict[Tuple[int, int], Dict[str, Opt
         return {}
 
     out: Dict[Tuple[int, int], Dict[str, Optional[str]]] = {}
-    for scene_idx, line_idx, is_audio, block in _split_into_clip_blocks(section):
+    for scene_idx, line_idx, suffix, block in _split_into_clip_blocks(section):
         # v789 — `### Clip S.L.audio` blocks are the v698A audio-twin
         # prompts; they live in their own map (see
         # parse_veo_audio_prompt_overrides) and must NOT collide with /
         # overwrite the visual clip's (scene, line) key here.
-        if is_audio:
+        # v892.1 — same for `### Clip S.L.plate`, the composite background
+        # layer. Any suffixed block is somebody else's clip; only a bare
+        # `### Clip S.L` header owns the visual (scene, line) key.
+        if suffix:
             continue
         # v682i — try the labeled format first (`**Text prompt:**`
         # before the fence). If absent, fall back to the bare-fence
@@ -432,8 +455,8 @@ def parse_veo_audio_prompt_overrides(
     def _harvest(body: Optional[str]) -> None:
         if not body:
             return
-        for scene_idx, line_idx, is_audio, block in _split_into_clip_blocks(body):
-            if not is_audio:
+        for scene_idx, line_idx, suffix, block in _split_into_clip_blocks(body):
+            if suffix != "audio":
                 continue
             text_prompt = _extract_prompt_content(
                 block, _TEXT_PROMPT_LABEL_RE, _TEXT_BODY_BOUNDARY_RE
@@ -465,6 +488,87 @@ def parse_veo_audio_prompt_overrides(
         _harvest(body)
 
     return out
+
+
+def parse_veo_plate_prompt_overrides(
+    md_text: str,
+) -> Dict[Tuple[int, int], str]:
+    """v892.1 — parse the composite background-layer blocks
+    (`### Clip S.L.plate`) from the `## Veo 3.1 Final Prompts` section
+    (and/or a following `## Composite plate layers` section — the same
+    escape hatch the audio twins get, because `_slice_section` stops at
+    the next `## ` heading).
+
+    Returns a dict keyed by (scene_index, line_index) → text_prompt str.
+    The key is the PERFORMING clip's key: a v892 plate has no line of its
+    own, so it is addressed by the clip it sits under. main.py's v892
+    Phase 3b uses this as the composite_plate Clip's prompt instead of
+    the generic silent-hold fallback. Negative prompts are ignored on
+    plates (the platform's standardized negatives apply).
+    """
+    out: Dict[Tuple[int, int], str] = {}
+
+    def _harvest(body: Optional[str]) -> None:
+        if not body:
+            return
+        for scene_idx, line_idx, suffix, block in _split_into_clip_blocks(body):
+            if suffix != "plate":
+                continue
+            text_prompt = _extract_prompt_content(
+                block, _TEXT_PROMPT_LABEL_RE, _TEXT_BODY_BOUNDARY_RE
+            )
+            if text_prompt is None:
+                fence_m = _FENCE_RE.search(block)
+                text_prompt = fence_m.group(1).strip() if fence_m else None
+            if text_prompt:
+                out[(scene_idx, line_idx)] = text_prompt
+
+    _harvest(_slice_section(md_text))
+
+    m = re.search(
+        r"^##\s+Composite\s+plate\b.*$", md_text, flags=re.MULTILINE | re.IGNORECASE
+    )
+    if m:
+        body_start = m.end()
+        next_section = re.search(
+            r"^##\s+(?!#)", md_text[body_start:], flags=re.MULTILINE
+        )
+        body = (
+            md_text[body_start : body_start + next_section.start()]
+            if next_section
+            else md_text[body_start:]
+        )
+        _harvest(body)
+
+    return out
+
+
+def attach_veo_plate_prompts_to_scenes(
+    scenes: List[Dict[str, Any]],
+    plate_prompts_by_key: Dict[Tuple[int, int], str],
+) -> None:
+    """v892.1 — merge authored composite-plate prompts INTO each scene's
+    `veo_prompts` entries as an extra `plate_prompt` key. Same carrier
+    trick as v789's `audio_prompt`: riding the existing entry dicts means
+    the value persists through ImageSceneAssignment.veo_prompts_json with
+    NO schema migration, and every existing reader uses .get(...) so the
+    extra key is invisible to them. Call AFTER
+    attach_veo_prompts_to_scenes (the `veo_prompts` lists must exist).
+    """
+    if not plate_prompts_by_key:
+        return
+    for scene in scenes:
+        scene_index = scene.get("scene_index")
+        vps = scene.get("veo_prompts")
+        if vps is None:
+            continue
+        for li0 in range(len(vps)):
+            plate = plate_prompts_by_key.get((scene_index, li0 + 1))
+            if not plate:
+                continue
+            if vps[li0] is None:
+                vps[li0] = {"text_prompt": None, "negative_prompt": None}
+            vps[li0]["plate_prompt"] = plate
 
 
 def attach_veo_audio_prompts_to_scenes(

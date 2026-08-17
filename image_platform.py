@@ -5348,6 +5348,8 @@ def parse_scene_table(md_text: str) -> Dict[str, Any]:
                 attach_veo_prompts_to_scenes as _attach_veo_prompts,
                 parse_veo_audio_prompt_overrides as _parse_veo_audio_prompts,
                 attach_veo_audio_prompts_to_scenes as _attach_veo_audio_prompts,
+                parse_veo_plate_prompt_overrides as _parse_veo_plate_prompts,
+                attach_veo_plate_prompts_to_scenes as _attach_veo_plate_prompts,
             )
             _veo_prompts_map = _parse_veo_prompts(md_text)
             _attach_veo_prompts(scenes, _veo_prompts_map)
@@ -5361,6 +5363,20 @@ def parse_scene_table(md_text: str) -> Dict[str, Any]:
                 log.info(
                     f"[v789] parsed {len(_veo_audio_map)} authored audio-twin "
                     f"prompt(s): {sorted(_veo_audio_map.keys())}"
+                )
+            # v892.1 — operator-authored composite background-layer prompts
+            # (`### Clip S.L.plate` blocks). Same carrier as the audio twin:
+            # attached as a `plate_prompt` key inside the veo_prompts entry,
+            # consumed by main.py's v892 Phase 3b as the composite_plate
+            # Clip's prompt. A composite scene has ONE line, so writing the
+            # plate as a bare `### Clip S.L` used to overwrite the SPEAKING
+            # clip's prompt — that is the bug this suffix closes.
+            _veo_plate_map = _parse_veo_plate_prompts(md_text)
+            _attach_veo_plate_prompts(scenes, _veo_plate_map)
+            if _veo_plate_map:
+                log.info(
+                    f"[v892.1] parsed {len(_veo_plate_map)} authored composite "
+                    f"plate prompt(s): {sorted(_veo_plate_map.keys())}"
                 )
         except ImportError:
             # Module not present on disk → graceful no-op. Existing
@@ -9115,6 +9131,16 @@ def prepare_batch_for_video(
             if _anchor_node_id is not None
             else None
         )
+        # v892.1 — the plate's position in the uploaded image list. Phase 3b
+        # in main.py needs this to give the spawned composite_plate Clip a
+        # start frame; without it the plate row was created and then sat at
+        # status 'preparing' forever with no prompt and no frame, so the
+        # background layer of every composite open never rendered at all.
+        _asg_composite_plate_local_idx = (
+            node_id_to_local_index.get(_asg_composite_plate_node_id)
+            if _asg_composite_plate_node_id is not None
+            else None
+        )
 
         # v718i (NEW 2026-05-18) — resolve end-frame image's local_idx for
         # v718h-C Option C Veo native end-frame interpolation. None on every
@@ -9389,6 +9415,19 @@ def prepare_batch_for_video(
                     else ("composite_key" if _asg_composite_plate_node_id else None)
                 ),
                 "composite_plate_image_node_id": _asg_composite_plate_node_id,
+                # v892.1 — the plate image's position in the uploaded frame
+                # list, so Phase 3b can bind it as the plate Clip's start
+                # frame. None on every non-composite line.
+                "composite_plate_image_local_index": _asg_composite_plate_local_idx,
+                # v892.1 — operator-authored plate prompt from the markdown's
+                # `### Clip S.L.plate` block. When absent Phase 3b writes its
+                # own hold-still text; the plate is a frozen silent layer, so
+                # the fallback is honest rather than a guess.
+                "composite_plate_prompt_override": (
+                    (vp or {}).get("plate_prompt")
+                    if _asg_composite_plate_node_id
+                    else None
+                ),
                 "voiceover_anchor_image_node_id": (
                     _anchor_node_id
                     if (scene_speaker_mode or "").lower() == "voiceover"

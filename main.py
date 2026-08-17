@@ -246,6 +246,14 @@ class DialogueLineInput(BaseModel):
     # the audio_pair Clip's prompt_text instead of build_prompt
     # auto-construction. NULL = auto-build (pre-v789 behavior).
     voiceover_audio_prompt_override: Optional[str] = None
+    # v892 / v892.1 — composite background layer. composite_plate_image_node_id
+    # is the FK to the plate ImageNode; the _local_index is that image's
+    # position in the upload list, which Phase 3b needs to bind the spawned
+    # composite_plate Clip's start frame. composite_plate_prompt_override is
+    # the operator-authored `### Clip S.L.plate` text. All NULL on every
+    # non-composite line.
+    composite_plate_image_local_index: Optional[int] = None
+    composite_plate_prompt_override: Optional[str] = None
     # v718i (NEW 2026-05-18) — Veo native end-frame interpolation binding.
     # When set, veo_generator.py:2605 binds cfg.last_frame to this ImageNode's
     # rendered output instead of auto-inferring from next clip's start image.
@@ -3167,6 +3175,111 @@ async def _setup_job_background(
                             flush=True,
                         )
                     db.commit()
+
+                    # v892.1 Phase 3b — give every plate clip a start frame and
+                    # a prompt, then hand it to the worker. Phase 3a created the
+                    # rows and stopped there: no prompt_text, no start_frame,
+                    # status stuck at 'preparing', so the background layer of a
+                    # composite open never rendered and the operator had nothing
+                    # to key the performing layer over. Same shape as v698A
+                    # Phase 3b below, minus the dialogue — a plate is silent by
+                    # definition.
+                    plate_clips = db.query(Clip).filter(
+                        Clip.job_id == job_id,
+                        Clip.clip_role == 'composite_plate',
+                        Clip.status == 'preparing',
+                    ).all()
+                    plates_prepared = 0
+                    for cp in plate_clips:
+                        try:
+                            ck_sib = db.query(Clip).filter(
+                                Clip.id == cp.paired_clip_id
+                            ).first()
+                            if ck_sib is None or ck_sib.clip_index >= len(dialogue_raw):
+                                print(
+                                    f"[v892.1/Phase3b] plate {cp.id} has no usable "
+                                    f"composite_key sibling; skipping",
+                                    flush=True,
+                                )
+                                continue
+                            line_data_cp = (
+                                dialogue_raw[ck_sib.clip_index]
+                                if isinstance(dialogue_raw[ck_sib.clip_index], dict)
+                                else {}
+                            )
+                            plate_local_idx = line_data_cp.get(
+                                "composite_plate_image_local_index"
+                            )
+                            if (
+                                plate_local_idx is None
+                                or plate_local_idx >= len(uploaded_frames_list)
+                            ):
+                                print(
+                                    f"[v892.1/Phase3b] plate {cp.id} local index "
+                                    f"{plate_local_idx} unusable "
+                                    f"(uploaded_frames_list len="
+                                    f"{len(uploaded_frames_list)}); skipping",
+                                    flush=True,
+                                )
+                                continue
+                            plate_fname = uploaded_frames_list[plate_local_idx]
+
+                            # Operator-authored `### Clip S.L.plate` text wins.
+                            # The fallback is deliberately literal rather than a
+                            # build_prompt call: a plate is one still held for
+                            # the layer's duration, and build_prompt would write
+                            # motion and performance into a frame that must not
+                            # move.
+                            _authored_plate = (
+                                (line_data_cp.get("composite_plate_prompt_override") or "").strip()
+                                or None
+                            )
+                            _plate_secs = (
+                                cp.veo_render_duration_s
+                                or cp.target_duration_s
+                                or 4
+                            )
+                            cp.prompt_text = _authored_plate or (
+                                f"Animate the attached start-frame image into a "
+                                f"{int(round(float(_plate_secs)))}-second vertical 9:16 video in "
+                                f"which nothing moves. Hold the image completely "
+                                f"still for the full duration, with no camera "
+                                f"move, no zoom and no motion in the image. "
+                                f"Silent. No subtitles, no captions."
+                            )
+                            cp.start_frame = f"jobs/{job_id}/frames/{plate_fname}"
+                            cp.status = ClipStatus.PENDING.value
+                            plates_prepared += 1
+                            print(
+                                f"[v892.1/Phase3b] plate {cp.id} → frame="
+                                f"{plate_fname} prompt="
+                                f"{'AUTHORED' if _authored_plate else 'fallback-hold'} "
+                                f"status=pending",
+                                flush=True,
+                            )
+                        except Exception as _cp_err:
+                            print(
+                                f"[v892.1/Phase3b] plate {cp.id} prep failed "
+                                f"(non-fatal): {_cp_err}",
+                                flush=True,
+                            )
+                    if plates_prepared:
+                        db.commit()
+                        print(
+                            f"[v892.1/Phase3b] prepared {plates_prepared} "
+                            f"composite_plate clip(s) → status=pending",
+                            flush=True,
+                        )
+                    # TEMP DIAGNOSTIC (2026-08-17, remove once a composite open
+                    # is confirmed rendered end to end) — proves the phase ran
+                    # and says what it saw, so a silent zero is distinguishable
+                    # from the phase never executing.
+                    print(
+                        f"[v892.1/Phase3b][TEMP] plate rows found="
+                        f"{len(plate_clips)} prepared={plates_prepared} "
+                        f"job={job_id}",
+                        flush=True,
+                    )
             except Exception as _exc_v892:
                 # Never let plate creation take down the render flow; the key
                 # layer still renders and the operator can composite manually.
