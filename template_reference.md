@@ -16719,3 +16719,25 @@ All three now mirror the shape v698A and v718i already use. `DialogueLineInput` 
 
 **Process note worth keeping:** v892.1 was shipped labelled "code-verified only, needs a live render". The label was honest and still insufficient — the fix was made at the END of a broken chain, and only the live render would have shown the front of it was dead too. Verify the whole path, not the part you changed.
 
+## v930 — IMAGE READ + IMAGE PROMPT GRAMMAR: the benchmark-settled way to read a frame and to write one (2026-08-18)
+
+**Where it comes from.** 300+ blind-scored renders across nine benchmark rounds (2026-08-14→17), scored by the operator against real source frames. Full evidence and numbers: `wiki/concepts/prompting/image-requirements-contract.md` (the frozen requirements) and `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` §"HOW TO BUILD AN IMAGE PROMPT FROM A SOURCE FRAME" + §"THE WINNING PROMPT GRAMMAR". This section is the production-facing summary; the wiki pages are canonical for the measurements.
+
+**THE LAW UNDER ALL OF IT — no slot, no fidelity.** A fact with no named field is silently dropped, and no downstream wording recovers it. Proven three separate ways: a machine's free-prose read collapsed to 1.75/5 composition stars while the same reader with a schema scored 3.62; every body was averaged toward "normal" until a bodies field existed; the hook element was filed as one object among several until a hero field existed.
+
+**READ SIDE (decode, Stage 4d = `stage4d.v3`).** Three slots added to `code/v589_video_understanding.py`, each a measured failure:
+1. `observed_people[].body_exact` — the body EXACTLY as it appears, amplified in BOTH directions, never averaged: build, fat placement, muscle and where it shows, skin condition (cellulite, stretch marks, crepey skin, veins, sun damage, age spots), age markers, posture. Mannequins are objects, never people.
+2. `frame_inventory.hero_and_prominence` — the ONE element the shot exists to show, decided from the WHOLE VIDEO's context (transcript + sibling shots), with its share of frame and its exaggeration KEPT ("enormous, bursting out", never "large" — realistic scale destroys the hook).
+3. Background prominence caps inside `set_and_background` — every background person/object carries an explicit how-small/how-far statement; a bare list is a summons whose prominence the generator chooses by itself, differently each render.
+Old `stage4d.v2` artifacts stay valid v2; they are not v3. Reader house rules for ad-hoc reads: `tools/extraction_rules.py` (outer repo).
+
+**WRITE SIDE (builds).** Four measured rules:
+1. **A prompt is a FILLED FORM with our fields overwritten** — read the source into slots, overwrite ONLY what the build swaps (identity/setting/prop), append the fixed tail LAST (bodies clause, no-text, the operator's locked realism half). One assembler, one contract check (`tools/prompt_assembly.py`, `tools/check_prompt_contract.py`); no script carries its own copy of a mandatory block.
+2. **Describe the photograph, never instruct the painter.** Declarative properties of the finished image win; imperative commands ("MUST DOMINATE", "Do NOT reduce") lose. Values in image-measurable terms (mm, metres, thirds-of-frame).
+3. **Place the action by POSING THE PERSON, never by positioning the camera.** Camera-position language ("camera slightly above, tilted down") is dead — the model never simulates a camera. The v791 pose grammar wins measured 3.85 vs 3.13 on the safe-zone axis (ChatGPT 4.75/5), and generalises beyond hooks (won on a pour and a plank): raise the hero to a body landmark ("to her own chin level"), lock the lens to that landmark ("the lens level with her raised hand"), eat the headroom ("the top of her head touching the top edge"). Backstop for frames a pose cannot fix (reclining figures): CROP THE HEADROOM IN POST — deterministic, free.
+4. **Backgrounds: name the room and stop** (80.2 vs 71.2 for a full object list, which also scored the WORST focus). Never subject-framing words inside the background field. Proximity-by-wide-lens (0.5x/24mm close) is an INDOOR/CONTROLLED-location tool only — on a busy public location it pulls the whole crowd in sharp (blur is banned), so busy locations subordinate by CROP, keeping the source's own framing.
+
+**Dead ends, measured so nobody re-tests them:** reference-photo detail level (two independent nulls, ~110 renders — use a clean portrait for hygiene and stop optimising); per-model prompt layers (helped ChatGPT, HURT both Banana models — never write one without evidence for that model); the v791 ban on thirds/grid words is stale on ChatGPT (operator-picked winner used them) but unmeasured on the Bananas.
+
+**Auditor/checker note:** checkers verify declarations, not decisions — the contract check verifies the mandatory blocks are present, never which creative values they carry.
+

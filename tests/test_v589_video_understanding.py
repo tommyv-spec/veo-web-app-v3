@@ -15,9 +15,10 @@ SPEC.loader.exec_module(v589)
 
 def valid_stage4d():
     return {
-        "schema_version": "stage4d.v2",
+        "schema_version": "stage4d.v3",
         "observed_people": [
-            {"label": "person_1", "identity_markers": "adult, dark hair", "wardrobe": "blue shirt", "shots_present": [1]},
+            {"label": "person_1", "identity_markers": "adult, dark hair", "wardrobe": "blue shirt",
+             "body_exact": "average build, no visible muscle definition, unmarked skin on the visible forearms, upright posture", "shots_present": [1]},
         ],
         "shots": [{
             "shot_index": 1,
@@ -50,6 +51,7 @@ def valid_stage4d():
                 "on_screen_text_verbatim": "none",
                 "color_palette": "Warm neutrals: cream tile, pale grey stone, mid-blue shirt.",
                 "production_method": "Single continuous live-action take; no compositing tells.",
+                "hero_and_prominence": "The lifted glass — the demo object this shot exists to show; about a tenth of the frame, at realistic scale (an instruction demo, not a symptom mass); everything else is support.",
             },
             "start_frame_spec": {
                 "camera_height_and_angle": "Level with the eyes, straight-on.",
@@ -87,7 +89,7 @@ class Stage4dContractTests(unittest.TestCase):
 
     def test_valid_contract_passes(self):
         result = v589.validate_stage4d_output(valid_stage4d(), self.expected)
-        self.assertEqual(result["schema_version"], "stage4d.v2")
+        self.assertEqual(result["schema_version"], "stage4d.v3")
 
     def test_old_array_contract_fails(self):
         with self.assertRaisesRegex(v589.Stage4dValidationError, "top level"):
@@ -124,7 +126,7 @@ class Stage4dContractTests(unittest.TestCase):
 
     def test_human_template_is_shaped_but_not_handoff_ready(self):
         template = json.loads(v589.write_human_walk_template(self.expected, {"segments": []}, None))
-        self.assertEqual(template["schema_version"], "stage4d.v2")
+        self.assertEqual(template["schema_version"], "stage4d.v3")
         # Pin the SHAPE, not just the error. Asserting only that validation
         # raises "placeholders" is not enough: when the template was missing
         # frame_inventory + start_frame_spec it also collected two
@@ -152,13 +154,13 @@ class Stage4dContractTests(unittest.TestCase):
 
         filled = fill(template)
         result = v589.validate_stage4d_output(filled, self.expected)
-        self.assertEqual(result["schema_version"], "stage4d.v2")
+        self.assertEqual(result["schema_version"], "stage4d.v3")
 
     def test_parse_and_validate_is_scope_safe(self):
         # Regression: this function once referenced main()'s locals
         # (provider_used / out) and raised NameError on every provider call.
         parsed = v589.parse_and_validate_stage4d(json.dumps(valid_stage4d()), self.expected)
-        self.assertEqual(parsed["schema_version"], "stage4d.v2")
+        self.assertEqual(parsed["schema_version"], "stage4d.v3")
         with self.assertRaisesRegex(v589.Stage4dValidationError, "invalid JSON"):
             v589.parse_and_validate_stage4d("not json {", self.expected)
 

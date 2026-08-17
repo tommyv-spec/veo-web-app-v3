@@ -378,13 +378,13 @@ def test_missing_motion_json_says_so_and_skips(tmp_path, capsys):
 
 def test_a_stage4d_v2_artifact_exits_cleanly(tmp_path, capsys):
     art = tmp_path / "stage4d_vlm.json"
-    art.write_text(json.dumps(_artifact([], version="stage4d.v2")),
+    art.write_text(json.dumps(_artifact([], version="stage4d.v3")),
                    encoding="utf-8")
     (tmp_path / "motion.json").write_text("[]", encoding="utf-8")
     assert mcc.main([str(art)]) == 0
     out = capsys.readouterr().out
     assert "skipped" in out
-    assert "stage4d.v2" in out
+    assert "stage4d.v3" in out
     assert "motion_cross_check" in out        # says why: the heavy lane has one
 
 

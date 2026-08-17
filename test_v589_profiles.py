@@ -35,7 +35,7 @@ def test_schema_default_profile_is_unchanged():
     assert (v589.schema_for_profile("ugc-reel")["properties"]["shots"]["items"]
             == v589.PER_SHOT_SCHEMA)
     assert (v589.schema_for_profile("ugc-reel")["properties"]["schema_version"]["enum"]
-            == [v589.STAGE4D_SCHEMA_VERSION] == ["stage4d.v2"])
+            == [v589.STAGE4D_SCHEMA_VERSION] == ["stage4d.v3"])
 
 
 def test_profiles_declare_their_own_shot_schema_and_version():
@@ -43,7 +43,7 @@ def test_profiles_declare_their_own_shot_schema_and_version():
     ugc = v589.READING_PROFILES["ugc-reel"]
     fb = v589.READING_PROFILES["fbads-video"]
     assert ugc["shot_schema"] is v589.PER_SHOT_SCHEMA
-    assert ugc["schema_version"] == v589.STAGE4D_SCHEMA_VERSION == "stage4d.v2"
+    assert ugc["schema_version"] == v589.STAGE4D_SCHEMA_VERSION == "stage4d.v3"
     assert fb["shot_schema"] is v589.LEAN_AD_SHOT_SCHEMA
     assert fb["schema_version"] == "adread.v1"
     # a lean artifact must never be mistakable for a full stage4d.v2 one
@@ -502,9 +502,26 @@ def test_unknown_profile_names_the_valid_choices():
 
 
 def _minimal_valid_stage4d():
-    """Load a real passing artifact as the base fixture."""
+    """Load a real passing artifact as the base fixture.
+
+    The artifact on disk is a stage4d.v2 record and raw/ is immutable, so the two
+    v3 slots (observed_people[].body_exact, frame_inventory.hero_and_prominence,
+    added 2026-08-18) are injected here in memory — the fixture must be what the
+    CURRENT schema calls complete, not what the old one did.
+    """
     p = Path(__file__).parent.parent / "raw/decode_work/DbjOnA3B8o7/stage4d_vlm.json"
-    return json.loads(p.read_text(encoding="utf-8"))
+    data = json.loads(p.read_text(encoding="utf-8"))
+    data["schema_version"] = v589.STAGE4D_SCHEMA_VERSION
+    for person in data.get("observed_people", []):
+        person.setdefault("body_exact",
+            "average adult build, no marked muscle definition, unremarkable visible skin, upright posture")
+    for shot in data.get("shots", []):
+        fi = shot.get("frame_inventory")
+        if isinstance(fi, dict):
+            fi.setdefault("hero_and_prominence",
+                "the presenter's demonstration - what the shot exists to show; realistic scale; "
+                "everything else support")
+    return data
 
 
 def _expected_shots_for(data):
@@ -541,7 +558,8 @@ def _minimal_valid_lean():
         "schema_version": "adread.v1",
         "observed_people": [
             {"label": "person_1", "identity_markers": "woman, 60s, grey bob",
-             "wardrobe": "cream cardigan", "shots_present": [1, 2]},
+             "wardrobe": "cream cardigan",
+             "body_exact": "slim build, light muscle tone in the forearms, unmarked skin, upright seated posture", "shots_present": [1, 2]},
         ],
         "ad_read": _ad_read_block(),
         "shots": [
@@ -578,7 +596,8 @@ def _old_shape_lean_artifact():
         "schema_version": "adread.v1",
         "observed_people": [
             {"label": "person_1", "identity_markers": "woman, 60s, grey bob",
-             "wardrobe": "cream cardigan", "shots_present": [1, 2]},
+             "wardrobe": "cream cardigan",
+             "body_exact": "slim build, light muscle tone in the forearms, unmarked skin, upright seated posture", "shots_present": [1, 2]},
         ],
         "ad_read": _ad_read_block(),
         "shots": [
@@ -657,7 +676,7 @@ def test_the_two_contracts_do_not_cross_validate():
     with pytest.raises(v589.Stage4dValidationError) as exc:
         v589.validate_stage4d_output(lean, _lean_expected_shots())  # default lane
     msg = str(exc.value)
-    assert "schema_version must be 'stage4d.v2'" in msg
+    assert "schema_version must be 'stage4d.v3'" in msg
     assert "missing forensic_perception" in msg          # heavy fields demanded
 
     heavy = _minimal_valid_stage4d()

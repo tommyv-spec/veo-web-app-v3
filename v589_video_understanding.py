@@ -57,7 +57,11 @@ from pathlib import Path
 # Schema + prompts (shared across providers)
 # ──────────────────────────────────────────────────────────────────────
 
-STAGE4D_SCHEMA_VERSION = "stage4d.v2"
+# v3 (2026-08-18, benchmark rounds 1-9): adds observed_people[].body_exact and
+# frame_inventory.hero_and_prominence — the two facts measured to be silently dropped
+# when they had no slot (bodies averaged toward "normal"; the hook element described
+# as one object among several). Old v2 artifacts stay valid v2; they are not v3.
+STAGE4D_SCHEMA_VERSION = "stage4d.v3"
 PRIMARY_CHANGE_AXES = [
     "Surface/Texture",
     "Structural Integrity",
@@ -240,12 +244,15 @@ PER_SHOT_SCHEMA = {
             "required": [
                 "set_and_background", "wardrobe_and_grooming", "props_and_objects",
                 "on_screen_text_verbatim", "color_palette", "production_method",
+                "hero_and_prominence",
             ],
             "properties": {
                 "set_and_background": _string_schema(
                     "What the space actually is, its surfaces and architecture, and everything visible at depth "
                     "with its colour and material — even when defocused. 'Blurred background' is not an answer; "
-                    "say what is blurred."
+                    "say what is blurred. For every background person or incidental object, state HOW SMALL and "
+                    "HOW FAR it is ('beachgoers far behind, small, nobody close to the subjects') — a bare list "
+                    "is a summons whose prominence a generator will choose by itself."
                 ),
                 "wardrobe_and_grooming": _string_schema(
                     "Per person in this shot: every garment with its exact colour, cut and fabric, plus "
@@ -273,6 +280,15 @@ PER_SHOT_SCHEMA = {
                 "color_palette": _string_schema(
                     "The three to six dominant colours as plain names, each tied to what carries it "
                     "(e.g. 'maroon — shirt; teal — back wall; warm amber — key on skin')."
+                ),
+                "hero_and_prominence": _string_schema(
+                    "The ONE element this shot exists to show, decided from the WHOLE VIDEO's context "
+                    "(transcript, the other shots, what the video is about) — never from the still alone. "
+                    "State its share of the frame and how far past real life it is pushed: a symptom rendered "
+                    "as a material mass is meant to be grotesquely oversized, so write 'enormous, far larger "
+                    "than any real one, bursting out' rather than 'large' — recording it at realistic scale "
+                    "destroys the thing that made the video work. Then say plainly that everything else in "
+                    "the shot is support."
                 ),
                 "production_method": _string_schema(
                     "HOW THIS FRAME WAS MADE, not what is in it. Was everything captured together in "
@@ -659,11 +675,19 @@ STAGE4D_JSON_SCHEMA = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["label", "identity_markers", "wardrobe", "shots_present"],
+                "required": ["label", "identity_markers", "wardrobe", "body_exact", "shots_present"],
                 "properties": {
                     "label": _string_schema("Neutral source label such as person_1 or host."),
                     "identity_markers": _string_schema("Observed age range, hair, build, and stable identity cues."),
                     "wardrobe": _string_schema("Observed clothing and accessories, recorded once here."),
+                    "body_exact": _string_schema(
+                        "The body EXACTLY as it appears, never averaged and never flattered: build, where "
+                        "the body fat sits, muscle definition and where it shows, skin condition (cellulite, "
+                        "stretch marks, loose or crepey skin, veins, sun damage, age spots, scars, uneven "
+                        "tan), age markers, habitual posture. A fit body must read as genuinely fit and an "
+                        "unfit or ageing body must show what it shows — the contrast between bodies is "
+                        "usually the story. Mannequins/dolls are OBJECTS, not people: never list them here."
+                    ),
                     "shots_present": {"type": "array", "items": {"type": "integer"}},
                 },
             },
@@ -841,6 +865,19 @@ Quote on-screen text EXACTLY — it is often the strongest single element in the
 frame and it is what a port rewrites first. Name colours as plain words tied to
 the object carrying them. When something is defocused past recognition, say
 what it most likely is AND that it is unreadable, rather than omitting it.
+
+v930 — BODIES, HERO AND PROMINENCE (benchmark-derived, 2026-08-18):
+
+  * `observed_people[].body_exact`: record every body exactly, amplified in BOTH
+    directions, never averaged — fit is visibly fit, heavy/ageing/marked shows what
+    it shows. This is the single fact readers drop most, and once dropped no build
+    downstream can recover it.
+  * `frame_inventory.hero_and_prominence`: name the ONE element the shot exists to
+    show, from the VIDEO's context, with its share of frame and its exaggeration
+    kept at full strength. A still read in isolation files the hook element as one
+    object among several.
+  * Background people and incidental objects always carry an explicit smallness /
+    distance statement; a bare list is a summons.
 
 v890 — START-FRAME RECREATION SPEC (fill `start_frame_spec` on EVERY shot):
 
