@@ -7649,7 +7649,7 @@ async def request_clip_redo(
     
     add_job_log(
         db, clip.job_id, 
-        f"Clip {clip.clip_index + 1} redo requested (attempt {new_attempt}/3, {'with' if clip.use_logged_params else 'without'} logged params, backend={job.backend})",
+        f"Clip {clip.clip_index + 1} redo requested (attempt {new_attempt}, {'with' if clip.use_logged_params else 'without'} logged params, backend={job.backend})",
         "INFO", "approval",
         details={"reason": request.reason if request else None, "use_logged_params": clip.use_logged_params, "backend": job.backend}
     )
@@ -7657,7 +7657,7 @@ async def request_clip_redo(
     return ApprovalResponse(
         clip_id=clip.id,
         status="redo_queued",  # UI always sees "redo_queued" for display purposes
-        message=f"Redo queued (attempt {new_attempt}/3). {'Using same parameters.' if clip.use_logged_params else 'Using fresh parameters.'}",
+        message=f"Redo queued (attempt {new_attempt}). {'Using same parameters.' if clip.use_logged_params else 'Using fresh parameters.'}",
         attempts_remaining=UNLIMITED_ATTEMPTS_REMAINING
     )
 
