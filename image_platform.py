@@ -10788,6 +10788,81 @@ def promote_batch_to_video(
         f"[v892.3 PROMOTE] batch={batch_id} nodes={len(nodes)} "
         f"assignments={len(assignments_by_scene_idx)} -> {len(_scene_plan)} scene(s)"
     )
+
+    # v892.8 — THIS PATH CANNOT BUILD A COMPOSITE. Say so out loud.
+    #
+    # There are two promote paths and they are separate implementations. The
+    # browser goes prepare-batch-for-video -> payload -> POST /api/jobs, which
+    # runs main.py's background prompt-build and with it v892 Phase 3a/3b (the
+    # plate clip gets created, framed and queued). THIS endpoint writes Clip
+    # rows directly at status='pending' and never spawns that task, so Phase
+    # 3a/3b do not exist here: no plate clip is created and none of the
+    # per-scene bindings (clip_role, composite plate, v698A anchor, v718i
+    # end frame) are carried at all.
+    #
+    # Found 2026-08-19: the reaction-duet batch promoted from the CLI produced
+    # 20 clips all with clip_role NULL, while the SAME batch promoted from the
+    # browser produced a composite_key. The build was fine; the path was not.
+    #
+    # Adding the four fields here would be worse than leaving it: the clip
+    # would be marked composite_key with no Phase 3a behind it, so it would
+    # LOOK wired and still render with no background layer. Until this path
+    # grows real plate support, the honest thing is to refuse to fail quietly.
+    _v892_8_composite = sorted(
+        a.scene_index for a in assignments_by_scene_idx.values()
+        if getattr(a, "composite_plate_image_node_id", None)
+    )
+    _v892_8_anchored = sorted(
+        a.scene_index for a in assignments_by_scene_idx.values()
+        if getattr(a, "voiceover_anchor_image_node_id", None)
+    )
+    _v892_8_endframe = sorted(
+        a.scene_index for a in assignments_by_scene_idx.values()
+        if getattr(a, "end_frame_image_node_id", None)
+    )
+    _v892_8_warnings = []
+    if _v892_8_composite:
+        _v892_8_warnings.append(
+            f"scenes {_v892_8_composite} declare composite_plate_image, but this "
+            f"promote path cannot build a composite: no plate clip will exist and "
+            f"the background layer will be missing. Promote from the UI instead, "
+            f"or composite the plate still by hand in post (v892.8)."
+        )
+    if _v892_8_anchored:
+        _v892_8_warnings.append(
+            f"scenes {_v892_8_anchored} declare voiceover_anchor_image (v698A): "
+            f"no audio twin will be created on this path."
+        )
+    if _v892_8_endframe:
+        _v892_8_warnings.append(
+            f"scenes {_v892_8_endframe} declare end_frame_image (v718i): the "
+            f"explicit end frame will not be bound on this path."
+        )
+    # v892.8 — Prompt B is the biggest loss on this path and it hits EVERY
+    # build, not just composites. Measured 2026-08-19 on the same batch:
+    # UI promote 20/20 clips carry prompt_text_b, CLI promote 0/20. So a
+    # policy-blocked render on a CLI-promoted job has no v805 fallback to
+    # retry with and simply fails. Warn whenever the build authored one.
+    _v892_8_has_b = False
+    for _a in assignments_by_scene_idx.values():
+        try:
+            for _vp in (_json.loads(_a.veo_prompts_json or "[]") or []):
+                if (_vp or {}).get("prompt_b"):
+                    _v892_8_has_b = True
+                    break
+        except Exception:
+            continue
+        if _v892_8_has_b:
+            break
+    if _v892_8_has_b:
+        _v892_8_warnings.append(
+            "the build authors Prompt B (v805 policy fallback) but this promote "
+            "path does not carry it: every clip will have prompt_text_b empty, so "
+            "a policy-blocked render has nothing to fall back to. Promote from the "
+            "UI to keep Prompt B."
+        )
+    for _w in _v892_8_warnings:
+        log.warning(f"[v892.8 PROMOTE] {_w}")
     for scene_pos, (idx, n, _assignment) in enumerate(_scene_plan):
         variant = db.query(ImageVariant).filter(ImageVariant.id == n.chosen_variant_id).first()
         if not variant:
@@ -11091,6 +11166,11 @@ def promote_batch_to_video(
         "batch_id": batch_id,
         "total_clips": len(clip_specs),
         "job_name": job_name,
+        # v892.8 — per-scene bindings this path silently cannot honour. Empty
+        # on an ordinary build. The CLI prints the promote response, so a
+        # composite promoted here now SAYS it lost its plate instead of just
+        # rendering without one.
+        "warnings": _v892_8_warnings,
     }
 
 

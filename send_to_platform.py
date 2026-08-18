@@ -807,6 +807,12 @@ def poll_images(client, batch_id, args, report):
 def promote(client, batch_id, report):
     res = client.post(f"/api/images/batches/{batch_id}/promote-to-video")
     report["promote"] = res
+    # v892.8 — this promote path cannot honour per-scene bindings (composite
+    # plate, v698A anchor, v718i end frame). The server now says which scenes
+    # lose what; print it loudly rather than let the operator find out from a
+    # render with no background layer.
+    for _w in (res.get("warnings") or []):
+        print(f"  WARNING (v892.8): {_w}")
     job_id = res.get("video_job_id")
     if not job_id:
         raise PlatformError(EXIT_UNKNOWN, f"promote response missing video_job_id: {str(res)[:200]}")

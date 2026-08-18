@@ -167,6 +167,7 @@ def main():
     # Derived: any DialogueLineInput field that main.py reads back out of the
     # submitted line dict is by construction expected to arrive from the
     # frontend. If index.html never names it, it always arrives as None.
+    imgp_src = IMGP.read_text(encoding="utf-8")
     dli = class_fields(main_tree, "DialogueLineInput") or []
     read_back = set(re.findall(
         r"line(?:_data|_data_cp|_cp)?\.get\(\s*['\"]([a-z_0-9]+)['\"]", main_src))
@@ -176,8 +177,40 @@ def main():
     # newlines, so it matched the colon of the ternary that READS the value
     # (`? promoteMeta.name\n : null`). The check passed on a copy with the key
     # deliberately deleted. Found only by negative-testing it.
+    #
+    # v892.8 — there are TWO promote paths and each builds its own payload:
+    # the browser's in static/index.html, and the server-side
+    # `promote-to-video` endpoint that the CLI calls, which assembles its own
+    # `dialogue_list`. Checking only index.html is how the CLI path shipped
+    # for months dropping every per-scene binding on the floor. A field is
+    # satisfied if EITHER builder sends it; a field neither sends is dead on
+    # at least one path, which is what happened to the composite plate.
+    dialogue_builder = ""
+    m_db = re.search(r"dialogue_list\.append\(\{", imgp_src)
+    if m_db:
+        i, depth = m_db.end(), 1
+        while depth and i < len(imgp_src):
+            if imgp_src[i] == "{":
+                depth += 1
+            elif imgp_src[i] == "}":
+                depth -= 1
+            i += 1
+        dialogue_builder = imgp_src[m_db.end():i]
+    else:
+        notes.append("dialogue_list.append not found — CHECK2 covered index.html only")
+
+    diverged = []
     for f in crossing:
-        if not re.search(r"^\s*" + re.escape(f) + r"\s*:", index_src, re.MULTILINE):
+        in_browser = re.search(r"^\s*" + re.escape(f) + r"\s*:", index_src, re.MULTILINE)
+        in_server = re.search(r'^\s*"' + re.escape(f) + r'"\s*:', dialogue_builder, re.MULTILINE)
+        if in_browser and not in_server and dialogue_builder:
+            # Sent by the browser, not by the server-side promote. NOT a hard
+            # failure — that path genuinely predates most of these bindings and
+            # v892.8 now warns at promote time. But it is listed on every run,
+            # because a divergence nobody can see is how the composite plate
+            # went missing for months.
+            diverged.append(f)
+        if not in_browser and not in_server:
             problems.append(
                 "CHECK2 {0}: DialogueLineInput declares it and main.py reads it back, but "
                 "static/index.html never sends it — it arrives as None on every job "
@@ -188,7 +221,6 @@ def main():
     # A field the parser goes looking for (`- **name:**`) has to land as a key
     # on the scene dict or the image dict, or it was read and thrown away.
     # Checked when written and found CLEAN — this guards it from here on.
-    imgp_src = IMGP.read_text(encoding="utf-8")
     recognised = set(re.findall(r"\\\*\\\*([a-z_0-9]+):\\\*\\\*", imgp_src))
 
     def dict_keys(call):
@@ -247,6 +279,11 @@ def main():
         len(dli), len(crossing)))
     print("ImageSceneAssignment   : {0} columns | {1} to_dict keys".format(
         len(cols), len(keys) if keys is not None else "n/a"))
+    if diverged:
+        print("  DIVERGENT (browser promote sends these, server-side promote does NOT —")
+        print("  a build using them must be promoted from the UI; v892.8 warns at promote):")
+        for f in diverged:
+            print("     " + f)
     for n in notes:
         print("  note: {0}".format(n))
     print()
