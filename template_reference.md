@@ -16719,6 +16719,18 @@ All three now mirror the shape v698A and v718i already use. `DialogueLineInput` 
 
 **Process note worth keeping:** v892.1 was shipped labelled "code-verified only, needs a live render". The label was honest and still insufficient — the fix was made at the END of a broken chain, and only the live render would have shown the front of it was dead too. Verify the whole path, not the part you changed.
 
+### v892.5 — A PROMPT AND ITS POLICY-FALLBACK TWIN ARE ONE EDIT
+
+`PATCH /api/clips/{id}` accepted `prompt_text` and not `prompt_text_b`. So an operator could correct a clip's prompt and leave the Prompt-B twin holding superseded text — and Prompt B is exactly what ships when the render is policy-blocked, i.e. the case where you least want the old wording back.
+
+Found on clip 14286 of job `1f35eac2`: its `prompt_text` was corrected to the speaking prompt while `prompt_text_b` still carried the silent composite-plate text from the v892.1 bug. Had that redo tripped the policy path, the clip would have rendered frozen and silent again, from a field nothing could reach.
+
+`prompt_text_b` is now a patchable field and a member of the v735 clearable set. **The general form: when a value has a fallback twin, the twin is part of the same edit surface.** A correction that reaches only the happy path is not a correction — it is a correction plus a landmine. Same shape as v892.2's four boundaries, one level down.
+
+**Scope:** forward-only, additive — no existing caller changes behaviour.
+
+---
+
 ## v930 — IMAGE READ + IMAGE PROMPT GRAMMAR: the benchmark-settled way to read a frame and to write one (2026-08-18)
 
 **Where it comes from.** 300+ blind-scored renders across nine benchmark rounds (2026-08-14→17), scored by the operator against real source frames. Full evidence and numbers: `wiki/concepts/prompting/image-requirements-contract.md` (the frozen requirements) and `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` §"HOW TO BUILD AN IMAGE PROMPT FROM A SOURCE FRAME" + §"THE WINNING PROMPT GRAMMAR". This section is the production-facing summary; the wiki pages are canonical for the measurements.

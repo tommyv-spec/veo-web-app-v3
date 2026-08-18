@@ -6429,6 +6429,12 @@ class UpdateClipRequest(BaseModel):
     dialogue_text: Optional[str] = None
     dialogue_pad: Optional[str] = None
     prompt_text: Optional[str] = None
+    # v892.5 — the POLICY-FALLBACK twin. prompt_text was patchable and its
+    # Prompt-B twin was not, so an operator could correct a clip's prompt and
+    # still have a policy-blocked retry render the superseded text from B.
+    # Found on clip 14286, whose prompt_text was corrected to the speaking
+    # prompt while prompt_text_b still held the silent composite-plate text.
+    prompt_text_b: Optional[str] = None
     clip_mode: Optional[str] = None
     cut_mode: Optional[str] = None
     target_duration_s: Optional[float] = None
@@ -6443,7 +6449,7 @@ class UpdateClipRequest(BaseModel):
 
 
 _V735_ALLOWED_CLEAR_FIELDS = {
-    "dialogue_text", "dialogue_pad", "prompt_text", "cut_mode",
+    "dialogue_text", "dialogue_pad", "prompt_text", "prompt_text_b", "cut_mode",
     "target_duration_s", "veo_render_duration_s", "caption",
     "scene_type", "bg_color", "voiceover_anchor_image_node_id",
     "voiceover_line",
@@ -6584,6 +6590,8 @@ async def update_clip(
         clip.dialogue_pad = req.dialogue_pad
     if req.prompt_text is not None:
         clip.prompt_text = req.prompt_text
+    if req.prompt_text_b is not None:  # v892.5
+        clip.prompt_text_b = req.prompt_text_b
     if req.caption is not None:
         clip.caption = req.caption
     if req.voiceover_line is not None:
