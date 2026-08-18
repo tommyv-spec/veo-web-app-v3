@@ -10743,7 +10743,31 @@ def promote_batch_to_video(
     except Exception as _ae:
         log.warning(f"[image_platform] could not load assignments for batch {batch_id}: {_ae}")
 
-    for idx, n in enumerate(nodes):
+    # v892.3 — promote emits one clip row per STORYBOARD SCENE, in scene
+    # order. Before this the loop ran over image NODES and looked its lines
+    # up with assignments_by_scene_idx.get(n.scene_index_in_batch): a map
+    # keyed by SCENE index, read with an IMAGE index. That is only correct
+    # when images and scenes are 1:1. On a build that reuses an image every
+    # extra scene was dropped silently. Live proof 2026-08-18:
+    # street-jealousy-belly-v2 (15 images / 19 scenes) promoted to 15 clips
+    # and lost its entire CTA block. Reuse is also INTERLEAVED (scene 4 and
+    # scene 6 share image 4), so grouping by node would reorder the video —
+    # the iteration itself has to run in scene order.
+    _nodes_by_id = {n.id: (i, n) for i, n in enumerate(nodes)}
+    _scene_plan = []
+    for _a in sorted(assignments_by_scene_idx.values(), key=lambda a: a.scene_index):
+        _hit = _nodes_by_id.get(_a.image_node_id)
+        if _hit is not None:
+            _scene_plan.append((_hit[0], _hit[1], _a))
+    if not _scene_plan:
+        # Legacy batches predating ImageSceneAssignment keep node order.
+        _scene_plan = [(i, n, None) for i, n in enumerate(nodes)]
+    # TEMP DIAGNOSTIC (v892.3) — strip once one reused-image promote is seen live.
+    log.info(
+        f"[v892.3 PROMOTE] batch={batch_id} nodes={len(nodes)} "
+        f"assignments={len(assignments_by_scene_idx)} -> {len(_scene_plan)} scene(s)"
+    )
+    for scene_pos, (idx, n, _assignment) in enumerate(_scene_plan):
         variant = db.query(ImageVariant).filter(ImageVariant.id == n.chosen_variant_id).first()
         if not variant:
             raise HTTPException(500, f"Node {n.id}: chosen variant {n.chosen_variant_id} missing from DB")
@@ -10805,7 +10829,9 @@ def promote_batch_to_video(
         # (same underlying image) and scene_index. Each entry carries
         # its own line text, action_note, and Veo prompt override
         # pulled from the parallel arrays.
-        _assignment = assignments_by_scene_idx.get(n.scene_index_in_batch)
+        # v892.3 — _assignment now arrives with the scene from _scene_plan
+        # (was: assignments_by_scene_idx.get(n.scene_index_in_batch), a
+        # scene-keyed map read with an IMAGE index — see the loop head).
         if _assignment:
             _ad = _assignment.to_dict()
             scene_lines = _ad.get("lines") or []
@@ -10851,7 +10877,7 @@ def promote_batch_to_video(
                 "id": current_clip_index + 1,
                 "text": line_text_i,
                 "clip_mode": mode,
-                "scene_index": idx,
+                "scene_index": scene_pos,
                 # All lines in this scene use this scene's image as start frame.
                 # main.py reads start_image_idx to pick from uploaded_frames_list.
                 "start_image_idx": idx,
@@ -10877,7 +10903,7 @@ def promote_batch_to_video(
                 "dialogue_id": current_clip_index + 1,
                 "dialogue_text": line_text_i,
                 "clip_mode": mode,
-                "scene_index": idx,
+                "scene_index": scene_pos,
                 "start_frame": start_frame_key,
                 "end_frame": None,  # filled below for blend mode
                 "scene_transition": n.scene_transition or "",
@@ -10886,7 +10912,7 @@ def promote_batch_to_video(
             clips_in_this_scene.append(current_clip_index)
 
         scenes_list.append({
-            "scene_index": idx,
+            "scene_index": scene_pos,
             "image_filename": dst_filename,
             # main.py's blend-mode end_frame logic reads camelCase keys
             # — provide both for compat.
