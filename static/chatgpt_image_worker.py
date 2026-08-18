@@ -669,6 +669,46 @@ def watch_mode(watch_dir, poll_s=5, email=None):
                 pass
 
 
+def _run_pull_session(p_factory, args, http_run, host):
+    """One driver lifetime: start Playwright, log in, pump until it stops.
+
+    Raising out of here is how the supervisor learns the driver died."""
+    with p_factory() as p:
+        lp = launch_logged_in(p, getattr(args, "chatgpt_email", None))
+        if not lp:
+            return
+        ctx, page = lp
+        state = {"ctx": ctx}
+
+        def _relaunch():
+            """A fresh logged-in page after the browser dies mid-run.
+            The saved profile means this is a plain relaunch — no seeding,
+            no sign-in — so recovery costs seconds, not a queue."""
+            old = state.get("ctx")
+            if old is not None:
+                try:
+                    old.close()
+                except Exception:
+                    pass          # already dead; closing is best-effort
+            again = launch_logged_in(p, getattr(args, "chatgpt_email", None))
+            if not again:
+                state["ctx"] = None
+                return None
+            state["ctx"], new_page = again
+            return new_page
+
+        try:
+            http_run(args.api_url, args.api_key, page, host,
+                     relaunch=_relaunch)
+        finally:
+            if state.get("ctx") is not None:
+                try:
+                    state["ctx"].close()
+                except Exception:
+                    pass
+    return
+
+
 def main():
     ap = argparse.ArgumentParser(description="ChatGPT web image-gen worker")
     ap.add_argument("--login", action="store_true", help="headful manual login, save session")
@@ -785,42 +825,33 @@ def main():
     # reused. No pulling from the user's main Chrome — works for every user.
     if args.api_url and args.api_key:
         import socket
+        import time as _time
         from chatgpt_http_pull import run as http_run
         sync_playwright, _ = _import_playwright()
-        with sync_playwright() as p:
-            lp = launch_logged_in(p, getattr(args, "chatgpt_email", None))
-            if not lp:
-                return
-            ctx, page = lp
-            state = {"ctx": ctx}
-
-            def _relaunch():
-                """A fresh logged-in page after the browser dies mid-run.
-                The saved profile means this is a plain relaunch — no seeding,
-                no sign-in — so recovery costs seconds, not a queue."""
-                old = state.get("ctx")
-                if old is not None:
-                    try:
-                        old.close()
-                    except Exception:
-                        pass          # already dead; closing is best-effort
-                again = launch_logged_in(p, getattr(args, "chatgpt_email", None))
-                if not again:
-                    state["ctx"] = None
-                    return None
-                state["ctx"], new_page = again
-                return new_page
-
+        # v899.5 SUPERVISOR. The relaunch inside the pump reuses the SAME
+        # Playwright driver, so it cannot survive the driver itself dying —
+        # and it does: 2026-08-11 the Node driver took an EPIPE writing to a
+        # closed pipe (FFBrowserContext emitted an event after the transport
+        # was gone), Node threw on an unhandled 'error' event, and the whole
+        # worker process exited ("Worker stopped"). A queue with jobs left in
+        # it then just sits there until someone notices.
+        # Restarting the driver means a brand-new `sync_playwright()`, which
+        # only an OUTER loop can do.
+        restarts = 0
+        while True:
             try:
-                http_run(args.api_url, args.api_key, page, socket.gethostname(),
-                         relaunch=_relaunch)
-            finally:
-                if state.get("ctx") is not None:
-                    try:
-                        state["ctx"].close()
-                    except Exception:
-                        pass
-        return
+                _run_pull_session(p_factory=sync_playwright, args=args,
+                                  http_run=http_run, host=socket.gethostname())
+                return                      # clean shutdown (signal / loop end)
+            except KeyboardInterrupt:
+                return                      # operator stopped it; do not restart
+            except BaseException as e:      # driver death surfaces as SystemExit too
+                restarts += 1
+                first = str(e).splitlines()[0][:140] if str(e) else type(e).__name__
+                wait = min(10 * restarts, 120)
+                log(f"worker session died ({type(e).__name__}: {first}) — "
+                    f"restarting the browser driver in {wait}s (restart {restarts})")
+                _time.sleep(wait)
     if args.watch:
         wd = args.watch_dir or os.environ.get("IMAGE_JOBS_DIR") or os.path.join(
             os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "..", "..", "data")), "_image_jobs")
