@@ -7537,6 +7537,8 @@ async def request_clip_redo(
     # 24h activity window covers anything the user is actively iterating.
     job.updated_at = datetime.utcnow()
     
+    # v892.4 — captured before the rebuild below can overwrite it.
+    _pre_redo_prompt = clip.prompt_text
     # === REGENERATE PROMPT with feedback + new dialogue baked in ===
     # Instead of just prepending feedback, rebuild the prompt from scratch so
     # gesture cues, transition cues, and object rules all match the new dialogue.
@@ -7637,6 +7639,43 @@ async def request_clip_redo(
         # If regen fails, fall back to prepending feedback to existing prompt
         if request and request.reason and clip.prompt_text:
             clip.prompt_text = f"=== PRIORITY ===\n{request.reason}\n===\n\n{clip.prompt_text}"
+
+    # === v892.4 — an AUTHORED Veo prompt survives a redo ===
+    # A build ships its own per-clip Veo prompt (v572 veo_prompt_override) and
+    # promote copies it into Clip.prompt_text. The regeneration above rebuilds
+    # the prompt from scratch on EVERY redo, which threw that authored text away
+    # and replaced it with generic build_prompt output — whose default body says
+    # "speaks directly to camera". Operator 2026-08-18, iterating a street scene:
+    # the redone clip kept addressing the lens and kept the superseded motion,
+    # because none of the authored text was in play any more. The untouched
+    # clips in the same job still carried theirs, which is what proved it.
+    #
+    # So: if this clip is AUTHORED (the job's dialogue_json carries an override
+    # for it), keep the prompt it already had — including one the operator just
+    # PATCHed in, which is how a single clip gets iterated without re-promoting
+    # all of them. A redo that supplies new_dialogue still takes the rebuilt
+    # prompt, and a clip with no authored override is untouched by this.
+    if _pre_redo_prompt and not (request and request.new_dialogue is not None):
+        try:
+            _dj = json.loads(job.dialogue_json) if job.dialogue_json else {}
+            _lines = _dj.get("lines") if isinstance(_dj, dict) else _dj
+            _authored = False
+            for _ln in (_lines or []):
+                if not isinstance(_ln, dict):
+                    continue
+                if _ln.get("id") == clip.clip_index + 1 or _ln.get("clip_index") == clip.clip_index:
+                    _authored = bool((_ln.get("veo_prompt_override") or "").strip())
+                    break
+            if _authored and clip.prompt_text != _pre_redo_prompt:
+                clip.prompt_text = _pre_redo_prompt
+                # TEMP DIAGNOSTIC (v892.4) — strip once seen on a live redo.
+                print(f"[v892.4 REDO] clip {clip.id}: authored prompt kept "
+                      f"({len(_pre_redo_prompt)} chars); discarded the rebuild",
+                      flush=True)
+        except Exception as _ae:
+            print(f"[v892.4 REDO] clip {clip.id}: authored-prompt check failed: {_ae}",
+                  flush=True)
+
     
     # Part C: Add debug log to prove DB state at redo time
     add_job_log(
