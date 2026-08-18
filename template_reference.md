@@ -16739,5 +16739,7 @@ Old `stage4d.v2` artifacts stay valid v2; they are not v3. Reader house rules fo
 
 **Dead ends, measured so nobody re-tests them:** reference-photo detail level (two independent nulls, ~110 renders — use a clean portrait for hygiene and stop optimising); per-model prompt layers (helped ChatGPT, HURT both Banana models — never write one without evidence for that model); the v791 ban on thirds/grid words is stale on ChatGPT (operator-picked winner used them) but unmeasured on the Bananas.
 
+**Enforcement (2026-08-18):** every build declares  in §0; the auditor check  WARNs (forward-only) when the declaration is missing and when a fenced image prompt carries the measured-dead camera-position language. The crop backstop is a tool, not a hope:  (verified on the mannequin frame: an 18% top crop lifts the crystal mass out of the feed-UI zone).
+
 **Auditor/checker note:** checkers verify declarations, not decisions — the contract check verifies the mandatory blocks are present, never which creative values they carry.
 
