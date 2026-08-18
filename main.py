@@ -5791,6 +5791,10 @@ async def get_job_clips(
             total_variants=get_actual_versions_count(c),
             clip_mode=c.clip_mode or "fresh",
             scene_index=c.scene_index or 0,
+            # v861.2 — enumerate these HERE too: ClipResponse is built with
+            # explicit kwargs, so declaring a field on the model is not enough.
+            target_duration_s=c.target_duration_s,
+            veo_render_duration_s=c.veo_render_duration_s,
             prompt_text=c.prompt_text or None,
             prompt_text_b=c.prompt_text_b or None,  # v805/v821
             dialogue_text_b=c.dialogue_text_b or None,  # v821
@@ -5889,6 +5893,10 @@ async def get_job_clips_active(
             total_variants=get_actual_versions_count(c),
             clip_mode=c.clip_mode or "fresh",
             scene_index=c.scene_index or 0,
+            # v861.2 — enumerate these HERE too: ClipResponse is built with
+            # explicit kwargs, so declaring a field on the model is not enough.
+            target_duration_s=c.target_duration_s,
+            veo_render_duration_s=c.veo_render_duration_s,
             prompt_text=c.prompt_text or None,
             prompt_text_b=c.prompt_text_b or None,  # v805/v821
             dialogue_text_b=c.dialogue_text_b or None,  # v821
