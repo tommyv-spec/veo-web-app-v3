@@ -5791,6 +5791,81 @@ def tile_text_terminal_reason(page, data_index):
     return None
 
 
+# v899.7 — MINOR: probe the IMAGE before blaming it.
+#
+# The 2026-07-09 rule sent MINOR straight to the replace-image card on the
+# premise that "a minor-flagged IMAGE can't be fixed by rewording". Measured on
+# job f58e833f (2026-08-18) that premise is false: the SAME frame rendered fine
+# under three different prompts, and failed under three others.
+#
+#   full prompt, "my granddaughter ... she's eight"   -> PASSED
+#   full prompt, sewing-machine line                  -> PASSED
+#   minimal prompt "she talks"                        -> PASSED (2 videos)
+#   hem / collar / back-seam description  x3 wordings -> FAILED (minors) x5
+#
+# So the image is innocent and the SCENE DESCRIPTION is the trigger (garment
+# language beside a child's dress in frame). Blaming the image swapped the start
+# frame for one from another beat — the operator's "start image got mixed".
+#
+# Ladder: probe with a minimal prompt to ask "is it the image or the words?"
+#   probe FAILS    -> the image really is the problem -> terminal, replace image.
+#   probe PASSES   -> image cleared -> try Prompt B for a properly scripted clip.
+#   Prompt B fails -> terminal, but tell the operator to reword the SCENE, and
+#                     never swap the image (we have proof it renders).
+_MINOR_STAGE = {}
+_MINOR_STAGE_LOCK = threading.Lock()
+
+
+def minimal_probe_prompt(subject="The main AI generated character"):
+    """The smallest prompt that still renders — the diagnostic the operator ran
+    by hand as `she talks`. No scene description, so nothing for the minors
+    classifier to latch onto; if THIS fails, the image is genuinely at fault."""
+    return f"{subject} talks."
+
+
+def minor_reject_next_action(clip_id, has_prompt_b=None):
+    """Next step for a MINOR reject. Returns one of:
+       'probe_minimal'  — render the minimal prompt to test the image
+       'retry_prompt_b' — image cleared by the probe; try the reworded line
+       'terminal_prompt'— image cleared but B failed -> reword the SCENE
+       'terminal_image' — the probe failed too -> the image is the problem
+    """
+    if not clip_id:
+        return 'terminal_image'
+    if has_prompt_b is None:
+        has_prompt_b = bool(_CLIP_PROMPT_B.get(clip_id))
+    with _MINOR_STAGE_LOCK:
+        stage = _MINOR_STAGE.get(clip_id)
+        if stage is None:
+            _MINOR_STAGE[clip_id] = 'probed'
+            return 'probe_minimal'
+        if stage == 'probed':
+            # The probe was submitted and we are back here => it failed.
+            _MINOR_STAGE[clip_id] = 'image_blamed'
+            return 'terminal_image'
+        if stage == 'probe_passed':
+            if has_prompt_b and clip_id not in _PROMPT_B_TRIED:
+                _PROMPT_B_TRIED[clip_id] = True
+                _MINOR_STAGE[clip_id] = 'prompt_b'
+                return 'retry_prompt_b'
+            _MINOR_STAGE[clip_id] = 'done'
+            return 'terminal_prompt'
+        return 'terminal_prompt'
+
+
+def minor_probe_passed(clip_id):
+    """Call when the minimal probe RENDERED: the image is cleared, so the next
+    MINOR reject on this clip must blame the prompt, never the frame."""
+    if not clip_id:
+        return
+    with _MINOR_STAGE_LOCK:
+        if _MINOR_STAGE.get(clip_id) == 'probed':
+            _MINOR_STAGE[clip_id] = 'probe_passed'
+            print(f"[v899.7] clip {clip_id}: minimal prompt RENDERED -> image is "
+                  f"cleared; a further MINOR reject is the scene description, "
+                  f"not the frame", flush=True)
+
+
 def prominent_promptb_decision(clip_id):
     """v821b — decide how to handle a gen-time PROMINENT_PEOPLE block for this clip.
     Returns one of:
@@ -5881,6 +5956,12 @@ _TERMINAL_CONTENT_MESSAGES = {
     'SEXUAL': ("⚠️ Flow flagged this image/scene as sexual content. Upload a different image "
                "or change the pose/prompt (switching the model won't fix it)."),
     'CSAM': "⚠️ Flow blocked this image for safety. Upload a different image.",
+    # v899.7 — the image already rendered under a minimal prompt, so telling the
+    # operator to replace it would be wrong AND would swap a scene's frame for
+    # one from another beat. The wording is what trips it.
+    'MINOR_PROMPT': ("⚠️ Flow flagged this as minors-related, but the IMAGE renders fine "
+                     "on a minimal prompt — the scene description is the trigger. Reword "
+                     "the action (garment/child-adjacent wording), keep the image."),
     'REPUTATIONAL': ("⚠️ Flow blocked this as reputational / current-events risk. Change the prompt "
                      "(reword the scene, drop any public-figure or news framing) — retrying won't fix it."),
     'MISREPRESENT': ("⚠️ Flow blocked this as reputational / current-events risk. Change the prompt "
@@ -5928,6 +6009,46 @@ def handle_terminal_reject(clip_id, reason, account_name="", job_id=None, clip_i
     card, no Prompt B. Shares prominent_promptb_decision (reason-agnostic: it only
     checks whether the clip has an un-tried prompt_b) with the tile-text path."""
     _r = (reason or '').upper()
+
+    # v899.7 — MINOR no longer jumps straight to replace-image. Probe the image
+    # with a minimal prompt first; only blame the frame if THAT fails too.
+    # (The 2026-07-09 exclusion assumed the image was always at fault; job
+    # f58e833f disproved it — same frame rendered under a minimal prompt.)
+    if 'MINOR' in _r:
+        _m = minor_reject_next_action(clip_id)
+        if _m == 'probe_minimal' and requeue:
+            try:
+                update_clip_status(
+                    clip_id, 'flow_redo_queued',
+                    error_message=f'v899.7 {reason} -> probing image with a minimal prompt')
+            except Exception as _pe:
+                print(f"[v899.7] probe requeue failed for clip {clip_id} ({_pe})", flush=True)
+            else:
+                print(f"[v899.7] {reason} on clip {clip_id} -> minimal-prompt probe "
+                      f"(is it the image or the words?)", flush=True)
+                return 'requeued'
+        elif _m == 'retry_prompt_b' and requeue:
+            try:
+                update_clip_status(
+                    clip_id, 'flow_redo_queued',
+                    error_message=f'v899.7 {reason} -> image cleared, retry reworded line (Prompt B)')
+            except Exception as _pe:
+                _PROMPT_B_TRIED.pop(clip_id, None)
+                print(f"[v899.7] prompt-B requeue failed for clip {clip_id} ({_pe})", flush=True)
+            else:
+                print(f"[v899.7] {reason} on clip {clip_id} -> image cleared by probe, "
+                      f"retrying with Prompt B", flush=True)
+                return 'requeued'
+        elif _m == 'terminal_prompt':
+            # Image is PROVEN renderable — do not tell the operator to change it.
+            print(f"[v899.7] {reason} on clip {clip_id} -> image cleared but the wording "
+                  f"still trips it; the SCENE DESCRIPTION is the trigger", flush=True)
+            route_terminal_content_reject(
+                clip_id, 'MINOR_PROMPT',
+                account_name if 'account_name' in dir() else '')
+            return 'terminal'
+        # 'terminal_image' falls through to the existing terminal handling below.
+
     if any(_t in _r for _t in ('PROMINENT', 'SEXUAL')):
         d = prominent_promptb_decision(clip_id)
         if d == 'retry_prompt_b' and requeue:
