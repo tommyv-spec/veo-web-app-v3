@@ -183,6 +183,43 @@ def main():
                 "static/index.html never sends it — it arrives as None on every job "
                 "(this is v892.2)".format(f))
 
+    # ---- CHECK 4 — parsed block fields reach a dict ----------------------
+    # The markdown-parse -> scene-assignment boundary, the first of the four.
+    # A field the parser goes looking for (`- **name:**`) has to land as a key
+    # on the scene dict or the image dict, or it was read and thrown away.
+    # Checked when written and found CLEAN — this guards it from here on.
+    imgp_src = IMGP.read_text(encoding="utf-8")
+    recognised = set(re.findall(r"\\\*\\\*([a-z_0-9]+):\\\*\\\*", imgp_src))
+
+    def dict_keys(call):
+        best = set()
+        for m in re.finditer(re.escape(call) + r"\(\{", imgp_src):
+            i, depth = m.end(), 1
+            while depth and i < len(imgp_src):
+                if imgp_src[i] == "{":
+                    depth += 1
+                elif imgp_src[i] == "}":
+                    depth -= 1
+                i += 1
+            keys = set(re.findall(r'^\s*"([a-z_0-9]+)":', imgp_src[m.end():i], re.M))
+            if len(keys) > len(best):
+                best = keys
+        return best
+
+    emitted = dict_keys("scenes.append") | dict_keys("images.append")
+    # Fields deliberately renamed on the way out, each matching its DB column.
+    # A rename is legitimate; being dropped is not. This list is small and
+    # explicit on purpose — if it starts growing, the renaming is the problem.
+    RENAMED = {"image": "image_index",
+               "frame_anchor": "frame_anchor_s",
+               "variants": "n_variants"}
+    for f in sorted(recognised):
+        if f in emitted or RENAMED.get(f) in emitted:
+            continue
+        problems.append(
+            "CHECK4 {0}: the parser looks for `- **{0}:**` but no scene/image dict "
+            "ever carries it — the field is read out of the build and dropped".format(f))
+
     # ---- CHECK 3 — assignment columns survive to_dict --------------------
     cols = sa_columns(imgp_tree, "ImageSceneAssignment")
     keys = to_dict_keys(imgp_tree, "ImageSceneAssignment")
