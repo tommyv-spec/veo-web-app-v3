@@ -351,6 +351,12 @@ class CreateJobRequest(BaseModel):
 from job_response import JobResponse  # noqa: E402
 
 
+# v931 — redos are unlimited (operator 2026-08-18). attempts_remaining stays
+# in the API as a positive sentinel so older frontends' "disable at <= 0"
+# guards never fire. 999 is never displayed (v931 UI strips the counters).
+UNLIMITED_ATTEMPTS_REMAINING = 999
+
+
 class ClipResponse(BaseModel):
     id: int
     clip_index: int
@@ -366,7 +372,7 @@ class ClipResponse(BaseModel):
     # New approval fields
     approval_status: str = "pending_review"
     generation_attempt: int = 1
-    attempts_remaining: int = 2
+    attempts_remaining: int = UNLIMITED_ATTEMPTS_REMAINING
     redo_reason: Optional[str] = None
     versions: List[Dict] = []
     # Variant fields
@@ -542,6 +548,24 @@ async def lifespan(app: FastAPI):
                 print(f"[Deferred] Backfilled {_res[0]} job(s) with user_id={_res[1]} ({_res[2]})", flush=True)
         except Exception as _jbf_e:
             print(f"[Deferred] jobs user_id backfill: {_jbf_e}", flush=True)
+
+        # v931 — one-time normalization: clips stranded 'max_attempts' by the
+        # retired 3-attempt redo cap become reviewable again. Idempotent.
+        try:
+            from models import Clip as _Clip931, get_db as _get_db931
+            def _clear_max_attempts():
+                with _get_db931() as _db:
+                    _n = _db.query(_Clip931).filter(_Clip931.approval_status == "max_attempts").update(
+                        {"approval_status": "pending_review"}, synchronize_session=False
+                    )
+                    if _n:
+                        _db.commit()
+                    return _n
+            _nm = await _asyncio.to_thread(_clear_max_attempts)
+            if _nm:
+                print(f"[Deferred][v931] Cleared legacy max_attempts flag on {_nm} clip(s) — redos are unlimited now", flush=True)
+        except Exception as _v931e:
+            print(f"[Deferred][v931] max_attempts normalization failed: {_v931e}", flush=True)
 
         # v487: rescue orphaned redos. Any Job that has a clip in
         # flow_redo_queued but whose own updated_at is older than 24h
@@ -5751,7 +5775,7 @@ async def get_job_clips(
             error_message=c.error_message,
             approval_status=c.approval_status or "pending_review",
             generation_attempt=c.generation_attempt or 1,
-            attempts_remaining=3 - (c.generation_attempt or 1),
+            attempts_remaining=UNLIMITED_ATTEMPTS_REMAINING,
             redo_reason=c.redo_reason,
             versions=deduplicate_versions(c.versions_json, job_id=c.job_id),
             selected_variant=c.selected_variant if c.selected_variant else 1,
@@ -5849,7 +5873,7 @@ async def get_job_clips_active(
             error_message=c.error_message,
             approval_status=c.approval_status or "pending_review",
             generation_attempt=c.generation_attempt or 1,
-            attempts_remaining=3 - (c.generation_attempt or 1),
+            attempts_remaining=UNLIMITED_ATTEMPTS_REMAINING,
             redo_reason=c.redo_reason,
             versions=deduplicate_versions(c.versions_json, job_id=c.job_id),
             selected_variant=c.selected_variant if c.selected_variant else 1,
@@ -5892,9 +5916,6 @@ async def approve_clip(
     
     if clip.status != ClipStatus.COMPLETED.value:
         raise HTTPException(status_code=400, detail="Can only approve completed clips")
-    
-    if clip.approval_status == "max_attempts":
-        raise HTTPException(status_code=400, detail="Clip has reached max attempts - contact support")
     
     # Update approval status
     clip.approval_status = "approved"
@@ -5941,7 +5962,7 @@ async def approve_clip(
         clip_id=clip.id,
         status="approved",
         message="Clip approved" + (" - next clip will start generating" if next_clip_triggered else ""),
-        attempts_remaining=3 - clip.generation_attempt
+        attempts_remaining=UNLIMITED_ATTEMPTS_REMAINING
     )
 
 
@@ -5969,7 +5990,7 @@ async def reject_clip(
         clip_id=clip.id,
         status="rejected",
         message="Clip has been rejected. You can redo it or leave as is.",
-        attempts_remaining=3 - clip.generation_attempt
+        attempts_remaining=UNLIMITED_ATTEMPTS_REMAINING
     )
 
 
@@ -7391,7 +7412,7 @@ async def select_clip_variant(
             error_message=clip.error_message,
             approval_status=clip.approval_status or "pending_review",
             generation_attempt=clip.generation_attempt or 1,
-            attempts_remaining=3 - (clip.generation_attempt or 1),
+            attempts_remaining=UNLIMITED_ATTEMPTS_REMAINING,
             redo_reason=clip.redo_reason,
             selected_variant=variant_num,
             total_variants=len(versions),
@@ -7411,8 +7432,8 @@ async def request_clip_redo(
     Request a redo for a clip.
     
     - Attempt 1 → 2: Uses same logged parameters
-    - Attempt 2 → 3: Uses fresh parameters (no log)
-    - Attempt 3: No more redos allowed, must contact support
+    - Attempt 3+: Uses fresh parameters (no log)
+    - v931: attempts are unlimited (the old cap at 3 is removed)
     
     For Flow backend jobs: sets status to 'flow_redo_queued' (handled by Flow worker)
     For API backend jobs: sets status to 'redo_queued' (handled by API worker)
@@ -7430,7 +7451,7 @@ async def request_clip_redo(
             clip_id=clip.id,
             status="redo_queued",
             message="Redo already queued - please wait",
-            attempts_remaining=3 - clip.generation_attempt
+            attempts_remaining=UNLIMITED_ATTEMPTS_REMAINING
         )
     
     if clip.status == ClipStatus.GENERATING.value:
@@ -7443,18 +7464,11 @@ async def request_clip_redo(
     if clip.status not in [ClipStatus.COMPLETED.value, ClipStatus.FAILED.value]:
         raise HTTPException(status_code=400, detail=f"Can only redo completed or failed clips (current status: {clip.status})")
     
-    # Check attempt limit
-    if clip.generation_attempt >= 3:
-        clip.approval_status = "max_attempts"
-        db.commit()
-        raise HTTPException(
-            status_code=400, 
-            detail={
-                "code": "MAX_ATTEMPTS_REACHED",
-                "message": "Maximum 3 attempts reached. Please contact support for assistance.",
-                "support_email": "support@yourdomain.com"
-            }
-        )
+    # v931 — redos are unlimited. The old 3-attempt cap ('max_attempts' flag +
+    # MAX_ATTEMPTS_REACHED 400) is gone. Clear the legacy flag so clips capped
+    # under the old rule become reviewable again after this redo.
+    if clip.approval_status == "max_attempts":
+        clip.approval_status = "pending_review"
     
     # Save current version to history before redo (avoid duplicates)
     versions = json.loads(clip.versions_json) if clip.versions_json else []
@@ -7478,7 +7492,7 @@ async def request_clip_redo(
     
     # Determine if we use logged params
     # Attempt 2: use logged params (same settings)
-    # Attempt 3: fresh generation (no logged params)
+    # Attempt 3+: fresh generation (no logged params)
     clip.use_logged_params = (new_attempt == 2)
     
     # Set status for redo queue based on backend type
@@ -7644,7 +7658,7 @@ async def request_clip_redo(
         clip_id=clip.id,
         status="redo_queued",  # UI always sees "redo_queued" for display purposes
         message=f"Redo queued (attempt {new_attempt}/3). {'Using same parameters.' if clip.use_logged_params else 'Using fresh parameters.'}",
-        attempts_remaining=3 - new_attempt
+        attempts_remaining=UNLIMITED_ATTEMPTS_REMAINING
     )
 
 
@@ -7801,7 +7815,7 @@ async def get_clip(
         "status": clip.status,
         "approval_status": clip.approval_status,
         "generation_attempt": clip.generation_attempt,
-        "attempts_remaining": 3 - clip.generation_attempt,
+        "attempts_remaining": UNLIMITED_ATTEMPTS_REMAINING,
     }
 
 
@@ -7832,7 +7846,7 @@ async def get_clip_versions(
         "clip_id": clip_id,
         "dialogue_id": clip.dialogue_id,
         "total_attempts": clip.generation_attempt,
-        "attempts_remaining": 3 - clip.generation_attempt,
+        "attempts_remaining": UNLIMITED_ATTEMPTS_REMAINING,
         "versions": versions,
     }
 

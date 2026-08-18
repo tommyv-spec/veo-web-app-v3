@@ -1311,7 +1311,7 @@ class JobWorker:
                 frames_keys_status = "SET" if job.frames_storage_keys else "NULL"
                 add_job_log(
                     db, job_id, 
-                    f"[{WORKER_VERSION}] Starting redo for clip {clip.clip_index + 1} (attempt {clip.generation_attempt}/3) [R2 keys: {frames_keys_status}]",
+                    f"[{WORKER_VERSION}] Starting redo for clip {clip.clip_index + 1} (attempt {clip.generation_attempt}) [R2 keys: {frames_keys_status}]",
                     "INFO", "redo"
                 )
                 
@@ -1747,7 +1747,7 @@ class JobWorker:
                         
                         add_job_log(
                             db, job_id,
-                            f"Redo completed for clip {clip.clip_index + 1} (attempt {clip.generation_attempt}/3)",
+                            f"Redo completed for clip {clip.clip_index + 1} (attempt {clip.generation_attempt})",
                             "INFO", "redo"
                         )
                     else:

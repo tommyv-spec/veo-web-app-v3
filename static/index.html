@@ -11757,9 +11757,9 @@ Ambient: same kitchen room tone, soft pour sound.
             if(collapsedActs){
                 let acts='';
                 if(approved)acts=`<div style="display:flex;align-items:center;justify-content:center;gap:8px">${hasMultipleVariants?`<button class="variant-btn" onclick="switchVariant(${clip.id},${selectedVariant-1})" ${selectedVariant<=1?'disabled':''}>◀</button>`:''}<span style="color:var(--success);font-size:14px">✓ Approved${hasMultipleVariants?' ('+versionLabel+')':''}</span>${hasMultipleVariants?`<button class="variant-btn" onclick="switchVariant(${clip.id},${selectedVariant+1})" ${selectedVariant>=totalVariants?'disabled':''}>▶</button>`:''}<button class="btn btn-secondary btn-sm" style="padding:4px 8px;font-size:11px" onclick="downloadClip('${API}/jobs/${jobId}/outputs/${clip.output_filename}','clip_${clip.clip_index+1}.mp4')" title="Download clip">📥</button><button class="btn btn-redo btn-sm" style="padding:4px 8px;font-size:11px" onclick="redoModal(${clipId},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''} title="Redo clip">↻</button><button class="btn btn-secondary btn-sm" style="padding:4px 8px;font-size:11px;color:var(--text-muted)" onclick="confirmDelete(${clipId},${clip.clip_index})" title="Remove clip">🗑</button></div>`;
-                else if(rejected)acts=`<div class="rejected-notice"><span>❌ Rejected</span>${clip.attempts_remaining>0&&clipId?`<button class="btn btn-redo btn-sm" onclick="redoModal(${clipId},${clip.attempts_remaining},${clip.clip_index})">↻ Redo (${clip.attempts_remaining})</button>`:'<span>No redos</span>'}</div>`;
+                else if(rejected)acts=`<div class="rejected-notice"><span>❌ Rejected</span>${clip.attempts_remaining>0&&clipId?`<button class="btn btn-redo btn-sm" onclick="redoModal(${clipId},${clip.attempts_remaining},${clip.clip_index})">↻ Redo</button>`:'<span>No redos</span>'}</div>`;
                 else if(maxed)acts='<div class="max-notice">⚠️ Max attempts</div>';
-                else if(canReview&&clipId)acts=`<div class="clip-actions"><button class="btn btn-approve" onclick="approve(${clipId})">✓</button><button class="btn btn-reject" onclick="confirmDelete(${clipId},${clip.clip_index})">🗑</button><button class="btn btn-redo" onclick="redoModal(${clipId},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''}>↻${clip.attempts_remaining}</button></div>`;
+                else if(canReview&&clipId)acts=`<div class="clip-actions"><button class="btn btn-approve" onclick="approve(${clipId})">✓</button><button class="btn btn-reject" onclick="confirmDelete(${clipId},${clip.clip_index})">🗑</button><button class="btn btn-redo" onclick="redoModal(${clipId},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''}>↻</button></div>`;
                 collapsedActs.innerHTML=acts;
             }
             // v176: Update expanded actions too — keeps both views in sync
@@ -11767,10 +11767,10 @@ Ambient: same kitchen room tone, soft pour sound.
             if(expandedActs){
                 let eActs='';
                 if(approved)eActs=`<div style="display:flex;align-items:center;justify-content:center;gap:8px"><span style="color:var(--success);font-size:13px">✓ Approved${hasMultipleVariants?' (v'+versionLabel+')':''}</span><button class="btn btn-secondary btn-sm" style="padding:4px 8px;font-size:11px" onclick="downloadClip('${API}/jobs/${jobId}/outputs/${clip.output_filename}','clip_${clip.clip_index+1}.mp4')">📥</button><button class="btn btn-redo btn-sm" style="padding:4px 8px;font-size:11px" onclick="redoModal(${clipId},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''} title="Redo clip">↻</button></div>`;
-                else if(rejected)eActs=`<div class="rejected-notice"><span>❌ Rejected</span>${clip.attempts_remaining>0&&clipId?`<button class="btn btn-redo btn-sm" onclick="redoModal(${clipId},${clip.attempts_remaining},${clip.clip_index})">↻ Redo (${clip.attempts_remaining})</button>`:'<span>No redos</span>'}</div>`;
+                else if(rejected)eActs=`<div class="rejected-notice"><span>❌ Rejected</span>${clip.attempts_remaining>0&&clipId?`<button class="btn btn-redo btn-sm" onclick="redoModal(${clipId},${clip.attempts_remaining},${clip.clip_index})">↻ Redo</button>`:'<span>No redos</span>'}</div>`;
                 else if(maxed)eActs='<div class="max-notice">⚠️ Max attempts</div>';
-                else if(canReview&&clipId&&hasMultipleVariants)eActs=`<div style="display:flex;align-items:center;justify-content:center;gap:6px"><span style="color:var(--text-muted);font-size:11px">Click a variant to select & approve</span><button class="btn btn-reject btn-sm" style="padding:4px 10px;font-size:11px" onclick="confirmDelete(${clipId},${clip.clip_index})">🗑</button><button class="btn btn-redo btn-sm" style="padding:4px 10px;font-size:11px" onclick="redoModal(${clipId},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''}>↻ Redo (${clip.attempts_remaining})</button></div>`;
-                else if(canReview&&clipId)eActs=`<div class="clip-actions"><button class="btn btn-approve" onclick="approve(${clipId})">✓</button><button class="btn btn-reject" onclick="confirmDelete(${clipId},${clip.clip_index})">🗑</button><button class="btn btn-redo" onclick="redoModal(${clipId},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''}>↻${clip.attempts_remaining}</button></div>`;
+                else if(canReview&&clipId&&hasMultipleVariants)eActs=`<div style="display:flex;align-items:center;justify-content:center;gap:6px"><span style="color:var(--text-muted);font-size:11px">Click a variant to select & approve</span><button class="btn btn-reject btn-sm" style="padding:4px 10px;font-size:11px" onclick="confirmDelete(${clipId},${clip.clip_index})">🗑</button><button class="btn btn-redo btn-sm" style="padding:4px 10px;font-size:11px" onclick="redoModal(${clipId},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''}>↻ Redo</button></div>`;
+                else if(canReview&&clipId)eActs=`<div class="clip-actions"><button class="btn btn-approve" onclick="approve(${clipId})">✓</button><button class="btn btn-reject" onclick="confirmDelete(${clipId},${clip.clip_index})">🗑</button><button class="btn btn-redo" onclick="redoModal(${clipId},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''}>↻</button></div>`;
                 expandedActs.innerHTML=eActs;
             }
             // Update variant nav
@@ -12003,7 +12003,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 }
             }
             else if(approved)acts=`<div style="display:flex;align-items:center;justify-content:center;gap:6px;flex-wrap:wrap">${hasMultipleVariants?`<button class="variant-btn" onclick="switchVariant(${c.id},${selectedVariant-1})" ${selectedVariant<=1?'disabled':''}>◀</button>`:''}<span style="color:var(--success);font-size:12px;white-space:nowrap">✓ ${hasMultipleVariants?versionLabel:'OK'}</span>${hasMultipleVariants?`<button class="variant-btn" onclick="switchVariant(${c.id},${selectedVariant+1})" ${selectedVariant>=totalVariants?'disabled':''}>▶</button>`:''}<button class="btn btn-secondary btn-sm" style="padding:4px 8px;font-size:11px" onclick="downloadClip('${API}/jobs/${jid}/outputs/${c.output_filename}','clip_${c.clip_index+1}.mp4')" title="Download clip">📥</button><button class="btn btn-redo btn-sm" style="padding:4px 8px;font-size:11px" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})" ${c.attempts_remaining<=0?'disabled':''} title="Redo clip">↻</button><button class="btn btn-secondary btn-sm" style="padding:4px 8px;font-size:11px;color:var(--text-muted)" onclick="confirmDelete(${clipId},${c.clip_index})" title="Remove clip">🗑</button></div>`;
-            else if(rejected&&!redoQueued)acts=`<div class="rejected-notice"><span>❌ Rejected</span>${c.attempts_remaining>0&&clipId?`<button class="btn btn-redo btn-sm" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})">↻ Redo (${c.attempts_remaining})</button>`:'<span>No redos</span>'}</div>`;
+            else if(rejected&&!redoQueued)acts=`<div class="rejected-notice"><span>❌ Rejected</span>${c.attempts_remaining>0&&clipId?`<button class="btn btn-redo btn-sm" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})">↻ Redo</button>`:'<span>No redos</span>'}</div>`;
             else if(maxed)acts='<div class="max-notice">⚠️ Max attempts</div>';
             else if(waitingApproval)acts=`<div style="color:#f59e0b;text-align:center;font-size:10px">⏸️ Approve clip #${c.clip_index} first${cancelBtn}</div>`;
             else if(preparing)acts=`<div style="color:#a78bfa;text-align:center;font-size:10px">⚡ Extracting continue frame${cancelBtn}</div>`;
@@ -12031,9 +12031,9 @@ Ambient: same kitchen room tone, soft pour sound.
                 // For non-image-attributable failures (RATE_LIMIT / TIMEOUT
                 // / NETWORK / VIDEO_GENERATION_FAILED etc.) the upload button
                 // is hidden — retry is the only fix.
-                acts=`<div style="text-align:center"><div style="color:var(--error);font-size:10px;margin-bottom:6px">${c.error_message||'Failed'}</div><div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap">${c.attempts_remaining>0&&clipId?`<button class="btn btn-redo btn-sm" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})">↻ Retry (${c.attempts_remaining} left)</button>`:''}${_revertBtn}<button class="btn btn-sm" onclick="confirmDelete(${clipId},${c.clip_index})" style="background:var(--surface-2);color:var(--text-muted);padding:4px 10px;font-size:11px;">✕ Remove</button></div></div>`;
+                acts=`<div style="text-align:center"><div style="color:var(--error);font-size:10px;margin-bottom:6px">${c.error_message||'Failed'}</div><div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap">${c.attempts_remaining>0&&clipId?`<button class="btn btn-redo btn-sm" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})">↻ Retry</button>`:''}${_revertBtn}<button class="btn btn-sm" onclick="confirmDelete(${clipId},${c.clip_index})" style="background:var(--surface-2);color:var(--text-muted);padding:4px 10px;font-size:11px;">✕ Remove</button></div></div>`;
             }
-            else if(canReview&&clipId)acts=`<div class="clip-actions"><button class="btn btn-approve" onclick="approve(${clipId})">✓</button><button class="btn btn-reject" onclick="confirmDelete(${clipId},${c.clip_index})">🗑</button><button class="btn btn-redo" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})" ${c.attempts_remaining<=0?'disabled':''}>↻${c.attempts_remaining}</button></div>`;
+            else if(canReview&&clipId)acts=`<div class="clip-actions"><button class="btn btn-approve" onclick="approve(${clipId})">✓</button><button class="btn btn-reject" onclick="confirmDelete(${clipId},${c.clip_index})">🗑</button><button class="btn btn-redo" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})" ${c.attempts_remaining<=0?'disabled':''}>↻</button></div>`;
             // Frame info display
             // v779 — show the actual start (and end, if any) frame image as a
             // thumbnail + download button, right above the prompt/dialogue. Was
@@ -12095,7 +12095,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 expandedVid = gridHtml;
                 
                 if(approved) expandedActs = `<div style="display:flex;align-items:center;justify-content:center;gap:8px"><span style="color:var(--success);font-size:13px">\u2713 Approved (v${versionLabel})</span><button class="btn btn-secondary btn-sm" style="padding:4px 8px;font-size:11px" onclick="downloadClip('${API}/jobs/${selectedJobId}/outputs/${c.output_filename}','clip_${c.clip_index+1}.mp4')" title="Download clip">\ud83d\udce5</button><button class="btn btn-redo btn-sm" style="padding:4px 8px;font-size:11px" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})" ${c.attempts_remaining<=0?'disabled':''} title="Redo clip">\u21bb</button></div>`;
-                else if(canReview) expandedActs = `<div style="display:flex;align-items:center;justify-content:center;gap:6px"><span style="color:var(--text-muted);font-size:11px">Click a variant to select & approve</span><button class="btn btn-reject btn-sm" style="padding:4px 10px;font-size:11px" onclick="confirmDelete(${clipId},${c.clip_index})" title="Delete clip">\ud83d\uddd1</button><button class="btn btn-redo btn-sm" style="padding:4px 10px;font-size:11px" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})" ${c.attempts_remaining<=0?'disabled':''}>\u21bb Redo (${c.attempts_remaining})</button></div>`;
+                else if(canReview) expandedActs = `<div style="display:flex;align-items:center;justify-content:center;gap:6px"><span style="color:var(--text-muted);font-size:11px">Click a variant to select & approve</span><button class="btn btn-reject btn-sm" style="padding:4px 10px;font-size:11px" onclick="confirmDelete(${clipId},${c.clip_index})" title="Delete clip">\ud83d\uddd1</button><button class="btn btn-redo btn-sm" style="padding:4px 10px;font-size:11px" onclick="redoModal(${clipId},${c.attempts_remaining},${c.clip_index})" ${c.attempts_remaining<=0?'disabled':''}>\u21bb Redo</button></div>`;
                 else expandedActs = acts;
             } else if(c.output_filename && !isRegenerating && !failed && !pending && !skipped) {
                 // Single variant — show it as a card in expanded mode too
@@ -12298,7 +12298,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 // green on BOTH sides approved.
                 acts = `<div class="clip-actions" style="display:flex;gap:4px;justify-content:center;">
                     <button class="btn btn-approve btn-sm" style="padding:4px 8px;font-size:11px;" onclick="approvePairedSide(${clip.id},${clip.clip_index})" title="approve ${sideLabel}">✓</button>
-                    <button class="btn btn-redo btn-sm" style="padding:4px 8px;font-size:11px;" onclick="redoModal(${clip.id},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''} title="redo ${sideLabel}">↻${clip.attempts_remaining}</button>
+                    <button class="btn btn-redo btn-sm" style="padding:4px 8px;font-size:11px;" onclick="redoModal(${clip.id},${clip.attempts_remaining},${clip.clip_index})" ${clip.attempts_remaining<=0?'disabled':''} title="redo ${sideLabel}">↻</button>
                 </div>`;
             } else {
                 acts = `<div style="text-align:center;color:var(--text-muted);font-size:10px;">—</div>`;
@@ -13486,7 +13486,7 @@ Ambient: same kitchen room tone, soft pour sound.
         
         let redoClip=null,redoClipIndex=null,redoOriginalDialogue=null;
         async function redoModal(cid,rem,clipIdx){
-            if(rem<=0)return alert('No redos left');
+            // v931 — redos are unlimited; the old "No redos left" gate is gone.
             redoClip=cid;
             redoClipIndex=clipIdx;
             
@@ -13517,7 +13517,7 @@ Ambient: same kitchen room tone, soft pour sound.
                     
                     <div class="modal-actions" style="margin-top:16px;">
                         <button class="btn btn-secondary btn-sm" onclick="closeModal()">Cancel</button>
-                        <button class="btn btn-redo btn-sm" onclick="submitRedo()">↻ Regenerate (${rem-1} left)</button>
+                        <button class="btn btn-redo btn-sm" onclick="submitRedo()">↻ Regenerate</button>
                     </div>
                 </div>
             `;
