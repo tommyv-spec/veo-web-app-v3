@@ -517,6 +517,59 @@ _VIDEO_POLICY_TERMINAL_LOCK = threading.Lock()
 # it belongs on the terminal list (never retry/swap). Surfaces in the FAILED tile
 # text too — see tile_text_terminal_reason for the DOM-side catch.
 _VIDEO_POLICY_TERMINAL_REASONS = ('PROMINENT_PEOPLE', 'SEXUAL', 'CSAM', 'REPUTATIONAL', 'MISREPRESENT', 'MINOR')
+
+# v899.6 — NOT every content reject is a fact about the image.
+#
+# Measured on job f58e833f (2026-08-18): image_01.png was rejected as MINOR on
+# clip #4, yet the SAME image passed on clips #2 and #3 in the same job, and
+# clip #12 failed on it and then completed on a later attempt. So the verdict is
+# NON-DETERMINISTIC for some reasons — the classifier, not the content.
+#
+# Treating those as terminal was actively harmful: it skipped the retry that
+# would have worked and jumped to swapping the start frame, which silently
+# replaced a scene's frame with one from a different beat (the operator's
+# "the start image got mixed" report). Retry the same frame a bounded number of
+# times FIRST, and only escalate to changing the image when it keeps failing.
+#
+# HARD reasons stay terminal and are never retried:
+#   CSAM            — must never be re-submitted, at all.
+#   PROMINENT_PEOPLE / REPUTATIONAL / MISREPRESENT — a recognised face or
+#                     likeness does not change between attempts, so retrying
+#                     only burns credits.
+_POLICY_SOFT_REASONS = ('MINOR', 'SEXUAL')
+_POLICY_SOFT_MAX_ATTEMPTS = 2
+_POLICY_SOFT_SEEN = {}
+_POLICY_SOFT_LOCK = threading.Lock()
+
+
+def policy_reason_is_terminal(reason, job_id=None, clip_index=None, log=print):
+    """Is this content reject worth giving up on, or worth one more attempt?
+
+    Returns True to route terminal (replace-image / anchor swap), False to retry
+    the SAME frame. Soft reasons get _POLICY_SOFT_MAX_ATTEMPTS tries per clip
+    before escalating; hard reasons escalate immediately. Unknown reasons are
+    treated as soft — a retry is cheap, a wrongly-swapped frame is not.
+    """
+    r = (reason or '').upper()
+    if not r:
+        return False
+    if not any(soft in r for soft in _POLICY_SOFT_REASONS):
+        return True  # CSAM / PROMINENT / REPUTATIONAL / MISREPRESENT
+    key = (str(job_id), clip_index, r)
+    with _POLICY_SOFT_LOCK:
+        seen = _POLICY_SOFT_SEEN.get(key, 0) + 1
+        _POLICY_SOFT_SEEN[key] = seen
+        if len(_POLICY_SOFT_SEEN) > 512:
+            _POLICY_SOFT_SEEN.clear()
+            _POLICY_SOFT_SEEN[key] = seen
+    if seen < _POLICY_SOFT_MAX_ATTEMPTS:
+        log(f"[v899.6] {r} on clip {clip_index} attempt {seen}/"
+            f"{_POLICY_SOFT_MAX_ATTEMPTS} — NOT terminal yet, retrying the same "
+            f"frame (this verdict is known to flip between attempts)")
+        return False
+    log(f"[v899.6] {r} on clip {clip_index} persisted {seen}x — escalating to "
+        f"terminal (image really does need changing)")
+    return True
 _VIDEO_POLICY_TERMINAL_WINDOW_S = 180.0     # how recent a reject counts (media-keyed, so safe to keep longer)
 _UUID_RE = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
 
@@ -11211,6 +11264,12 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
         # error (caller routes route_terminal_content_reject); do NOT retry, do NOT
         # golden-restore. This stops a SEXUAL fail being mis-read as unusual-activity.
         _term_reason = _terminal_reason_for_uuids(_failed_uuids)
+        # v899.6 — a soft reason (MINOR/SEXUAL) gets a same-frame retry first;
+        # its verdict is known to flip between attempts on identical input.
+        if _term_reason and not policy_reason_is_terminal(
+                _term_reason, job_id=locals().get('job_id'), clip_index=locals().get('clip_index'),
+                log=lambda m: print(m, flush=True)):
+            _term_reason = None
         if _term_reason:
             print(f"[FailCheck] ⛔ TERMINAL content reject ({_term_reason}) on clip {clip_num} "
                   f"media {[u[:8] for u in _failed_uuids]} — marking policy error, NOT retrying/restoring", flush=True)
@@ -17665,6 +17724,12 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
         # Definitive API terminal (PROMINENT_PEOPLE) that the DOM check surfaced
         # as a real failure — deterministic face-content reject.
         _term_reason = _consume_video_policy_terminal_for_clip(job_id, clip_index)
+        # v899.6 — do not swap the start frame on the FIRST soft reject. Swapping
+        # early is what replaced a scene's frame with one from another beat.
+        if _term_reason and not policy_reason_is_terminal(
+                _term_reason, job_id=job_id, clip_index=clip_index,
+                log=lambda m: print(m, flush=True)):
+            _term_reason = None
         if _term_reason:
             # v821b — prominent with an un-tried Prompt B -> requeue with reworded line.
             if handle_terminal_reject(clip_id, _term_reason, job_id=job_id, clip_index=clip_index) == 'requeued':
