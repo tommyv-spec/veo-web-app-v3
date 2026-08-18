@@ -363,3 +363,76 @@ if __name__ == "__main__":
 
     found = locate_firefox_profile(a.email)
     print(f"profile for {a.email}: {found or 'NOT FOUND'}")
+
+
+def read_cookies_for_playwright(profile_dir, log=print):
+    """Firefox cookies.sqlite -> Playwright add_cookies() dicts.
+
+    Needed because rebuilding the golden only rewrites FILES. When the session
+    dies mid-run the browser already has the profile open, so overwriting
+    cookies.sqlite underneath it changes nothing about the live session — the
+    dead cookies stay in memory. Injecting them into the running context is what
+    actually recovers without a browser restart.
+
+    Reads a COPY: the source may be locked, and the operator's real profile must
+    never be written to. Returns [] on any failure.
+    """
+    src = os.path.join(profile_dir, "cookies.sqlite")
+    if not os.path.isfile(src):
+        return []
+    tmp = os.path.join(tempfile.gettempdir(),
+                       f"ffpull_ck_{abs(hash(profile_dir))}.sqlite")
+    out = []
+    try:
+        shutil.copy2(src, tmp)
+        con = sqlite3.connect(tmp)
+        try:
+            rows = con.execute(
+                "SELECT name, value, host, path, expiry, isSecure, isHttpOnly, sameSite "
+                "FROM moz_cookies"
+            ).fetchall()
+        finally:
+            con.close()
+        # Firefox stores sameSite as 0/1/2; Playwright wants the words.
+        same = {0: "None", 1: "Lax", 2: "Strict"}
+        for name, value, host, path, expiry, secure, httponly, ss in rows:
+            if not name or host is None:
+                continue
+            ck = {
+                "name": name,
+                "value": value or "",
+                "domain": host,
+                "path": path or "/",
+                "httpOnly": bool(httponly),
+                "secure": bool(secure),
+                "sameSite": same.get(ss, "Lax"),
+            }
+            # expiry 0 == session cookie -> omit the key entirely. Firefox also
+            # stores NEGATIVE expiries for some rows, and Playwright rejects the
+            # whole add_cookies() batch on one bad value ("only -1 or a positive
+            # number ... is allowed"), so guard for >0 rather than truthiness.
+            # expiry 0 == session cookie -> omit the key entirely. Two traps:
+            #  * Firefox stores NEGATIVE expiries on some rows.
+            #  * This profile stores expiry in MILLISECONDS (measured: 1787448315241
+            #    == 2026-08-21), while Playwright wants SECONDS. Feeding ms through
+            #    puts the date in the year 58000 and Playwright rejects the WHOLE
+            #    add_cookies() batch: "only -1 or a positive number ... is allowed".
+            # One bad value loses every cookie, so normalise and guard here.
+            try:
+                exp = float(expiry or 0)
+                if exp > 1e11:      # clearly milliseconds, not seconds
+                    exp /= 1000.0
+                if exp > 0:
+                    ck["expires"] = exp
+            except (TypeError, ValueError):
+                pass
+            out.append(ck)
+    except Exception as e:
+        log(f"[ff-pull] could not read cookies for injection: {str(e)[:120]}")
+        return []
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+    return out

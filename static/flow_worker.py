@@ -3587,10 +3587,19 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
         _stuck_on_google = ("accounts.google.com" in _cur_url
                             or "accountchooser" in _cur_url
                             or "/api/auth/signin" in _cur_url)
+        # A /signin/challenge/ page (pwd, 2FA, captcha...) means Google is asking
+        # for CREDENTIALS: the cookies are dead and NO amount of clicking gets in.
+        # Rebuild immediately instead of waiting for the SSO budget. Measured
+        # 2026-08-11: the chooser click succeeded, Google answered with
+        # challenge/pwd, _sso_attempts was still 0 so the old `>= 2` gate never
+        # fired, and both accounts burned ~5 min of retries then failed
+        # createProject with the challenge URL as the project URL.
+        _wants_credentials = "/signin/challenge/" in _cur_url
         if (not _session_rebuilt and state != 'flow_logged_in'
-                and _stuck_on_google and _sso_attempts >= 2):
+                and _stuck_on_google
+                and (_wants_credentials or _sso_attempts >= 2)):
             _session_rebuilt = True
-            if refresh_firefox_session_from_profile(SESSION_FOLDER, label=label):
+            if refresh_firefox_session_from_profile(SESSION_FOLDER, label=label, page=page):
                 _sso_attempts = 0  # fresh cookies deserve a fresh SSO budget
                 try:
                     page.goto(FLOW_HOME_URL, timeout=60000)
@@ -4660,49 +4669,93 @@ ACCOUNTS = [
 _LAPTOP_COPIED_GOLDENS = set()  # golden paths copied this process (copy once)
 
 
-def refresh_firefox_session_from_profile(session_folder, label=""):
-    """Rebuild a Firefox slot's golden from the operator's REAL Firefox profile
-    and restore it, for use when the live session dies mid-run.
+def refresh_firefox_session_from_profile(session_folder=None, label="", page=None):
+    """Rebuild EVERY enabled Firefox slot's golden from the operator's real
+    Firefox profile, then recover the live session.
 
-    Restoring the existing golden is NOT enough on a session loss: that golden
-    holds the same cookies that just stopped working. The operator's real Firefox
-    profile is still signed in, so re-pulling from it is what actually recovers.
-    Bypasses the copy-once guard on purpose — that guard exists to avoid
-    re-copying at startup, not to block recovery.
+    Restoring an existing golden cannot fix a dead session: that golden holds the
+    cookies that just stopped working. The operator's real Firefox profile is
+    still signed in, so re-pulling from it is what actually recovers — this is
+    the automation of re-passing the email in the UI by hand.
 
-    Returns True if a fresh golden was built. Never raises.
+    ALL goldens are rebuilt, not just this slot's. Every slot runs the SAME
+    Google account, they all went stale together (observed 2026-08-11: both
+    accounts hit challenge/pwd in the same minute), and a caller inside a
+    per-account worker cannot reliably name its own folder — the module-level
+    SESSION_FOLDER is the single-account one.
+
+    Only GOLDEN directories are written; nothing has those open. The live session
+    is recovered by injecting cookies into `page`, because the running browser
+    holds cookies.sqlite open and ignores changes made underneath it.
+
+    Returns True if at least one golden was rebuilt. Never raises.
     """
     try:
         if not _bd.is_firefox_mode(BROWSER_MODE):
             return False
-        golden = get_golden_folder(session_folder)
-        _LAPTOP_COPIED_GOLDENS.discard(golden)
         import sys as _sys
         _sys.modules.pop("firefox_profile_pull", None)
         from firefox_profile_pull import build_firefox_golden_from_profile
         from worker_profile_pull import load_laptop_email as _lle_r
 
-        acct_num, slot = None, None
-        for i, a in enumerate(ACCOUNTS, start=1):
-            if a.get("session_folder") == session_folder:
-                acct_num, slot = i, a
-                break
-        email = ((slot or {}).get("laptop_email")
-                 or ACCOUNTS[0].get("laptop_email")
+        email = (ACCOUNTS[0].get("laptop_email")
                  or _lle_r(os.path.join(_BASE, "worker_settings.json")))
         if not email:
             print(f"[{label}] session refresh: no laptop_email configured", flush=True)
             return False
 
-        print(f"[{label}] session lost — rebuilding golden from {email}", flush=True)
-        if not build_firefox_golden_from_profile(
-                email, golden, label=label, account_num=acct_num,
-                log=lambda m: print(m, flush=True)):
+        slots = [(i, a) for i, a in enumerate(ACCOUNTS, start=1) if a.get("enabled")]
+        if not slots and session_folder:
+            slots = [(None, {"session_folder": session_folder})]
+
+        print(f"[{label}] session lost — rebuilding {len(slots)} golden(s) from {email}",
+              flush=True)
+        rebuilt, first_golden = 0, None
+        for num, acct in slots:
+            sess = acct.get("session_folder")
+            if not sess:
+                continue
+            golden = get_golden_folder(sess)
+            _LAPTOP_COPIED_GOLDENS.discard(golden)
+            if build_firefox_golden_from_profile(
+                    email, golden, label=label, account_num=num,
+                    log=lambda m: print(m, flush=True)):
+                _LAPTOP_COPIED_GOLDENS.add(golden)
+                rebuilt += 1
+                if first_golden is None:
+                    first_golden = golden
+                # Restore ONLY a slot whose browser is not this one; writing a
+                # live profile's files is pointless (Firefox ignores it) and the
+                # cookie injection below covers the running session.
+                if session_folder and os.path.abspath(sess) == os.path.abspath(session_folder):
+                    continue
+                restore_from_golden(session_folder=sess, account_label=label,
+                                    restore_session=True)
+        if not rebuilt:
             return False
-        _LAPTOP_COPIED_GOLDENS.add(golden)
-        restore_from_golden(session_folder=session_folder, account_label=label,
-                            restore_session=True)
-        print(f"[{label}] ✓ session refreshed from the real Firefox profile", flush=True)
+
+        # Rewriting cookies.sqlite is NOT enough while the browser is running:
+        # Firefox has it open and keeps serving the dead cookies from memory.
+        # Push the fresh ones into the live context so the session recovers
+        # without a browser restart (we only hold a page here, not a launcher).
+        if page is not None and first_golden:
+            try:
+                from firefox_profile_pull import read_cookies_for_playwright
+                cks = read_cookies_for_playwright(first_golden,
+                                                  log=lambda m: print(m, flush=True))
+                if cks:
+                    ctx = page.context
+                    ctx.clear_cookies()
+                    ctx.add_cookies(cks)
+                    print(f"[{label}] ✓ injected {len(cks)} cookies into the live session",
+                          flush=True)
+                else:
+                    print(f"[{label}] ⚠ no cookies to inject — restart needed", flush=True)
+            except Exception as _ie:
+                print(f"[{label}] cookie injection failed ({str(_ie)[:100]})", flush=True)
+
+        print(f"[{label}] ✓ {rebuilt} golden(s) rebuilt from the real Firefox profile",
+              flush=True)
         return True
     except Exception as e:
         print(f"[{label}] session refresh failed ({str(e)[:120]})", flush=True)
