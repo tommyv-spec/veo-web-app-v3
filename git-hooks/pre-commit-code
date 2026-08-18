@@ -74,4 +74,38 @@ if echo "$out" | grep -q "^A\."; then
   echo ""
 fi
 
+
+# ---------------------------------------------------------------------------
+# v892.6 FIELD PLUMBING gate.
+#
+# WHY: in one week v892.1, v892.2 and v892.5 were all the same fault — a field
+# wired at some of the boundaries it must cross and silently dropped at the one
+# that was missed. Every boundary here enumerates its fields BY HAND (pydantic
+# model, the promote payload in static/index.html, the apply-block, the
+# response changed_fields tuple, an assignment to_dict). Hand-maintained lists
+# drift, and the symptom always lands far away: a duet open with no background
+# layer; a PATCH answering `changed_fields: []` after writing the field.
+#
+# The checker DERIVES the field set from the source — it holds no list of its
+# own, or it would be the same bug one level up. Calibrated to zero failures on
+# a correct tree and negative-tested: each of the three real bugs was
+# re-introduced into a copy and each was caught.
+
+plumb_touched=""
+for f in main.py image_platform.py static/index.html; do
+  if git diff --cached --name-only | grep -qx "$f"; then plumb_touched="yes"; fi
+done
+
+if [ -n "$plumb_touched" ] && [ -f check_field_plumbing.py ]; then
+  if ! python check_field_plumbing.py; then
+    echo ""
+    echo "commit BLOCKED: a field is wired at some surfaces and not others."
+    echo "Each one above is SILENT at runtime — nothing errors, the value just"
+    echo "never arrives. Fix the missing surface, or add an EXEMPT entry in"
+    echo "check_field_plumbing.py with the reason it is genuinely one-sided."
+    echo "(Deliberate bypass: git commit --no-verify)"
+    exit 1
+  fi
+fi
+
 exit 0
