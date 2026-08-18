@@ -7072,6 +7072,27 @@ def _import_scene_table_impl(
 
         if existing is not None:
             if (existing.prompt or "") == (final_prompt or ""):
+                # v931 - the image prompt is unchanged so the node is NOT
+                # rewritten or re-rendered (that is the point of resync), but
+                # the DENORMALIZED first-clip Veo overrides on this node are a
+                # UI-thumbnail mirror of the authoritative
+                # ImageSceneAssignment.veo_prompts_json, and the assignment IS
+                # rebuilt further down. Without this refresh a build whose CLIP
+                # prompts changed while its IMAGE prompts did not would render
+                # the new prompt while the card kept showing the old one - a
+                # split that cost a real misdiagnosis on 2026-08-19 (the stale
+                # card was read as "the platform never got the fix").
+                if (existing.veo_prompt_override or None) != denorm_veo_prompt_override:
+                    print(
+                        f"[v931/resync-denorm] batch={batch_id} "
+                        f"image_index={image_index} node={existing.id} "
+                        f"refreshing stale veo_prompt_override card copy",
+                        flush=True,
+                    )
+                existing.veo_prompt_override = denorm_veo_prompt_override
+                existing.veo_negative_prompt_override = (
+                    denorm_veo_negative_prompt_override
+                )
                 resync_report["unchanged"].append(image_index)
                 created_nodes_by_image_index[image_index] = existing
                 db.flush()
