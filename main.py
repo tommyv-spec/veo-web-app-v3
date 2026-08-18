@@ -6688,7 +6688,13 @@ async def update_clip(
         "clip_index": clip.clip_index,
         "changed_fields": [
             f for f in (
-                "dialogue_text", "dialogue_pad", "prompt_text", "clip_mode",
+                # v892.5 — prompt_text_b belongs in this list too. It was
+                # applied above but omitted here, so a successful patch
+                # reported `changed_fields: []` and read as a no-op. One more
+                # hand-maintained enumeration drifting from the thing it
+                # describes — the same disease as v892.2, in the response.
+                "dialogue_text", "dialogue_pad", "prompt_text", "prompt_text_b",
+                "clip_mode",
                 "cut_mode", "target_duration_s", "veo_render_duration_s",
                 "caption", "scene_type", "bg_color", "clip_role",
                 "voiceover_anchor_image_node_id", "voiceover_line",
