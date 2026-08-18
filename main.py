@@ -381,6 +381,15 @@ class ClipResponse(BaseModel):
     # Scene/mode fields
     clip_mode: Optional[str] = "fresh"  # v782 default fresh (was blend)
     scene_index: Optional[int] = 0
+    # v861 per-clip render length. These are SET by the promote path and by
+    # POST /api/jobs, and PATCHable, but were never returned — so the only way
+    # to check what a clip would actually render at was to watch the output and
+    # measure it. A duration that silently falls back to the job-wide
+    # config.duration looks identical to one that bound correctly until the mp4
+    # lands. Returning them makes the binding checkable before the render, not
+    # after (2026-08-18: three batches rendered 8s each before this was visible).
+    target_duration_s: Optional[float] = None
+    veo_render_duration_s: Optional[int] = None
     # Prompt
     prompt_text: Optional[str] = None
     # v805/v821 — Prompt B policy fallback + its reworded line + active variant
