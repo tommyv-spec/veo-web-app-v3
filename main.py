@@ -13892,6 +13892,25 @@ def _v812_apply_swap(db, clip, rejected_key, new_key):
         clip.replacement_start_frame = rejected_key
     clip.start_frame = new_key
     clip.status = ClipStatus.FLOW_REDO_QUEUED.value
+
+    # v899.5 — PRESERVE WHY BEFORE CLEARING.
+    # error_code/error_message have to be cleared so the clip re-enters the
+    # queue clean, but nulling them used to destroy the ONLY record of why the
+    # clip was redone. Asked "why were clips #4 and #12 redone?" on job
+    # f58e833f (2026-08-18) the answer was unrecoverable: error_code empty,
+    # error_message empty, and the reason existed only in a worker console that
+    # had already scrolled away. redo_reason is free text and survives the
+    # requeue, so the audit trail lives there.
+    _why = (clip.error_message or clip.error_code or "").strip()
+    if _why:
+        _stamp = f"auto-swap ({_why})"
+        if rejected_key:
+            _stamp += f" rejected={str(rejected_key).split('/')[-1]}"
+        clip.redo_reason = (
+            f"{clip.redo_reason} | {_stamp}" if clip.redo_reason else _stamp
+        )[:1000]
+        print(f"[v899.5] clip {clip.id}: preserved redo reason -> {_stamp}", flush=True)
+
     clip.error_code = None
     clip.error_message = None
     clip.claimed_by_worker = None
@@ -16300,10 +16319,26 @@ async def user_worker_report_policy_violation(
 
     clip.status = ClipStatus.FAILED.value
     clip.error_code = "CONTENT_POLICY_VIOLATION"
+    # v899.5 — KEEP THE SPECIFIC REASON. Only PROMINENT/CELEBRITY got a precise
+    # code above; every other rejection collapsed to the generic string and the
+    # worker's error_reason (PUBLIC_ERROR_SEXUAL, PUBLIC_ERROR_UNSAFE_GENERATION,
+    # ...) was thrown away. That is why "why was this clip redone?" had no
+    # answer on job f58e833f (2026-08-18) — the only copy lived in a console.
+    # Flow's own code is the actionable part: SEXUAL means reshoot the frame,
+    # UNSAFE_GENERATION often clears on a reworded line.
+    _flow_reason = (request.error_reason or "").strip()
     clip.error_message = (
         request.detail
         or "⚠️ Flow rejected this image's content. Upload a replacement to retry."
     )
+    if _flow_reason:
+        clip.error_message = f"{clip.error_message} [Flow: {_flow_reason}]"
+        _rr = f"content policy: {_flow_reason}"
+        clip.redo_reason = (
+            f"{clip.redo_reason} | {_rr}" if clip.redo_reason else _rr
+        )[:1000]
+    print(f"[v899.5] clip {clip_id} content policy | flow_reason="
+          f"{_flow_reason or 'NOT SENT BY WORKER'}", flush=True)
     db.commit()
 
     # v701e preemptive sibling cascade.
