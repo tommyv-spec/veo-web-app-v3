@@ -16111,7 +16111,13 @@ async def user_worker_get_redo_clips(
             )
         )
         if _age_cutoff is not None:
-            _q = _q.filter(Job.created_at >= _age_cutoff)
+            # v932.1 — a recreated clip is a deliberate operator act on a
+            # possibly old job; its redo_reason marks it and the 24h
+            # Job.updated_at filter above still bounds it. The age cap keeps
+            # excluding STALE queue entries (the 2026-08-07 failure), which
+            # never carry this marker.
+            _q = _q.filter(or_(Job.created_at >= _age_cutoff,
+                               Clip.redo_reason.like('v932 recreate%')))
         redo_clips = _q.order_by(Clip.id.asc()).all()
     else:
         redo_cutoff = datetime.utcnow() - timedelta(hours=24)
@@ -16129,9 +16135,11 @@ async def user_worker_get_redo_clips(
             )
         )
         if _age_cutoff is not None:
-            _q = _q.filter(Job.created_at >= _age_cutoff)
+            # v932.1 — same deliberate-recreate exemption as the worker_id branch.
+            _q = _q.filter(or_(Job.created_at >= _age_cutoff,
+                               Clip.redo_reason.like('v932 recreate%')))
         redo_clips = _q.order_by(Clip.id.asc()).all()
-    
+
     if not redo_clips:
         return {"clips": []}
     
