@@ -85,7 +85,7 @@ def valid_stage4d():
             },
             "audio": {"dialogue_verbatim": "First, lift the glass.", "ambient": "room tone", "music": "none", "voice_register": "direct"},
             "motion_cross_check": {"input_classification": "medium", "vlm_observation": "one hand lift", "agrees": True, "discrepancy": "none"},
-            "veo_reproduction_hints": {"use_blend_to_next_scene": False, "needs_platform_future_image_end": False, "transition_prompt": "Lift the glass from counter to chest height."},
+            "continuity_read": {"motion_continues_past_cut": False, "end_state_differs_from_start": True, "cut_observed": "hard cut; the glass ends raised to chest height"},
             "human_walk_corrections": "none",
         }],
     }
@@ -156,6 +156,26 @@ class Stage4dContractTests(unittest.TestCase):
         self.assertIn(
             "performance", v589.build_user_prompt(
                 self.expected, "hello", {}, include_schema=False))
+
+    def test_v934_the_observation_schema_names_no_video_engine(self):
+        """The read is model-agnostic, and this is the guard that keeps it so.
+
+        The block now called continuity_read used to be veo_reproduction_hints
+        and carried a `transition_prompt` — a piece of Veo prompt wording
+        sitting inside the observation. Two costs, both real: the read stops
+        being usable for any other engine, and one engine's quirk quietly
+        becomes a permanent fact about the source.
+
+        Checked against the SCHEMA ONLY (field names and descriptions), not the
+        module text — the surrounding comments discuss Veo on purpose, and
+        explaining why a rule exists must never trip the rule.
+        """
+        blob = json.dumps(v589.PER_SHOT_SCHEMA).lower()
+        for engine in ("veo", "kling", "sora", "runway", "banana"):
+            self.assertNotIn(
+                engine, blob,
+                f"{engine!r} appears in the observation schema; engine-specific "
+                "wording belongs to the dialect layer (template_reference v934)")
 
     def test_standard_cost_is_only_an_estimate(self):
         estimate = v589.compute_gemini_cost("gemini-3.6-flash", 1000, 100, 200)

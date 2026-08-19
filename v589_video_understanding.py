@@ -7,8 +7,12 @@ source for visual action arcs (parallel to whisper.cpp being authoritative for
 dialogue).
 
 The schema captures: static_composition + action_arc (start_state / mid_state /
-end_state / magnitude COMPLETE/PARTIAL/MINIMAL / verbs_observed) + audio +
-veo_reproduction_hints.
+end_state / magnitude COMPLETE/PARTIAL/MINIMAL / verbs_observed) + performance
+(what is DONE, to whom, in what register — v934) + audio + continuity_read.
+
+Everything here is OBSERVATION and stays model-agnostic. How any of it gets
+worded for a particular video model is a separate layer that lives outside
+this file — see template_reference.md §v934.
 
 Provider cascade (first available wins):
   1. LM Studio  — local OpenAI-compatible server at http://localhost:1234.
@@ -148,7 +152,7 @@ PER_SHOT_SCHEMA = {
     "required": [
         "shot_index", "start", "end", "summary", "forensic_perception",
         "static_composition", "frame_inventory", "start_frame_spec", "action_arc",
-        "performance", "audio", "motion_cross_check", "veo_reproduction_hints",
+        "performance", "audio", "motion_cross_check", "continuity_read",
         "human_walk_corrections",
     ],
     "properties": {
@@ -514,14 +518,43 @@ PER_SHOT_SCHEMA = {
                 "discrepancy": _string_schema("Difference to reconcile, or none."),
             },
         },
-        "veo_reproduction_hints": {
+        # ── v934 — renamed from veo_reproduction_hints ────────────────
+        # The old name and its third field held a piece of VEO PROMPT
+        # WORDING inside the model-agnostic read. That is precisely the
+        # layering violation v934 exists to remove: an engine-specific
+        # instruction living in the observation makes the read unusable
+        # for any other engine, and quietly promotes one engine's quirk
+        # into a permanent fact about the source.
+        #
+        # What survives is what a camera can actually see: does the
+        # movement carry on past the cut, does the shot land somewhere
+        # different from where it started, and what does the cut do. The
+        # DIALECT layer turns those into whatever the target needs — a Veo
+        # transition line, a Kling keyframe pair, or an `end_frame_image`
+        # on our own platform (v718h-C). The two booleans map to those
+        # decisions directly; making the mapping explicit is the point,
+        # because it is the mapping that has to be rewritten per engine,
+        # not the observation.
+        #
+        # RENAMED rather than deprecated because there are zero stage4d.v3
+        # artifacts on disk to break — measured, see template_reference
+        # §v934. That window closes with the first v3 decode written.
+        "continuity_read": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["use_blend_to_next_scene", "needs_platform_future_image_end", "transition_prompt"],
+            "required": [
+                "motion_continues_past_cut", "end_state_differs_from_start", "cut_observed",
+            ],
             "properties": {
-                "use_blend_to_next_scene": {"type": "boolean"},
-                "needs_platform_future_image_end": {"type": "boolean"},
-                "transition_prompt": _string_schema("Source-faithful motion cue with absolute magnitude when complete."),
+                "motion_continues_past_cut": {"type": "boolean"},
+                "end_state_differs_from_start": {"type": "boolean"},
+                "cut_observed": _string_schema(
+                    "What is SEEN at the join to the next shot: a hard cut, a "
+                    "match on action, the same movement continuing, or 'last "
+                    "shot'. When a movement completes across the join, give its "
+                    "full extent so the magnitude is not lost. Describe the "
+                    "join itself — never write a prompt instruction for a "
+                    "particular video model here."),
             },
         },
         "human_walk_corrections": _string_schema(
@@ -2175,10 +2208,10 @@ def write_human_walk_template(shots: list, transcript: dict, frames_dir: Path | 
             },
             "audio": {"dialogue_verbatim": dialogue_text, "ambient": "<REQUIRED>", "music": "<REQUIRED>", "voice_register": "<REQUIRED>"},
             "motion_cross_check": {"input_classification": "<COPY FROM motion.json>", "vlm_observation": "<REQUIRED>", "agrees": False, "discrepancy": "<REQUIRED>"},
-            "veo_reproduction_hints": {
-                "use_blend_to_next_scene": False,
-                "needs_platform_future_image_end": False,
-                "transition_prompt": "<REQUIRED>",
+            "continuity_read": {
+                "motion_continues_past_cut": False,
+                "end_state_differs_from_start": False,
+                "cut_observed": "<REQUIRED>",
             },
             "human_walk_corrections": "<REQUIRED: dense frames " + ", ".join(f.name for f in shot_frames) + ">",
         })
