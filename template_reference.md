@@ -16658,6 +16658,22 @@ SETTING SHELL: <shell> | source: <bank row | UNLISTED — name> | de-wooded: YES
 
 **2026-08-14 SETTING CORRECTION — supersedes v927's old “§8 names the shell to reach for FIRST” and “premium” clauses.** Operator: *"always pick the mentors."* No shell is now the automatic first choice. The action picks the room type; realistic-relatable applies on every lane; the specific shell must look real, be distinctive, de-wooded, §8-clean, pass the two-second-USA test and differ from the prior family build. The Hanbang Penthouse remains in the bank only for an action that genuinely belongs there; it is not the default. The four Nuri brand tokens remain required. A §7.2.1 lock that preserves the setting still preserves it, and a single IG growth run remains the one legal deliberate repeat.
 
+**2026-08-19 — clause 4 finally has a code path, and the token is `growth-run repeat:`.** Clause 4 has always said a deliberate repeat inside ONE IG growth run is legal, and the checker's own FAIL message told authors to "say so on the same line". **Neither was true in code.** `c_setting_shell_unique` returned FAIL the moment the declared shell matched the shell of the build named in `unique-vs:`, before reading anything else — so the documented escape could not be taken, and the only way past the gate was to invent a difference in the background. That is worse than no escape: it pushes an author into changing the one variable a controlled run is holding still.
+
+What forced the fix was the ice-cube object series. The operator (2026-08-18) took the setting OUT of the experiment — *"put it in a neutral background"* — precisely so the object under test would be the only difference between builds. From v10 on, holding the wall constant is the discipline, and the gate forbade it.
+
+The escape is now real. On the `SETTING SHELL:` line, alongside `unique-vs:`, add:
+
+```
+| growth-run repeat: <why this run holds the shell>
+```
+
+Present → the same-shell FAIL becomes a PASS that names the parent it deliberately matches, and the sibling-sweep WARN becomes a PASS too. Absent → the original FAIL, whose message now quotes the exact token to write. It stays a DECLARATION check in the sense of `feedback_checkers-verify-declarations-not-decisions`: it verifies the author said so and gave a reason, never whether the run is genuinely one run.
+
+**Two things worth carrying forward.** First, the general shape: **a documented escape with no code path is a trap, not a leniency** — it reads as permission and behaves as a wall, and the author who trusts the docstring loses the time. When a rule's prose promises a way through, the checker owes that way an implementation or the prose owes a correction. Second, the fix was negative-tested before shipping (declaration present → PASS naming the parent; token removed, nothing else changed → the original FAIL), per rev 404's *"a check nobody has watched fail is not evidence"*.
+
+**Touched by this amendment:** this deep-dive (canonical), `.claude/skills/build-video/audit_build.py` (`c_setting_shell_unique`), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline). First build to use it: `videos/nuri-korella-ed-magnets-handweb-joining-valley-neutral-soldier-comment-growth-v10.md`.
+
 ---
 
 ## v892 — COMPOSITE SCENE = ONE SCENE, TWO CLIPS (the video-axis twin of v698A)
@@ -16728,6 +16744,75 @@ Found on clip 14286 of job `1f35eac2`: its `prompt_text` was corrected to the sp
 `prompt_text_b` is now a patchable field and a member of the v735 clearable set. **The general form: when a value has a fallback twin, the twin is part of the same edit surface.** A correction that reaches only the happy path is not a correction — it is a correction plus a landmine. Same shape as v892.2's four boundaries, one level down.
 
 **Scope:** forward-only, additive — no existing caller changes behaviour.
+
+---
+
+### v892.6 — THE PLUMBING CHECK: derive the field set, never enumerate it
+
+`code/check_field_plumbing.py`, run by the code pre-commit hook whenever `main.py`, `image_platform.py` or `static/index.html` are staged. Four comparisons:
+
+| | catches |
+|---|---|
+| CHECK1 | every `UpdateClipRequest` field is applied AND reported (v892.5) |
+| CHECK2 | every `DialogueLineInput` field main.py reads back is actually SENT by a promote payload (v892.2) |
+| CHECK3 | every `ImageSceneAssignment` column survives `to_dict()` |
+| CHECK4 | every parsed `- **field:**` reaches a scene/image dict |
+
+**It holds no list of field names.** It reads each surface out of the source and compares them, so a new field is checked the moment it is added. A hand-maintained list of hand-maintained lists would be the same bug one level up.
+
+**Three failures while building it, each worth more than the tool.**
+
+1. **The first run reported 14 problems and all 14 were my own regexes.** `target_duration_s` IS applied, just wrapped in `float()`; `lines_json` IS emitted, as `lines`. Calibrated to zero on a correct tree, because **a checker that cries wolf gets switched off, which is worse than no checker.**
+2. **Negative-testing exposed that CHECK2 was worthless.** Its regex allowed whitespace between the field name and the colon, and that crosses newlines, so it matched the colon of the *ternary that reads the value* and passed on a copy with the key deliberately deleted. It now requires the name at the start of a line. **A check nobody has watched fail is not evidence.**
+3. **The hook did not fire, twice.** First because the gate was appended BELOW the canon-drift `[ -z "$touched" ] && exit 0`, unreachable on any commit not touching a rule master. Then because installing with `cp` leaves CRLF in the shebang on a Windows checkout, making the interpreter `/bin/sh` + CR — which does not exist, so **git skips the hook SILENTLY** and every gate in it stops running. That had disabled the pre-existing canon-drift gate too. Install with `tr -d`; if a gate ever seems dead, check line endings FIRST.
+
+### v892.7 — PROVE IT FROM THE DATABASE, NOT FROM A LOG NOBODY CAN READ
+
+v892.1 and v892.2 each shipped with a `[TEMP]` diagnostic, assuming someone would read the Render log. For a week nobody could. Operator: *"i don't know where to watch, you can do it yourself."*
+
+`code/verify_v892_live.py` reads the outcome instead. A v892 scene makes a `composite_key` clip; Phase 3a/3b must give it a `composite_plate` sibling with BOTH a prompt and a start frame:
+
+- no plate row → Phase 3a never got the node id (v892.2 class)
+- plate row, no prompt/frame → Phase 3b did not run (v892.1 class)
+- plate row with both → the chain worked
+
+**Three exit codes on purpose:** 0 confirmed, 1 broken, **2 = no composite job exists yet**. "Nothing to judge" is not a pass, and reporting it as one is exactly how a fix gets believed without evidence.
+
+### v892.8 — TWO PROMOTE PATHS, AND THEY ARE NOT THE SAME IMPLEMENTATION
+
+| path | what runs |
+|---|---|
+| browser | `prepare-batch-for-video` → payload in `index.html` → `POST /api/jobs` → main.py background task → **Phase 3a/3b run** |
+| CLI | `POST /batches/{id}/promote-to-video` → writes Clip rows directly at `status='pending'` → **that task never runs** |
+
+Found by promoting one batch both ways: the browser produced a `composite_key`, the CLI produced 20 clips with `clip_role` NULL. The build was correct and the assignment row was correct (`composite_plate_image_node_id` set). **Only the path differed.**
+
+**Carrying the bindings alone would have been worse than nothing** — the clip would be marked `composite_key` with no Phase 3a behind it, so it would look wired and still render with no background layer. v892.8 therefore only made the losses *visible*: the endpoint reports which scenes lose what, and `send_to_platform.py` prints it.
+
+### v892.9 — PROMPT B IS THE EXPENSIVE HALF OF THAT DIVERGENCE
+
+Measured on one batch, same build, only the path differing:
+
+| | Prompt B | failed |
+|---|---|---|
+| UI promote | 20/20 | **0** |
+| CLI promote | **0/20** | **9**, all `GENERATION_POLICY` |
+
+The Flow worker retries a policy-blocked clip on `prompt_text_b` before escalating (v805). With that field NULL the block is **terminal** and the clip dies. This had been happening on every CLI promote, for every build, invisibly.
+
+**Refusal was considered and rejected on measurement:** 226 of 322 builds author Prompt B, so refusing would have blocked 70% of the corpus to avoid a two-line fix. `dialogue_list` now carries `veo_prompt_b` / `veo_prompt_b_line`, and the Clip row gets `prompt_text_b` / `dialogue_text_b`.
+
+### v892.10 — THE CLI PROMOTE CAN BUILD A COMPOSITE
+
+Three pieces inside `promote_batch_to_video`, because Phase 3a/3b do not exist on that path:
+
+1. **Plate frames materialise.** The scene loop copies a frame per scene's OWN image; a plate node is never any scene's own image, so nothing was copied and there was no file to render from — the same root cause as v892.2, in the other implementation.
+2. **The performing clip is marked `composite_key` ONLY when its plate frame actually materialised.** Marking it otherwise is precisely the failure v892.8 refused to create. When a plate cannot be built the clip is left unmarked and the reason logged, so a real failure stays visible instead of being disguised as success.
+3. **The plate sibling is created inline** — silent, same duration, own start frame, authored `.plate` prompt or a hold-still fallback, `clip_index + 200000` to match main.py, paired after a flush. The export filter still excludes plates, so this adds a LAYER, never a segment.
+
+**Status: code-verified only.** No composite has been promoted since. `python code/verify_v892_live.py` returns 2 until one is. That is deliberately not called done — "code-verified only" is the exact state that made v892.1 look finished while the front of its chain was dead.
+
+**Reading production**: `RENDER_API_KEY` now lives in `~/veo-worker/.env` (outside the repo) and as a persistent user env var; `python code/render_logs.py --text <needle>` reads the live log. **Prefer a database row over a log line** — a log proves code ran, a row proves the outcome.
 
 ---
 
