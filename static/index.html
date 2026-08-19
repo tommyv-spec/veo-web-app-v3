@@ -12259,7 +12259,13 @@ Ambient: same kitchen room tone, soft pour sound.
 
             let acts = '';
             if (approved) {
-                acts = `<div style="text-align:center;color:var(--success);font-size:11px;font-weight:600;">✓ approved</div>`;
+                // v935 — with multiple takes, tell the operator the pick is
+                // still changeable: paging ◀ ▶ resets approval server-side
+                // and brings the ✓ button back for the newly shown take.
+                const _v935ChangeHint = hasMultipleVariants
+                    ? `<div style="text-align:center;color:var(--text-muted);font-size:9px;margin-top:2px;">◀ ▶ show another take to change the pick</div>`
+                    : '';
+                acts = `<div style="text-align:center;color:var(--success);font-size:11px;font-weight:600;">✓ approved</div>${_v935ChangeHint}`;
             } else if (rejected) {
                 acts = `<div style="text-align:center;color:var(--error);font-size:11px;">✗ rejected</div>`;
             } else if (generating) {
@@ -13188,9 +13194,69 @@ Ambient: same kitchen room tone, soft pour sound.
                     const isApproved = clipData.approval_status === 'approved';
                     const isRejected = clipData.approval_status === 'rejected';
                     const isPending = !isApproved && !isRejected;
+
+                    // v935 — paired-side branch. The server resets
+                    // approval_status to pending_review on every
+                    // select-variant (main.py select_clip_variant), so paging
+                    // to another take IS how the operator changes their mind
+                    // after approving a side. But the generic branch below
+                    // writes into .clip-actions-collapsed /
+                    // .clip-actions-expanded, which do NOT exist on paired
+                    // cards (v743 note) — so the side kept its dead
+                    // "✓ approved" text and the ✓ button never came back
+                    // until a full page reload. Rebuild THIS side's review
+                    // row and recompute the pair badge from BOTH halves.
+                    const pairedSideDiv = scope && scope.closest ? scope.closest('.clip-paired-side') : null;
+                    if (pairedSideDiv) {
+                        const _ar = clipData.attempts_remaining || 0;
+                        const _ci = clipData.clip_index || 0;
+                        const reviewRow = pairedSideDiv.querySelector('.clip-toolbar-row.review');
+                        if (reviewRow) {
+                            if (isApproved) {
+                                reviewRow.innerHTML = `<div style="text-align:center;color:var(--success);font-size:11px;font-weight:600;">✓ approved</div>`;
+                            } else if (isRejected) {
+                                reviewRow.innerHTML = `<div style="text-align:center;color:var(--error);font-size:11px;">✗ rejected</div>`;
+                            } else {
+                                reviewRow.innerHTML = `<div class="clip-actions" style="display:flex;gap:4px;justify-content:center;">
+                                    <button class="btn btn-approve btn-sm" style="padding:4px 8px;font-size:11px;" onclick="approvePairedSide(${clipId},${_ci})" title="approve this take">✓</button>
+                                    <button class="btn btn-redo btn-sm" style="padding:4px 8px;font-size:11px;" onclick="redoModal(${clipId},${_ar},${_ci})" ${_ar<=0?'disabled':''} title="redo">↻</button>
+                                </div>`;
+                            }
+                        }
+                        // Sync the cache BEFORE computing pair state + diff keys so
+                        // both reflect the post-switch reality. (The generic cache
+                        // update further down also runs; the duplication is harmless.)
+                        const cachedSide = cachedClipsData ? cachedClipsData.find(x => x.id === clipId) : null;
+                        if (cachedSide) {
+                            cachedSide.approval_status = clipData.approval_status;
+                            cachedSide.selected_variant = variantNum;
+                            cachedSide.output_filename = clipData.output_filename;
+                            cachedSide.total_variants = totalVariants;
+                        }
+                        const outerClipId = parseInt(card.dataset.clipId, 10);
+                        const visualClip = cachedClipsData ? cachedClipsData.find(x => x.id === outerClipId) : null;
+                        const audioClip = visualClip ? cachedClipsData.find(x => x.id === visualClip.paired_clip_id) : null;
+                        const vApproved = visualClip && visualClip.status === 'completed' && visualClip.approval_status === 'approved';
+                        const aApproved = audioClip && audioClip.status === 'completed' && audioClip.approval_status === 'approved';
+                        card.classList.toggle('clip-approved', !!(vApproved && aApproved));
+                        const pairBadge = card.querySelector('.badge:not([style*="paired"])');
+                        if (pairBadge) {
+                            if (vApproved && aApproved) { pairBadge.className = 'badge badge-approved'; pairBadge.textContent = 'PAIR READY'; }
+                            else { pairBadge.className = 'badge badge-pending_review'; pairBadge.textContent = vApproved ? 'review voice' : (aApproved ? 'review video' : 'review both'); }
+                        }
+                        // Refresh the diff keys stored under the VISUAL's index so
+                        // the next poll sees this card as already up to date —
+                        // otherwise pair-blind patchClipUI runs over it and
+                        // clobbers the pair badge with the visual's own status.
+                        if (visualClip) {
+                            if (audioClip && !visualClip._audioTwin) visualClip._audioTwin = audioClip;
+                            clipStates[visualClip.clip_index] = getClipStateKey(visualClip);
+                            clipUIKeys[visualClip.clip_index] = getClipUIKey(visualClip);
+                        }
+                    } else {
                     card.classList.toggle('clip-approved', isApproved);
                     card.classList.toggle('clip-rejected', isRejected);
-                    
+
                     const badge = card.querySelector('.badge');
                     if (badge) {
                         const statusText = clipData.approval_status || 'pending_review';
@@ -13228,7 +13294,8 @@ Ambient: same kitchen room tone, soft pour sound.
                         const expandedActs = card.querySelector('.clip-actions-expanded');
                         if (expandedActs) expandedActs.innerHTML = pendingHtml;
                     }
-                    
+                    } // end v935 non-paired branch
+
                     // Update cached clip data
                     if (cachedClipsData) {
                         const cached = cachedClipsData.find(c => c.id === clipId);
