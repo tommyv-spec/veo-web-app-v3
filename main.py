@@ -6892,8 +6892,166 @@ async def delete_clip(
         db.commit()
     
     add_job_log(db, job_id, f"Clip {clip_index + 1} deleted by user", "INFO", "deletion")
-    
+
     return {"success": True, "message": f"Clip {clip_index + 1} deleted"}
+
+
+class RecreateClipRequest(BaseModel):
+    clip_index: int
+
+
+@app.post("/api/jobs/{job_id}/clips/recreate")
+async def recreate_deleted_clip(
+    job_id: str,
+    request: RecreateClipRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v932 — rebuild ONE deleted clip row from the job's own dialogue_json.
+
+    A clip delete is a hard delete (row + output file). Before this endpoint
+    the only recovery was promoting the whole batch again — a brand-new job
+    and a full re-render of every clip. The Job already carries everything
+    the row needs: dialogue_json lines[clip_index] has the line text, the
+    v572 Veo prompt override, Prompt B (v805/v821), the v861 durations and
+    start_image_idx; frames_storage_keys maps start_image_idx to the frame
+    key. Rebuild the row from that and queue it as flow_redo_queued so the
+    worker's redo path re-renders exactly this one clip.
+
+    Deliberately narrow scope — refuse loudly rather than mis-build:
+      - flow-backend jobs only (pickup rides the flow redo path)
+      - main timeline clips only (no audio twins >= 100000, no plates)
+      - fresh/cut clips only (blend end-frames and v718i explicit end-frame
+        bindings need neighbor-clip context this path does not rebuild)
+    """
+    job = get_user_job(db, job_id, current_user)
+
+    if job.backend != 'flow':
+        raise HTTPException(status_code=400, detail=f"Recreate is only supported for flow jobs (this job backend: {job.backend})")
+
+    ci = request.clip_index
+
+    try:
+        dialogue_data = json.loads(job.dialogue_json) if job.dialogue_json else {}
+    except (json.JSONDecodeError, TypeError):
+        dialogue_data = {}
+    lines = dialogue_data.get("lines") or []
+
+    if ci < 0 or ci >= len(lines):
+        raise HTTPException(
+            status_code=400,
+            detail=f"clip_index {ci} is outside this job's dialogue lines (0..{len(lines) - 1}). "
+                   f"Audio twins (100000+) and composite plates (200000+) cannot be recreated here."
+        )
+
+    existing = db.query(Clip).filter(Clip.job_id == job_id, Clip.clip_index == ci).first()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"Clip index {ci} already exists on this job (clip id {existing.id}, status {existing.status})")
+
+    line = lines[ci] if isinstance(lines[ci], dict) else {}
+
+    clip_mode = line.get('clip_mode', 'fresh') or 'fresh'
+    if clip_mode == 'blend' or line.get('end_frame_image_node_id'):
+        raise HTTPException(
+            status_code=400,
+            detail="Recreate supports fresh/cut clips only — blend and explicit end-frame clips "
+                   "need neighbor-frame context this path does not rebuild."
+        )
+
+    # Start frame: same derivation as the create path (main.py Phase 2) and
+    # the redo-pending fallback — sorted frames_storage_keys + start_image_idx.
+    start_frame_key = None
+    try:
+        frames_keys = json.loads(job.frames_storage_keys) if job.frames_storage_keys else {}
+    except (json.JSONDecodeError, TypeError):
+        frames_keys = {}
+    uploaded_frames = sorted(frames_keys.keys())
+    if uploaded_frames:
+        start_img_idx = line.get('start_image_idx', 0) or 0
+        start_frame_key = f"jobs/{job_id}/frames/{uploaded_frames[start_img_idx % len(uploaded_frames)]}"
+    if not start_frame_key:
+        raise HTTPException(status_code=409, detail="Job has no stored frames (frames_storage_keys empty) — cannot rebuild the start frame.")
+
+    # Prompt: when the line carries a v572 override, compose it exactly as the
+    # promote path does. No override → NULL; the flow worker's legacy prompt
+    # builder handles that case (same contract as image_platform promote).
+    prompt_text = None
+    _override = (line.get('veo_prompt_override') or '').strip() or None
+    if _override:
+        try:
+            from veo_prompt_overrides import compose_final_prompt
+            prompt_text = compose_final_prompt(_override, line.get('veo_negative_prompt_override'))
+        except Exception as _ce:
+            print(f"[v932] compose_final_prompt failed for job {job_id} clip {ci}: {_ce}", flush=True)
+            prompt_text = _override
+
+    warnings = []
+    _cutoff = job_age_cutoff()
+    if _cutoff is not None and job.created_at and job.created_at < _cutoff:
+        warnings.append(
+            "Job is older than the worker claim window (WORKER_MAX_JOB_AGE_DAYS, default 7 days) — "
+            "the worker will NOT pick this clip up until that window is raised."
+        )
+    if (line.get('clip_role') or '').lower() == 'visual_pair':
+        twin = db.query(Clip).filter(Clip.job_id == job_id, Clip.clip_index == 100000 + ci).first()
+        if twin is None:
+            warnings.append(
+                f"This line is a v698A visual_pair but its audio twin (clip_index {100000 + ci}) "
+                f"is also missing — this endpoint does not recreate audio twins."
+            )
+
+    clip = Clip(
+        job_id=job_id,
+        clip_index=ci,
+        dialogue_id=ci + 1,
+        dialogue_text=line.get('text', '') or '',
+        dialogue_pad=line.get('dialogue_pad'),
+        status=ClipStatus.FLOW_REDO_QUEUED.value,
+        clip_mode=clip_mode,
+        scene_index=line.get('scene_index', 0) or 0,
+        cut_mode=line.get('cut_mode'),
+        target_duration_s=line.get('target_duration_s'),
+        veo_render_duration_s=line.get('veo_render_duration_s'),
+        caption=line.get('caption'),
+        scene_type=line.get('scene_type'),
+        bg_color=line.get('bg_color'),
+        clip_role=line.get('clip_role'),
+        voiceover_anchor_image_node_id=line.get('voiceover_anchor_image_node_id'),
+        voiceover_line=line.get('voiceover_line'),
+        start_frame=start_frame_key,
+        prompt_text=prompt_text,
+        prompt_text_b=line.get('veo_prompt_b'),
+        dialogue_text_b=line.get('veo_prompt_b_line'),
+        generation_attempt=1,
+        use_logged_params=False,
+        redo_reason="v932 recreate: clip row rebuilt after delete",
+    )
+    db.add(clip)
+
+    # Bump job bookkeeping: total_clips counts rows; updated_at keeps the job
+    # inside the redo-pending 24h freshness filter.
+    db.flush()
+    job.total_clips = db.query(Clip).filter(Clip.job_id == job_id).count()
+    job.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(clip)
+
+    add_job_log(db, job_id, f"Clip {ci + 1} recreated from dialogue_json and queued for render (v932)", "INFO", "recreate")
+    # v932 TEMP DIAG — remove after the first operator-confirmed recreate+render.
+    print(f"[v932 TEMP] recreate job={job_id} clip_index={ci} clip_id={clip.id} "
+          f"start_frame={start_frame_key} prompt={'override' if prompt_text else 'NULL(legacy-build)'} "
+          f"dur={clip.veo_render_duration_s} warnings={len(warnings)}", flush=True)
+
+    return {
+        "success": True,
+        "clip_id": clip.id,
+        "clip_index": ci,
+        "status": clip.status,
+        "start_frame": start_frame_key,
+        "prompt_attached": bool(prompt_text),
+        "veo_render_duration_s": clip.veo_render_duration_s,
+        "warnings": warnings,
+    }
 
 
 # ============ Lineup Management (Post-Production) ============
