@@ -58,4 +58,17 @@ e = stp.classify_http_error(FakeResp(400, {"detail": "Ingredient(s) with type=ch
 assert e.exit_code == stp.EXIT_INGREDIENT
 e = stp.classify_http_error(FakeResp(500, {"detail": "Import failed due to a server-side error: KeyError: 'x'"}))
 assert e.exit_code == stp.EXIT_UNKNOWN
+
+# Source cells must identify a real node or a named saved alias. Generic prose
+# used to parse as alias "reference" and fail only after the expensive build.
+assert stp.parse_source_ref("upload korella") == ("alias", "korella")
+assert stp.parse_source_ref("upload node 1594") == ("node", 1594)
+assert stp.parse_source_ref("uploaded reference") is None
+msg = stp.source_ref_error("uploaded reference")
+assert "upload <saved-alias>" in msg and "upload node <id>" in msg, msg
+
+_, _, _, _, errors = stp.plan_reference_bindings(
+    [{"name": "Nuri", "type": "character", "source": "uploaded reference"}],
+    explicit={}, aliases={}, uploads_by_id=None, subject=None, product_node=None)
+assert errors and "does not identify an upload" in errors[0], errors
 print("test_send_preflight: ALL PASS")

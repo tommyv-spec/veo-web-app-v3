@@ -261,6 +261,7 @@ _SOURCE_NODE_RE = re.compile(r"^\s*upload(?:ed)?\s*(?:node\s*)?#?(\d+)\s*$", re.
 _SOURCE_ALIAS_RE = re.compile(r"^\s*upload(?:ed)?[:\s]\s*([A-Za-z][\w][\w .-]*?)\s*$", re.I)
 _SOURCE_BARE_NODE_RE = re.compile(r"^\s*node\s*#?(\d+)\s*$", re.I)
 _STATE_SUFFIX_RE = re.compile(r"^(.+?)\s*\([^)]+\)\s*$")
+_VAGUE_SOURCE_ALIASES = {"reference", "image", "reference image", "uploaded reference"}
 
 
 def parse_source_ref(source):
@@ -277,7 +278,19 @@ def parse_source_ref(source):
         return ("node", int(m.group(1)))
     m = _SOURCE_ALIAS_RE.match(s)
     if m and not m.group(1).strip().isdigit():
-        return ("alias", m.group(1).strip())
+        alias = m.group(1).strip()
+        if alias.lower() not in _VAGUE_SOURCE_ALIASES:
+            return ("alias", alias)
+    return None
+
+
+def source_ref_error(source):
+    """Return an exact repair message for upload-like but unusable Source cells."""
+    s = (source or "").strip().strip("`")
+    if re.match(r"^upload(?:ed)?\b", s, re.I) and parse_source_ref(s) is None:
+        return (f"Source cell {s!r} does not identify an upload. Use exactly "
+                "'upload <saved-alias>' or 'upload node <id>'; otherwise leave "
+                "the cell non-upload and bind the row with --ingredient.")
     return None
 
 
@@ -335,6 +348,21 @@ def plan_reference_bindings(rows, explicit, aliases, uploads_by_id,
             continue  # legacy path: server binds this row from subject_node_id
         if rtype == "product" and product_node:
             continue  # server binds the product row from product_node_id
+
+        # A vague Source cell is only a problem for a row we still have to bind
+        # FROM that cell. The three branches above mean the row is already bound
+        # by something else (an explicit --ingredient, --avatar/--subject, or
+        # --product), and in those cases the cell is never read at all — so
+        # rejecting on it there fails a send that was fully specified. This
+        # check sat ABOVE them until 2026-08-19, which made every build in the
+        # corpus unsendable (they all carry 'uploaded reference' on the persona
+        # row, bound via --avatar) and made the error's own prescribed repair
+        # impossible: it says "bind the row with --ingredient", but the explicit
+        # branch was unreachable. Order matters here; keep this below them.
+        source_error = source_ref_error(source)
+        if source_error:
+            errors.append(f"row '{name}': {source_error}")
+            continue
 
         node, how = None, None
         ref = parse_source_ref(source)
