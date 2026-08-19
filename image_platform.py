@@ -10821,12 +10821,15 @@ def promote_batch_to_video(
         if getattr(a, "end_frame_image_node_id", None)
     )
     _v892_8_warnings = []
+    # v892.10 — composites ARE supported on this path now (plate frames get
+    # materialised and a composite_plate sibling is created inline below), so
+    # this is an informational note, not a loss warning. If a plate frame
+    # cannot be materialised the clip is deliberately left unmarked and the
+    # per-node reason is logged, so a real failure still surfaces.
     if _v892_8_composite:
-        _v892_8_warnings.append(
-            f"scenes {_v892_8_composite} declare composite_plate_image, but this "
-            f"promote path cannot build a composite: no plate clip will exist and "
-            f"the background layer will be missing. Promote from the UI instead, "
-            f"or composite the plate still by hand in post (v892.8)."
+        log.info(
+            f"[v892.10 PROMOTE] scenes {_v892_8_composite} declare "
+            f"composite_plate_image — building plate layer(s) inline"
         )
     if _v892_8_anchored:
         _v892_8_warnings.append(
@@ -11016,6 +11019,16 @@ def promote_batch_to_video(
                 "start_frame": start_frame_key,
                 "end_frame": None,  # filled below for blend mode
                 "scene_transition": n.scene_transition or "",
+                # v892.10 — composite plate binding for THIS path. The browser
+                # promote gets its plate via main.py Phase 3a/3b; this endpoint
+                # writes Clip rows itself and that task never runs here, so the
+                # plate has to be built inline below. Carried per clip so the
+                # plate sibling can be created after the keys exist.
+                "composite_plate_image_node_id": (
+                    getattr(_assignment, "composite_plate_image_node_id", None)
+                    if _assignment is not None else None
+                ),
+                "composite_plate_prompt": ((vp_i or {}).get("plate_prompt") or None),
             })
 
             clips_in_this_scene.append(current_clip_index)
@@ -11133,6 +11146,46 @@ def promote_batch_to_video(
     except ImportError:
         _compose_veo_prompt = None
 
+    # v892.10 — materialise frames for COMPOSITE PLATE nodes.
+    #
+    # The loop above copies a frame per entry in _scene_plan, i.e. per scene's
+    # OWN image. A plate node is referenced only by composite_plate_image and
+    # is never any scene's own image, so its frame was never copied and there
+    # was nothing on disk to render it from. Same root cause as v892.2 on the
+    # browser path, in the other implementation.
+    _v892_10_plate_frames = {}   # node_id -> start_frame key
+    for _pid in {s.get("composite_plate_image_node_id") for s in clip_specs if s.get("composite_plate_image_node_id")}:
+        _hit = _nodes_by_id.get(_pid)
+        if _hit is None:
+            log.warning(f"[v892.10] plate node {_pid} is not in this batch — skipped")
+            continue
+        _pidx, _pnode = _hit
+        _pvariant = db.query(ImageVariant).filter(ImageVariant.id == _pnode.chosen_variant_id).first()
+        if not _pvariant:
+            log.warning(f"[v892.10] plate node {_pid} has no chosen variant — skipped")
+            continue
+        _psrc = images_root() / _pvariant.image_path
+        if not _psrc.exists():
+            _storage_download_to_local(_pvariant.image_path)
+        if not _psrc.exists():
+            log.warning(f"[v892.10] plate node {_pid} file unavailable — skipped")
+            continue
+        _pext = _psrc.suffix or ".png"
+        _pfn = f"image_{_pidx:02d}{_pext}"
+        try:
+            copy2(_psrc, job_images_dir / _pfn)
+        except Exception as _pe:
+            log.warning(f"[v892.10] plate node {_pid} copy failed: {_pe}")
+            continue
+        if _r2_configured and _r2_storage is not None:
+            try:
+                _r2_storage.upload_job_frame(new_job_id, _pfn, job_images_dir / _pfn)
+                frames_storage_keys[_pfn] = f"jobs/{new_job_id}/frames/{_pfn}"
+            except Exception as _ue2:
+                log.warning(f"[v892.10] plate frame {_pfn} R2 upload failed: {_ue2}")
+        _v892_10_plate_frames[_pid] = f"jobs/{new_job_id}/frames/{_pfn}"
+        log.info(f"[v892.10] plate frame materialised: node={_pid} -> {_pfn}")
+
     for spec in clip_specs:
         # v575: look up the parallel dialogue entry to find any v572
         # prebuilt prompt override. dialogue_list and clip_specs are
@@ -11175,8 +11228,66 @@ def promote_batch_to_video(
             prompt_text=_prompt_text,  # v575 — set when prebuilt override exists
             prompt_text_b=_prompt_text_b,      # v892.9 — policy fallback (v805)
             dialogue_text_b=_dialogue_text_b,  # v892.9 — reworded line (v821)
+            # v892.10 — mark the performing layer, but ONLY when its plate
+            # frame actually exists. Marking composite_key without a usable
+            # plate is the failure mode v892.8 refused to create: it looks
+            # wired and still renders with no background layer.
+            clip_role=(
+                "composite_key"
+                if _v892_10_plate_frames.get(spec.get("composite_plate_image_node_id"))
+                else None
+            ),
+            composite_plate_image_node_id=(
+                spec.get("composite_plate_image_node_id")
+                if _v892_10_plate_frames.get(spec.get("composite_plate_image_node_id"))
+                else None
+            ),
         )
         db.add(clip)
+
+    # v892.10 — create the composite_plate sibling clips (this path's Phase
+    # 3a + 3b in one step, since main.py's background task never runs here).
+    # The plate is a silent frozen layer: same duration as the layer it sits
+    # under, its own start frame, a prompt, and status pending so the worker
+    # picks it up. The export filter already excludes plates from the
+    # timeline, so this adds a LAYER, never a segment.
+    db.flush()   # the key clips need ids before anything can pair to them
+    _v892_10_made = 0
+    for spec in clip_specs:
+        _pid = spec.get("composite_plate_image_node_id")
+        _pframe = _v892_10_plate_frames.get(_pid) if _pid else None
+        if not _pframe:
+            continue
+        _key_clip = db.query(Clip).filter(
+            Clip.job_id == new_job_id,
+            Clip.clip_index == spec["clip_index"],
+        ).first()
+        if _key_clip is None:
+            continue
+        _plate_prompt = (spec.get("composite_plate_prompt") or "").strip() or (
+            "Animate the attached start-frame image into a vertical 9:16 video "
+            "in which nothing moves. Hold the image completely still for the "
+            "full duration, with no camera move, no zoom and no motion in the "
+            "image. Silent. No subtitles, no captions."
+        )
+        db.add(Clip(
+            job_id=new_job_id,
+            clip_index=200000 + spec["clip_index"],   # same offset main.py uses
+            dialogue_id=spec["dialogue_id"],
+            dialogue_text="",                          # a plate is silent
+            status="pending",
+            scene_index=spec["scene_index"],
+            clip_role="composite_plate",
+            paired_clip_id=_key_clip.id,
+            composite_plate_image_node_id=_pid,
+            start_frame=_pframe,
+            prompt_text=_plate_prompt,
+            cut_mode="auto",
+            scene_type="shot",
+        ))
+        _v892_10_made += 1
+    if _v892_10_made:
+        log.info(f"[v892.10] created {_v892_10_made} composite_plate clip(s) for job {new_job_id}")
 
     # 6. Remember on the batch that we've already promoted it
     batch.promoted_video_job_id = new_job_id
