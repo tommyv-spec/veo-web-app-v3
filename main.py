@@ -6957,6 +6957,15 @@ async def recreate_deleted_clip(
             detail="Recreate supports fresh/cut clips only — blend and explicit end-frame clips "
                    "need neighbor-frame context this path does not rebuild."
         )
+    # v932.2 — a composite scene (v892) renders as a key clip PAIRED to a
+    # plate sibling at 200000+ci; recreating just the key row here would drop
+    # the pairing and the plate would stay orphaned on the deleted id.
+    if line.get('composite_plate_image_node_id'):
+        raise HTTPException(
+            status_code=400,
+            detail="This line is a composite scene (v892 key+plate pair) — recreate cannot rebuild "
+                   "the pair. Re-promote the batch to recover it."
+        )
 
     # Start frame: same derivation as the create path (main.py Phase 2) and
     # the redo-pending fallback — sorted frames_storage_keys + start_image_idx.
