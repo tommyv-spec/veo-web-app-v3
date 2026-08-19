@@ -148,7 +148,8 @@ PER_SHOT_SCHEMA = {
     "required": [
         "shot_index", "start", "end", "summary", "forensic_perception",
         "static_composition", "frame_inventory", "start_frame_spec", "action_arc",
-        "audio", "motion_cross_check", "veo_reproduction_hints", "human_walk_corrections",
+        "performance", "audio", "motion_cross_check", "veo_reproduction_hints",
+        "human_walk_corrections",
     ],
     "properties": {
         "shot_index": {"type": "integer", "minimum": 1},
@@ -398,6 +399,99 @@ PER_SHOT_SCHEMA = {
                 "verbs_observed": {"type": "array", "items": {"type": "string"}},
             },
         },
+        # ── v934 — the PERFORMANCE read ───────────────────────────────
+        # action_arc above answers "did anything change, and along which
+        # axis". It cannot answer the question a rebuild actually needs:
+        # what is being DONE, to whom, with what visible result, and in
+        # what register. A different cast in a different setting has to
+        # perform the same ACTIONS — it does not have to travel the same
+        # pixel path.
+        #
+        # Deliberately NOT a beats[] array. The lean profile settled that
+        # argument on cost (see LEAN_AD_SHOT_SCHEMA.action): an array of
+        # beat objects is the same information at roughly double the token
+        # count in braces and keys, and the model sequences fine on "then".
+        # These are the fields NEITHER schema had — the lean one carries
+        # action / camera_move / end_state and no register at all.
+        #
+        # Measured 2026-08-17 across two videos. Three results are baked
+        # into the wording and must not be softened back out:
+        #
+        #  1. BEAT SPLITTING IS A PROMPT PROBLEM, NOT A MODEL ONE. The
+        #     same model on the same video went 17 -> 26 beats on wording
+        #     alone; the free browser lane on Extended then reached 35,
+        #     longest beat 8.0s against 16.0s. A ten-second "beat" is not
+        #     a beat, it is a clip with a label on it.
+        #  2. KINEMATICS ARE BANNED HERE ON PURPOSE. Asked for gesture
+        #     manner, the model returns "even speed, light weight,
+        #     repetitive open palm dab gestures" — a checklist no
+        #     performer can act and no prompt can use. Distances, angles,
+        #     speed registers, weight words and body-part inventories
+        #     belong to action_arc.kinematics or nowhere.
+        #  3. A HELD POSE IS NOT AN ACTION. A palm that was ALREADY
+        #     extended got written as "he extends an open palm", and Veo
+        #     rendered nothing, because there was nothing to render. The
+        #     same trap the lean profile's end_state field guards: state
+        #     is written as state, never replayed as an event.
+        "performance": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "action_performed", "delivery_tone", "emotion_read",
+                "intent_subtext", "attention_target", "gesture_register",
+            ],
+            "properties": {
+                "action_performed": _string_schema(
+                    "Every action performed in this shot, IN ORDER, as one "
+                    "flowing sentence joined by 'then'. Each action names what "
+                    "is DONE, what or who it is done TO, and what visibly "
+                    "CHANGES because it happened: 'she halts him with a hand "
+                    "to his forearm, then he stops walking and turns his head "
+                    "to her.' A one-verb summary of a multi-action shot is the "
+                    "failure this field exists to catch. If a position is only "
+                    "HELD, write it as a state — 'his palm is already open "
+                    "toward her' — never as an event. Write 'held still' when "
+                    "nothing is performed at all. No distances, no angles, no "
+                    "speed or weight words, no lists of which body parts are "
+                    "recruited: those are action_arc.kinematics."),
+                "delivery_tone": _string_schema(
+                    "The delivery register of the speech in this shot, in "
+                    "plain words — teasing, deadpan, conspiratorial, "
+                    "mock-outraged, warm-knowing, urgent, flat, gleeful, "
+                    "weary. Say so when it CHANGES mid-shot, and name the word "
+                    "it changes on. 'none' when nobody speaks."),
+                "emotion_read": _string_schema(
+                    "Per visible person: their state, whether it CHANGES in "
+                    "this shot, and the VISIBLE TELL that proves it — brow, "
+                    "mouth corner, jaw, shoulder drop, gaze break, breath. "
+                    "Name people by garment or position, never by guessed "
+                    "identity. Where no tell is visible, write 'no visible "
+                    "tell' rather than inventing one."),
+                "intent_subtext": _string_schema(
+                    "The real social action underneath the literal one — what "
+                    "the person is actually doing to the other. 'She is not "
+                    "pouring the oil, she is testing whether he flinches.' "
+                    "Must be supportable by something visible in the shot; "
+                    "'none observable' is a valid answer."),
+                "attention_target": _string_schema(
+                    "Who or what the speech and the gaze are ADDRESSED TO: the "
+                    "other person (say which, by garment), the lens, the prop, "
+                    "or off-frame — and whether it SHIFTS during the shot. "
+                    "This field exists because an unaddressed line rebuilds as "
+                    "a line played to the camera: a rebuilt clip whose "
+                    "addressee was left unstated had the actor turn away from "
+                    "the man she was talking to and deliver it to the lens."),
+                "gesture_register": _string_schema(
+                    "HOW the hands accompany the speech, as a register rather "
+                    "than a movement trace: gestures in line with the words, "
+                    "explains with the hands what is being said, gestures "
+                    "naturally, gestures frantically, hands still. These are "
+                    "EXAMPLES, not a closed list — name the register actually "
+                    "seen. This is the field that keeps talking-head shots "
+                    "honest: they have no object to act on, so without it the "
+                    "read drifts into rhetoric about what the words mean."),
+            },
+        },
         "audio": {
             "type": "object",
             "additionalProperties": False,
@@ -548,13 +642,23 @@ LEAN_AD_SHOT_SCHEMA = {
 # preamble asked for extra attention to ACTION ARCS and verbs-of-state-change;
 # a lean shot has no action_arc and no state-evolution field to put that in.
 # The closing line ordered the forensic-perception protocol, which the lean
-# profile does not define. "ugc-reel" keeps the exact strings it always had,
-# so the default prompt stays byte-identical.
+# profile does not define. "ugc-reel" kept the exact strings it always had
+# until v934 added the performance clause below; "fbads-video" is untouched by
+# that and stays byte-identical.
 DEFAULT_TASK_PREAMBLE = (
     "Produce one JSON OBJECT matching the Stage 4d schema. "
     "Cover every shot in order. Use the EXACT shot start/end timestamps "
     "provided. Pay extra attention to action arcs in shots whose dialogue "
     "contains a verb-of-state-change (pour, squeeze, add, stir, mix, melt).\n"
+    # v934. The schema descriptions alone did not hold the line: asked for
+    # performance, a model reaches for movement description, because that is
+    # what most video-captioning training rewards. Saying it once here, in the
+    # task rather than only in the field text, is what moved the answers.
+    "The `performance` block asks WHAT IS BEING DONE — the action, who it is "
+    "done to, and what visibly changes because of it — never how the limbs "
+    "travelled. Distances, angles, speed and weight words belong to "
+    "action_arc, not there. A position that is only HELD is written as a "
+    "state, never as an event.\n"
 )
 
 # Keeps the two clauses that are genuinely shared — cover every shot, use the
@@ -2063,6 +2167,11 @@ def write_human_walk_template(shots: list, transcript: dict, frames_dir: Path | 
                     "intrinsic_state_end": "none", "primary_change_axis": "NONE", "magnitude": "NONE",
                 },
                 "verbs_observed": [],
+            },
+            # derived, not retyped — same reason as frame_inventory above
+            "performance": {
+                k: "<REQUIRED>"
+                for k in PER_SHOT_SCHEMA["properties"]["performance"]["required"]
             },
             "audio": {"dialogue_verbatim": dialogue_text, "ambient": "<REQUIRED>", "music": "<REQUIRED>", "voice_register": "<REQUIRED>"},
             "motion_cross_check": {"input_classification": "<COPY FROM motion.json>", "vlm_observation": "<REQUIRED>", "agrees": False, "discrepancy": "<REQUIRED>"},

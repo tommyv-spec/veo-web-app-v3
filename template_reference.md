@@ -16840,3 +16840,49 @@ Old `stage4d.v2` artifacts stay valid v2; they are not v3. Reader house rules fo
 
 **Auditor/checker note:** checkers verify declarations, not decisions — the contract check verifies the mandatory blocks are present, never which creative values they carry.
 
+---
+
+## v934 — THE ACTION READ AND THE VEO DIALECT: two layers, kept apart (2026-08-19)
+
+**Where it comes from.** The operator on rendered clips of `street-jealousy-belly-v2`: *"these prompts are very wrong especially the first ones in the Hook, very flat, the woman doesn't stop the man while passing"*. The storyboard was already right — Scene 3's `action_note` said *"completes his turn back to face the couple"* — the Veo prompts had dropped it. So the loss was not in the reading and not in the rendering; it was in the step between them, which nothing owned. Measured on two videos over 2026-08-17→19, and validated end to end: job `a9d9895d` rendered three clips from a source's own start frames at 4/6/8s, operator: *"i like the results"*.
+
+**THE SPLIT — this is the point of the rule.** Two layers that must never be written as one:
+
+1. **The ACTION READ (the WHAT)** — what the source performs. Model-agnostic. It says nothing about how any prompt is worded. Lives in `code/v589_video_understanding.py` as the `performance` block.
+2. **The PROMPT DIALECT (the HOW)** — how that read is written for one specific video model. Veo has a dialect; Kling and Sora have their own. Swap the render engine and ONLY this layer changes.
+
+Written together, a Veo quirk becomes a permanent fact about the source, and the read stops being reusable. That is the whole reason for the separation.
+
+### READ SIDE — the `performance` block
+
+Six fields per shot on the heavy `ugc-reel` profile: `action_performed`, `delivery_tone`, `emotion_read`, `intent_subtext`, `attention_target`, `gesture_register`. Deliberately absent from the lean `fbads-video` profile, which exists to read an eighty-shot ad cheaply. Three measured results are baked into the field wording:
+
+1. **Beat splitting is a PROMPT problem, not a model one.** The same model on the same video went 17 → 26 beats on wording alone. The free browser lane on Extended then reached 35 beats, longest beat 8.0s against 16.0s — beating the paid flash API. A ten-second "beat" is not a beat, it is a clip with a label on it.
+2. **Kinematics are banned here on purpose.** Asked for gesture manner, the model returns *"even speed, light weight, repetitive open palm dab gestures"* — a checklist no performer can act and no prompt can use. Distances, angles, speed registers, weight words and body-part inventories belong to `action_arc.kinematics` or nowhere. The question on every shot is **what is being done, to whom, and what changes because of it** — never how the arm travelled.
+3. **A held pose is not an action.** A palm that was ALREADY extended got written as *"he extends an open palm"*, and Veo rendered nothing, because there was nothing to render. Same trap the lean profile's `end_state` field guards: state is written as state, never replayed as an event.
+
+`gesture_register` is the operator's own category, and it is the fix for the one thing the spec could not do. A talking-head beat has no object to act on, so the read drifts into rhetoric about what the words mean. The register — *"gestures in line with the words"*, *"explains with her hands what she is saying"*, *"gestures naturally"*, *"gestures frantically"* — is a real, actable, renderable answer where "nothing changes" was not. Open list, per root `CLAUDE.md` §3.6.
+
+### WRITE SIDE — the Veo dialect
+
+Each rule below is a render failure, not a preference:
+
+1. **Action and its end state in one sentence.** *"until the skin is visibly slick"*. Without the end state the model picks its own stopping point, and usually stops early.
+2. **Join ordered beats with "then", never "as" or "and".** "As" reads as simultaneous and the model overlaps the beats into a blur. Confirmed independently by the lean profile's `action` field, which settled on the same word for the same reason.
+3. **A held pose is written as state, not event** — the read-side rule survives into the prompt unchanged. *"his palm is already open toward her"*, never *"he extends his palm"*.
+4. **Always name who is being spoken to.** An unaddressed line rebuilds as a line played to the lens: the actor turned away from the man she was talking to and delivered it to camera. The generic prompt body literally says *"speaks directly to camera"*, so silence on the addressee is not neutral — it is a default. Write `Looking straight at the man in the fitted cream knit polo, the woman in the maroon top says, "…"`. This is v872's addressee clause reaching the Veo layer.
+5. **Duration is part of the prompt.** Length changes rhythm, not just runtime — the same prompt at 8s and at 4s are different performances. Bind it from the line's own character and word count (`code/clip_duration.py`, v861/v884): allowed 4/6/8/10s, API lane 4/6/8.
+
+### What this rule does NOT yet settle
+
+Recorded so it is not rediscovered as a surprise:
+
+- **`action_result` drifts to rhetoric on talking-head shots.** The gesture register covers it in practice; the underlying weakness is real.
+- **"Nothing changes" was never once used across 37 beats on two videos.** The model will not volunteer that an action is absent, which is precisely the case the read exists to catch. Treat a suspiciously eventful read of a static shot as unverified.
+- **`veo_reproduction_hints` still sits inside the observation schema.** That is a layering violation by this rule's own terms — a Veo-specific field living in the model-agnostic read. Left in place deliberately: moving it touches the human-walk template, the validator and the tests, and it deserves its own change rather than a ride-along.
+- **The browser lane does not inherit these fields automatically yet.** `tools/build_gemini_decode_pack.py` carries the API lane's field descriptions across by parsing them out of the schema, but only for the names listed in its `OBSERVATION_FIELDS` tuple. Adding the six names there is a one-line edit, not yet made.
+
+**Why `stage4d.v3` was strengthened in place rather than bumped to v4.** Adding a required field to a version normally invalidates every artifact already written against it, which is why v930 bumped v2→v3. Measured before doing it here: **zero `stage4d.v3` artifacts exist on disk** — v3 landed 2026-08-18 and nothing has been decoded through it yet — against eight surviving v2 artifacts, which the validator already rejects as v3 on the version string alone. So the blast radius is empty and the version string stays honest. **This escape closes the moment the first v3 decode is written**; after that, a stricter contract needs v4.
+
+**Status: no auditor check, forward-only.** The read side is locked by `tests/test_v589_video_understanding.py::test_v934_performance_asks_for_action_not_kinematics`, which fails if the field wording is softened back toward movement description or if the lean profile gains the block. The dialect rules are documentation only — nothing greps a Veo prompt for "as" versus "then" today.
+

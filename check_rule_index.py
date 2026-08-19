@@ -132,6 +132,7 @@ DUAL_BUCKET_ALLOWLIST = {
     "v712": "Banana-2 attached-ref composition is §A authoring; Stage-4d relational is §B decode",
     "v718": "morph-diagnostics §A authoring; VLM forensic-perception §B decode; plumbing §C platform",
     "v867": "test-axis fields: §0 TEST AXES declaration line is §A authoring; the YAML frontmatter keys on new decodes are §B decode",
+    "v934": "the two layers ARE the rule: the model-agnostic performance/action read is §B decode; the Veo prompt dialect that renders it is §A authoring, and swapping the video model changes only the §A half",
 }
 
 _SECTION_RX = {

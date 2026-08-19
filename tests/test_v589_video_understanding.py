@@ -75,6 +75,14 @@ def valid_stage4d():
                 "morphology": {"focus_object": "glass", "intrinsic_state_start": "clear empty glass", "intrinsic_state_end": "clear empty glass", "primary_change_axis": "NONE", "magnitude": "NONE"},
                 "verbs_observed": ["lifts"],
             },
+            "performance": {
+                "action_performed": "she grips the glass, then lifts it to chest height and holds it there",
+                "delivery_tone": "warm-knowing, steady across the shot",
+                "emotion_read": "the woman in the blue apron stays composed; no visible tell",
+                "intent_subtext": "she is showing the glass is empty before it is filled",
+                "attention_target": "the lens throughout; no shift",
+                "gesture_register": "gestures in line with the words",
+            },
             "audio": {"dialogue_verbatim": "First, lift the glass.", "ambient": "room tone", "music": "none", "voice_register": "direct"},
             "motion_cross_check": {"input_classification": "medium", "vlm_observation": "one hand lift", "agrees": True, "discrepancy": "none"},
             "veo_reproduction_hints": {"use_blend_to_next_scene": False, "needs_platform_future_image_end": False, "transition_prompt": "Lift the glass from counter to chest height."},
@@ -119,6 +127,35 @@ class Stage4dContractTests(unittest.TestCase):
         self.assertIn("Motion classifications", prompt)
         self.assertNotIn('"additionalProperties"', prompt)
         self.assertIn("JSON OBJECT", prompt)
+
+    def test_v934_performance_asks_for_action_not_kinematics(self):
+        """The heavy read carries a performance block; the lean one must not.
+
+        Two separate locks, both load-bearing:
+
+        * ugc-reel REQUIRES it, and its wording bans the movement-description
+          answer the model reaches for by default ("even speed, light weight,
+          repetitive open palm dab gestures"). If someone softens the field
+          text back toward kinematics this goes red.
+        * fbads-video must NOT gain it. That profile exists to read an
+          eighty-shot ad cheaply; six extra prose fields per shot is exactly
+          the cost it was carved out to avoid.
+        """
+        perf = v589.PER_SHOT_SCHEMA["properties"]["performance"]
+        self.assertIn("performance", v589.PER_SHOT_SCHEMA["required"])
+        self.assertEqual(
+            set(perf["required"]),
+            {"action_performed", "delivery_tone", "emotion_read",
+             "intent_subtext", "attention_target", "gesture_register"},
+        )
+        action = perf["properties"]["action_performed"]["description"]
+        self.assertIn("No distances", action)
+        self.assertIn("HELD", action)          # a held pose is written as state
+        lean = v589.schema_for_profile("fbads-video")["properties"]["shots"]["items"]
+        self.assertNotIn("performance", lean["properties"])
+        self.assertIn(
+            "performance", v589.build_user_prompt(
+                self.expected, "hello", {}, include_schema=False))
 
     def test_standard_cost_is_only_an_estimate(self):
         estimate = v589.compute_gemini_cost("gemini-3.6-flash", 1000, 100, 200)
