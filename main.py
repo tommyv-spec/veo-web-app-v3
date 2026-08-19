@@ -7063,6 +7063,162 @@ async def recreate_deleted_clip(
     }
 
 
+class AddVoiceoverRequest(BaseModel):
+    voiceover_line: str
+    voiceover_line_b: Optional[str] = None   # v821 reworded line for Prompt B
+    audio_prompt: Optional[str] = None       # v789 authored twin prompt (verbatim when given)
+    audio_prompt_b: Optional[str] = None     # v821 Prompt B for the twin
+
+
+@app.post("/api/jobs/{job_id}/clips/{clip_index}/add-voiceover")
+async def add_voiceover_to_clip(
+    job_id: str,
+    clip_index: int,
+    request: AddVoiceoverRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v933 — turn an existing silent clip into a v698A voiceover pair on the
+    LIVE job, without a re-promote.
+
+    The visual clip's render is kept untouched; this only (1) stamps the
+    v698A pairing fields on the visual row, (2) creates the missing
+    audio_pair twin at clip_index+100000 (anchor frame + node id copied from
+    the job's existing twins, so the voice/face anchor stays identical),
+    (3) wires paired_clip_id both ways, (4) updates dialogue_json so future
+    recreates/exports see the line, and (5) queues ONLY the new twin for
+    render on the flow redo lane ('v933 modify' marker — exempt from the
+    job age cap like v932 recreates, still inside the 24h freshness bound).
+
+    Needs at least one existing audio_pair on the job to anchor from —
+    a job that never had voiceover pairs must be re-promoted instead.
+    """
+    job = get_user_job(db, job_id, current_user)
+    if job.backend != 'flow':
+        raise HTTPException(status_code=400, detail=f"add-voiceover is only supported for flow jobs (this job backend: {job.backend})")
+
+    line_text = (request.voiceover_line or "").strip()
+    if not line_text:
+        raise HTTPException(status_code=400, detail="voiceover_line is empty")
+
+    visual = db.query(Clip).filter(Clip.job_id == job_id, Clip.clip_index == clip_index).first()
+    if visual is None:
+        raise HTTPException(status_code=404, detail=f"No clip at clip_index {clip_index} on this job")
+    if (visual.clip_role or '') not in ('', None) and visual.clip_role != 'visual_pair':
+        raise HTTPException(status_code=400, detail=f"Clip {clip_index} has clip_role={visual.clip_role} — only a plain silent clip (or an unpaired visual_pair) can gain a voiceover")
+
+    twin_index = 100000 + clip_index
+    existing_twin = db.query(Clip).filter(Clip.job_id == job_id, Clip.clip_index == twin_index).first()
+    if existing_twin:
+        raise HTTPException(status_code=409, detail=f"Audio twin already exists at clip_index {twin_index} (clip id {existing_twin.id}, status {existing_twin.status})")
+
+    # Anchor template: any existing audio twin on this job carries the anchor
+    # frame key + anchor node id the whole video uses.
+    template = db.query(Clip).filter(
+        Clip.job_id == job_id,
+        Clip.clip_role == 'audio_pair',
+        Clip.start_frame.isnot(None),
+    ).order_by(Clip.clip_index.asc()).first()
+    if template is None:
+        raise HTTPException(status_code=409, detail="Job has no existing audio_pair twin to copy the anchor frame from — re-promote the batch instead.")
+
+    # Twin prompt: authored prompt wins (v789 verbatim). Fallback: clone the
+    # template twin's prompt and swap the quoted spoken span (v872 — the line
+    # is the only double-quoted span in the prompt).
+    import re as _re
+    def _swap_quoted_line(prompt: str, new_line: str) -> Optional[str]:
+        if not prompt:
+            return None
+        swapped, n = _re.subn(r'"[^"]+"', '"' + new_line + '"', prompt, count=1)
+        return swapped if n == 1 and prompt.count('"') == 2 else None
+
+    audio_prompt = (request.audio_prompt or "").strip() or _swap_quoted_line(template.prompt_text or "", line_text)
+    if not audio_prompt:
+        raise HTTPException(status_code=409, detail="No audio_prompt given and the template twin's prompt could not be line-swapped — pass audio_prompt explicitly.")
+    line_b = (request.voiceover_line_b or "").strip() or None
+    audio_prompt_b = (request.audio_prompt_b or "").strip() or (
+        _swap_quoted_line(audio_prompt, line_b) if line_b else None
+    )
+
+    # (1) visual side of the pair
+    visual.clip_role = 'visual_pair'
+    visual.voiceover_line = line_text
+    visual.voiceover_anchor_image_node_id = template.voiceover_anchor_image_node_id
+    visual.dialogue_text = line_text
+
+    # (2) the audio twin — same field shape as v698A Phase 3a/3b
+    twin = Clip(
+        job_id=job_id,
+        clip_index=twin_index,
+        dialogue_id=visual.dialogue_id,
+        dialogue_text=line_text,
+        dialogue_text_b=line_b,
+        status=ClipStatus.FLOW_REDO_QUEUED.value,
+        scene_index=visual.scene_index,
+        clip_role='audio_pair',
+        paired_clip_id=visual.id,
+        voiceover_anchor_image_node_id=template.voiceover_anchor_image_node_id,
+        voiceover_line=line_text,
+        cut_mode='auto',
+        scene_type='shot',
+        start_frame=template.start_frame,
+        prompt_text=audio_prompt,
+        prompt_text_b=audio_prompt_b,
+        generation_attempt=1,
+        use_logged_params=False,
+        redo_reason="v933 modify: audio twin added after promote",
+    )
+    db.add(twin)
+    db.flush()
+    # (3) bidirectional pairing, matching Phase 3a
+    visual.paired_clip_id = twin.id
+
+    # (4) dialogue_json so recreates/exports see the new line
+    try:
+        dialogue_data = json.loads(job.dialogue_json) if job.dialogue_json else {}
+        lines = dialogue_data.get("lines") or []
+        if 0 <= clip_index < len(lines) and isinstance(lines[clip_index], dict):
+            anchor_local_idx = None
+            for _l in lines:
+                if isinstance(_l, dict) and _l.get("voiceover_anchor_image_local_index") is not None:
+                    anchor_local_idx = _l.get("voiceover_anchor_image_local_index")
+                    break
+            lines[clip_index].update({
+                "text": line_text,
+                "clip_role": "visual_pair",
+                "voiceover_line": line_text,
+                "voiceover_anchor_image_node_id": template.voiceover_anchor_image_node_id,
+                "voiceover_anchor_image_local_index": anchor_local_idx,
+                "voiceover_audio_prompt_override": audio_prompt,
+                "veo_prompt_b_line": line_b,
+            })
+            job.dialogue_json = json.dumps(dialogue_data)
+    except (json.JSONDecodeError, TypeError) as _dj_err:
+        print(f"[v933] dialogue_json update skipped for job {job_id}: {_dj_err}", flush=True)
+
+    job.total_clips = db.query(Clip).filter(Clip.job_id == job_id).count()
+    job.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(twin)
+
+    add_job_log(db, job_id, f"Clip {clip_index + 1} gained a voiceover — audio twin {twin_index} created and queued (v933)", "INFO", "modify")
+    # v933 TEMP DIAG — remove after the first operator-confirmed twin render.
+    print(f"[v933 TEMP] add-voiceover job={job_id} visual={visual.id} twin={twin.id} "
+          f"anchor_frame={template.start_frame} prompt={'authored' if request.audio_prompt else 'template-swap'} "
+          f"prompt_b={'yes' if audio_prompt_b else 'NO'}", flush=True)
+
+    return {
+        "success": True,
+        "visual_clip_id": visual.id,
+        "twin_clip_id": twin.id,
+        "twin_clip_index": twin_index,
+        "twin_status": twin.status,
+        "anchor_start_frame": template.start_frame,
+        "prompt_source": "authored" if request.audio_prompt else "template-swap",
+        "prompt_b_attached": bool(audio_prompt_b),
+    }
+
+
 # ============ Lineup Management (Post-Production) ============
 
 class LineupUpdateRequest(BaseModel):
@@ -16124,9 +16280,10 @@ async def user_worker_get_redo_clips(
             # possibly old job; its redo_reason marks it and the 24h
             # Job.updated_at filter above still bounds it. The age cap keeps
             # excluding STALE queue entries (the 2026-08-07 failure), which
-            # never carry this marker.
+            # never carry this marker. v933 modify twins get the same pass.
             _q = _q.filter(or_(Job.created_at >= _age_cutoff,
-                               Clip.redo_reason.like('v932 recreate%')))
+                               Clip.redo_reason.like('v932 recreate%'),
+                               Clip.redo_reason.like('v933 modify%')))
         redo_clips = _q.order_by(Clip.id.asc()).all()
     else:
         redo_cutoff = datetime.utcnow() - timedelta(hours=24)
@@ -16144,9 +16301,10 @@ async def user_worker_get_redo_clips(
             )
         )
         if _age_cutoff is not None:
-            # v932.1 — same deliberate-recreate exemption as the worker_id branch.
+            # v932.1/v933 — same deliberate-recreate exemption as the worker_id branch.
             _q = _q.filter(or_(Job.created_at >= _age_cutoff,
-                               Clip.redo_reason.like('v932 recreate%')))
+                               Clip.redo_reason.like('v932 recreate%'),
+                               Clip.redo_reason.like('v933 modify%')))
         redo_clips = _q.order_by(Clip.id.asc()).all()
 
     if not redo_clips:
