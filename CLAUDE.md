@@ -108,6 +108,8 @@ python -c "import re; t=open('videos/<file>.md',encoding='utf-8').read(); print(
 - Add temporary diagnostic log lines on runtime-affecting changes (`main.py` / `video_processor.py` / `image_platform.py` / `static/flow_worker.py`). Remove only after operator-side evidence lands.
 - After every push to `code/` main → spawn `caveman:cavecrew-reviewer` on commit set; cheap insurance
 - `py_compile` insufficient — `import <module>` before push
+- **READ THE PRODUCTION LOG FROM HERE (2026-08-19).** `RENDER_API_KEY` now lives in `~/veo-worker/.env` (outside the repo, never committed) **and** as a persistent Windows user env var, so every shell and session has it. Use **`python code/render_logs.py --text <needle>`** (`--services` lists them; `-n` sets the count; `--service` picks a non-default one). `--text` is Render's own server-side filter, so it searches the whole retained window, not just the tail. **Why it matters:** for a week every `[TEMP]` diagnostic this project shipped had no reader — "did it fire?" was unanswerable and fixes got called done on code reading alone. If a diagnostic exists, check it here before claiming anything.
+- **Prefer DB state over logs when you can get it.** A log line proves code ran; a row proves the outcome. `python code/verify_v892_live.py` is the model: it reads the composite plate row and reports whether it has a prompt AND a start frame, with a distinct exit code for "no composite job exists yet" so an untested fix can never be mistaken for a passing one.
 - Bumping submodule pointer in wiki repo captures version stamp (`git add code && git commit` from wiki root)
 
 **Local workers (NOT on Render):**
