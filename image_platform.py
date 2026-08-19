@@ -10854,12 +10854,15 @@ def promote_batch_to_video(
             continue
         if _v892_8_has_b:
             break
-    if _v892_8_has_b:
-        _v892_8_warnings.append(
-            "the build authors Prompt B (v805 policy fallback) but this promote "
-            "path does not carry it: every clip will have prompt_text_b empty, so "
-            "a policy-blocked render has nothing to fall back to. Promote from the "
-            "UI to keep Prompt B."
+    # v892.9 carries Prompt B on this path now, so the loss this used to warn
+    # about is fixed rather than announced. The flag is kept because the
+    # composite/anchor/end-frame gaps above are still real, and because a
+    # build with NO authored Prompt B is worth noting: a policy block on such
+    # a clip is terminal on every path, not just this one.
+    if not _v892_8_has_b:
+        log.info(
+            "[v892.8 PROMOTE] build authors no Prompt B — a generation-policy "
+            "block will be terminal for its clips on any promote path"
         )
     for _w in _v892_8_warnings:
         log.warning(f"[v892.8 PROMOTE] {_w}")
@@ -10992,6 +10995,16 @@ def promote_batch_to_video(
                 # auto-build runs as before.
                 "veo_prompt_override": _veo_text_override or None,
                 "veo_negative_prompt_override": _veo_neg_override or None,
+                # v892.9 — Prompt B (v805 policy fallback) + its reworded line
+                # (v821). This path carried Prompt A and dropped B entirely.
+                # Measured on one batch: UI promote 20/20 clips with Prompt B,
+                # CLI promote 0/20 — and 9 of that job's clips died
+                # GENERATION_POLICY with nothing to retry on, while the SAME
+                # build promoted from the UI completed 20/20. Carrying it is a
+                # two-line fix; refusing the promote instead would have blocked
+                # 226 of 322 existing builds.
+                "veo_prompt_b": (vp_i or {}).get("prompt_b") or None,
+                "veo_prompt_b_line": (vp_i or {}).get("prompt_b_line") or None,
             })
 
             clip_specs.append({
@@ -11143,6 +11156,12 @@ def promote_batch_to_video(
         if _veo_override and _compose_veo_prompt is not None:
             _prompt_text = _compose_veo_prompt(_veo_override, _veo_neg)
 
+        # v892.9 — stamp Prompt B too. The Flow worker retries a
+        # generation-policy-blocked clip on prompt_text_b before escalating
+        # (v805); with it NULL the block is terminal and the clip just fails.
+        _prompt_text_b = (_matching_dialogue or {}).get("veo_prompt_b") or None
+        _dialogue_text_b = (_matching_dialogue or {}).get("veo_prompt_b_line") or None
+
         clip = Clip(
             job_id=new_job_id,
             clip_index=spec["clip_index"],
@@ -11154,6 +11173,8 @@ def promote_batch_to_video(
             start_frame=spec["start_frame"],
             end_frame=spec["end_frame"],
             prompt_text=_prompt_text,  # v575 — set when prebuilt override exists
+            prompt_text_b=_prompt_text_b,      # v892.9 — policy fallback (v805)
+            dialogue_text_b=_dialogue_text_b,  # v892.9 — reworded line (v821)
         )
         db.add(clip)
 
