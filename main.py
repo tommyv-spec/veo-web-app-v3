@@ -8733,9 +8733,7 @@ async def download_output(
             # CLI clients got 401 on downloads while every JSON endpoint
             # accepted the same token. Bearer first, cookie fallback.
             user = validate_bearer_token(request, _db)
-            if user is not None:
-                print(f"[TEMP] download_output bearer accepted user={user.id} job={job_id} file={filename}", flush=True)
-            else:
+            if user is None:
                 session_token = request.cookies.get("session")
                 if not session_token:
                     raise HTTPException(status_code=401, detail="Not authenticated")
