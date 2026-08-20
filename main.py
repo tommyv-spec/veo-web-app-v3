@@ -8722,17 +8722,26 @@ async def download_output(
     # and holding a dependency-injected session that long exhausts the pool.
     from models import get_db
     from auth import validate_session as db_validate_session
+    from auth import validate_bearer_token
 
     output_dir = None
     with get_db() as _db:
         # Authenticate
         if GOOGLE_AUTH_ENABLED:
-            session_token = request.cookies.get("session")
-            if not session_token:
-                raise HTTPException(status_code=401, detail="Not authenticated")
-            user = db_validate_session(_db, session_token)
-            if not user or not user.is_active:
-                raise HTTPException(status_code=401, detail="Not authenticated")
+            # v886 parity: this handler authenticates by hand (no dependency
+            # injection, see note above), so the bearer path never ran here —
+            # CLI clients got 401 on downloads while every JSON endpoint
+            # accepted the same token. Bearer first, cookie fallback.
+            user = validate_bearer_token(request, _db)
+            if user is not None:
+                print(f"[TEMP] download_output bearer accepted user={user.id} job={job_id} file={filename}", flush=True)
+            else:
+                session_token = request.cookies.get("session")
+                if not session_token:
+                    raise HTTPException(status_code=401, detail="Not authenticated")
+                user = db_validate_session(_db, session_token)
+                if not user or not user.is_active:
+                    raise HTTPException(status_code=401, detail="Not authenticated")
             job = _db.query(Job).filter(Job.id == job_id, Job.user_id == user.id).first()
         else:
             job = _db.query(Job).filter(Job.id == job_id).first()
