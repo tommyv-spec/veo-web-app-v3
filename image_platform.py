@@ -941,18 +941,34 @@ def _storage_delete(rel_path: str):
 #   failed     — last generation attempt failed (see error_message)
 
 
-def _safe_qc(raw):
+def _safe_qc(raw, node_id=None):
     """v936: decode ImageNode.qc_json for to_dict, never raising.
 
     A corrupt report must not 500 the sidebar poll — GET /api/images/nodes
     calls to_dict on every node every 2s. Bad JSON degrades to None.
+
+    Shape is checked too, not just parseability: the SPA reads qc.variants
+    and qc.recommended_variant_id, so a valid-JSON scalar or list ('0',
+    '"x"', '[]') would sail through json.loads and crash the reader later.
+    Only a dict is served; anything else degrades to None.
+
+    Both rejections WARN — shadow mode exists to measure machine-vs-operator
+    agreement, and a silently dropped report would under-count with no trace.
     """
     if not raw:
         return None
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except Exception:
+        log.warning(f"[image_platform] [qc] unparseable qc_json ignored (node={node_id})")
         return None
+    if not isinstance(parsed, dict):
+        log.warning(
+            f"[image_platform] [qc] non-dict qc_json ignored "
+            f"(node={node_id}, type={type(parsed).__name__})"
+        )
+        return None
+    return parsed
 
 
 class ImageNode(Base):
@@ -1190,7 +1206,7 @@ class ImageNode(Base):
             # v681 — per-image cast (decoded list of Ingredients Name strings).
             "cast": (json.loads(self.cast_json) if self.cast_json else None),
             # v936 — machine QC report (shadow mode; NULL until scored).
-            "qc": _safe_qc(self.qc_json),
+            "qc": _safe_qc(self.qc_json, node_id=self.id),
             # v698A — image role discriminator (was previously missing from
             # to_dict output; UI couldn't distinguish voiceover_anchor images
             # from standard images).
