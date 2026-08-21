@@ -861,6 +861,19 @@ def test_rank_survives_the_fully_degraded_variant():
     assert [r["variant_id"] for r in ranked] == [1, 2]
 
 
+def test_rank_and_compose_tolerate_an_absent_face_sim_key():
+    """A skipped stage may leave its key ABSENT rather than set to None (the
+    skipped_checks=['face'] path). Absent reads exactly like None — neutral in
+    the ranking, null in the report — and never a KeyError mid-compose."""
+    no_face = _v(1)
+    del no_face["face_sim"]
+    ranked = rank_variants([no_face, _v(2, face=0.7, overall=6)])
+    assert [r["variant_id"] for r in ranked] == [1, 2]
+    rep = compose_report(ranked, skipped=["face"])
+    assert rep["variants"]["1"]["face_sim"] is None
+    assert rep["recommended_variant_id"] == 1
+
+
 def test_rank_does_not_mutate_its_input():
     """rank_variants returns fresh per-variant dicts, so the caller's
     accumulated funnel output is never edited under it."""

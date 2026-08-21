@@ -727,8 +727,8 @@ def load_embedder() -> Optional[Any]:
 # face embedder above knows or enforces.
 #
 # A face_sim of None is NEUTRAL and never a fail — "None means no answer,
-# never no match" (see `face_similarity`). It is compared with `<`, so a
-# variant sitting exactly ON the floor is above it.
+# never no match" (see `face_similarity`). The floor is a floor, not a hurdle
+# to clear: the comparison is `>=`, so at-floor counts as above.
 RANK_FACE_SIM_FLOOR = 0.25
 
 
@@ -790,6 +790,11 @@ def rank_variants(variant_reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 # copied wholesale so a caller that accumulated extra scratch fields (raw
 # replies, byte buffers, timings) cannot push the report past the server's
 # 64,000-byte cap.
+#
+# Read with `.get`, matching how `rank_variants` reads the same variant: a
+# stage that did not run may leave its key ABSENT rather than set to None
+# (the skipped_checks=['face'] path), and a missing optional answer must
+# report as null, not raise KeyError halfway through composing a report.
 _REPORT_VARIANT_FIELDS = ("integrity", "face_sim", "judge", "rank")
 
 
@@ -832,6 +837,7 @@ def compose_report(ranked: List[Dict[str, Any]], skipped: List[str],
         # JSON object keys are strings on the wire anyway; making that explicit
         # here means the dict a test reads is the dict the server receives.
         "variants": {str(report["variant_id"]):
-                     {field: report[field] for field in _REPORT_VARIANT_FIELDS}
+                     {field: report.get(field)
+                      for field in _REPORT_VARIANT_FIELDS}
                      for report in ranked},
     }
