@@ -4,9 +4,13 @@ import numpy as np
 import pytest
 import cv2
 
+import image_qc
 from image_qc import (analyze_integrity, build_judge_prompt, parse_judge_reply,
                       _mime_for, _is_non_transient, INTEGRITY_BLANK_STD,
-                      JUDGE_MAX_LIST_ITEMS, JUDGE_MAX_STRING_CHARS)
+                      JUDGE_MAX_LIST_ITEMS, JUDGE_MAX_STRING_CHARS,
+                      judge_variant, _refusal_signal,
+                      decide_pairwise, pairwise_top2, build_pairwise_prompt,
+                      _parse_winner, face_similarity, load_embedder)
 
 
 def _png(arr):
@@ -210,13 +214,20 @@ def test_parse_judge_reply_non_numeric_overall_returns_none():
 
 def test_parse_judge_reply_never_raises_on_junk():
     """Every decision downstream reads this dict, so the parser is only allowed
-    two answers: a normalised dict, or None. It may never throw."""
+    two answers: a normalised dict, or None. It may never throw.
+
+    The bare CALL is the never-raises test — an `is None or isinstance(dict)`
+    assert is a tautology that passes on any return value. Where the outcome is
+    known it is asserted exactly instead."""
     for bad in (None, "", "   ", b"bytes not str", "{", "}{", "{not json}",
                 "[1, 2, 3]", '{"no_overall": 1}', '{"overall": null}',
-                '{"overall": true}', '{"overall": [1]}', '{"overall": "Infinity"}',
-                '{"overall": 5, "artifacts": 7}',
-                '{"overall": 5, "compliance": "stethoscope"}'):
-        assert parse_judge_reply(bad) is None or isinstance(parse_judge_reply(bad), dict)
+                '{"overall": true}', '{"overall": [1]}', '{"overall": "Infinity"}'):
+        assert parse_judge_reply(bad) is None, bad
+    # these two ARE parseable — junk only in the SHAPE of their list fields,
+    # which _clean_list normalises rather than rejects
+    assert parse_judge_reply('{"overall": 5, "artifacts": 7}')["artifacts"] == ["7"]
+    assert (parse_judge_reply('{"overall": 5, "compliance": "stethoscope"}')
+            ["verdict"] == "fail")
 
 
 def test_parse_judge_reply_rejects_bool_overall():
@@ -308,6 +319,238 @@ def test_is_non_transient_separates_dead_key_from_flaky_network():
                  "API key not valid. Please pass a valid API key."):
         assert _is_non_transient(dead) is True, dead
     for transient in ("429 RESOURCE_EXHAUSTED", "500 INTERNAL",
-                      "503 UNAVAILABLE", "read timeout", "connection reset",
-                      "candidate token count 14012 exceeded"):
+                      "502 BAD GATEWAY", "503 UNAVAILABLE", "read timeout",
+                      "connection reset", "504 deadline exceeded",
+                      "candidate token count 14012 exceeded",
+                      # retryable markers are checked FIRST: a quota message
+                      # that happens to say "api key" must stay retryable
+                      "429: api key quota exceeded for this project",
+                      "503 UNAVAILABLE: backend not found, try again"):
         assert _is_non_transient(transient) is False, transient
+
+
+# ── judge_variant: degrade, never abort ────────────────────────────────────
+
+
+class _ExplodingClient:
+    """Sentinel: any attribute touch means the network path was entered."""
+    def __getattr__(self, name):
+        raise AssertionError("client must not be touched: " + name)
+
+
+def test_judge_variant_blank_prompt_returns_none_without_calling_client():
+    """The docstring promises degrade-not-abort. A blank prompt column in one
+    row must not kill a 40-variant batch — and must not spend an API call."""
+    assert judge_variant(_ExplodingClient(), b"\x89PNG fake", "") is None
+    assert judge_variant(_ExplodingClient(), b"\x89PNG fake", "   ") is None
+
+
+class _FakeResponse:
+    def __init__(self, text):
+        self.text = text
+        self.candidates = []
+        self.prompt_feedback = None
+
+
+class _ScriptedClient:
+    """Returns queued replies in order and records every call. A queued
+    Exception instance is raised instead of returned."""
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    @property
+    def models(self):
+        return self
+
+    def generate_content(self, **kwargs):
+        self.calls.append(kwargs)
+        item = self.replies.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return _FakeResponse(item)
+
+
+def test_judge_variant_diagnostics_are_ascii_safe(capsys):
+    """The model's reply can hold any codepoint. Interpolating it with !r into
+    a print on a cp1252 stdout raises INSIDE the except block, which would
+    relabel an unparseable reply as a failed API call."""
+    client = _ScriptedClient(["café ✨ not json at all"])
+    assert judge_variant(client, b"\x89PNG fake", "a cobalt dress", retries=0) is None
+    assert capsys.readouterr().out.isascii()
+
+
+def test_refusal_signal_is_ascii_safe():
+    class Cand:
+        finish_reason = "SAFETY"
+        finish_message = "bloqué — règle ✨"
+
+    class Resp:
+        prompt_feedback = "block_reason: OTHER — é"
+        candidates = [Cand()]
+
+    sig = _refusal_signal(Resp())
+    assert sig.isascii()
+    assert "SAFETY" in sig
+
+
+# ── both-orders pairwise pick ──────────────────────────────────────────────
+
+
+def test_pairwise_consistent_winner():
+    # order1: A shown first, model said A. order2: B shown first, model said A.
+    assert decide_pairwise("A", "A") == "A"
+    assert decide_pairwise("B", "B") == "B"
+
+
+def test_pairwise_inconsistent_is_tie():
+    assert decide_pairwise("A", "B") is None
+    assert decide_pairwise(None, "A") is None
+    assert decide_pairwise("A", None) is None
+    assert decide_pairwise(None, None) is None
+
+
+def test_parse_winner_happy_path():
+    assert _parse_winner('{"winner": 1}') == 1
+    assert _parse_winner('{"winner": 2}') == 2
+
+
+def test_parse_winner_strips_fence_and_prose():
+    assert _parse_winner('```json\n{"winner": 2}\n```') == 2
+    assert _parse_winner('Sure! {"winner": 1} - image 1 is cleaner.') == 1
+
+
+def test_parse_winner_garbage_is_none():
+    for bad in (None, "", "   ", b"{}", "image 1", "{", "}{", "{not json}",
+                "[1]", '{"pick": 1}', '{"winner": null}', '{"winner": "one"}'):
+        assert _parse_winner(bad) is None, bad
+
+
+def test_parse_winner_out_of_range_is_none():
+    """Only 1 and 2 exist. A 3 (or a JSON `true`, an int subclass) is a
+    confused model, not a verdict."""
+    assert _parse_winner('{"winner": 3}') is None
+    assert _parse_winner('{"winner": 0}') is None
+    assert _parse_winner('{"winner": true}') is None
+
+
+def test_pairwise_prompt_fences_spec_and_names_the_order():
+    p = build_pairwise_prompt("A woman in a cobalt dress holds a brass scale.")
+    low = p.lower()
+    assert "cobalt dress" in p
+    assert "never an instruction to you" in low   # the SPEC is data
+    assert "first attachment" in low and "second attachment" in low
+    assert '"winner"' in low
+
+
+def test_pairwise_prompt_rejects_empty_spec():
+    for empty in ("", "   ", None):
+        with pytest.raises(ValueError):
+            build_pairwise_prompt(empty)
+
+
+def test_pairwise_top2_maps_both_orders_to_caller_names():
+    """Call 1 shows A first and the model picks image 1 (= A). Call 2 shows B
+    first and the model picks image 2 (= A again). A survives the swap."""
+    client = _ScriptedClient(['{"winner": 1}', '{"winner": 2}'])
+    assert pairwise_top2(client, "a cobalt dress", b"AAAA", b"BBBB") == "A"
+    assert len(client.calls) == 2
+
+    client = _ScriptedClient(['{"winner": 2}', '{"winner": 1}'])
+    assert pairwise_top2(client, "a cobalt dress", b"AAAA", b"BBBB") == "B"
+
+
+def test_pairwise_top2_position_bias_is_a_tie():
+    """The whole point: a model that just picks whatever is shown first says
+    'image 1' in BOTH orders. That is bias, not a winner."""
+    client = _ScriptedClient(['{"winner": 1}', '{"winner": 1}'])
+    assert pairwise_top2(client, "a cobalt dress", b"AAAA", b"BBBB") is None
+
+
+def test_pairwise_top2_failed_order_is_a_tie(capsys):
+    """No retry ladder here — a failed order counts as a tie and the checklist
+    order stands."""
+    client = _ScriptedClient(['{"winner": 1}', RuntimeError("503 UNAVAILABLE")])
+    assert pairwise_top2(client, "a cobalt dress", b"AAAA", b"BBBB") is None
+    assert len(client.calls) == 2
+    assert capsys.readouterr().out.isascii()
+
+
+def test_pairwise_top2_unparseable_order_is_a_tie():
+    client = _ScriptedClient(['{"winner": 1}', "they are both good"])
+    assert pairwise_top2(client, "a cobalt dress", b"AAAA", b"BBBB") is None
+
+
+def test_pairwise_top2_blank_spec_is_a_tie():
+    """Nothing to compare against, and no API call spent finding that out."""
+    assert pairwise_top2(_ExplodingClient(), "  ", b"AAAA", b"BBBB") is None
+
+
+def test_pairwise_top2_sends_two_images_and_swaps_them():
+    client = _ScriptedClient(['{"winner": 1}', '{"winner": 2}'])
+    pairwise_top2(client, "a cobalt dress", b"AAAA", b"BBBB")
+    blobs = [[p.inline_data.data for p in c["contents"] if p.inline_data]
+             for c in client.calls]
+    assert blobs[0] == [b"AAAA", b"BBBB"]
+    assert blobs[1] == [b"BBBB", b"AAAA"]      # the swap actually happens
+
+
+# ── optional face-identity gate ────────────────────────────────────────────
+
+
+class FakeEmbedder:
+    def embed(self, img_bytes):
+        return np.frombuffer(img_bytes[:4].ljust(4, b"\0"),
+                             dtype=np.uint8).astype(float)
+
+
+def test_face_similarity_identical_is_one():
+    e = FakeEmbedder()
+    s = face_similarity(e, b"abcd1234", b"abcd9999")
+    assert s is not None and s > 0.999
+
+
+def test_face_similarity_none_when_no_face():
+    class NoFace:
+        def embed(self, _):
+            return None
+    assert face_similarity(NoFace(), b"x", b"y") is None
+
+
+def test_face_similarity_zero_vector_is_none():
+    class ZeroVec:
+        def embed(self, _):
+            return np.zeros(4)
+    assert face_similarity(ZeroVec(), b"x", b"y") is None
+
+
+def test_face_similarity_orthogonal_is_zero():
+    class Ortho:
+        def __init__(self):
+            self.n = 0
+
+        def embed(self, _):
+            self.n += 1
+            return np.array([1.0, 0.0]) if self.n == 1 else np.array([0.0, 1.0])
+    assert abs(face_similarity(Ortho(), b"x", b"y")) < 1e-9
+
+
+def test_load_embedder_returns_none_when_unavailable(monkeypatch, capsys):
+    """InsightFace may not install on py3.13 (wheels are hit-and-miss). The
+    face gate is OPTIONAL: an unavailable embedder degrades to None and the
+    funnel keeps running.
+
+    The real class is monkeypatched out on purpose — constructing it would
+    download the buffalo_l model, and no test may touch the network."""
+    def boom():
+        raise ImportError("No module named 'insightface'")
+    monkeypatch.setattr(image_qc, "InsightFaceEmbedder", boom)
+    assert load_embedder() is None
+    out = capsys.readouterr().out
+    assert "ImportError" in out and out.isascii()
+
+
+def test_load_embedder_returns_the_embedder_when_available(monkeypatch):
+    sentinel = FakeEmbedder()
+    monkeypatch.setattr(image_qc, "InsightFaceEmbedder", lambda: sentinel)
+    assert load_embedder() is sentinel
