@@ -23729,15 +23729,20 @@ Ambient: same kitchen room tone, soft pour sound.
                         // recommended_variant_id ONLY on `confirmed` or `sole`, so
                         // "ranked" alone no longer describes what happened: a node
                         // can be fully ranked and still recommend nothing because
-                        // the second opinion flipped (`tied`) or never answered
-                        // (`unverified`). Those two now say so, so the operator
-                        // knows the missing star means "you pick", not "all bad".
+                        // the second opinion flipped (`tied`), never answered
+                        // (`unverified`), or FAILED the top pick outright
+                        // (`second_rejected` — a compliance, v808 or misspelled-label
+                        // hit that only the second look caught). Those three now say
+                        // so, so the operator knows the missing star means "you
+                        // pick", not "all bad" — and `second_rejected` in particular
+                        // means "do not just pick the top one anyway".
                         const CONF_HINTS = {
-                            confirmed:    'qc: ranked (checked twice)',
-                            sole:         'qc: only one usable variant',
-                            tied:         'qc: too close to call - you pick',
-                            unverified:   'qc: second check failed - you pick',
-                            none_healthy: 'qc: no variant recommended',
+                            confirmed:       'qc: ranked (checked twice)',
+                            sole:            'qc: only one usable variant',
+                            tied:            'qc: too close to call - you pick',
+                            unverified:      'qc: second check failed - you pick',
+                            second_rejected: 'qc: second check rejected the top pick - you pick',
+                            none_healthy:    'qc: no variant recommended',
                         };
                         // Reports written before v936.1 carry NO `confidence` key
                         // (and a hand-built one can carry an explicit null), so an
