@@ -341,7 +341,7 @@ def test_parse_judge_reply_verdict_downgrade_is_case_insensitive():
 def test_parse_judge_reply_strict_out_whitelist_and_caps():
     """The report is size-capped at 64,000 bytes (image_platform.py:3622), so
     the parser is the boundary where a chatty model stops being unbounded:
-    exactly the seven contract keys, each list capped, each string truncated."""
+    exactly the eight contract keys, each list capped, each string truncated."""
     assert (JUDGE_MAX_LIST_ITEMS, JUDGE_MAX_STRING_CHARS) == (10, 200)
     raw = json.dumps({
         "overall": 5, "verdict": "pass",
@@ -353,7 +353,7 @@ def test_parse_judge_reply_strict_out_whitelist_and_caps():
     })
     r = parse_judge_reply(raw)
     assert set(r) == {"overall", "verdict", "element_misses", "artifacts",
-                      "compliance", "text_errors", "reasons"}
+                      "compliance", "text_errors", "text_notes", "reasons"}
     assert len(r["artifacts"]) == JUDGE_MAX_LIST_ITEMS
     assert r["artifacts"][0] == "a0"     # the cap keeps the FIRST entries
     assert len(r["reasons"][0]) == JUDGE_MAX_STRING_CHARS
@@ -468,6 +468,142 @@ def test_parse_judge_reply_scalar_text_error_is_wrapped_not_exploded():
     r = parse_judge_reply(raw)
     assert r["text_errors"] == ["AORELLA"]
     assert r["verdict"] == "fail"
+
+
+# ── v936.2: the text bucket splits by severity ─────────────────────────────
+# v936.1's single hard fail was right about AORELLA and wrong about
+# everything else. Re-scoring the SAME 13 nodes / 56 variants under it
+# recommended nothing on 13 of 13, because one rule fired equally on a
+# misspelled hero brand ("AOKELLA" where the bottle should read KORELLA) and
+# on the scribble-glyph body lines of a background recipe book whose heading
+# was perfectly legible and which nobody reads at feed speed. Severity is
+# therefore split: text_errors keeps the un-overridable fail, text_notes
+# records the cosmetic filler and never touches the verdict.
+
+
+def test_judge_prompt_defines_both_text_buckets():
+    """The model needs somewhere to file a cosmetic observation. With only
+    the hard bucket named, every scribble on a prop lands back in it — which
+    is exactly how 13 of 13 nodes recommended nothing."""
+    p = build_judge_prompt("A woman holds a KORELLA saffron bottle.")
+    low = p.lower()
+    assert "text_errors" in low and "text_notes" in low
+    # the schema hint has to advertise the new key or the model never emits it
+    assert p.count("text_notes") >= 2
+    # the hard bucket is asked FIRST; the soft one is the overflow beside it
+    assert low.index("text_errors") < low.index("text_notes")
+    # and the soft bucket still lands above the leave-alone clause, for the
+    # same read-in-order reason text_errors does
+    assert low.index("text_notes") < low.index("ignore interpretation")
+
+
+def test_judge_prompt_narrows_text_errors_to_the_build_killers():
+    """Three named triggers, all of them things a buyer would see: a wrong
+    NAME, a string the SPEC quoted, or hero-product garble big enough to read
+    at a glance. Nothing else is allowed to force the fail."""
+    low = build_judge_prompt("A woman holds a KORELLA saffron bottle.").lower()
+    assert "wrong by even one character" in low          # the NAME trigger
+    assert "the spec explicitly quotes" in low           # the quoted-string trigger
+    assert "hero product" in low and "at a glance" in low  # the garble trigger
+
+
+def test_judge_prompt_gives_one_routing_test_between_the_two_buckets():
+    """One line the model can actually apply, phrased as the viewer's own
+    reaction rather than a taxonomy it has to interpret."""
+    low = build_judge_prompt("A woman holds a KORELLA saffron bottle.").lower()
+    assert ("would a scrolling viewer notice this and think the ad looks wrong"
+            in low)
+
+
+def test_judge_prompt_says_cosmetic_filler_text_is_expected():
+    """Said out loud, because 'do not report background scribble' read as
+    advice and lost to the character-by-character instruction above it. The
+    prompt now states that renders DO this and that it is not an error."""
+    low = build_judge_prompt("A woman holds a KORELLA saffron bottle.").lower()
+    assert "renders routinely produce unreadable filler text on props" in low
+    assert "this is expected" in low
+    assert "must not be reported as an error" in low
+
+
+def test_judge_prompt_tells_the_model_text_notes_never_fail():
+    """The verdict rule is part of the rubric the model answers with, so it
+    has to say which bucket is scored and which is only recorded."""
+    low = build_judge_prompt("A woman holds a KORELLA saffron bottle.").lower()
+    tail = low[low.index("verdict is 'fail'"):]
+    assert "text_notes never" in tail
+
+
+def test_parse_judge_reply_text_notes_do_not_force_a_fail():
+    """The recipe-book case, end to end: garbled body lines under a legible
+    heading, model says pass, and the pass has to survive."""
+    raw = json.dumps({"overall": 8, "verdict": "pass", "element_misses": [],
+                      "artifacts": [], "compliance": [], "reasons": [],
+                      "text_errors": [],
+                      "text_notes": ["Garbled and illegible pseudo-text "
+                                     "throughout the handwritten recipe book."]})
+    r = parse_judge_reply(raw)
+    assert r["verdict"] == "pass"
+    assert len(r["text_notes"]) == 1
+
+
+def test_parse_judge_reply_text_notes_never_rescue_a_fail_either():
+    """The soft bucket is inert in BOTH directions — it may not talk a real
+    text error, a compliance hit, or the model's own 'fail' into a pass."""
+    for extra in ({"text_errors": ['label reads "AOKELLA"']},
+                  {"compliance": ["white lab coat"]},
+                  {"verdict": "fail"}):
+        body = {"overall": 9, "verdict": "pass", "element_misses": [],
+                "artifacts": [], "compliance": [], "reasons": [],
+                "text_errors": [], "text_notes": ["scribble on a wall sign"]}
+        body.update(extra)
+        assert parse_judge_reply(json.dumps(body))["verdict"] == "fail", extra
+
+
+def test_parse_judge_reply_both_text_buckets_at_once_still_fails():
+    """The real mixed variant: a misspelled bottle AND harmless prop filler.
+    The hard bucket decides; the notes ride along in the report."""
+    raw = json.dumps({"overall": 7, "verdict": "pass", "element_misses": [],
+                      "artifacts": [], "compliance": [], "reasons": [],
+                      "text_errors": ["brand name reads 'AOKELLA'"],
+                      "text_notes": ["garbled text in small label icons"]})
+    r = parse_judge_reply(raw)
+    assert r["verdict"] == "fail"
+    assert len(r["text_errors"]) == 1 and len(r["text_notes"]) == 1
+
+
+def test_parse_judge_reply_text_notes_are_capped_like_their_siblings():
+    """Same 10-item / 200-char caps — a chatty model listing every scribble
+    in a bookshelf must not be able to inflate the report."""
+    raw = json.dumps({"overall": 9, "verdict": "pass", "element_misses": [],
+                      "artifacts": [], "compliance": [], "reasons": [],
+                      "text_errors": [],
+                      "text_notes": ["n" * 500] + ["note %d" % i
+                                                   for i in range(25)]})
+    r = parse_judge_reply(raw)
+    assert len(r["text_notes"]) == JUDGE_MAX_LIST_ITEMS
+    assert len(r["text_notes"][0]) == JUDGE_MAX_STRING_CHARS
+    assert r["text_notes"][0] == "n" * JUDGE_MAX_STRING_CHARS
+    assert r["verdict"] == "pass"      # capping is not a defect signal
+
+
+def test_parse_judge_reply_scalar_text_note_is_wrapped_not_exploded():
+    """A bare string means ONE observation, not one per character."""
+    raw = json.dumps({"overall": 7, "verdict": "pass", "element_misses": [],
+                      "artifacts": [], "compliance": [], "reasons": [],
+                      "text_errors": [], "text_notes": "recipe book scribble"})
+    r = parse_judge_reply(raw)
+    assert r["text_notes"] == ["recipe book scribble"]
+    assert r["verdict"] == "pass"
+
+
+def test_parse_judge_reply_absent_text_notes_defaults_to_empty():
+    """A reply from before this key existed still parses, and still passes."""
+    raw = ('{"overall": 8, "verdict": "pass", "element_misses": [], '
+           '"artifacts": [], "compliance": [], "text_errors": [], '
+           '"reasons": []}')
+    r = parse_judge_reply(raw)
+    assert r["text_notes"] == []
+    assert r["verdict"] == "pass"
 
 
 def test_mime_for_sniffs_magic_bytes():
@@ -1516,14 +1652,16 @@ def test_agreement_stats_tolerates_digit_strings_and_junk():
 # ---- fit_report -----------------------------------------------------------
 
 def _judge(n_items, text, compliance=()):
-    # text_errors is a v936.1 list field, so it counts toward the trim ladder
-    # exactly like its four siblings — the fixture has to carry it or the
-    # budget tests would measure a report shape the producer no longer writes.
+    # text_errors (v936.1) and text_notes (v936.2) are list fields, so they
+    # count toward the trim ladder exactly like their siblings — the fixture
+    # has to carry both or the budget tests would measure a report shape the
+    # producer no longer writes.
     return {"overall": 8, "verdict": "pass",
             "element_misses": [text] * n_items,
             "artifacts": [text] * n_items,
             "compliance": list(compliance),
             "text_errors": [],
+            "text_notes": [],
             "reasons": [text] * n_items}
 
 
@@ -1589,6 +1727,20 @@ def test_fit_report_trims_text_errors_like_its_four_siblings():
     assert len(out["variants"]["1"]["judge"]["text_errors"]) <= 3
     # the verdict the text errors forced is NOT trimmed away with them
     assert out["variants"]["1"]["judge"]["verdict"] == "pass"
+
+
+def test_fit_report_trims_text_notes_like_every_other_list_field():
+    """v936.2's soft bucket is free text from the same chatty model, so it
+    joins the ladder too. Being harmless to the verdict does not make it
+    harmless to a 64,000-byte cap: a node where every variant carries a prop
+    full of scribble is exactly the shape that 413s."""
+    rep = _report(20, "x" * JUDGE_MAX_STRING_CHARS)
+    for entry in rep["variants"].values():
+        entry["judge"]["text_notes"] = ["z" * JUDGE_MAX_STRING_CHARS] * 10
+    assert _size(rep) > FIT_REPORT_BUDGET
+    out = fit_report(rep)
+    assert _size(out) <= FIT_REPORT_BUDGET
+    assert len(out["variants"]["1"]["judge"]["text_notes"]) <= 3
 
 
 def test_fit_report_budgets_on_json_bytes_not_item_counts():
@@ -1895,7 +2047,7 @@ def _reply(overall, verdict="pass", **extra):
     """One judge reply as the model would send it, over the wire as JSON."""
     body = {"overall": overall, "verdict": verdict, "element_misses": [],
             "artifacts": [], "compliance": [], "text_errors": [],
-            "reasons": []}
+            "text_notes": [], "reasons": []}
     body.update(extra)
     return json.dumps(body)
 
@@ -2053,6 +2205,21 @@ def test_score_node_a_misspelled_brand_name_loses_the_recommendation():
     assert report["variants"]["1"]["judge"]["verdict"] == "fail"
     assert report["confidence"] == CONF_SOLE
     assert report["recommended_variant_id"] == 2
+
+
+def test_score_node_cosmetic_text_notes_keep_the_recommendation():
+    """The v936.2 over-correction, end to end. Same funnel as the AORELLA
+    test, but the finding is background scribble in a recipe book: the top
+    variant stays healthy, is re-judged, wins twice, and is recommended. The
+    batch that recommended nothing on 13 of 13 nodes is what this prevents."""
+    note = "Recipe book contains garbled, unreadable text lines below the title."
+    client = _ScriptedClient([_reply(8, text_notes=[note]), _reply(5),
+                              _reply(8, text_notes=[note]), _reply(5)])
+    report = _score(client, n=2)
+    assert report["variants"]["1"]["judge"]["verdict"] == "pass"
+    assert report["variants"]["1"]["judge"]["text_notes"] == [note]
+    assert report["confidence"] == CONF_CONFIRMED
+    assert report["recommended_variant_id"] == 1
 
 
 def test_score_node_never_calls_the_retired_pairwise_stage(monkeypatch):

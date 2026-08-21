@@ -30,6 +30,18 @@ because the rubric's anti-nitpick wording let a misspelled BRAND NAME through
 as "minor garbled text". A misspelled hero product is build-killing, so
 `text_errors` now forces a fail the model cannot override.
 
+v936.2 — that hard fail was right about AORELLA and wrong about everything
+else. Re-scoring the SAME 13 nodes / 56 variants under it recommended nothing
+on 13 of 13: one rule fired equally on a misspelled hero brand ("AOKELLA"
+where the bottle should read KORELLA) and on the scribble-glyph body lines of
+a background recipe book — heading perfectly legible, body unread by anyone
+at feed speed. A check that fails everything measures nothing. Severity is
+therefore split into two buckets: `text_errors` keeps the un-overridable fail
+and is narrowed to the defects a buyer would see (a NAME wrong by a
+character, a string the SPEC quoted, hero-product garble readable at a
+glance), while the new `text_notes` records cosmetic prop filler and is inert
+— it never enters the verdict, in either direction.
+
 Nothing in here may abort a batch. Every stage answers "no answer" (None, [],
 a 'call_failed' reason, an 'unverified' confidence) and lets the funnel carry
 on with the stages that did work — a dead judge, an absent face model or a 503
@@ -306,18 +318,23 @@ MINOR_BAN = ("any child, teen, baby, or minor anywhere in frame (v808) — judge
 JUDGE_SCHEMA_HINT = (
     'Reply ONLY with JSON: {"overall": 0-10, "verdict": "pass"|"fail", '
     '"element_misses": [strings], "artifacts": [strings], '
-    '"compliance": [strings], "text_errors": [strings], "reasons": [strings]}'
+    '"compliance": [strings], "text_errors": [strings], '
+    '"text_notes": [strings], "reasons": [strings]}'
 )
 
 # The list-valued fields, normalised to lists of strings on every reply so
-# callers never have to type-check what the model returned.
+# callers never have to type-check what the model returned. Membership here
+# buys the whitelist, the caps and the fit_report trim ladder — NOT a place in
+# the verdict, which is spelled out one field at a time in parse_judge_reply.
+# That is why `text_notes` (v936.2) can sit beside `text_errors` here and
+# still be unable to fail a variant.
 _JUDGE_LIST_FIELDS = ("element_misses", "artifacts", "compliance",
-                      "text_errors", "reasons")
+                      "text_errors", "text_notes", "reasons")
 
 # The report is size-capped server-side at 64,000 bytes
 # (image_platform.py:3622). The parser is where a chatty model stops being
 # unbounded, so every reply is trimmed to a known worst case before it can
-# reach a report: 5 fields x 10 entries x 200 chars ~= 10 KB per variant.
+# reach a report: 6 fields x 10 entries x 200 chars ~= 12 KB per variant.
 JUDGE_MAX_LIST_ITEMS = 10
 JUDGE_MAX_STRING_CHARS = 200
 
@@ -347,6 +364,17 @@ def build_judge_prompt(spec: str) -> str:
     file it. Two homes for one defect left the routing to the model's
     judgement, which is exactly what this design removes everywhere else —
     hence the explicit "never in artifacts" routing line.
+
+    v936.2 — "any defect in rendered text" turned out to cover two unrelated
+    things, and asking for both in one bucket failed 13 of 13 production
+    nodes. So the ask splits by severity, and the split is stated the only
+    way a model can act on: not as a taxonomy but as one question about the
+    viewer — would a scrolling viewer notice this and think the ad looks
+    wrong? The soft bucket also has to say that filler glyphs on props are
+    NORMAL OUTPUT, out loud. "Do not report background scribble" read as
+    advice and lost to the character-by-character instruction above it;
+    "renders routinely produce this, it is expected" is the same sentence
+    written as a fact about the world, which is what the model weighs.
     """
     return (
         "You are a strict production QC judge for an AI-generated ad image.\n"
@@ -362,30 +390,44 @@ def build_judge_prompt(spec: str) -> str:
         "3. compliance: report if the image shows " + COMPLIANCE_BANS + ", or "
         + MINOR_BAN + ". Report only what is clearly and unambiguously "
         "visible; if you are unsure, do not report it.\n"
-        "4. text_errors: read every piece of text visible in the image "
-        "(product label, packaging, brand name, signage, on-screen overlay) "
-        "character by character. Report any word that is misspelled, garbled, "
-        "or different from what the SPEC says it should say. A brand or "
-        "product name that is wrong by even one character is always a defect, "
-        "never a minor issue - report it here regardless of how small it "
-        "looks. ANY defect in rendered text belongs in text_errors and never "
-        "in artifacts, however it looks to you: put it here even when it "
-        "reads like a rendering glitch rather than a spelling mistake.\n"
-        "5. overall: 0-10 for how well the image fulfils the SPEC (10 = every "
+        "4. text_errors - text defects that RUIN the image. Read the brand "
+        "name, the product label and any text the SPEC quotes, character by "
+        "character. Report here: a brand or product NAME rendered wrong by "
+        "even one character; any text the SPEC explicitly quotes rendered "
+        "differently; and garbled text on the hero product that a viewer "
+        "scrolling at normal speed would notice at a glance. A wrong brand "
+        "name is always a defect, never a minor issue - report it regardless "
+        "of how small it looks. ANY defect in this class belongs in "
+        "text_errors and never in artifacts, however it looks to you: put it "
+        "here even when it reads like a rendering glitch rather than a "
+        "spelling mistake.\n"
+        "5. text_notes - cosmetic text observations, which are NOT defects: "
+        "illegible filler or pseudo-text on background props, decorative "
+        "lettering, and fine print too small to read at feed speed. AI image "
+        "renders routinely produce unreadable filler text on props - a recipe "
+        "book, a newspaper page, a spice jar, a wall sign - and this is "
+        "expected; it must not be reported as an error. Note it here instead, "
+        "and leave text_errors empty when that is all you found.\n"
+        "One question decides between 4 and 5: would a scrolling viewer "
+        "notice this and think the ad looks wrong? If yes, it is a "
+        "text_errors. If no, it is a text_notes.\n"
+        "6. overall: 0-10 for how well the image fulfils the SPEC (10 = every "
         "element present, clean, subject not cropped or obstructed).\n"
         "Ignore interpretation rather than error: exact colour shade, crop or "
         "lens choice within the described framing, lighting mood, and any "
-        "detail the SPEC does not name. RENDERED TEXT IS THE EXCEPTION and is "
-        "always in scope, even when the SPEC does not quote the exact string: "
-        "if the SPEC names a brand or product, the label must match it "
-        "character for character; if the SPEC does not name it, the text must "
-        "still be real, correctly spelled words rather than garbled glyphs. "
-        "Otherwise, list an element only if a viewer comparing SPEC to image "
-        "would call it a mistake. An empty element_misses list is a normal, "
-        "expected answer.\n"
-        "verdict is 'fail' if there is ANY compliance hit, ANY text error, "
-        "ANY artifact that a viewer would notice at feed speed, or a missing "
-        "element that changes the shot's meaning. Otherwise 'pass'.\n"
+        "detail the SPEC does not name. RENDERED TEXT ON THE HERO PRODUCT IS "
+        "THE EXCEPTION and is always in scope, even when the SPEC does not "
+        "quote the exact string: if the SPEC names a brand or product, the "
+        "label must match it character for character, and garbled glyphs "
+        "where that name belongs are a text_errors. Lettering on background "
+        "props is NOT held to that bar - it goes to text_notes. Otherwise, "
+        "list an element only if a viewer comparing SPEC to image would call "
+        "it a mistake. An empty element_misses list is a normal, expected "
+        "answer.\n"
+        "verdict is 'fail' if there is ANY compliance hit, ANY text_errors "
+        "entry, ANY artifact that a viewer would notice at feed speed, or a "
+        "missing element that changes the shot's meaning. text_notes never "
+        "make a verdict 'fail'. Otherwise 'pass'.\n"
         + JUDGE_SCHEMA_HINT
     )
 
@@ -412,17 +454,20 @@ def parse_judge_reply(raw: Any) -> Optional[Dict[str, Any]]:
     abort a whole batch run.
 
     Normalisation (extraction itself is `_json_object`):
-      * the result is a FRESH whitelisted dict of exactly the seven contract
+      * the result is a FRESH whitelisted dict of exactly the eight contract
         keys — an unknown key a chatty model invents never rides along into
         the size-capped report;
-      * the five list fields always come back as bounded lists of bounded
+      * the six list fields always come back as bounded lists of bounded
         strings (a bare scalar is wrapped, not iterated character by
         character);
       * `overall` is coerced then CLAMPED to 0-10 — the model is not trusted
         to respect its own scale;
       * `verdict` is RECOMPUTED, never trusted: any compliance hit and any
-        text error are 'fail', whatever the model said (§8 / v808 and a
-        misspelled brand name can never be talked into a pass).
+        text ERROR are 'fail', whatever the model said (§8 / v808 and a
+        misspelled brand name can never be talked into a pass). `text_notes`
+        (v936.2) is the one list field deliberately absent from that chain:
+        it is a record, not a signal, and it may not move the verdict in
+        either direction.
     """
     obj = _json_object(raw)
     if obj is None or "overall" not in obj:
@@ -457,6 +502,12 @@ def parse_judge_reply(raw: Any) -> Optional[Dict[str, Any]]:
     # breath, scoring it 6/10 — it saw the defect and weighed it as minor. The
     # weighing is what is removed here; the score is left exactly as reported,
     # because rewriting it would hide what the judge actually thought.
+    #
+    # v936.2: `text_notes` is NOT read below, on purpose. Whether cosmetic
+    # prop filler is worth failing is a severity call, and the rubric already
+    # made it upstream by giving the model two buckets and one question to
+    # route between them. Reading the soft bucket here would take that call
+    # back and reinstate the 13-of-13 blackout it was written to end.
     said_fail = str(obj.get("verdict", "")).strip().lower() == "fail"
     out["verdict"] = ("fail" if (out["compliance"] or out["text_errors"]
                                  or said_fail) else "pass")
@@ -1321,9 +1372,13 @@ def fit_report(report: Dict[str, Any],
     upstream is still holding, so an in-place trim would edit live funnel
     state, and on a rerun the operator's own accumulated data.
 
-    What gets trimmed: the judge's five free-text lists (`_JUDGE_LIST_FIELDS`,
-    which v936.1 grew by `text_errors`), progressively — 3 items each, then
-    none. What NEVER gets trimmed: verdicts, scores, ranks, integrity metrics,
+    What gets trimmed: the judge's six free-text lists (`_JUDGE_LIST_FIELDS`,
+    which v936.1 grew by `text_errors` and v936.2 by `text_notes`),
+    progressively — 3 items each, then none. Being harmless to the verdict
+    does not exempt a field from the ladder: `text_notes` is free text from
+    the same chatty model, and a node whose every variant carries a scribbled
+    prop is exactly the shape that 413s.
+    What NEVER gets trimmed: verdicts, scores, ranks, integrity metrics,
     the confidence call, the per-variant `verify` evidence behind it, and the
     recommendation — those are the report. A trimmed report says less about
     WHY; it still says what the machine would have picked and whether that
