@@ -18,11 +18,16 @@ does not lose the run.
 
 File layout:
   SHARED PLUMBING -> INTEGRITY -> JUDGE (pure, then API) ->
-  PAIRWISE (pure, then API) -> FACE -> RANK & REPORT
+  PAIRWISE (pure, then API) -> FACE -> RANK & REPORT -> CLI (pure, then I/O)
 
-RANK & REPORT sits LAST because it is the only stage that reads every other
-stage's output shape at once; reading it after the stages it consumes means
-each shape it destructures has already been defined above it.
+RANK & REPORT sits above the CLI because it is the stage that reads every
+other stage's output shape at once; reading it after the stages it consumes
+means each shape it destructures has already been defined above it. The CLI
+comes last for the same reason: it drives all of them.
+
+Usage:
+  python code/image_qc.py --batch <batch-id> [--avatar-node <node-id>]
+  python code/image_qc.py --batch <batch-id> --report
 
 Server contract (Task 2): reports carry version: 1, recommended_variant_id
 must be a plain int, reports stay under 64,000 bytes, POST returns 409 while
@@ -30,12 +35,14 @@ the node is still generating (retry after the render lands).
 """
 from __future__ import annotations
 
+import argparse
+import copy
 import json
 import os
 import re
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import cv2
@@ -877,3 +884,612 @@ def compose_report(ranked: List[Dict[str, Any]], skipped: List[str],
                       for field in _REPORT_VARIANT_FIELDS}
                      for report in reversed(ranked)},
     }
+
+
+# ══════════════════════════════════════════════════════════════════════
+# CLI (pure) — every decision the orchestration makes, with no I/O in it
+# ══════════════════════════════════════════════════════════════════════
+
+def agreement_stats(nodes: Iterable[Any]) -> Dict[str, Any]:
+    """How often the machine would have picked what the operator picked.
+
+    The whole point of shadow mode (v886.3): the report never chooses, so the
+    only way to learn whether it COULD be trusted is to compare it after the
+    fact against the operator's own pick.
+
+    Four counts, and the distinctions between them are the measurement:
+      * scored             — nodes carrying a report at all. Tells "nothing has
+                             been scored yet" apart from "scored, never
+                             comparable".
+      * comparable         — BOTH sides named a variant. Only these can agree
+                             or disagree.
+      * agree              — of those, the same variant.
+      * no_recommendation  — the operator picked, the report said "none of
+                             these is good enough". NOT a disagreement: the
+                             machine declined to answer, and counting a decline
+                             as a wrong answer would slowly libel the judge.
+
+    `agreement_pct` is None when nothing is comparable — a 0% agreement
+    claimed off zero samples reads as "the judge is useless" when the fact is
+    "the judge has not been tested".
+
+    Ids are compared as INTS: the server accepts a digit-string
+    recommended_variant_id (image_platform.py:3610), so a report written by a
+    tolerant producer can carry '5' where the node carries 5, and a string
+    comparison would score a real agreement as a disagreement.
+    """
+    scored = comparable = agree = no_recommendation = 0
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        qc = node.get("qc")
+        if not isinstance(qc, dict):
+            continue
+        scored += 1
+        chosen, rec = node.get("chosen_variant_id"), qc.get("recommended_variant_id")
+        if not chosen:
+            continue
+        if not rec:
+            no_recommendation += 1
+            continue
+        try:
+            same = int(chosen) == int(rec)
+        except (TypeError, ValueError):
+            # A report whose recommendation is not a number at all is not a
+            # disagreement either; it is an unreadable report. Skipped rather
+            # than raised: this runs over a whole batch's history.
+            continue
+        comparable += 1
+        agree += 1 if same else 0
+    return {
+        "scored": scored,
+        "comparable": comparable,
+        "agree": agree,
+        "no_recommendation": no_recommendation,
+        "agreement_pct": (round(100.0 * agree / comparable, 1)
+                          if comparable else None),
+    }
+
+
+# The server's hard cap is 64,000 bytes (image_platform.py:3622). Fitting to
+# 60,000 leaves headroom for the fact that the number measured here is
+# `json.dumps(report)` while the server measures `json.dumps(req.report)`
+# after FastAPI has round-tripped it — separators and float repr can differ by
+# a hair, and a report rejected at 64,001 bytes is a report that does not
+# exist.
+FIT_REPORT_BUDGET = 60_000
+
+# Progressive, not all-or-nothing: 3 items still names the top findings, which
+# is what a human reading the review UI actually uses. 0 is the last resort
+# that keeps the ranking (the part Task 10 reads) at any size.
+_FIT_TRIM_LADDER = (3, 0)
+
+
+def _report_size(report: Dict[str, Any]) -> int:
+    """The number the server will measure. `json.dumps` with its DEFAULT
+    ensure_ascii, because that is what image_platform.py:3621 calls: one
+    accented character costs 6 bytes on the wire, not 1, so budgeting on
+    character or item counts under-measures a non-ASCII report by ~6x and
+    lets it sail past this check into a 413."""
+    try:
+        return len(json.dumps(report))
+    except (TypeError, ValueError):
+        # Unserialisable content cannot be trimmed into shape either; report
+        # it as over-budget so the ladder runs and the POST still gets tried.
+        return FIT_REPORT_BUDGET + 1
+
+
+def fit_report(report: Dict[str, Any],
+               budget: int = FIT_REPORT_BUDGET) -> Dict[str, Any]:
+    """A report trimmed to fit under the server's size cap. Pure.
+
+    Returns the report UNTOUCHED when it already fits (the normal case: a
+    4-variant node is a few KB). Over budget, it DEEP-COPIES first and trims
+    the copy — the judge dicts inside a report are the same objects the funnel
+    upstream is still holding, so an in-place trim would edit live funnel
+    state, and on a rerun the operator's own accumulated data.
+
+    What gets trimmed: the judge's four free-text lists, progressively (3
+    items each, then none). What NEVER gets trimmed: verdicts, scores, ranks,
+    integrity metrics and the recommendation — those are the report. A
+    trimmed report says less about WHY; it still says what the machine would
+    have picked, which is the number Task 10 reads.
+
+    Never raises on a degraded report (judge None, metrics None, no variants
+    map at all) and never raises on an unfittable one: it returns the best
+    trim it managed and lets the POST decide. Refusing to return would be the
+    one module-level promise this file cannot break — nothing aborts a batch.
+    """
+    if _report_size(report) <= budget:
+        return report
+
+    trimmed = copy.deepcopy(report)
+    variants = trimmed.get("variants")
+    if not isinstance(variants, dict):
+        return trimmed
+
+    for cap in _FIT_TRIM_LADDER:
+        for entry in variants.values():
+            judge = entry.get("judge") if isinstance(entry, dict) else None
+            if not isinstance(judge, dict):
+                continue
+            for field in _JUDGE_LIST_FIELDS:
+                value = judge.get(field)
+                if isinstance(value, list) and len(value) > cap:
+                    judge[field] = value[:cap]
+        if _report_size(trimmed) <= budget:
+            return trimmed
+
+    print(f"[qc] report still {_report_size(trimmed)} bytes after full trim "
+          f"(budget {budget}) - posting anyway", flush=True)
+    return trimmed
+
+
+def pick_scorable_nodes(nodes: Iterable[Any]) -> List[Dict[str, Any]]:
+    """The nodes in a batch worth scoring, using ImageNode.to_dict's own field
+    names (`status`, `kind`, `variants` — image_platform.py:1180).
+
+    Three filters, each for a different reason:
+      * status == 'ready'  — a queued/generating node is about to REPLACE its
+        variants, and the server answers a POST for one with 409 anyway
+        (image_platform.py:3597). Scoring it burns Gemini calls on bytes that
+        are about to stop existing. 'draft' and 'failed' have nothing to score.
+      * kind != 'upload'   — uploads are the operator's own reference assets
+        (the avatar portrait, the product shot). There is no generation to
+        judge and no spec to judge it against.
+      * a non-empty variants list — 'ready' with no variants is a node whose
+        variants were deleted out from under it.
+
+    An empty prompt is NOT a filter: it kills the judge stage only, and the
+    integrity and face gates still measure something worth reporting.
+    """
+    scorable: List[Dict[str, Any]] = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        if node.get("status") != "ready" or node.get("kind") == "upload":
+            continue
+        if not (node.get("variants") or []):
+            continue
+        scorable.append(node)
+    return scorable
+
+
+def apply_pairwise(ranked: List[Dict[str, Any]],
+                   winner: Optional[str]) -> List[Dict[str, Any]]:
+    """Fold the pairwise verdict back into the ranking.
+
+    `pairwise_top2` compares the two best variants in BOTH orders, and only a
+    verdict that survives the swap counts. When that verdict names B — the
+    checklist runner-up — the ranking is stale: the score-based order and a
+    direct side-by-side look disagree, and the side-by-side look is the one
+    that saw them together. Promoting B is the entire reason the pairwise
+    stage costs two API calls; without this the stage would be pure spend and
+    the report would only ever record the reason.
+
+    'A' and None both leave the order exactly as ranked, which is the honest
+    outcome for both "the pair agreed with the checklist" and "there was no
+    verdict".
+
+    Returns FRESH rows (shallow copies) with `rank` renumbered, the same
+    contract `rank_variants` keeps, so the caller's list survives the call.
+    Only the top two can move: pairwise looked at exactly those two.
+    """
+    if winner != "B" or len(ranked) < 2:
+        return ranked
+    reordered = [ranked[1], ranked[0]] + list(ranked[2:])
+    out = [dict(row) for row in reordered]
+    for position, row in enumerate(out, start=1):
+        row["rank"] = position
+    return out
+
+
+class _RefFaceCache:
+    """An embedder wrapper that detects the batch's reference portrait ONCE.
+
+    `face_similarity` takes bytes on both sides and re-detects whatever it is
+    given, which is right for the candidate and wasteful for the reference:
+    the reference is the SAME avatar upload for every variant of every node in
+    the run, and InsightFace on a CPU box costs ~0.3s a frame. A 40-variant
+    batch pays that toll 40 times for an answer that cannot change.
+
+    Cached HERE, in the CLI layer, rather than by adding a precomputed-ref
+    parameter to `face_similarity`: that function's two-bytes signature is
+    what makes it testable without a model, and the batch-lifetime nature of
+    the cache belongs to the thing that owns the batch.
+
+    Match is by IDENTITY (`is`), not equality: the CLI hands the same bytes
+    object down the whole run, so identity always hits, and comparing 2 MB of
+    PNG per variant to decide whether to skip 0.3s of work would give some of
+    the saving straight back. A miss is not a bug — it just embeds normally.
+    """
+
+    def __init__(self, embedder: Any, ref_bytes: Optional[bytes]):
+        self._embedder = embedder
+        self._ref_bytes = ref_bytes
+        self._ref_faces: Optional[List[Any]] = None
+
+    def embed_all(self, img_bytes: bytes) -> List[Any]:
+        if self._ref_bytes is not None and img_bytes is self._ref_bytes:
+            if self._ref_faces is None:
+                # [] is a real, cacheable answer ("this portrait has no
+                # detectable face"), which is why the sentinel is None and not
+                # falsiness — an empty result must not be re-detected forever.
+                self._ref_faces = list(self._embedder.embed_all(img_bytes) or [])
+            return list(self._ref_faces)
+        return self._embedder.embed_all(img_bytes)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# CLI (I/O) — thin: fetch, drive the funnel above, POST. No decisions.
+# ══════════════════════════════════════════════════════════════════════
+
+DEFAULT_BASE_URL = "https://kavenobuilder.com"
+
+
+def _default_base_url() -> str:
+    """Env override first, then send_to_platform's own default, so the two
+    CLIs cannot end up pointed at different servers."""
+    val = os.environ.get("KAVENO_BASE_URL", "").strip()
+    if val:
+        return val.rstrip("/")
+    try:
+        from send_to_platform import DEFAULT_URL
+        return str(DEFAULT_URL).rstrip("/")
+    except Exception:
+        return DEFAULT_BASE_URL
+
+
+def _resolve_token(cli_token: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Reuse send_to_platform's token search (--token > KAVENO_API_TOKEN >
+    VEO_TOKEN > USER_WORKER_TOKEN > ~/veo-worker/.env > ~/.kaveno/token) so
+    an operator who ran `send_to_platform.py set-token` never has to think
+    about this one. Mirrored only if that import fails."""
+    try:
+        from send_to_platform import resolve_token
+        return resolve_token(cli_token)
+    except Exception:
+        if cli_token:
+            return cli_token, "--token"
+        for key in ("KAVENO_API_TOKEN", "VEO_TOKEN", "USER_WORKER_TOKEN"):
+            val = os.environ.get(key, "").strip()
+            if val:
+                return val, f"env {key}"
+        try:
+            with open(os.path.join(os.path.expanduser("~"), ".kaveno", "token"),
+                      encoding="utf-8") as handle:
+                val = handle.read().strip()
+            if val:
+                return val, "~/.kaveno/token"
+        except OSError:
+            pass
+        return None, None
+
+
+def _auth_session(token: Optional[str] = None) -> Any:
+    """A requests.Session carrying the bearer every /api/images route wants.
+    Raises when there is no token: every call in this file needs one, and
+    failing here beats 40 identical 401s."""
+    import requests
+    resolved, how = _resolve_token(token)
+    if not resolved:
+        raise RuntimeError(
+            "no API token found (--token, KAVENO_API_TOKEN, VEO_TOKEN, "
+            "USER_WORKER_TOKEN, ~/veo-worker/.env, ~/.kaveno/token). Mint one "
+            "at https://kavenobuilder.com/static/my-worker.html, then save it "
+            "with: python code/send_to_platform.py set-token <token>")
+    print(f"[qc] auth: token from {how}", flush=True)
+    session = requests.Session()
+    session.headers["Authorization"] = f"Bearer {resolved}"
+    return session
+
+
+def _url(base: str, path: str) -> str:
+    """Join a server-relative path onto the base. Variant image_urls arrive
+    server-relative ('/api/images/files/...?v=..&cb=v891'); an absolute one is
+    passed through so a future R2 direct link still works."""
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    if not path.startswith("/"):
+        path = "/" + path
+    return base.rstrip("/") + path
+
+
+def fetch_nodes(session: Any, base: str, batch_id: Optional[str] = None,
+                since_days: Optional[int] = None) -> List[Dict[str, Any]]:
+    """The batch's nodes, as ImageNode.to_dict shapes.
+
+    GET /api/images/nodes?batch_id=... scopes to that batch and IGNORES the
+    since_days window (image_platform.py:2668), which is what makes an old
+    batch scoreable at all. Without a batch, since_days is passed so the
+    --report path can look at a history window instead.
+    """
+    params: Dict[str, Any] = {}
+    if batch_id:
+        params["batch_id"] = batch_id
+    if since_days is not None:
+        params["since_days"] = since_days
+    resp = session.get(_url(base, "/api/images/nodes"), params=params, timeout=180)
+    resp.raise_for_status()
+    payload = resp.json()
+    if not isinstance(payload, dict):
+        return []
+    return [n for n in (payload.get("nodes") or []) if isinstance(n, dict)]
+
+
+def fetch_node(session: Any, base: str, node_id: int) -> Optional[Dict[str, Any]]:
+    """One node by id, for the avatar upload that supplies the face reference.
+    Returns None rather than raising: the face gate is optional and an absent
+    avatar degrades the run instead of ending it."""
+    try:
+        resp = session.get(_url(base, f"/api/images/nodes/{node_id}"), timeout=120)
+        resp.raise_for_status()
+        node = resp.json()
+        return node if isinstance(node, dict) else None
+    except Exception as exc:
+        print(f"[qc] could not fetch avatar node {node_id} ({_ascii(exc)}) - "
+              f"running without the face gate", flush=True)
+        return None
+
+
+def fetch_bytes(session: Any, base: str, url: Optional[str]) -> Optional[bytes]:
+    """One image's bytes, or None. Never raises — a failed download is one
+    variant scored as broken, not a lost batch."""
+    if not url:
+        return None
+    try:
+        resp = session.get(_url(base, url), timeout=180)
+        if resp.status_code != 200:
+            print(f"[qc] image fetch returned {resp.status_code} for {url}",
+                  flush=True)
+            return None
+        return resp.content
+    except Exception as exc:
+        print(f"[qc] image fetch failed for {url}: {_ascii(exc)}", flush=True)
+        return None
+
+
+def _chosen_variant_bytes(session: Any, base: str,
+                          node: Optional[Dict[str, Any]]) -> Optional[bytes]:
+    """The reference face: an upload node's chosen variant, else its first.
+    An upload has exactly one variant in practice; the fallback covers a row
+    that was never explicitly chosen."""
+    if not node:
+        return None
+    variants = [v for v in (node.get("variants") or []) if isinstance(v, dict)]
+    if not variants:
+        return None
+    chosen_id = node.get("chosen_variant_id")
+    pick = next((v for v in variants if v.get("id") == chosen_id), variants[0])
+    return fetch_bytes(session, base, pick.get("image_url"))
+
+
+def score_node(session: Any, base: str, client: Any, embedder: Any,
+               ref_bytes: Optional[bytes],
+               node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Run the whole funnel over one node and return its report, or None when
+    there was nothing to score.
+
+    Only `source == 'ai'` variants are scored: a manual variant is a file the
+    operator dropped in themselves (v530), and judging the operator's own
+    upload against the prompt measures nothing.
+
+    Order is chosen so the expensive stage runs least: fetch, then the free
+    integrity gates, then the face gate, and Gemini LAST and only on a variant
+    that decoded cleanly. A broken render is never judged — a paid call to be
+    told a blank frame is blank.
+
+    Memory: every scored variant's bytes are held for the length of the node,
+    because the pairwise stage needs the top two side by side after ranking.
+    That is 4-6 PNGs at ~2 MB — deliberately not engineered around.
+    """
+    node_id = node.get("id")
+    prompt = (node.get("prompt") or "").strip()
+    face_on = bool(embedder is not None and ref_bytes)
+    judge_on = bool(client is not None and prompt)
+    skipped: List[str] = []
+    if not face_on:
+        skipped.append("face")
+    if not judge_on:
+        skipped.append("judge")
+
+    reports: List[Dict[str, Any]] = []
+    variant_bytes: Dict[int, bytes] = {}
+    for variant in (node.get("variants") or []):
+        if not isinstance(variant, dict):
+            continue
+        if (variant.get("source") or "ai") != "ai":
+            continue
+        try:
+            # int, not the raw value: rank_variants sorts on variant_id as its
+            # final tiebreak, and Python refuses to order a mix of int and str.
+            variant_id = int(variant["id"])
+        except (KeyError, TypeError, ValueError):
+            print(f"[qc] node {node_id}: variant with an unusable id "
+                  f"{_ascii(variant.get('id'))} skipped", flush=True)
+            continue
+
+        img = fetch_bytes(session, base, variant.get("image_url"))
+        if img is None:
+            reports.append({"variant_id": variant_id,
+                            "integrity": {"ok": False, "reasons": ["fetch_failed"],
+                                          "metrics": None},
+                            "face_sim": None, "judge": None})
+            continue
+        variant_bytes[variant_id] = img
+
+        integrity = analyze_integrity(img)
+        face_sim = face_similarity(embedder, ref_bytes, img) if face_on else None
+        judge = (judge_variant(client, img, prompt)
+                 if (judge_on and integrity["ok"]) else None)
+        reports.append({"variant_id": variant_id, "integrity": integrity,
+                        "face_sim": face_sim, "judge": judge})
+
+    if not reports:
+        return None
+
+    ranked = rank_variants(reports)
+    pairwise_reason: Optional[str] = None
+    # A variant healthy on all three axes sorts above one that is not, so the
+    # healthy variants are exactly the head of `ranked` — the top two here ARE
+    # ranked[0] and ranked[1], which is what makes apply_pairwise's top-2 swap
+    # the right fold.
+    healthy = [row for row in ranked if all(_healthy_axes(row))]
+    if judge_on and len(healthy) >= 2:
+        a_bytes = variant_bytes.get(healthy[0]["variant_id"])
+        b_bytes = variant_bytes.get(healthy[1]["variant_id"])
+        if a_bytes and b_bytes:
+            winner, pairwise_reason = pairwise_top2(client, prompt, a_bytes, b_bytes)
+            ranked = apply_pairwise(ranked, winner)
+    return compose_report(ranked, skipped, pairwise_reason)
+
+
+def post_report(session: Any, base: str, node_id: int,
+                report: Dict[str, Any]) -> Tuple[int, str]:
+    """POST one report. Returns (status_code, short detail); -1 on a transport
+    failure. The caller decides what each code means — 409 in particular is
+    'retry after the render lands', not an error."""
+    try:
+        resp = session.post(_url(base, f"/api/images/nodes/{node_id}/qc"),
+                            json={"report": report}, timeout=120)
+        return resp.status_code, _ascii((resp.text or "")[:300])
+    except Exception as exc:
+        return -1, _ascii(exc)
+
+
+def _run_batch(session: Any, base: str, args: Any) -> int:
+    """Score every scorable node in a batch and POST each report.
+
+    Every per-node step is wrapped: one node that explodes (a shape the server
+    grew, a variant list that is not a list, a native crash inside the face
+    model) logs and the batch carries on. Degrade, never abort — that is the
+    module's whole promise, and the CLI is where it is easiest to break.
+    """
+    nodes = fetch_nodes(session, base, batch_id=args.batch)
+    scorable = pick_scorable_nodes(nodes)
+    if args.limit_nodes:
+        scorable = scorable[:args.limit_nodes]
+    print(f"[qc] batch {args.batch}: {len(nodes)} nodes, "
+          f"{len(scorable)} scorable", flush=True)
+    if not scorable:
+        return 0
+
+    try:
+        client = _gemini_client()
+    except Exception as exc:
+        print(f"[qc] no Gemini client ({_ascii(exc)}) - integrity and face "
+              f"only, 'judge' reported in skipped_checks", flush=True)
+        client = None
+
+    embedder = load_embedder()
+    ref_bytes = None
+    if embedder is not None and args.avatar_node:
+        ref_bytes = _chosen_variant_bytes(
+            session, base, fetch_node(session, base, args.avatar_node))
+    if embedder is not None and not ref_bytes:
+        print("[qc] no reference face (pass --avatar-node <upload node id>) - "
+              "skipping the face gate", flush=True)
+    if embedder is not None and ref_bytes:
+        # ONE detection of the reference portrait for the whole batch.
+        embedder = _RefFaceCache(embedder, ref_bytes)
+
+    posted = deferred = failed = 0
+    for node in scorable:
+        node_id = node.get("id")
+        try:
+            report = score_node(session, base, client, embedder, ref_bytes, node)
+        except Exception as exc:
+            print(f"[qc] node {node_id} scoring failed ({_ascii(exc)}) - "
+                  f"skipped, batch continues", flush=True)
+            failed += 1
+            continue
+        if report is None:
+            print(f"[qc] node {node_id}: no AI variants to score", flush=True)
+            continue
+
+        report = fit_report(report)
+        status, detail = post_report(session, base, node_id, report)
+        if status == 200:
+            posted += 1
+            print(f"[qc] node {node_id}: "
+                  f"recommended={report['recommended_variant_id']} "
+                  f"skipped={report['skipped_checks']} "
+                  f"pairwise={report['pairwise_reason']}", flush=True)
+        elif status == 409:
+            # Not an error: the node started rendering again between the fetch
+            # and the POST. The next run rescores it, and the send_to_platform
+            # hookup rescores it after the render lands.
+            deferred += 1
+            print(f"[qc] node {node_id}: still rendering, rescore later "
+                  f"(409)", flush=True)
+        elif status == 413:
+            failed += 1
+            print(f"[qc] node {node_id}: report REJECTED as too large at "
+                  f"{_report_size(report)} bytes - fit_report's budget is "
+                  f"wrong, not the server ({detail})", flush=True)
+        else:
+            failed += 1
+            print(f"[qc] node {node_id}: POST failed ({status}) {detail}",
+                  flush=True)
+
+    print(f"[qc] done: {posted} scored, {deferred} deferred (still rendering), "
+          f"{failed} failed", flush=True)
+    print("[qc] shadow mode (v886.3): nothing was chosen - the operator still "
+          "picks every variant.", flush=True)
+    return 0
+
+
+def _run_report(session: Any, base: str, args: Any) -> int:
+    """Print the agreement number. Read-only — POSTs nothing."""
+    nodes = fetch_nodes(session, base, batch_id=args.batch,
+                        since_days=None if args.batch else args.since_days)
+    stats = agreement_stats(nodes)
+    scope = f"batch {args.batch}" if args.batch else f"last {args.since_days} days"
+    pct = "n/a" if stats["agreement_pct"] is None else f"{stats['agreement_pct']}%"
+    print(f"[qc] {scope}: {stats['scored']} scored node(s)", flush=True)
+    print(f"shadow agreement: {stats['agree']}/{stats['comparable']} ({pct}) "
+          f"| qc-said-none-good: {stats['no_recommendation']}", flush=True)
+    return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="image_qc",
+        description="v936 image-variant QC, shadow mode. Scores every AI "
+                    "variant in a batch and records what the machine WOULD "
+                    "have picked. Never chooses (v886.3).")
+    parser.add_argument("--batch", help="batch id to score (or to report on)")
+    parser.add_argument("--avatar-node", type=int, default=None,
+                        help="node id of the avatar UPLOAD; supplies the "
+                             "reference face. Omit to skip the face gate.")
+    parser.add_argument("--base-url", default=None,
+                        help=f"platform base URL (default: {_default_base_url()})")
+    parser.add_argument("--token", default=None,
+                        help="API token; normally found automatically")
+    parser.add_argument("--report", action="store_true",
+                        help="print the operator-vs-machine agreement and exit")
+    parser.add_argument("--limit-nodes", type=int, default=0,
+                        help="score at most N nodes (a cheap first run)")
+    parser.add_argument("--since-days", type=int, default=30,
+                        help="history window for --report without --batch")
+    args = parser.parse_args(argv)
+
+    if not args.batch and not args.report:
+        parser.error("--batch is required (or --report to read the agreement)")
+
+    base = (args.base_url or _default_base_url()).rstrip("/")
+    try:
+        session = _auth_session(args.token)
+    except Exception as exc:
+        print(f"[qc] {_ascii(exc)}", file=sys.stderr, flush=True)
+        return 2
+    try:
+        return _run_report(session, base, args) if args.report \
+            else _run_batch(session, base, args)
+    except Exception as exc:
+        print(f"[qc] run failed: {_ascii(exc)}", file=sys.stderr, flush=True)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -14,7 +14,9 @@ from image_qc import (analyze_integrity, build_judge_prompt, parse_judge_reply,
                       PAIRWISE_CONSISTENT, PAIRWISE_DISAGREED,
                       PAIRWISE_CALL_FAILED,
                       face_similarity, load_embedder, InsightFaceEmbedder,
-                      rank_variants, compose_report, RANK_FACE_SIM_FLOOR)
+                      rank_variants, compose_report, RANK_FACE_SIM_FLOOR,
+                      agreement_stats, fit_report, pick_scorable_nodes,
+                      apply_pairwise, _RefFaceCache, FIT_REPORT_BUDGET)
 
 
 def _png(arr):
@@ -1000,3 +1002,268 @@ def test_compose_report_round_trips_through_json():
     assert back["variants"]["2"]["rank"] == 2
     assert back["variants"]["2"]["integrity"]["metrics"] is None
     assert back["pairwise_reason"] == PAIRWISE_DISAGREED
+
+
+# ══════════════════════════════════════════════════════════════════════
+# CLI (pure parts) — agreement_stats / fit_report / pick_scorable_nodes /
+# apply_pairwise / the reference-embedding cache. Zero network in here.
+# ══════════════════════════════════════════════════════════════════════
+
+def test_agreement_stats():
+    nodes = [
+        {"chosen_variant_id": 5, "qc": {"recommended_variant_id": 5}},
+        {"chosen_variant_id": 6, "qc": {"recommended_variant_id": 7}},
+        {"chosen_variant_id": 8, "qc": {"recommended_variant_id": None}},
+        {"chosen_variant_id": None, "qc": {"recommended_variant_id": 9}},
+        {"chosen_variant_id": 3, "qc": None},
+    ]
+    s = agreement_stats(nodes)
+    assert s["comparable"] == 2
+    assert s["agree"] == 1
+    assert s["no_recommendation"] == 1
+
+
+def test_agreement_stats_counts_scored_and_percent():
+    """`scored` counts every node carrying a report, which is what tells a 0/0
+    agreement ('nothing scored yet') apart from 0/0 ('scored, never
+    comparable'). The percentage is None rather than 0 when nothing is
+    comparable — a 0% agreement claim off zero samples would be a lie."""
+    empty = agreement_stats([{"chosen_variant_id": 1, "qc": None}])
+    assert empty["scored"] == 0 and empty["agreement_pct"] is None
+    both = agreement_stats([{"chosen_variant_id": 4, "qc": {"recommended_variant_id": 4}},
+                            {"chosen_variant_id": 4, "qc": {"recommended_variant_id": 5}}])
+    assert both["scored"] == 2 and both["agreement_pct"] == 50.0
+
+
+def test_agreement_stats_tolerates_digit_strings_and_junk():
+    """The server accepts a digit-string recommended_variant_id, so a report
+    written by an older producer can carry one. Comparing '5' to 5 as strings
+    would score a real agreement as a disagreement."""
+    s = agreement_stats([
+        {"chosen_variant_id": 5, "qc": {"recommended_variant_id": "5"}},
+        {"chosen_variant_id": 6, "qc": {"recommended_variant_id": "not a number"}},
+        {"chosen_variant_id": 7, "qc": "a string report"},
+        "not a node",
+    ])
+    assert s["comparable"] == 1 and s["agree"] == 1
+
+
+# ---- fit_report -----------------------------------------------------------
+
+def _judge(n_items, text, compliance=()):
+    return {"overall": 8, "verdict": "pass",
+            "element_misses": [text] * n_items,
+            "artifacts": [text] * n_items,
+            "compliance": list(compliance),
+            "reasons": [text] * n_items}
+
+
+def _report(n_variants, text, n_items=10, compliance=()):
+    return {
+        "version": 1,
+        "generated_at": "2026-08-21T00:00:00Z",
+        "recommended_variant_id": 1,
+        "skipped_checks": [],
+        "pairwise_reason": None,
+        "variants": {
+            str(i): {"integrity": {"ok": True, "reasons": [],
+                                   "metrics": {"short_side": 1024,
+                                               "gray_std": 51.5, "lap_var": 900.0}},
+                     "face_sim": 0.71,
+                     "judge": _judge(n_items, text, compliance),
+                     "rank": i}
+            for i in range(1, n_variants + 1)},
+    }
+
+
+def _size(report):
+    return len(json.dumps(report))
+
+
+def test_fit_report_passes_a_report_that_already_fits():
+    rep = _report(2, "x" * 20)
+    assert _size(rep) <= FIT_REPORT_BUDGET
+    out = fit_report(rep)
+    assert out == rep
+
+
+def test_fit_report_trims_ascii_overflow_to_fit():
+    rep = _report(20, "x" * JUDGE_MAX_STRING_CHARS)
+    assert _size(rep) > FIT_REPORT_BUDGET
+    out = fit_report(rep)
+    assert _size(out) <= FIT_REPORT_BUDGET
+    # first rung of the ladder: 3 items per list, not 0
+    assert len(out["variants"]["1"]["judge"]["reasons"]) == 3
+
+
+def test_fit_report_drops_lists_entirely_when_three_items_still_overflow():
+    rep = _report(60, "x" * JUDGE_MAX_STRING_CHARS)
+    out = fit_report(rep)
+    assert _size(out) <= FIT_REPORT_BUDGET
+    assert out["variants"]["1"]["judge"]["reasons"] == []
+
+
+def test_fit_report_budgets_on_json_bytes_not_item_counts():
+    """Two variants, 60 list items between them — an item-count budget calls
+    that small. json.dumps with the default ensure_ascii escapes every 'e'
+    with an acute accent to \\u00e9, six bytes for one character, so the real
+    payload is over the cap. Budgeting on anything but the dumped length is
+    how a report sails past the client check and gets 413'd by the server."""
+    rep = _report(2, "é" * JUDGE_MAX_STRING_CHARS)
+    assert _size(rep) > FIT_REPORT_BUDGET
+    out = fit_report(rep)
+    assert _size(out) <= FIT_REPORT_BUDGET
+    assert json.loads(json.dumps(out))["variants"]["1"]["judge"]["verdict"] == "pass"
+
+
+def test_fit_report_never_mutates_the_caller_s_report():
+    """The judge dicts inside a report are the SAME objects the funnel is
+    still holding. An in-place trim would silently edit funnel state — and on
+    a rerun, the operator's own accumulated data."""
+    rep = _report(20, "x" * JUDGE_MAX_STRING_CHARS)
+    before = json.dumps(rep)
+    fit_report(rep)
+    assert json.dumps(rep) == before
+
+
+def test_fit_report_keeps_verdicts_scores_and_ranks():
+    rep = _report(60, "x" * JUDGE_MAX_STRING_CHARS, compliance=["stethoscope"])
+    out = fit_report(rep)
+    entry = out["variants"]["7"]
+    assert entry["rank"] == 7
+    assert entry["face_sim"] == 0.71
+    assert entry["integrity"]["metrics"]["short_side"] == 1024
+    assert entry["judge"]["overall"] == 8
+    assert entry["judge"]["verdict"] == "pass"
+    assert out["recommended_variant_id"] == 1
+    assert out["version"] == 1
+
+
+def test_fit_report_survives_a_degraded_report():
+    """judge None (dead judge), metrics None (undecodable variant), and a
+    variants map that is not there at all. None of those may raise inside the
+    one function that stands between the funnel and the POST."""
+    rep = {"version": 1, "recommended_variant_id": None,
+           "variants": {"1": {"integrity": {"ok": False, "reasons": ["undecodable"],
+                                            "metrics": None},
+                              "face_sim": None, "judge": None, "rank": 1}}}
+    assert fit_report(rep) == rep
+    assert fit_report({"version": 1}) == {"version": 1}
+    tiny = fit_report(rep, budget=10)          # unfittable, still returns a dict
+    assert tiny["version"] == 1
+
+
+# ---- pick_scorable_nodes --------------------------------------------------
+
+def _variant(vid, source="ai"):
+    return {"id": vid, "node_id": 900, "variant_index": 1,
+            "image_url": f"/api/images/files/nodes/900/variant_{vid}.png"
+                         f"?v={vid}&cb=v891",
+            "source": source, "backend": "banana",
+            "created_at": "2026-08-21T00:00:00"}
+
+
+def _node(nid, status="ready", kind="generated", variants=1, prompt="a woman"):
+    return {"id": nid, "name": f"Node {nid}", "kind": kind, "origin": "manual",
+            "prompt": prompt, "aspect_ratio": "9:16", "resolution": "1080p",
+            "model": "banana", "n_variants": variants, "status": status,
+            "chosen_variant_id": None, "chosen_variant": None,
+            "error_message": None, "blocked_children_count": 0,
+            "batch_id": "b-1", "qc": None, "role": None,
+            "variants": [_variant(v) for v in range(1, variants + 1)],
+            "parents": []}
+
+
+def test_pick_scorable_nodes_filters_on_the_real_to_dict_fields():
+    nodes = [
+        _node(1),                                   # scorable
+        _node(2, status="generating"),              # mid-render
+        _node(3, status="draft"),                   # never rendered
+        _node(4, status="failed"),
+        _node(5, kind="upload"),                    # a reference asset
+        _node(6, variants=0),                       # ready, nothing to score
+        _node(7, variants=3),                       # scorable
+        "not a dict",
+    ]
+    assert [n["id"] for n in pick_scorable_nodes(nodes)] == [1, 7]
+
+
+def test_pick_scorable_nodes_keeps_a_node_with_an_empty_prompt():
+    """An empty prompt kills the JUDGE stage, not the node: integrity and the
+    face gate still measure something worth reporting."""
+    assert len(pick_scorable_nodes([_node(1, prompt="")])) == 1
+
+
+# ---- apply_pairwise -------------------------------------------------------
+
+def _ranked(*ids):
+    return [{"variant_id": vid, "rank": i} for i, vid in enumerate(ids, 1)]
+
+
+def test_apply_pairwise_promotes_the_pair_winner():
+    out = apply_pairwise(_ranked(4, 7, 9), "B")
+    assert [r["variant_id"] for r in out] == [7, 4, 9]
+    assert [r["rank"] for r in out] == [1, 2, 3]
+
+
+def test_apply_pairwise_leaves_the_order_alone_on_a_or_no_winner():
+    for winner in ("A", None):
+        out = apply_pairwise(_ranked(4, 7, 9), winner)
+        assert [r["variant_id"] for r in out] == [4, 7, 9]
+
+
+def test_apply_pairwise_does_not_edit_the_caller_s_rows():
+    ranked = _ranked(4, 7)
+    apply_pairwise(ranked, "B")
+    assert [r["variant_id"] for r in ranked] == [4, 7]
+    assert [r["rank"] for r in ranked] == [1, 2]
+
+
+def test_apply_pairwise_ignores_a_list_too_short_to_swap():
+    assert apply_pairwise(_ranked(4), "B")[0]["variant_id"] == 4
+    assert apply_pairwise([], "B") == []
+
+
+# ---- reference-embedding cache -------------------------------------------
+
+class _CountingEmbedder:
+    def __init__(self):
+        self.calls = []
+
+    def embed_all(self, img_bytes):
+        self.calls.append(img_bytes)
+        return [np.array([1.0, 0.0, 0.0])] if img_bytes == b"ref" else [
+            np.array([1.0, 0.0, 0.0])]
+
+
+def test_ref_face_cache_embeds_the_reference_once_per_batch():
+    """The reference portrait is the SAME bytes for every variant in a batch.
+    InsightFace on CPU is ~0.3s a frame, so re-detecting it per variant pays
+    that toll once per variant instead of once per run."""
+    inner = _CountingEmbedder()
+    ref = b"ref"
+    cached = _RefFaceCache(inner, ref)
+    for _ in range(5):
+        assert face_similarity(cached, ref, b"cand") == pytest.approx(1.0)
+    assert inner.calls.count(ref) == 1
+    assert inner.calls.count(b"cand") == 5
+
+
+def test_ref_face_cache_caches_an_empty_reference_result_too():
+    """A reference with no detectable face is a settled answer. Re-running the
+    detector on it every variant would be the slowest way to keep learning
+    nothing."""
+    class _NoFaces:
+        def __init__(self):
+            self.n = 0
+
+        def embed_all(self, img_bytes):
+            self.n += 1
+            return []
+    inner = _NoFaces()
+    ref = b"ref"
+    cached = _RefFaceCache(inner, ref)
+    assert face_similarity(cached, ref, b"cand") is None
+    assert face_similarity(cached, ref, b"cand") is None
+    # 1 reference call + 2 candidate calls: the empty reference was not redone
+    assert inner.n == 3
