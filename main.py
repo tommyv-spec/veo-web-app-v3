@@ -739,6 +739,15 @@ async def lifespan(app: FastAPI):
     _export_sweeper_task = _asyncio.create_task(_export_sweeper())
     print("[App][Export/v850] stale-export sweeper started (every 60s)", flush=True)
 
+    # v938 — server-side auto-edit. The local worker still wins any run it is
+    # awake for (see AUTOEDIT_SERVER_GRACE_S); this picks up the rest so a user
+    # with no PC setup still gets a video.
+    _autoedit_dispatcher_task = _asyncio.create_task(_autoedit_dispatcher())
+    print(f"[App][AutoEdit/server] auto-edit dispatcher started "
+          f"(enabled={_autoedit_server_enabled()}, {AUTOEDIT_DISPATCH_INTERVAL_S}s tick, "
+          f"{AUTOEDIT_SERVER_GRACE_S}s local-worker grace, "
+          f"gate at {AUTOEDIT_MIN_AVAIL_MB}MB avail)", flush=True)
+
     # v872 — idle recycle backstop (see _idle_memory_watchdog).
     _mem_watchdog_task = _asyncio.create_task(_idle_memory_watchdog())
     print(f"[App][Mem/v872] idle memory watchdog started "
@@ -757,6 +766,7 @@ async def lifespan(app: FastAPI):
     _purge_task.cancel()
     _export_sweeper_task.cancel()
     _export_dispatcher_task.cancel()
+    _autoedit_dispatcher_task.cancel()
     _mem_watchdog_task.cancel()
     _image_stop_event.set()
     try:
@@ -771,6 +781,12 @@ async def lifespan(app: FastAPI):
         await _asyncio.to_thread(_requeue_local_exports_on_shutdown)
     except Exception as _sq:
         print(f"[Export/v850] shutdown re-queue failed: {_sq}", flush=True)
+
+    # v938 — same handover for a render this container was in the middle of.
+    try:
+        await _asyncio.to_thread(_requeue_local_autoedits_on_shutdown)
+    except Exception as _aq:
+        print(f"[AutoEdit/server] shutdown re-queue failed: {_aq}", flush=True)
 
     worker.stop()
     print("[App] Shutdown complete")
@@ -10017,6 +10033,8 @@ def _container_is_idle() -> bool:
     do not hold the recycle back."""
     if _LOCAL_EXPORT_IDS:
         return False
+    if _LOCAL_AUTOEDIT_IDS:  # v938 — a render here is worth protecting too
+        return False
     try:
         if getattr(worker, "running_jobs", None):
             return False
@@ -10440,6 +10458,546 @@ def _requeue_local_exports_on_shutdown() -> int:
             print(f"[Export/v850] shutdown re-queue error: {_qe}", flush=True)
             return 0
     print(f"[Export/v850] shutdown handed over {n} in-flight export(s)", flush=True)
+    return n
+
+
+# ============ v938 — server-side auto-edit executor ============
+#
+# Auto-edit used to be queue-ONLY: the server inserted a row and a worker on
+# the operator's PC claimed it. A user with no PC setup got a row that sat
+# 'queued' for ever and no video. This runs the same pipeline HERE, the same
+# way Export Final already runs here, so the feature works with nobody at home.
+#
+# It deliberately copies the export design above so the two read alike: one
+# dispatcher loop is the only place a runner is spawned, the claim takes a row
+# lock, the runner opens its OWN session, heartbeats while it works, and writes
+# the terminal state on a fresh session.
+#
+# The caption renderer is left alone on purpose: autoedit_pipeline.caption_engine()
+# returns 'libass' (plain ffmpeg) unless AUTOEDIT_CAPTION_ENGINE says otherwise,
+# and that is the only engine this 2GB box can run. Never set that variable here.
+
+# Off switch. Default ON; set to 0/false/no/off in the Render env to stop the
+# server rendering without waiting for a deploy. The worker path is untouched
+# by it — turning this off just returns auto-edit to queue-only.
+def _autoedit_server_enabled() -> bool:
+    return (os.environ.get("AUTOEDIT_SERVER_EXECUTOR") or "1").strip().lower() \
+        not in ("0", "false", "no", "off")
+
+
+AUTOEDIT_DISPATCH_INTERVAL_S = int(os.environ.get("AUTOEDIT_DISPATCH_INTERVAL_S", "20"))
+# GRACE PERIOD — why the server waits before taking a run.
+#
+# The operator's PC is far faster than this box (GPU Whisper, pycaps captions,
+# spare RAM), so when a local worker is up it SHOULD win every race. It polls
+# every ~15s. If the server claimed the instant a row appeared, it would steal
+# work from the faster machine roughly half the time. Holding queued rows for
+# 90s means a live local worker always gets there first, and the server only
+# picks up what nobody claimed.
+AUTOEDIT_SERVER_GRACE_S = int(os.environ.get("AUTOEDIT_SERVER_GRACE_S", "90"))
+# Same admission gate exports use, and the same default: a render loads a
+# Whisper model and runs ffmpeg, so starting into 150MB of headroom takes the
+# whole container down.
+AUTOEDIT_MIN_AVAIL_MB = int(os.environ.get("AUTOEDIT_MIN_AVAIL_MB", str(EXPORT_MIN_AVAIL_MB)))
+# One at a time, always. Two ffmpeg+Whisper passes on 1 CPU / 2GB is an OOM.
+AUTOEDIT_MAX_CONCURRENT = 1
+# autoedit_queue.STALE_AFTER is 5 minutes and a caption pass can run for
+# minutes with no stage change, so beat well inside that window.
+AUTOEDIT_HEARTBEAT_S = 45
+
+# Runs THIS container is actively rendering. Same job as _LOCAL_EXPORT_IDS.
+_LOCAL_AUTOEDIT_IDS: set = set()
+_AUTOEDIT_TASKS: set = set()  # strong refs; asyncio only holds weak ones
+_last_autoedit_gate_log = 0.0
+
+
+def _autoedit_headroom_ok() -> bool:
+    """True when there is room to start a render. Logs at most once a minute
+    while it holds runs back, so a stalled queue is visible without flooding
+    the log at every dispatch tick.
+
+    Deliberately does NOT touch _export_gate_blocked_since: that flag exists to
+    let the idle watchdog recycle the worker when an EXPORT is starved, and a
+    starved auto-edit is not worth a restart.
+    """
+    global _last_autoedit_gate_log
+    try:
+        import mem_guard as _mg
+        ok, snap = _mg.headroom_ok(AUTOEDIT_MIN_AVAIL_MB)
+    except Exception:
+        return True  # never let the gate itself block work
+    if not ok:
+        import time as _t
+        now = _t.monotonic()
+        if now - _last_autoedit_gate_log > 60:
+            _last_autoedit_gate_log = now
+            print(f"[AutoEdit/server] HOLD — avail={snap.get('avail_mb')}MB < "
+                  f"{AUTOEDIT_MIN_AVAIL_MB}MB required (used={snap.get('used_mb')}MB "
+                  f"of {snap.get('limit_mb')}MB). Queued auto-edits stay queued.",
+                  flush=True)
+    return ok
+
+
+def _autoedit_server_token(db, user_id: str):
+    """A worker token for this user, so the pipeline can fetch the job's files.
+
+    autoedit_pipeline downloads the export + b-roll over the public API, and it
+    reads its token from KAVENO_API_TOKEN. On a PC that token is set up by hand;
+    here nobody is around to do it, so reuse the user's active worker token and
+    mint one if they have none — the same get-or-create every worker-setup
+    endpoint already does. The token is scoped to that one user, and the server
+    is only using it to read files it already stores.
+    """
+    from models import UserWorkerToken
+    tok = db.query(UserWorkerToken).filter(
+        UserWorkerToken.user_id == user_id,
+        UserWorkerToken.is_active == True,  # noqa: E712
+    ).first()
+    if tok:
+        return tok.id
+    tok = UserWorkerToken(
+        id=secrets.token_urlsafe(48),
+        user_id=user_id,
+        name=f"Worker-{datetime.utcnow().strftime('%Y%m%d-%H%M')}",
+    )
+    db.add(tok)
+    db.commit()
+    print(f"[AutoEdit/server] minted a worker token for user {str(user_id)[:8]} "
+          f"— the render needs one to read the job's files", flush=True)
+    return tok.id
+
+
+def _claim_autoedit_for_server():
+    """Take the oldest runnable AutoEditRun for this container. Sync — to_thread.
+
+    Returns a plain dict (never a detached ORM row) or None when there is
+    nothing to take.
+    """
+    from models import get_db, AutoEditRun
+    from autoedit_queue import is_claimable
+
+    now = datetime.utcnow()
+    grace_cutoff = now - timedelta(seconds=AUTOEDIT_SERVER_GRACE_S)
+    with get_db() as _db:
+        try:
+            # skip_locked mirrors /api/autoedit/claim: without the row lock two
+            # claimants reading at the same instant both pass is_claimable and
+            # both commit, and one job gets rendered twice. Postgres honours it;
+            # SQLite (tests) has no row locks and silently ignores it.
+            rows = _db.query(AutoEditRun).filter(
+                AutoEditRun.state.in_(["queued", "claimed", "running"])
+            ).order_by(AutoEditRun.created_at.asc()).with_for_update(
+                skip_locked=True).all()
+            for run in rows:
+                if run.id in _LOCAL_AUTOEDIT_IDS:
+                    continue  # already rendering right here
+                if not is_claimable(run.state, run.heartbeat_at, now):
+                    continue
+                # The grace period only guards a FRESH queue entry. A
+                # claimed/running row only gets here after 5 minutes of silence,
+                # which already means whoever held it is gone.
+                if run.state == "queued" and (run.created_at or now) > grace_cutoff:
+                    continue
+                if not run.user_id:
+                    continue  # no user, no token, no download — leave it alone
+                run.state, run.claimed_by, run.heartbeat_at = "claimed", "server", now
+                # A stale reclaim counts as an attempt, same as the worker path,
+                # so a run that keeps dying burns the MAX_ATTEMPTS budget.
+                run.attempts += 1
+                _db.commit()
+                print(f"[AutoEdit/server] TEMP claimed {run.id[:8]} job={run.job_id[:8]} "
+                      f"template={run.template} attempt={run.attempts}", flush=True)
+                claim = {
+                    "id": run.id, "job_id": run.job_id, "user_id": run.user_id,
+                    "template": run.template, "placement": run.placement,
+                    "offset": run.offset, "repair_json": run.repair_json,
+                    "attempts": run.attempts,
+                }
+                # The token lookup comes AFTER the claim commit on purpose:
+                # minting one commits, and committing while we still held the
+                # FOR UPDATE locks would drop them before the claim was written.
+                claim["api_token"] = _autoedit_server_token(_db, run.user_id)
+                return claim
+            _db.rollback()  # release the FOR UPDATE locks we did not use
+            return None
+        except Exception as _ce:
+            try:
+                _db.rollback()
+            except Exception:
+                pass
+            print(f"[AutoEdit/server] claim error: {_ce}", flush=True)
+            return None
+
+
+def _autoedit_touch(autoedit_id: str, stage: str = None) -> bool:
+    """Heartbeat (and optionally the stage label) on a FRESH short session.
+
+    Filtered on claimed/running so a cancelled or already-failed row is never
+    dragged back to life by a late tick from a render we lost.
+    """
+    from models import get_db, AutoEditRun
+
+    with get_db() as _db:
+        try:
+            row = _db.query(AutoEditRun).filter(
+                AutoEditRun.id == autoedit_id,
+                AutoEditRun.state.in_(["claimed", "running"]),
+            ).first()
+            if row is None:
+                return False
+            row.state = "running"
+            row.heartbeat_at = datetime.utcnow()
+            if stage:
+                row.stage = stage
+            _db.commit()
+            return True
+        except Exception as _te:
+            try:
+                _db.rollback()
+            except Exception:
+                pass
+            print(f"[AutoEdit/server] heartbeat write failed "
+                  f"run={autoedit_id[:8]}: {_te}", flush=True)
+            return False
+
+
+async def _autoedit_heartbeat(autoedit_id: str):
+    """Keep the row fresh while the render blocks a worker thread. A missed
+    tick is survivable (STALE_AFTER is 5 min); a dead loop is not, so nothing
+    is allowed to escape."""
+    while True:
+        try:
+            await asyncio.sleep(AUTOEDIT_HEARTBEAT_S)
+            await asyncio.to_thread(_autoedit_touch, autoedit_id, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as _he:
+            print(f"[AutoEdit/server] heartbeat error run={autoedit_id[:8]}: {_he}",
+                  flush=True)
+
+
+def _autoedit_normalize_qc(qc, source: str) -> dict:
+    """Force a usable quality verdict. A render that reports nothing readable
+    is 'needs a human', never silently 'READY'."""
+    if not isinstance(qc, dict) or qc.get("verdict") not in ("READY", "NEEDS_MANUAL_EDIT"):
+        return {
+            "schema_version": 1,
+            "verdict": "NEEDS_MANUAL_EDIT",
+            "reasons": [f"{source} did not provide a valid quality verdict"],
+            "checks": [],
+        }
+    return qc
+
+
+async def _autoedit_store_result(db, run, qc: dict, write_tmp) -> dict:
+    """THE one place a finished auto-edit becomes a stored output.
+
+    Both finishers go through here — the worker's /complete upload and the
+    server's own render — so the filename scheme, the R2 key, the qc columns
+    and the terminal state can never drift apart. `write_tmp` is an async
+    callable that fills the temp path it is handed; that is the only part the
+    two paths do differently (read an upload stream vs copy a local file).
+    """
+    from datetime import datetime as _dt
+    from models import Job
+
+    job = db.query(Job).filter(Job.id == run.job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="job for this run no longer exists")
+
+    fn = f"autoedit_{run.job_id[:8]}_{run.template}_{run.id[:6]}.mp4"
+    output_dir = Path(job.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dest = output_dir / fn
+
+    # Write under a temp name, rename only once the file is closed. Writing
+    # straight to `dest` would leave a truncated mp4 under the FINAL name if
+    # anything went wrong mid-write, and the outputs list would offer that
+    # half-file as a finished video.
+    tmp = output_dir / f".{fn}.part"
+    try:
+        await write_tmp(tmp)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    tmp.replace(dest)
+
+    try:  # R2 so it survives a redeploy — same key scheme the exports use.
+        # to_thread: upload_file is a synchronous multi-second network call, and
+        # this runs on the event loop of a 1-CPU box — inline it would stall
+        # every other request for the whole upload.
+        from backends.storage import is_storage_configured, get_storage
+        if is_storage_configured():
+            await asyncio.to_thread(get_storage().upload_file, str(dest),
+                                    f"jobs/{run.job_id}/outputs/{fn}")
+    except Exception as e:
+        print(f"[AutoEdit] R2 upload failed (non-fatal): {e}", flush=True)
+
+    run.state, run.result_filename, run.finished_at = "done", fn, _dt.utcnow()
+    run.qc_status = qc["verdict"]
+    run.qc_report_json = json.dumps(qc, ensure_ascii=False)
+    db.commit()
+    print(f"[AutoEdit/v937 TEMP] done {run.id} verdict={qc['verdict']} -> {fn} "
+          f"({dest.stat().st_size / 1e6:.1f} MB)", flush=True)
+    return {"ok": True, "filename": fn,
+            "qc_status": qc["verdict"], "qc_report": qc,
+            "download_url": f"/api/jobs/{run.job_id}/outputs/{fn}"}
+
+
+def _autoedit_apply_failure(run, error: str) -> str:
+    """Shared retry decision: back to queued until MAX_ATTEMPTS is spent.
+    Mutates the row; the caller commits."""
+    from datetime import datetime as _dt
+    from autoedit_queue import next_state_on_fail
+
+    run.state = next_state_on_fail(run.attempts)
+    run.error = (error or "")[:2000]
+    if run.state == "failed":
+        run.finished_at = _dt.utcnow()
+    return run.state
+
+
+def _fail_autoedit_run(autoedit_id: str, error: str):
+    """Record a server-side failure on a FRESH session. Sync — to_thread.
+
+    Fresh because the render holds its session for minutes: if the run died
+    BECAUSE that connection dropped, the old session cannot record its own
+    failure and the row would be stranded in 'running'.
+    """
+    from models import get_db, AutoEditRun
+
+    with get_db() as _db:
+        try:
+            row = _db.query(AutoEditRun).filter(AutoEditRun.id == autoedit_id).first()
+            if row is None:
+                return None
+            state = _autoedit_apply_failure(row, error)
+            _db.commit()
+            print(f"[AutoEdit/server] TEMP fail {autoedit_id[:8]} "
+                  f"attempt={row.attempts} -> {state}: {str(error)[:160]}", flush=True)
+            return state
+        except Exception as _fe:
+            try:
+                _db.rollback()
+            except Exception:
+                pass
+            print(f"[AutoEdit/server] could not write failure "
+                  f"run={autoedit_id[:8]}: {_fe}", flush=True)
+            return None
+
+
+def _autoedit_work_dir(job_id: str) -> Path:
+    """Scratch space for one render. The system temp dir, never the repo: the
+    pipeline drops a ~150MB source video plus intermediates in here and the
+    repo checkout is not the place for that."""
+    import tempfile
+    return Path(tempfile.gettempdir()) / "autoedit" / job_id
+
+
+def _run_autoedit_blocking(claim: dict, work: Path) -> Path:
+    """The render itself. Sync and slow — always call via asyncio.to_thread."""
+    from autoedit_pipeline import run_autoedit
+
+    work.mkdir(parents=True, exist_ok=True)
+    out = work / f"autoedit_{claim['id'][:6]}.mp4"
+    try:
+        repairs = json.loads(claim.get("repair_json") or "{}")
+    except (TypeError, ValueError):
+        repairs = {}
+
+    # The pipeline fetches the job's files over the public API and reads its
+    # token from the environment. Only one render runs per container
+    # (AUTOEDIT_MAX_CONCURRENT), so setting it around the call is safe, and the
+    # old value goes back either way.
+    prev = os.environ.get("KAVENO_API_TOKEN")
+    if claim.get("api_token"):
+        os.environ["KAVENO_API_TOKEN"] = claim["api_token"]
+    try:
+        return run_autoedit(
+            claim["job_id"], work, out,
+            template=claim["template"], placement=claim["placement"],
+            offset=claim.get("offset"),
+            progress=lambda stage: _autoedit_touch(claim["id"], stage),
+            repairs=repairs or None,
+        )
+    finally:
+        if prev is None:
+            os.environ.pop("KAVENO_API_TOKEN", None)
+        else:
+            os.environ["KAVENO_API_TOKEN"] = prev
+
+
+async def _finish_autoedit_from_path(claim: dict, out: Path, work: Path) -> dict:
+    """Store a server-rendered result through the same helper /complete uses."""
+    from models import get_db, AutoEditRun
+
+    qc_raw = {}
+    report = work / "qc_report.json"
+    if report.exists():
+        try:
+            qc_raw = json.loads(report.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as _qe:
+            print(f"[AutoEdit/server] unreadable qc_report.json: {_qe}", flush=True)
+    qc = _autoedit_normalize_qc(qc_raw, "The server render")
+
+    async def _write(tmp: Path):
+        # copyfile, not rename: the work dir is in the system temp area and the
+        # outputs dir may well be a different mount, where rename fails.
+        await asyncio.to_thread(shutil.copyfile, str(out), str(tmp))
+
+    with get_db() as db:
+        run = db.query(AutoEditRun).filter(AutoEditRun.id == claim["id"]).first()
+        if run is None:
+            raise RuntimeError(f"auto-edit run {claim['id'][:8]} vanished mid-render")
+        return await _autoedit_store_result(db, run, qc, _write)
+
+
+async def _autoedit_runner(claim: dict):
+    """Do one auto-edit, detached from any HTTP request."""
+    import traceback as _tb
+
+    autoedit_id = claim["id"]
+    work = _autoedit_work_dir(claim["job_id"])
+    hb_task = None
+    ok = False
+    try:
+        print(f"[AutoEdit/server] START run={autoedit_id[:8]} job={claim['job_id'][:8]} "
+              f"attempt={claim['attempts']} work={work}", flush=True)
+        hb_task = asyncio.create_task(_autoedit_heartbeat(autoedit_id))
+        # to_thread: _autoedit_touch is a blocking DB write and this is the
+        # event loop.
+        await asyncio.to_thread(_autoedit_touch, autoedit_id, "download")
+        out = await asyncio.to_thread(_run_autoedit_blocking, claim, work)
+        res = await _finish_autoedit_from_path(claim, out, work)
+        ok = True
+        print(f"[AutoEdit/server] DONE run={autoedit_id[:8]} -> {res.get('filename')} "
+              f"({res.get('qc_status')})", flush=True)
+    except asyncio.CancelledError:
+        # Shutdown. Do NOT burn an attempt on it — the shutdown hook re-queues
+        # this row so the next container picks it straight up.
+        raise
+    except BaseException as e:
+        # run_autoedit raises AutoEditError (a RuntimeError), but the store step
+        # can still raise HTTPException, whose str() is useless. Take .detail.
+        _err = getattr(e, "detail", None) or str(e) or e.__class__.__name__
+        print(f"[AutoEdit/server] FAILED run={autoedit_id[:8]}: {_err}", flush=True)
+        print(f"[AutoEdit/server] traceback: {_tb.format_exc()}", flush=True)
+        await asyncio.to_thread(_fail_autoedit_run, autoedit_id, str(_err))
+    finally:
+        if hb_task is not None:
+            hb_task.cancel()
+        _LOCAL_AUTOEDIT_IDS.discard(autoedit_id)
+        if ok:
+            # A finished render leaves a ~150MB source video plus intermediates
+            # behind, and this box has very little disk. Failures KEEP the dir
+            # so it can be looked at — the path is logged above.
+            try:
+                shutil.rmtree(work, ignore_errors=True)
+            except Exception as _ce:
+                print(f"[AutoEdit/server] could not clean {work}: {_ce}", flush=True)
+        else:
+            print(f"[AutoEdit/server] kept work dir for diagnosis: {work}", flush=True)
+
+
+def _spawn_autoedit_runner(claim: dict) -> None:
+    """Fire the runner detached from the dispatcher tick.
+
+    Registers the id SYNCHRONOUSLY, before the task is even scheduled, so a
+    later tick landing in the gap cannot start a second render of the same run.
+    A failure to create the task unregisters it again — a leaked id would make
+    the run unclaimable for the life of the container.
+    """
+    autoedit_id = claim["id"]
+    _LOCAL_AUTOEDIT_IDS.add(autoedit_id)
+    try:
+        task = asyncio.create_task(_autoedit_runner(claim))
+    except RuntimeError as _cte:
+        _LOCAL_AUTOEDIT_IDS.discard(autoedit_id)
+        print(f"[AutoEdit/server] CANNOT SPAWN run={autoedit_id[:8]} — {_cte}", flush=True)
+        raise
+
+    _AUTOEDIT_TASKS.add(task)
+
+    def _on_done(_t: "asyncio.Task") -> None:
+        # Belt to the runner's own finally: a coroutine that dies BEFORE its try
+        # block never runs that finally, and the id would leak.
+        _AUTOEDIT_TASKS.discard(_t)
+        _LOCAL_AUTOEDIT_IDS.discard(autoedit_id)
+        if _t.cancelled():
+            return
+        _exc = _t.exception()
+        if _exc is not None:
+            print(f"[AutoEdit/server] runner task DIED run={autoedit_id[:8]}: "
+                  f"{type(_exc).__name__}: {_exc}", flush=True)
+
+    task.add_done_callback(_on_done)
+
+
+async def _autoedit_dispatch_tick() -> bool:
+    """One pass of the dispatcher. Split out so a test can drive it directly.
+    Returns True when it started a render."""
+    if not _autoedit_server_enabled():
+        return False
+    if len(_LOCAL_AUTOEDIT_IDS) >= AUTOEDIT_MAX_CONCURRENT:
+        return False
+    # A free slot is not the same thing as free memory.
+    if not _autoedit_headroom_ok():
+        return False
+    claim = await asyncio.to_thread(_claim_autoedit_for_server)
+    if claim is None:
+        return False
+    _spawn_autoedit_runner(claim)
+    return True
+
+
+async def _autoedit_dispatcher():
+    """THE ONLY PLACE a server-side auto-edit runner is spawned."""
+    while True:
+        try:
+            await _autoedit_dispatch_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception as _de:
+            # Never die: if this loop stops, every auto-edit sits queued for
+            # ever and nothing says why.
+            print(f"[AutoEdit/server] dispatcher tick failed (non-fatal): {_de}",
+                  flush=True)
+        await asyncio.sleep(AUTOEDIT_DISPATCH_INTERVAL_S)
+
+
+def _requeue_local_autoedits_on_shutdown() -> int:
+    """Deploy path: hand this container's in-flight renders back to the queue.
+
+    heartbeat_at=NULL makes the row claimable at once, so the next container
+    (or the local worker) picks it up instead of waiting out the 5-minute stale
+    window. Sync — call via to_thread from the shutdown hook.
+    """
+    from models import get_db, AutoEditRun
+
+    ids = list(_LOCAL_AUTOEDIT_IDS)
+    if not ids:
+        return 0
+    n = 0
+    with get_db() as _db:
+        try:
+            for run in _db.query(AutoEditRun).filter(
+                AutoEditRun.id.in_(ids),
+                AutoEditRun.state.in_(["claimed", "running"]),
+            ).all():
+                run.state = "queued"
+                run.heartbeat_at = None
+                run.stage = None
+                n += 1
+                print(f"[AutoEdit/server] HANDOVER run={run.id[:8]} job={run.job_id[:8]} "
+                      f"— shutting down, re-queued", flush=True)
+            _db.commit()
+        except Exception as _qe:
+            try:
+                _db.rollback()
+            except Exception:
+                pass
+            print(f"[AutoEdit/server] shutdown re-queue error: {_qe}", flush=True)
+            return 0
     return n
 
 
@@ -16091,42 +16649,22 @@ async def autoedit_complete(
     db: DBSession = Depends(get_db_session),
     worker_user_id: str = Depends(verify_user_worker_token),
 ):
-    """Worker uploads the finished mp4; we store it next to the job's outputs."""
-    from datetime import datetime as _dt
-    from models import Job
+    """Worker uploads the finished mp4; we store it next to the job's outputs.
 
+    v938 — the storing itself lives in _autoedit_store_result, shared with the
+    server-side executor, so the two finishers cannot drift apart. Only the
+    reading of the bytes is different here: an upload stream, with a size cap.
+    """
     run = _autoedit_run_for_worker(db, autoedit_id, worker_user_id)
 
     try:
-        qc = json.loads(qc_report or "{}")
+        parsed = json.loads(qc_report or "{}")
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="qc_report must be valid JSON")
-    verdict = qc.get("verdict")
-    if verdict not in ("READY", "NEEDS_MANUAL_EDIT"):
-        qc = {
-            "schema_version": 1,
-            "verdict": "NEEDS_MANUAL_EDIT",
-            "reasons": ["The local worker did not provide a valid quality verdict"],
-            "checks": [],
-        }
-        verdict = qc["verdict"]
+    qc = _autoedit_normalize_qc(parsed, "The local worker")
 
-    job = db.query(Job).filter(Job.id == run.job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="job for this run no longer exists")
-
-    fn = f"autoedit_{run.job_id[:8]}_{run.template}_{run.id[:6]}.mp4"
-    output_dir = Path(job.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    dest = output_dir / fn
-
-    # Write under a temp name, rename only once the file is closed. Writing
-    # straight to `dest` would leave a truncated mp4 under the FINAL name if
-    # anything went wrong mid-write, and the outputs list would offer that
-    # half-file as a finished video.
-    tmp = output_dir / f".{fn}.part"
-    written = 0
-    try:
+    async def _write(tmp: Path):
+        written = 0
         with open(tmp, "wb") as f:
             while chunk := await video.read(1 << 20):
                 written += len(chunk)
@@ -16136,31 +16674,8 @@ async def autoedit_complete(
                         detail=f"Auto-edit upload is larger than "
                                f"{AUTOEDIT_MAX_UPLOAD_BYTES // (1 << 20)} MB")
                 f.write(chunk)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    tmp.replace(dest)
 
-    try:  # R2 so it survives a redeploy — same key scheme the exports use.
-        # to_thread: upload_file is a synchronous multi-second network call, and
-        # this handler is async on a 1-CPU box — inline it would stall every
-        # other request for the whole upload.
-        from backends.storage import is_storage_configured, get_storage
-        if is_storage_configured():
-            await asyncio.to_thread(get_storage().upload_file, str(dest),
-                                    f"jobs/{run.job_id}/outputs/{fn}")
-    except Exception as e:
-        print(f"[AutoEdit] R2 upload failed (non-fatal): {e}", flush=True)
-
-    run.state, run.result_filename, run.finished_at = "done", fn, _dt.utcnow()
-    run.qc_status = verdict
-    run.qc_report_json = json.dumps(qc, ensure_ascii=False)
-    db.commit()
-    print(f"[AutoEdit/v937 TEMP] done {run.id} verdict={verdict} -> {fn} "
-          f"({dest.stat().st_size / 1e6:.1f} MB)", flush=True)
-    return {"ok": True, "filename": fn,
-            "qc_status": verdict, "qc_report": qc,
-            "download_url": f"/api/jobs/{run.job_id}/outputs/{fn}"}
+    return await _autoedit_store_result(db, run, qc, _write)
 
 
 class AutoEditFail(BaseModel):
@@ -16174,15 +16689,13 @@ async def autoedit_fail(
     db: DBSession = Depends(get_db_session),
     worker_user_id: str = Depends(verify_user_worker_token),
 ):
-    """Worker reports a failure. Back to `queued` until MAX_ATTEMPTS is spent."""
-    from datetime import datetime as _dt
-    from autoedit_queue import next_state_on_fail
+    """Worker reports a failure. Back to `queued` until MAX_ATTEMPTS is spent.
 
+    v938 — the retry decision lives in _autoedit_apply_failure, shared with the
+    server-side executor so both paths spend the attempt budget the same way.
+    """
     run = _autoedit_run_for_worker(db, autoedit_id, worker_user_id)
-    run.state = next_state_on_fail(run.attempts)
-    run.error = p.error[:2000]
-    if run.state == "failed":
-        run.finished_at = _dt.utcnow()
+    _autoedit_apply_failure(run, p.error)
     db.commit()
     print(f"[AutoEdit] fail {run.id} attempt={run.attempts} -> {run.state}: {p.error[:120]}",
           flush=True)
