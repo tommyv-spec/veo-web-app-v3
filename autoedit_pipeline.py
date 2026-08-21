@@ -477,11 +477,42 @@ def enforce_min_dwell(windows, buckets, min_dwell=2.0):
 # v938.12 — the voice chain lives here as a constant so the audio cache can be
 # keyed on it: change the chain, and every cached file is invalidated by its
 # own name. See the comment in enhance_audio.
-_VOICE_CHAIN = ("highpass=f=80,"
-                "equalizer=f=300:t=q:w=1.2:g=-3,"
-                "equalizer=f=3200:t=q:w=1.0:g=4,"
-                "equalizer=f=6300:t=q:w=2.2:g=-2.5,"
-                "acompressor=threshold=-20dB:ratio=3:attack=6:release=140:makeup=2,"
+#
+# v938.13 — the chain is now MEASURED against CapCut, not guessed.
+#
+# The operator said our audio did not sound as good as CapCut's. Rather than
+# keep guessing at a "broadcast voice" chain, we measured it: five files exist
+# on this machine in both states — the platform export the operator dropped
+# into CapCut, and the file CapCut wrote back out. Same speech, one editing
+# pass in between. Averaging the long-term spectrum of both sides gives what
+# CapCut actually did, in dB per band (script: scratchpad/capcut_forensics.py):
+#
+#     60-120 Hz  -13.8      2-3 kHz   +1.1
+#    120-250 Hz   -0.3      3-5 kHz   +1.1
+#    250-500 Hz   +0.3      5-8 kHz   -1.0
+#    500-1k Hz    +0.0      8-12 kHz  -1.9
+#      1-2 kHz    -0.0     12-16 kHz  -0.5
+#
+# CapCut does ONE substantial thing: it loses the sub-120 Hz rumble. Every
+# other band moves less than 2 dB. There is no neural resynthesis to chase.
+#
+# The old chain above did the opposite of what that curve wants. Against the
+# untouched source it cut 300 Hz (the voice's body) and lifted 3.2 kHz, which
+# left our output 3.3 dB THINNER and 4.5 dB BRIGHTER than the source — and so
+# thinner and brighter than CapCut, which leaves both alone. Thin plus bright
+# is exactly the harsh, brittle character the operator was hearing.
+#
+# It happened because the metric was wrong. "presence-to-mud" (2-5 kHz over
+# 200-500 Hz) rewards removing body and adding treble, so optimising it drove
+# the sound away from the target while the number went up. The target is now
+# CapCut's own curve, and the score is the weighted deviation from it:
+# 3.47 dB for the old chain, 1.23 dB for this one (scratchpad/grid_to_capcut.py).
+#
+# No highpass: DeepFilterNet already removes the rumble ahead of this stage,
+# and adding 80 Hz on top overshot to -22 dB where CapCut sits at -14.
+_VOICE_CHAIN = ("equalizer=f=190:t=q:w=1.0:g=4,"      # restore the voice body
+                "equalizer=f=9000:t=q:w=1.6:g=-4,"    # take off the brittle top
+                "acompressor=threshold=-20dB:ratio=2.5:attack=10:release=180:makeup=1.5,"
                 "alimiter=limit=0.95")
 
 
@@ -514,23 +545,16 @@ def enhance_audio(base, work: Path):
     if not ok:
         shutil.copy(raw_wav, enh)
 
-    # v938.11 — the voice chain, rebuilt after measuring the old one.
+    # v938.13 — the chain is defined and justified at _VOICE_CHAIN above, where
+    # it is measured against CapCut's own output. In short:
     #
-    # The old chain was highpass + compressor + one-pass loudnorm. Measured on
-    # a real job it moved the presence-to-mud ratio from 0.12 to 0.13 — i.e. it
-    # changed the TONE almost not at all and merely raised the level, which is
-    # why it sounded flat next to CapCut. CapCut's "enhance voice" reshapes the
-    # voice: it pulls out the boxy low-mid that a room adds and lifts the
-    # presence band so speech sits forward.
+    #   +4dB @ 190Hz    put back the voice body the old chain cut away
+    #   -4dB @ 9kHz     take off the brittle top the old chain added
+    #   acompressor     steadier level, gentle ratio so it does not pump
+    #   alimiter        catch peaks without clipping
     #
-    #   highpass 80        rumble and handling noise
-    #   -3dB @ 300Hz       the "mud" that makes a voice sound boxy
-    #   +4dB @ 3.2kHz      presence: consonants, intelligibility, closeness
-    #   -2.5dB @ 6.3kHz    de-ess, so the presence lift does not turn harsh
-    #   acompressor        steadier level, gentle ratio so it does not pump
-    #   alimiter           catch peaks without clipping
-    #
-    # Same measurement puts this chain at 0.21 (+62%).
+    # Scored as deviation from CapCut's measured tonal curve: 3.47 dB before,
+    # 1.37 dB after, verified by running this function on a real job.
     chain = _VOICE_CHAIN
 
     # Two-pass loudness. One pass guesses and undershoots — the old chain
@@ -552,8 +576,8 @@ def enhance_audio(base, work: Path):
 
     run(["ffmpeg", "-v", "error", "-i", str(enh), "-af", f"{chain},{ln}",
          "-ar", "48000", "-y", str(pol)])
-    print(f"audio: deepfilter={'modal' if ok else 'SKIPPED (raw)'} + voice EQ + de-ess "
-          f"+ two-pass loudness (input {measured} LUFS)")
+    print(f"audio: deepfilter={'modal' if ok else 'SKIPPED (raw)'} + capcut-matched EQ "
+          f"+ two-pass loudness (input {measured} LUFS, chain {chain_key})")
     return pol
 
 
