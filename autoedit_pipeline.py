@@ -14,6 +14,7 @@ may be imported at module level.
 The local CLI wrapper is tools/capcut_autoedit.py (wiki repo) — it just calls
 run_autoedit() below. This module is the moved-verbatim pipeline body.
 """
+import hashlib
 import json
 import os
 import shutil
@@ -473,11 +474,36 @@ def enforce_min_dwell(windows, buckets, min_dwell=2.0):
     return windows
 
 
+# v938.12 — the voice chain lives here as a constant so the audio cache can be
+# keyed on it: change the chain, and every cached file is invalidated by its
+# own name. See the comment in enhance_audio.
+_VOICE_CHAIN = ("highpass=f=80,"
+                "equalizer=f=300:t=q:w=1.2:g=-3,"
+                "equalizer=f=3200:t=q:w=1.0:g=4,"
+                "equalizer=f=6300:t=q:w=2.2:g=-2.5,"
+                "acompressor=threshold=-20dB:ratio=3:attack=6:release=140:makeup=2,"
+                "alimiter=limit=0.95")
+
+
 def enhance_audio(base, work: Path):
-    raw_wav, enh, pol = work / "audio_raw.wav", work / "audio_enh.wav", work / "audio_pol.wav"
+    # v938.12 — the cache is keyed on the CHAIN, not just the filename.
+    #
+    # It used to be a bare `audio_pol.wav` + `if pol.exists(): return pol`.
+    # So when the voice chain was rebuilt, every job with a cached file kept
+    # serving the OLD audio — byte-identical, proven by md5 — and the new
+    # chain silently never ran. The operator would have heard no change at
+    # all and reasonably concluded the fix did nothing. compose() already
+    # keys its own cache this way; this did not, and that asymmetry is what
+    # hid the bug.
+    chain_key = hashlib.md5(_VOICE_CHAIN.encode()).hexdigest()[:8]
+    raw_wav, enh = work / "audio_raw.wav", work / "audio_enh.wav"
+    pol = work / f"audio_pol_{chain_key}.wav"
     if pol.exists():
-        print("audio: cached")
+        print(f"audio: cached (chain {chain_key})")
         return pol
+    for stale in work.glob("audio_pol*.wav"):
+        if stale != pol:
+            stale.unlink(missing_ok=True)   # do not hoard one file per chain edit
     run(["ffmpeg", "-v", "error", "-i", str(base), "-vn", "-ac", "1", "-ar", "48000", "-y", str(raw_wav)])
     ok = False
     try:
@@ -505,12 +531,7 @@ def enhance_audio(base, work: Path):
     #   alimiter           catch peaks without clipping
     #
     # Same measurement puts this chain at 0.21 (+62%).
-    chain = ("highpass=f=80,"
-             "equalizer=f=300:t=q:w=1.2:g=-3,"
-             "equalizer=f=3200:t=q:w=1.0:g=4,"
-             "equalizer=f=6300:t=q:w=2.2:g=-2.5,"
-             "acompressor=threshold=-20dB:ratio=3:attack=6:release=140:makeup=2,"
-             "alimiter=limit=0.95")
+    chain = _VOICE_CHAIN
 
     # Two-pass loudness. One pass guesses and undershoots — the old chain
     # aimed at -15 LUFS and landed at -17.1. Measuring first hits the target.
