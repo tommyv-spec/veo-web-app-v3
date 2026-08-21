@@ -33,6 +33,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libgl1 \
+    libegl1 \
+    libgles2 \
     curl \
     git \
     && rm -rf /var/lib/apt/lists/* \
@@ -86,6 +88,7 @@ RUN pip install --no-cache-dir \
     python -m playwright install --with-deps chromium && \
     chmod -R a+rX /ms-playwright && \
     python -c "import cv2, sys; assert hasattr(cv2,'CascadeClassifier'), 'cv2 lost CascadeClassifier'; print('cv2', cv2.__version__, 'ok')" && \
+    python -c "import skia; print('skia ok')" && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy application code

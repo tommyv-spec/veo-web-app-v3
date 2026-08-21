@@ -585,8 +585,14 @@ def render_captions(nocap: Path, out: Path, template: str, offset=-0.05):
                        capture_output=True, text=True, encoding="utf-8", errors="replace",
                        cwd=cwd, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     if r.returncode != 0 or not out.exists():
-        print((r.stderr or r.stdout)[-2000:])
-        raise AutoEditError("pycaps render failed")
+        detail = ((r.stderr or "") + "\n" + (r.stdout or "")).strip()
+        print(detail[-2000:], flush=True)
+        # Carry the real reason into the error itself. "pycaps render failed"
+        # alone is what the operator saw in the UI while the actual cause
+        # (a missing graphics library) sat only in the server log.
+        tail = " | ".join(ln.strip() for ln in detail.splitlines()
+                          if ln.strip() and ("Error" in ln or "error" in ln))[-400:]
+        raise AutoEditError(f"pycaps render failed: {tail or detail[-200:] or 'no output'}")
 
 
 def render_captions_dynamic(nocap: Path, out: Path, template: str, windows, work: Path):
