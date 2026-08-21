@@ -1,7 +1,8 @@
 import numpy as np
 import cv2
 
-from image_qc import analyze_integrity, build_judge_prompt, parse_judge_reply
+from image_qc import (analyze_integrity, build_judge_prompt, parse_judge_reply,
+                      _mime_for)
 
 
 def _png(arr):
@@ -219,3 +220,20 @@ def test_parse_judge_reply_missing_verdict_defaults_pass():
     raw = '{"overall": 6, "element_misses": [], "artifacts": [], '\
           '"compliance": [], "reasons": []}'
     assert parse_judge_reply(raw)["verdict"] == "pass"
+
+
+def test_parse_judge_reply_verdict_downgrade_is_case_insensitive():
+    """FAIL-OPEN GUARD. The recompute may only ever ADD a fail, never drop
+    one. A model that shouts "FAIL" (or title-cases it) has detected a real
+    problem — matching the literal lowercase "fail" only would silently
+    rewrite that to "pass" and ship a broken variant."""
+    for said in ("FAIL", "Fail", " fail ", "fAiL"):
+        raw = ('{"overall": 5, "verdict": "%s", "element_misses": [], '
+               '"artifacts": ["warped hand"], "compliance": [], "reasons": []}' % said)
+        assert parse_judge_reply(raw)["verdict"] == "fail", said
+
+
+def test_mime_for_sniffs_magic_bytes():
+    assert _mime_for(b"\x89PNG\r\n\x1a\n rest") == "image/png"
+    assert _mime_for(b"\xff\xd8\xff\xe0 jfif") == "image/jpeg"
+    assert _mime_for(b"") == "image/png"   # unknown falls back to PNG

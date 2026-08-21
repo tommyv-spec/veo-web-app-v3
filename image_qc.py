@@ -172,8 +172,12 @@ def parse_judge_reply(raw: Any) -> Optional[Dict[str, Any]]:
         return None
     obj["overall"] = max(0, min(10, overall))
 
-    obj["verdict"] = "fail" if (obj["compliance"] or
-                                obj.get("verdict") == "fail") else "pass"
+    # The recompute may only ever ADD a fail, never drop one, so the model's
+    # own word is matched case- and whitespace-insensitively: a reply that
+    # shouts "FAIL" has detected a real problem, and comparing against the
+    # literal lowercase "fail" would fail OPEN and ship the broken variant.
+    said_fail = str(obj.get("verdict", "")).strip().lower() == "fail"
+    obj["verdict"] = "fail" if (obj["compliance"] or said_fail) else "pass"
     return obj
 
 
@@ -205,6 +209,17 @@ def _gemini_api_key() -> Optional[str]:
     return None
 
 
+def _mime_for(image_bytes: bytes) -> str:
+    """Sniff the container from its magic bytes. Variants are PNG today, but
+    the sniff is cheap insurance against the day one arrives as JPEG and gets
+    posted under the wrong content type."""
+    if image_bytes[:4] == b"\x89PNG":
+        return "image/png"
+    if image_bytes[:2] == b"\xff\xd8":
+        return "image/jpeg"
+    return "image/png"
+
+
 def _gemini_client() -> Any:
     """One client per batch run, reused across every variant judged."""
     key = _gemini_api_key()
@@ -229,7 +244,7 @@ def judge_variant(client: Any, image_bytes: bytes, image_prompt: str,
             resp = client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=[types.Part.from_bytes(data=image_bytes,
-                                                mime_type="image/png"),
+                                                mime_type=_mime_for(image_bytes)),
                           types.Part.from_text(text=prompt)],
             )
             parsed = parse_judge_reply(getattr(resp, "text", None))
