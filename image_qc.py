@@ -11,6 +11,8 @@ Funnel per node (built across Tasks 3-7; stage 4 redesigned by v936.1):
   3. Gemini judge     (checklist, prompt-as-rubric) on survivors
   4. second opinion   (re-judge the top 2 healthy variants independently;
                        recommend ONLY when the same one wins twice)
+  5. continuity       (v936.3, free: how well each variant continues the
+                       APPROVED previous frame in its own video)
 
 v936.1 — what changed and why. A controlled experiment over 13 production
 nodes / 56 variants found the shipped judge's WINNER was substantially noise:
@@ -42,6 +44,22 @@ character, a string the SPEC quoted, hero-product garble readable at a
 glance), while the new `text_notes` records cosmetic prop filler and is inert
 — it never enters the verdict, in either direction.
 
+v936.3 — the judge scores each variant ALONE against its own prompt, which is
+the wrong question for a batch: these images are SHOTS IN ONE VIDEO, and the
+persona, wardrobe, setting and product have to carry across them. Over the
+same 13 production nodes the second opinion left 8 of them `tied`, and the
+ties are real — the judge genuinely cannot separate near-identical renders,
+and pushing it to try produced fabricated confidence (a re-run picked a
+different winner on all 13 nodes, r=-0.06). CONTINUITY asks a better-posed
+question with a real answer: not "which is prettier" but "which one actually
+continues from this approved frame". The anchor is the chosen variant of the
+node's `chain` parent — an image the operator has ALREADY approved, so it is
+evidence rather than another opinion, which is what makes it recommendable.
+It is a RANKING TIEBREAKER and never a gate: a wardrobe or lighting
+difference is not "broken", it is merely worse for the sequence, and the last
+over-broad hard fail this module shipped (v936.1's text rule) recommended
+nothing on 13 of 13 nodes.
+
 Nothing in here may abort a batch. Every stage answers "no answer" (None, [],
 a 'call_failed' reason, an 'unverified' confidence) and lets the funnel carry
 on with the stages that did work — a dead judge, an absent face model or a 503
@@ -50,7 +68,7 @@ degrades the report, it does not lose the run.
 File layout:
   SHARED PLUMBING -> INTEGRITY -> JUDGE (pure, then API) ->
   SECOND OPINION (pure) -> PAIRWISE (retired, pure then API) ->
-  FACE -> RANK & REPORT -> CLI (pure, then I/O)
+  FACE -> CONTINUITY -> RANK & REPORT -> CLI (pure, then I/O)
 
 RANK & REPORT sits above the CLI because it is the stage that reads every
 other stage's output shape at once; reading it after the stages it consumes
@@ -80,6 +98,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import itertools
 import json
 import os
 import re
@@ -607,11 +626,21 @@ CONF_TIED = "tied"                  # pass 2 flipped it, or scored them equal
 CONF_UNVERIFIED = "unverified"      # a pass-2 call produced no answer
 CONF_NONE_HEALTHY = "none_healthy"  # nothing was worth recommending
 CONF_SECOND_REJECTED = "second_rejected"   # pass 2 FAILED the pass-1 winner
+# v936.3 — the judge could not separate the top two, but the one the report
+# names matches the operator's ALREADY-APPROVED previous frame better.
+CONF_CONTINUITY = "continuity"
 
-# The ONLY two states that may carry a recommendation. Kept as a constant so
+# The ONLY states that may carry a recommendation. Kept as a constant so
 # `compose_report`'s gate and any future reader agree by construction rather
-# than by two places listing the same two strings on purpose.
-CONF_RECOMMENDABLE = (CONF_CONFIRMED, CONF_SOLE)
+# than by three places listing the same strings on purpose.
+#
+# What the three have in common is the test: something OUTSIDE a single judge
+# call vouched for the pick — the answer REPEATED (`confirmed`), there was
+# nothing to compare it against (`sole`), or a frame the operator had already
+# approved separated a pair the judge could not (`continuity`). A state that
+# rests on one judge call alone is never in here, which is the whole of
+# v936.1.
+CONF_RECOMMENDABLE = (CONF_CONFIRMED, CONF_SOLE, CONF_CONTINUITY)
 
 
 def _judge_overall(judge: Optional[Dict[str, Any]]) -> int:
@@ -646,8 +675,10 @@ def _separated(first_a: Optional[Dict[str, Any]],
 def classify_confidence(first_a: Optional[Dict[str, Any]],
                         first_b: Optional[Dict[str, Any]],
                         second_a: Optional[Dict[str, Any]],
-                        second_b: Optional[Dict[str, Any]]) -> str:
-    """Four judge dicts in, one confidence word out. Pure.
+                        second_b: Optional[Dict[str, Any]],
+                        continuity_a_leads: bool = False) -> str:
+    """Four judge dicts plus one continuity flag in, one confidence word out.
+    Pure.
 
     `first_*` are pass 1's judgements of the ranking's top two healthy
     variants, in rank order; `second_*` are the independent second opinion of
@@ -655,7 +686,15 @@ def classify_confidence(first_a: Optional[Dict[str, Any]],
     None when every attempt failed, and there simply may not BE a second
     candidate.
 
-    The six answers, IN THE ORDER THEY ARE DECIDED (the order is part of the
+    `continuity_a_leads` (v936.3) is `continuity_favors(cont_a, cont_b)`,
+    computed by the caller: did A match the approved previous frame BETTER
+    than B, by a margin worth acting on? It is a plain bool rather than the
+    two signal dicts so this function keeps its "no dependency on cv2 or a
+    face model" shape — the measuring lives in the CONTINUITY section and the
+    deciding lives here. It defaults False, so a caller that never adopted
+    the stage gets exactly the v936.2 answers.
+
+    The seven answers, IN THE ORDER THEY ARE DECIDED (the order is part of the
     contract — see `second_rejected` and the pass-1 short circuit):
       none_healthy    — there was no candidate at all.
       sole            — no second candidate existed. Recommend A; the healthy
@@ -665,6 +704,12 @@ def classify_confidence(first_a: Optional[Dict[str, Any]],
                         change the answer. Decided BEFORE the pass-2 arguments
                         are read, which is what lets `score_node` skip both
                         calls; `second_*` are expected to be None here.
+      continuity      — ...unless A matched the approved previous frame
+                        better. Recommendable off pass 1 alone, exactly like
+                        `sole`: the evidence is not a second judge call, it is
+                        a frame the OPERATOR already chose. This is the common
+                        case — 8 of 13 production nodes tie on pass 1, because
+                        scores sit compressed in a 5-7 band.
       unverified      — a pass-2 call produced no answer. Recommend NOTHING,
                         and stay distinct from `tied`: an outage is not the
                         judge contradicting itself, and merging the two would
@@ -674,9 +719,19 @@ def classify_confidence(first_a: Optional[Dict[str, Any]],
                         Outranks the score comparison on purpose: verdicts
                         reproduce, scores do not.
       confirmed       — A scored strictly higher in BOTH passes and pass 2 did
-                        not fail it. The only state that earns a
-                        recommendation off a comparison.
-      tied (pass 2)   — pass 2 flipped the order or scored them equal.
+                        not fail it. The strongest state the judge can earn.
+      tied (pass 2)   — pass 2 flipped the order or scored them equal...
+      continuity      — ...unless A leads on continuity there too. The judge
+                        contradicting ITSELF says nothing about an independent
+                        signal, and A has additionally survived pass 2's
+                        verdict by the time this cell is reached.
+
+    Two states are deliberately NOT upgradeable by continuity:
+      * `unverified` is about a FAILED CALL, not a tie. Recommending off it
+        would let a 503 produce a recommendation.
+      * `second_rejected` is about a DEFECT the second read found in the very
+        variant the report would name. A good colour match on a variant
+        carrying a v808 hit is not a reason to ship it.
 
     This function is A-ORIENTED, and that is the load-bearing detail.
     `compose_report` recommends `ranked[0]`, which IS A, so "confirmed" has
@@ -697,7 +752,11 @@ def classify_confidence(first_a: Optional[Dict[str, Any]],
     # equal pair common rather than exceptional — buying 2 calls to confirm a
     # verdict that cannot move is pure spend.
     if not _separated(first_a, first_b):
-        return CONF_TIED
+        # v936.3: the judge has nothing left to say about this pair, so the
+        # approved previous frame gets the last word — when it actually has
+        # one. `continuity_a_leads` is False whenever a signal is missing on
+        # either side, so an unmeasurable pair still lands on `tied`.
+        return CONF_CONTINUITY if continuity_a_leads else CONF_TIED
     if second_a is None or second_b is None:
         return CONF_UNVERIFIED
     # The VERDICT outranks the score comparison, and this order is the whole
@@ -724,7 +783,7 @@ def classify_confidence(first_a: Optional[Dict[str, Any]],
         return CONF_SECOND_REJECTED
     if _judge_overall(second_a) > _judge_overall(second_b):
         return CONF_CONFIRMED
-    return CONF_TIED
+    return CONF_CONTINUITY if continuity_a_leads else CONF_TIED
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1018,6 +1077,186 @@ def load_embedder() -> Optional[Any]:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# CONTINUITY (v936.3) — does this candidate continue the APPROVED frame?
+#
+# Every stage above judges a variant on its own. That is the wrong frame of
+# reference for this corpus: the images in a batch are SHOTS IN ONE VIDEO, so
+# the persona, the wardrobe, the setting and the product have to carry from
+# one to the next. The anchor is the CHOSEN variant of the node's `chain`
+# parent — a frame the operator has already approved — which is what makes
+# this evidence rather than one more opinion.
+#
+# Two signals, both FREE (no extra model call; the embedder is the one the
+# avatar gate already loaded):
+#   face_sim       — the persona's face against the anchor's. Catches the
+#                    most damaging break there is, the face drifting between
+#                    two shots of the same person.
+#   color_distance — a global HSV histogram distance. Catches grade, lighting
+#                    and setting shifts.
+#
+# TIEBREAKER, NEVER A GATE. A wardrobe or lighting difference is not
+# "broken", it is merely worse for the sequence — and the last over-broad
+# hard fail this module shipped (v936.1's text rule) recommended nothing on
+# 13 of 13 nodes. A check that fails everything measures nothing.
+# ══════════════════════════════════════════════════════════════════════
+
+# 8 x 8 x 8 over H, S, V. The hue axis is the coarse one on purpose: 8 bins
+# is 22.5 degrees each, wide enough that a small pose or exposure shift keeps
+# its mass in the same bin, narrow enough to tell a warm kitchen from a blue
+# bathroom. The cost of the coarseness is real and worth stating — a hue
+# shift smaller than a bin reads as ZERO here.
+COLOR_HIST_BINS = (8, 8, 8)
+
+# How much better one variant must match the anchor before the report will
+# say so out loud. 0.05 on either axis, and the winner may not be WORSE on
+# the other one.
+#
+# Why 0.05, conservatively: two renders of the SAME setting differ by ~0.001
+# on the colour axis, so this is ~50x the render-noise floor it has to clear,
+# while a genuinely different room scores ~1.0 — the bar sits far from both.
+# On the face axis it is well under the ~0.3+ gap that means a different
+# person and above ArcFace's frame-to-frame jitter on one identity. It is NOT
+# yet calibrated against operator picks on this corpus: it is a deliberate
+# starting point, and the per-variant numbers are stored in every report so
+# it can be re-derived from data instead of re-guessed. Raising it makes the
+# stage quieter (more `tied`), never wronger.
+CONTINUITY_MARGIN = 0.05
+
+
+def _color_histogram(img_bytes: Any) -> Optional[Any]:
+    """A normalised 3D HSV histogram, or None if the bytes are not an image.
+
+    L1-normalised (bins sum to 1) so the Bhattacharyya comparison below
+    behaves like the textbook one: 0.0 for identical distributions, 1.0 for
+    disjoint. Never raises — cv2.imdecode ASSERTS on a zero-length buffer
+    rather than returning None (the same hazard `analyze_integrity` guards),
+    and a failed download must not abort a batch.
+    """
+    try:
+        arr = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if arr is None:
+            return None
+        hsv = cv2.cvtColor(arr, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0, 1, 2], None, list(COLOR_HIST_BINS),
+                            [0, 180, 0, 256, 0, 256])
+        total = float(hist.sum())
+        if total <= 0.0:
+            return None
+        return (hist / total).astype(np.float32)
+    except (cv2.error, TypeError, ValueError, AttributeError) as exc:
+        print(f"[qc] colour histogram failed ({_ascii(exc)}) - no continuity "
+              f"colour reading for this frame", flush=True)
+        return None
+
+
+def color_distance(a_bytes: Any, b_bytes: Any) -> Optional[float]:
+    """How far apart two frames are in colour: 0.0 identical, 1.0 disjoint.
+    None means "no answer" — an undecodable frame on either side.
+
+    Bhattacharyya rather than correlation or intersection because it is
+    already a DISTANCE on a fixed 0..1 scale, so a margin expressed in it
+    means the same thing on every pair of frames. Read the honest caveat with
+    it: a global histogram cannot separate "different room" from "the subject
+    fills more of the frame" — a person growing from 10% to 50% of an
+    otherwise identical frame measures 0.23 -> 0.54 here. Within ONE node the
+    confound is weak (every variant renders the same prompt at roughly the
+    same framing), which is exactly the only comparison this number is ever
+    used for, and it is why it sits BELOW the face axis and below the judge.
+    """
+    hist_a, hist_b = _color_histogram(a_bytes), _color_histogram(b_bytes)
+    if hist_a is None or hist_b is None:
+        return None
+    try:
+        dist = float(cv2.compareHist(hist_a, hist_b, cv2.HISTCMP_BHATTACHARYYA))
+    except cv2.error:
+        return None
+    if dist != dist:                     # NaN: sqrt of a float-error negative
+        return None
+    return round(min(max(dist, 0.0), 1.0), 4)
+
+
+def continuity_signals(embedder: Any, ref_bytes: Any, cand_bytes: Any,
+                       parent_variant_id: Optional[int] = None
+                       ) -> Dict[str, Any]:
+    """How well `cand_bytes` continues the approved frame `ref_bytes`.
+
+    Both numbers are optional and independent: a b-roll prop shot has no face
+    but still has a setting, and an undecodable candidate has neither. None
+    means "no answer" everywhere in this module, never "no match" — a frame
+    with nothing measurable must not be scored 0 and ranked last for it.
+
+    `parent_variant_id` is carried through untouched so the stored report
+    says, per variant, WHICH approved frame this was measured against. A good
+    match against the wrong previous frame is worse than no match at all, and
+    without the id nobody can tell the two apart later.
+    """
+    face_sim = None
+    if embedder is not None and ref_bytes and cand_bytes:
+        face_sim = face_similarity(embedder, ref_bytes, cand_bytes)
+    return {"face_sim": face_sim,
+            "color_distance": color_distance(ref_bytes, cand_bytes),
+            "parent_variant_id": parent_variant_id}
+
+
+def _cont_value(cont: Any, key: str) -> Optional[float]:
+    """One reading of one continuity number, shared by the ranker and the
+    margin test so they can never disagree about the same variant.
+
+    Anything that is not a real measurement reads as None: a missing dict, a
+    hand-edited string, a bool (True is not a 1.0 score), a NaN.
+    """
+    if not isinstance(cont, dict):
+        return None
+    val = cont.get(key)
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        return None
+    val = float(val)
+    return None if val != val else val
+
+
+def continuity_favors(cont_a: Any, cont_b: Any) -> bool:
+    """Does A match the approved previous frame MEANINGFULLY better than B?
+
+    Two rules, and the second is the one that keeps this honest:
+      1. at least one axis must clear CONTINUITY_MARGIN in A's favour;
+      2. A may not be WORSE than B on the other measured axis.
+
+    Rule 2 makes a split decision (better face, worse setting) a refusal
+    rather than a guess — two signals disagreeing is precisely the state this
+    stage exists to decline. Equal on the quiet axis is fine: only an actual
+    regression blocks the win.
+
+    An axis where either side has no number simply does not vote, in either
+    direction. So no signal at all is False — "we could not measure it" is
+    never a win, exactly as `face_similarity` returning None is never a match.
+    """
+    face_a, face_b = _cont_value(cont_a, "face_sim"), _cont_value(cont_b, "face_sim")
+    col_a, col_b = (_cont_value(cont_a, "color_distance"),
+                    _cont_value(cont_b, "color_distance"))
+    # Positive = A is better. Colour flips because LOWER distance is closer.
+    #
+    # ROUNDED, because binary floats make "exactly at the margin" a coin flip
+    # that depends on which numbers you picked: 0.90 - 0.85 is 0.05000000...4
+    # and clears the bar, while 0.15 - 0.10 is 0.04999999...6 and does not.
+    # Both mean the same thing to anyone reading the report, and the margin is
+    # a floor rather than a hurdle to clear — the same reading
+    # RANK_FACE_SIM_FLOOR gets. 6 places is far finer than the 4 that
+    # `color_distance` stores, so it only ever cancels representation error.
+    def gap(better: Optional[float], worse: Optional[float]) -> Optional[float]:
+        if better is None or worse is None:
+            return None
+        return round(better - worse, 6)
+
+    face_gap = gap(face_a, face_b)
+    col_gap = gap(col_b, col_a)
+    if (face_gap is not None and face_gap < 0) or (col_gap is not None
+                                                   and col_gap < 0):
+        return False
+    return bool((face_gap is not None and face_gap >= CONTINUITY_MARGIN)
+                or (col_gap is not None and col_gap >= CONTINUITY_MARGIN))
+
+
+# ══════════════════════════════════════════════════════════════════════
 # RANK & REPORT (pure) — the funnel's output, no model and no I/O
 # Reads what every stage above produced and answers two questions: what
 # order would the machine have put these in, and would it have picked one.
@@ -1071,16 +1310,37 @@ def rank_variants(variant_reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]
       2. judge verdict pass  — 'fail' and "no judge at all" both sink
       3. face at/above floor — a different person outranks nothing
       4. judge overall desc  — the actual quality score
-      5. face_sim desc       — None reads as 0.0 HERE ONLY, as a tiebreak
+      5. continuity face desc  — (v936.3) whose face best continues the
+                               approved previous frame
+      6. continuity colour asc — then whose setting, grade and lighting do
+      7. face_sim desc       — None reads as 0.0 HERE ONLY, as a tiebreak
                                between variants already past axis 3; it never
                                decides a pass/fail, so "no answer" costs a
                                variant nothing that a real score could win
-      6. variant_id asc      — the final tiebreak, which is what makes the
+      8. variant_id asc      — the final tiebreak, which is what makes the
                                ordering TOTAL: two variants that are equal on
                                every measurable axis still have exactly one
                                legal order, so the same batch never ranks two
                                ways and a shadow-agreement number stays
                                comparable across runs
+
+    Where the continuity axes SIT is the design, not an accident. Below the
+    three health axes and below the judge's score, because "does this follow
+    the last frame" is a different question from "is this a good render" and
+    must never rescue a broken one. Above the two arbitrary tiebreakers,
+    because face_sim-to-avatar is a gate that has already passed and
+    variant_id is a coin flip — and a coin flip is what those 8 tied
+    production nodes are decided by today.
+
+    A MISSING continuity number is NEUTRAL, which takes a mechanism rather
+    than a sentinel: a tuple sort compares element-wise, so any stand-in value
+    (0.0, +inf) would rank the unmeasured variant AGAINST the measured ones
+    instead of abstaining. Instead each continuity axis is switched OFF for a
+    tie group unless EVERY member of that group carries that number, and the
+    order falls through to the axes below exactly as it does today. Same
+    reading `_above_face_floor` gives None — no answer is not a bad answer —
+    and it is per-axis, so a group where one frame has no face is still
+    ordered on colour.
 
     Returns FRESH per-variant dicts (shallow copies): the caller's accumulated
     funnel output is not edited under it, so a rank pass can be re-run or run
@@ -1097,24 +1357,54 @@ def rank_variants(variant_reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     TypeError out of the sort. The server tolerates digit-string ids, so the
     CLI that builds these reports (Task 7) coerces before ranking.
     """
-    def key(report: Dict[str, Any]) -> Tuple[Any, ...]:
+    def health_key(report: Dict[str, Any]) -> Tuple[Any, ...]:
+        """Axes 1-4 — the part no continuity reading may reorder."""
         integrity_ok, verdict_pass, face_ok = _healthy_axes(report)
         judge = report.get("judge")
-        face_sim = report.get("face_sim")
         # Strict reads INSIDE a non-None judge are safe: `parse_judge_reply`
         # builds a fresh whitelist of exactly the six contract keys and always
         # sets both `verdict` and `overall`, so a judge dict that exists has
         # them. -1 sorts an unjudged variant below a real 0, which is right:
         # a 0 is a measurement, a missing judge is not.
         overall = judge["overall"] if judge else -1
-        return (-integrity_ok, -verdict_pass, -face_ok, -overall,
-                -(face_sim if face_sim is not None else 0.0),
+        return (-integrity_ok, -verdict_pass, -face_ok, -overall)
+
+    def tail_key(report: Dict[str, Any]) -> Tuple[Any, ...]:
+        """Axes 7-8 — the arbitrary tiebreakers under the continuity ones."""
+        face_sim = report.get("face_sim")
+        return (-(face_sim if face_sim is not None else 0.0),
                 report["variant_id"])
 
-    ranked = [dict(report) for report in sorted(variant_reports, key=key)]
-    for position, report in enumerate(ranked, start=1):
+    # Built by composing STABLE sorts, innermost axis first, because the two
+    # continuity axes are conditional and a single tuple key cannot express
+    # "abstain". With no continuity data anywhere this is the identical
+    # ordering the single sorted(key=...) produced before v936.3: a
+    # lexicographic sort IS a group-by on the leading axes followed by a sort
+    # on the trailing ones.
+    ranked = [dict(report) for report in variant_reports]
+    ranked.sort(key=tail_key)
+    ranked.sort(key=health_key)
+
+    ordered: List[Dict[str, Any]] = []
+    for _, group in itertools.groupby(ranked, key=health_key):
+        rows = list(group)
+        # `all` over the WHOLE tie group, not over a pair: one unmeasurable
+        # member switches that axis off for everyone in the group rather than
+        # being ranked last by it. A single-row group trivially passes and
+        # sorts to itself.
+        if all(_cont_value(r.get("continuity"), "color_distance") is not None
+               for r in rows):
+            rows.sort(key=lambda r: _cont_value(r.get("continuity"),
+                                                "color_distance"))
+        if all(_cont_value(r.get("continuity"), "face_sim") is not None
+               for r in rows):
+            rows.sort(key=lambda r: -_cont_value(r.get("continuity"),
+                                                 "face_sim"))
+        ordered.extend(rows)
+
+    for position, report in enumerate(ordered, start=1):
         report["rank"] = position
-    return ranked
+    return ordered
 
 
 # Exactly the keys a report carries per variant. Whitelisted rather than
@@ -1131,11 +1421,18 @@ def rank_variants(variant_reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 # Only the top two healthy rows carry one, so on every other row the `.get`
 # yields None — which reads in the stored report as "never re-judged", the
 # fact a later auditor needs.
-_REPORT_VARIANT_FIELDS = ("integrity", "face_sim", "judge", "verify", "rank")
+#
+# v936.3 adds `continuity`: the two free signals against the approved previous
+# frame, plus the id of the frame they were measured against. Null on every
+# row of a node with no chain parent, which is most of them.
+_REPORT_VARIANT_FIELDS = ("integrity", "face_sim", "judge", "verify",
+                          "continuity", "rank")
 
 
 def compose_report(ranked: List[Dict[str, Any]], skipped: List[str],
-                   confidence: Optional[str] = None) -> Dict[str, Any]:
+                   confidence: Optional[str] = None,
+                   continuity_anchor: Optional[Dict[str, Any]] = None
+                   ) -> Dict[str, Any]:
     """One node's shadow report, ready to POST.
 
     `recommended_variant_id` needs BOTH gates to pass, and they answer
@@ -1166,6 +1463,14 @@ def compose_report(ranked: List[Dict[str, Any]], skipped: List[str],
 
     `skipped` names the stages that did not run at all ('face', 'judge') so a
     None recommendation can be told apart from a gate that never fired.
+
+    `continuity_anchor` (v936.3) is `{"parent_node_id": N, "variant_id": M}`
+    — the approved frame every variant's `continuity` block was measured
+    against — or None when the node has no chain parent, the parent has no
+    chosen variant yet, or its image would not download. It is at the top
+    level because it is one fact about the NODE, and because a reader has to
+    be able to check WHAT the comparison was against: a good match against
+    the wrong previous frame is worse than no match at all.
     """
     recommended: Optional[int] = None
     if (confidence in CONF_RECOMMENDABLE
@@ -1187,14 +1492,16 @@ def compose_report(ranked: List[Dict[str, Any]], skipped: List[str],
     return {
         # STAYS 1. The server hard-rejects anything else
         # (image_platform.py:3600) and this change ships without a server
-        # deploy, so every field here is ADDITIVE: `confidence` and the
-        # per-variant `verify` are new keys the server passes through
+        # deploy, so every field here is ADDITIVE: `confidence`, the
+        # per-variant `verify`, and v936.3's `continuity_anchor` plus
+        # per-variant `continuity` are new keys the server passes through
         # untouched, and the dropped `pairwise_reason` had no reader at all.
         "version": 1,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "recommended_variant_id": recommended,
         "skipped_checks": list(skipped),
         "confidence": confidence,
+        "continuity_anchor": continuity_anchor,
         # JSON object keys are strings on the wire anyway; making that explicit
         # here means the dict a test reads is the dict the server receives.
         #
@@ -1228,14 +1535,20 @@ def agreement_stats(nodes: Iterable[Any]) -> Dict[str, Any]:
                              confidence explains why. `confirmed + sole` by
                              construction; the headline denominator.
       * agree              — of those, the same variant.
-      * confirmed / sole   — `comparable` split, because the two are NOT the
+      * confirmed / sole /
+        continuity         — `comparable` split, because the three are NOT the
                              same evidence. A `sole` node bought ZERO
                              verification: there was one candidate and the
                              operator will nearly always pick the only thing on
                              offer, so folding it in inflates the very number
                              that is supposed to prove the second opinion
-                             works. `confirmed` is the bucket that validates
-                             the stage; read it first.
+                             works. `continuity` (v936.3) is a pick the JUDGE
+                             never made — the top two tied and the approved
+                             previous frame separated them — so it measures a
+                             different stage entirely and reading it merged
+                             with `confirmed` would credit the judge for it.
+                             `confirmed` is the bucket that validates the
+                             second opinion; read it first.
       * legacy             — a recommendation this metric cannot attribute to
                              a verified state: a pre-v936.1 report (no
                              `confidence` key), or one whose recommendation
@@ -1272,9 +1585,13 @@ def agreement_stats(nodes: Iterable[Any]) -> Dict[str, Any]:
     comparison would score a real agreement as a disagreement.
     """
     scored = tied = no_recommendation = 0
-    # (count, agree) per bucket. `confirmed` and `sole` add up to the headline;
-    # `legacy` is deliberately outside it.
-    buckets = {CONF_CONFIRMED: [0, 0], CONF_SOLE: [0, 0], "legacy": [0, 0]}
+    # (count, agree) per bucket. Every CONF_RECOMMENDABLE state adds up to the
+    # headline; `legacy` is deliberately outside it. Built FROM the constant
+    # rather than listed by hand: the bucketing below indexes this dict with a
+    # confidence that passed the `in CONF_RECOMMENDABLE` test, so a state
+    # added there and forgotten here would be a KeyError on a live batch.
+    buckets: Dict[str, List[int]] = {name: [0, 0] for name in CONF_RECOMMENDABLE}
+    buckets["legacy"] = [0, 0]
     for node in nodes or []:
         if not isinstance(node, dict):
             continue
@@ -1314,9 +1631,10 @@ def agreement_stats(nodes: Iterable[Any]) -> Dict[str, Any]:
 
     confirmed, confirmed_agree = buckets[CONF_CONFIRMED]
     sole, sole_agree = buckets[CONF_SOLE]
+    continuity, continuity_agree = buckets[CONF_CONTINUITY]
     legacy, legacy_agree = buckets["legacy"]
-    comparable = confirmed + sole
-    agree = confirmed_agree + sole_agree
+    comparable = confirmed + sole + continuity
+    agree = confirmed_agree + sole_agree + continuity_agree
     return {
         "scored": scored,
         "comparable": comparable,
@@ -1325,6 +1643,8 @@ def agreement_stats(nodes: Iterable[Any]) -> Dict[str, Any]:
         "confirmed_agree": confirmed_agree,
         "sole": sole,
         "sole_agree": sole_agree,
+        "continuity": continuity,
+        "continuity_agree": continuity_agree,
         "legacy": legacy,
         "legacy_agree": legacy_agree,
         "tied": tied,
@@ -1555,13 +1875,19 @@ def summary_dict(posted: int, deferred: int, failed: int, skipped: int,
 
 
 class _RefFaceCache:
-    """An embedder wrapper that detects the batch's reference portrait ONCE.
+    """An embedder wrapper that detects each REUSED frame ONCE per batch.
 
     `face_similarity` takes bytes on both sides and re-detects whatever it is
-    given, which is right for the candidate and wasteful for the reference:
-    the reference is the SAME avatar upload for every variant of every node in
-    the run, and InsightFace on a CPU box costs ~0.3s a frame. A 40-variant
-    batch pays that toll 40 times for an answer that cannot change.
+    given, which is right for the candidate and wasteful for a reference: the
+    avatar portrait is the SAME upload for every variant of every node in the
+    run, and InsightFace on a CPU box costs ~0.3s a frame. A 40-variant batch
+    pays that toll 40 times for an answer that cannot change.
+
+    v936.3 generalised it from one frame to a small SET, because the avatar is
+    no longer the only reused reference: a continuity anchor is shared by
+    every variant of every node that chains off it (8 of the 13 nodes in the
+    measured batch share ONE anchor). `remember` declares a frame reusable;
+    everything else still passes straight through.
 
     Cached HERE, in the CLI layer, rather than by adding a precomputed-ref
     parameter to `face_similarity`: that function's two-bytes signature is
@@ -1572,21 +1898,34 @@ class _RefFaceCache:
     object down the whole run, so identity always hits, and comparing 2 MB of
     PNG per variant to decide whether to skip 0.3s of work would give some of
     the saving straight back. A miss is not a bug — it just embeds normally.
+    Remembered buffers are held for the batch's life, which is also what keeps
+    `id()` honest (a freed object's id can be handed to a new one). They cost
+    nothing extra: the anchor cache is holding the same bytes anyway.
     """
 
     def __init__(self, embedder: Any, ref_bytes: Optional[bytes]):
         self._embedder = embedder
-        self._ref_bytes = ref_bytes
-        self._ref_faces: Optional[List[Any]] = None
+        self._pinned: List[bytes] = []
+        self._faces: Dict[int, List[Any]] = {}
+        self.remember(ref_bytes)
+
+    def remember(self, img_bytes: Optional[bytes]) -> None:
+        """Declare a frame reusable for the rest of the batch. Idempotent, and
+        a no-op on None — plenty of nodes resolve no anchor at all."""
+        if img_bytes is None:
+            return
+        if not any(pinned is img_bytes for pinned in self._pinned):
+            self._pinned.append(img_bytes)
 
     def embed_all(self, img_bytes: bytes) -> List[Any]:
-        if self._ref_bytes is not None and img_bytes is self._ref_bytes:
-            if self._ref_faces is None:
-                # [] is a real, cacheable answer ("this portrait has no
-                # detectable face"), which is why the sentinel is None and not
+        if any(pinned is img_bytes for pinned in self._pinned):
+            key = id(img_bytes)
+            if key not in self._faces:
+                # [] is a real, cacheable answer ("this frame has no detectable
+                # face"), which is why the sentinel is a missing KEY and not
                 # falsiness — an empty result must not be re-detected forever.
-                self._ref_faces = list(self._embedder.embed_all(img_bytes) or [])
-            return list(self._ref_faces)
+                self._faces[key] = list(self._embedder.embed_all(img_bytes) or [])
+            return list(self._faces[key])
         return self._embedder.embed_all(img_bytes)
 
 
@@ -1797,9 +2136,119 @@ def _chosen_variant_bytes(session: Any, base: str,
     return fetch_bytes(session, base, pick.get("image_url"))
 
 
+def _as_int(value: Any) -> Optional[int]:
+    """An int, or None when the value is not one. The server tolerates
+    digit-string ids, so `"17572" == 17572` has to be true somewhere."""
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _chain_parent_id(node: Dict[str, Any]) -> Optional[int]:
+    """The node this one CONTINUES FROM, or None.
+
+    `parents` is ImageEdge.to_dict (image_platform.py:1331) and its `kind`
+    discriminates what each parent is FOR: 'character' and 'product' are
+    UPLOADS the render used as references, and only 'chain' is the previous
+    image in the sequence — e.g. node 5083 carries
+    {'kind': 'chain', 'parent_node_id': 5073, 'role': 'chain_from_image_3'}.
+    Comparing against the avatar upload is what the face gate already does;
+    doing it again here would measure nothing new.
+
+    The FIRST usable chain edge wins. The server sorts `parents` by
+    slot_order, so "first" is stable, and a node with two chain parents is a
+    shape that does not occur — picking one deterministically beats guessing.
+    """
+    for edge in (node.get("parents") or []):
+        if not isinstance(edge, dict) or edge.get("kind") != "chain":
+            continue
+        parent_id = _as_int(edge.get("parent_node_id"))
+        if parent_id is not None:
+            return parent_id
+    return None
+
+
+class _ContinuityAnchors:
+    """The approved previous frame for each node, fetched ONCE per batch.
+
+    In the measured batch 8 of 13 nodes chain off ONE parent, so a naive
+    implementation re-downloads that ~2 MB PNG (and re-embeds its face) eight
+    times over for an answer that cannot change. Keyed by PARENT NODE ID
+    rather than by the parent's chosen variant id: a node maps to exactly one
+    chosen variant, so it is the same key wearing a different name, and it
+    additionally saves the parent-node GET that finding the variant id
+    requires in the first place.
+
+    NEGATIVE results are cached too — a parent outside the fetched set, one
+    whose variant the operator has not picked yet, an image that would not
+    download. Re-asking per node is the slowest possible way to keep getting
+    the same 404, and all three are ordinary states, not errors: continuity is
+    additive, so "no signal" has to be as cheap as a signal.
+
+    Never raises: `fetch_node` and `fetch_bytes` both answer None on failure,
+    which is the whole contract this leans on.
+    """
+
+    def __init__(self, session: Any, base: str):
+        self._session = session
+        self._base = base
+        # parent node id -> (anchor bytes or None, report-ready anchor or None)
+        self._resolved: Dict[int, Tuple[Optional[bytes],
+                                        Optional[Dict[str, Any]]]] = {}
+
+    def anchor_for(self, node: Dict[str, Any]
+                   ) -> Tuple[Optional[bytes], Optional[Dict[str, Any]]]:
+        """(bytes to compare against, the anchor block for the report)."""
+        parent_id = _chain_parent_id(node)
+        if parent_id is None:
+            return None, None
+        if parent_id not in self._resolved:
+            self._resolved[parent_id] = self._resolve(parent_id)
+        return self._resolved[parent_id]
+
+    def _resolve(self, parent_id: int
+                 ) -> Tuple[Optional[bytes], Optional[Dict[str, Any]]]:
+        parent = fetch_node(self._session, self._base, parent_id)
+        if not parent:
+            return None, None
+        chosen_id = _as_int(parent.get("chosen_variant_id"))
+        if chosen_id is None:
+            # Ordinary and temporary: the operator has not picked this
+            # parent's variant yet. Said out loud because "no continuity on
+            # this node" is otherwise invisible in the log.
+            print(f"[qc] chain parent {parent_id} has no chosen variant yet - "
+                  f"no continuity signal for its children", flush=True)
+            return None, None
+        chosen = parent.get("chosen_variant")
+        if not isinstance(chosen, dict) or _as_int(chosen.get("id")) != chosen_id:
+            # to_dict fills `chosen_variant` for us; the scan is the fallback
+            # for a partial payload rather than the main path.
+            chosen = next((v for v in (parent.get("variants") or [])
+                           if isinstance(v, dict)
+                           and _as_int(v.get("id")) == chosen_id), None)
+        img = fetch_bytes(self._session, self._base,
+                          (chosen or {}).get("image_url"))
+        if img is None:
+            return None, None
+        return img, {"parent_node_id": parent_id, "variant_id": chosen_id}
+
+
+def _pin_reference(embedder: Any, img_bytes: Optional[bytes]) -> None:
+    """Tell the batch's face cache this frame will be reused, when there IS a
+    cache. `embedder` may be None, a bare InsightFaceEmbedder (single-node
+    calls, tests) or a `_RefFaceCache`; only the last one can remember."""
+    remember = getattr(embedder, "remember", None)
+    if callable(remember):
+        remember(img_bytes)
+
+
 def score_node(session: Any, base: str, client: Any, embedder: Any,
-               ref_bytes: Optional[bytes],
-               node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+               ref_bytes: Optional[bytes], node: Dict[str, Any],
+               anchors: Optional["_ContinuityAnchors"] = None
+               ) -> Optional[Dict[str, Any]]:
     """Run the whole funnel over one node and return its report, or None when
     there was nothing to score.
 
@@ -1838,6 +2287,14 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
       * pass 1 did not SEPARATE the top two (equal scores, or the ranker's
         tiebreak did the ordering) — the answer is already `tied`, and the
         compressed 5-7 score band makes this common rather than rare.
+
+    `anchors` (v936.3) is the batch's continuity cache. Optional so a
+    single-node call still works — it builds a throwaway one, which still
+    fetches the anchor once for this node's variants rather than once each.
+    Continuity is purely ADDITIVE: no chain parent, no chosen variant, no
+    embedder or a failed fetch all land as "no signal", and a node with no
+    chain parent takes exactly the path it took before this stage existed,
+    down to making no extra request.
     """
     node_id = node.get("id")
     prompt = (node.get("prompt") or "").strip()
@@ -1848,6 +2305,14 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
         skipped.append("face")
     if not judge_on:
         skipped.append("judge")
+
+    if anchors is None:
+        anchors = _ContinuityAnchors(session, base)
+    anchor_bytes, anchor_ref = anchors.anchor_for(node)
+    # The same anchor serves every variant here and, in the measured batch,
+    # 8 of the 13 nodes — so its face is detected once for the whole run
+    # instead of once per candidate.
+    _pin_reference(embedder, anchor_bytes)
 
     reports: List[Dict[str, Any]] = []
     variant_bytes: Dict[int, bytes] = {}
@@ -1872,16 +2337,25 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
             reports.append({"variant_id": variant_id,
                             "integrity": {"ok": False, "reasons": ["fetch_failed"],
                                           "metrics": None},
-                            "face_sim": None, "judge": None})
+                            "face_sim": None, "judge": None,
+                            "continuity": None})
             continue
         variant_bytes[variant_id] = img
 
         integrity = analyze_integrity(img)
         face_sim = face_similarity(embedder, ref_bytes, img) if face_on else None
+        # Free (no model call) and computed even on a broken render: the
+        # ranker's health axes already sink that variant, and the stored
+        # numbers are what the margin gets recalibrated from later.
+        continuity = (continuity_signals(embedder, anchor_bytes, img,
+                                         parent_variant_id=(anchor_ref or {})
+                                         .get("variant_id"))
+                      if anchor_bytes is not None else None)
         judge = (judge_variant(client, img, prompt)
                  if (judge_on and integrity["ok"]) else None)
         reports.append({"variant_id": variant_id, "integrity": integrity,
-                        "face_sim": face_sim, "judge": judge})
+                        "face_sim": face_sim, "judge": judge,
+                        "continuity": continuity})
 
     if not reports:
         return None
@@ -1944,8 +2418,23 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
                               "verdict": again["verdict"]})
         second_a, second_b = seconds
 
-    confidence = classify_confidence(first_a, first_b, second_a, second_b)
-    if confidence == CONF_SECOND_REJECTED:
+    # v936.3: computed on healthy[0] vs healthy[1] — the two the report is
+    # ABOUT — so the flag always describes the variant compose_report would
+    # name, whichever way the ranker ordered them.
+    continuity_leads = bool(
+        len(healthy) >= 2 and continuity_favors(healthy[0].get("continuity"),
+                                                healthy[1].get("continuity")))
+    confidence = classify_confidence(first_a, first_b, second_a, second_b,
+                                     continuity_leads)
+    if confidence == CONF_CONTINUITY:
+        # Worth a line of its own: the judge did NOT pick this one, so an
+        # operator reading the star needs to know what did — and that the
+        # evidence is a frame they approved themselves.
+        print(f"[qc] node {node_id}: the judge could not separate the top 2 - "
+              f"variant {healthy[0]['variant_id']} continues the approved "
+              f"frame {(anchor_ref or {}).get('variant_id')} better "
+              f"(continuity)", flush=True)
+    elif confidence == CONF_SECOND_REJECTED:
         # The state most worth explaining, and the one an operator is most
         # likely to override by eye: the ranking still puts this variant on
         # top, so without this line the missing star looks like indecision
@@ -1957,7 +2446,7 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
     elif confidence in (CONF_TIED, CONF_UNVERIFIED):
         print(f"[qc] node {node_id}: top 2 did not separate ({confidence}) - "
               f"no recommendation", flush=True)
-    return compose_report(ranked, skipped, confidence)
+    return compose_report(ranked, skipped, confidence, anchor_ref)
 
 
 def post_report(session: Any, base: str, node_id: int,
@@ -2032,10 +2521,16 @@ def _run_batch(session: Any, base: str, args: Any) -> int:
         print("[qc] no --avatar-node given - skipping the face gate",
               flush=True)
 
+    # ONE continuity cache for the whole run: 8 of the measured batch's 13
+    # nodes chain off the same approved frame, and a per-node cache would
+    # re-download and re-embed it for each of them.
+    anchors = _ContinuityAnchors(session, base)
+
     for node in scorable:
         node_id = node.get("id")
         try:
-            report = score_node(session, base, client, embedder, ref_bytes, node)
+            report = score_node(session, base, client, embedder, ref_bytes,
+                                node, anchors=anchors)
         except Exception as exc:
             print(f"[qc] node {node_id} scoring failed ({_ascii(exc)}) - "
                   f"skipped, batch continues", flush=True)
@@ -2106,15 +2601,18 @@ def _run_report(session: Any, base: str, args: Any) -> int:
     print(f"[qc] {scope}: {stats['scored']} scored node(s)", flush=True)
     # Every bucket, because they mean different things and the operator reads
     # this line to decide whether to trust the judge. The headline is split on
-    # the next line: `confirmed` is the only bucket that bought verification,
-    # `sole` had one candidate to begin with, and `legacy` sits outside the
-    # percentage because those picks came from the stage v936.1 replaced.
+    # the next line: `confirmed` is the only bucket the second opinion earned,
+    # `sole` had one candidate to begin with, `continuity` is a pick the judge
+    # never made, and `legacy` sits outside the percentage because those picks
+    # came from the stage v936.1 replaced.
     print(f"shadow agreement: {stats['agree']}/{stats['comparable']} ({pct}) "
           f"| tied-or-unverified: {stats['tied']} "
           f"| none-good: {stats['no_recommendation']}", flush=True)
     print(f"  of that: confirmed: {stats['confirmed_agree']}/"
           f"{stats['confirmed']} (the verified bucket) "
           f"| sole (unverified): {stats['sole_agree']}/{stats['sole']} "
+          f"| continuity: {stats['continuity_agree']}/{stats['continuity']} "
+          f"(judge tied, approved frame decided) "
           f"| legacy (pre-v936.1, excluded): {stats['legacy_agree']}/"
           f"{stats['legacy']}", flush=True)
     return EXIT_OK

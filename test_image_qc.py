@@ -1218,10 +1218,15 @@ def test_judge_overall_missing_score_sentinel_is_below_a_real_zero():
     assert classify_confidence(_judged(0), {}, _judged(0), {}) == CONF_CONFIRMED
 
 
-def test_only_confirmed_and_sole_are_recommendable():
-    """The whole point of Change C: four of the six states must never
-    produce a recommended_variant_id."""
-    assert set(CONF_RECOMMENDABLE) == {CONF_CONFIRMED, CONF_SOLE}
+def test_only_evidence_backed_states_are_recommendable():
+    """The whole point of Change C: a state may carry a recommendation only
+    when something OUTSIDE one judge call vouched for it — the answer
+    repeating (`confirmed`), there being nothing to compare (`sole`), or the
+    approved previous frame separating a pair the judge could not
+    (`continuity`, v936.3). The four refusing states must never produce a
+    recommended_variant_id."""
+    assert set(CONF_RECOMMENDABLE) == {CONF_CONFIRMED, CONF_SOLE,
+                                       image_qc.CONF_CONTINUITY}
     for refused in (CONF_TIED, CONF_UNVERIFIED, CONF_NONE_HEALTHY,
                     CONF_SECOND_REJECTED):
         assert refused not in CONF_RECOMMENDABLE
@@ -2306,10 +2311,10 @@ def test_run_batch_survives_a_node_whose_scoring_raises(monkeypatch, _no_models,
     _stub_nodes(monkeypatch, [_ai_node(1, n=1), _ai_node(2, n=1)])
     real = image_qc.score_node
 
-    def boom(session, base, client, embedder, ref, node):
+    def boom(session, base, client, embedder, ref, node, anchors=None):
         if node["id"] == 1:
             raise RuntimeError("kaboom")
-        return real(session, base, client, embedder, ref, node)
+        return real(session, base, client, embedder, ref, node, anchors=anchors)
     monkeypatch.setattr(image_qc, "score_node", boom)
 
     code = _run_batch(_StubSession(), "https://k.com", _batch_args(json=True))
@@ -2388,6 +2393,7 @@ def test_run_report_json_carries_every_counter(monkeypatch, capsys):
     assert set(payload) == {"scored", "comparable", "agree", "agreement_pct",
                             "confirmed", "confirmed_agree",
                             "sole", "sole_agree",
+                            "continuity", "continuity_agree",
                             "legacy", "legacy_agree",
                             "tied", "no_recommendation"}
 
@@ -2762,3 +2768,628 @@ def test_shadow_qc_passes_the_batch_the_avatar_and_the_base_url(monkeypatch):
     stp._run_shadow_qc(778, _qc_args(subject=None))
     assert "--avatar-node" not in seen[-1]
     assert seen[-1][:3] == ["--batch", "778", "--json"]
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v936.3 CONTINUITY — does this candidate continue the APPROVED frame?
+#
+# The judge scores each variant ALONE against its own prompt, but these
+# images are shots in ONE video. Measured over 13 production nodes the judge
+# could not separate the top two on 8 of them, and pushing it to try produced
+# fabricated confidence (a re-run picked a different winner on all 13,
+# r=-0.06). Continuity asks a better-posed question with a real answer.
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _hue(h, seed=7):
+    """A frame with ONE dominant hue plus brightness texture.
+
+    Textured on purpose: a flat colour field is a `blank_frame` to the
+    integrity gate, so it could never reach the ranker in real life, and a
+    fixture that cannot occur is a fixture that proves nothing. The hue is
+    what the colour histogram sees; the texture is what keeps gray_std and
+    lap_var above their floors.
+    """
+    rng = np.random.default_rng(seed)
+    hsv = np.zeros((1024, 576, 3), np.uint8)
+    hsv[:, :, 0] = h
+    hsv[:, :, 1] = 200
+    hsv[:, :, 2] = rng.integers(60, 255, (1024, 576), dtype=np.uint8)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+
+ORANGE, BLUE = _png(_hue(12)), _png(_hue(110))
+# The same room rendered twice: same hue, different noise. This is the pair
+# the margin constant has to sit ABOVE, or every re-render would read as a
+# setting change.
+ORANGE_AGAIN = _png(_hue(12, seed=99))
+
+
+# ---- colour distance ------------------------------------------------------
+
+def test_color_distance_identical_bytes_is_zero():
+    assert image_qc.color_distance(ORANGE, ORANGE) == 0.0
+
+
+def test_color_distance_separates_two_dominant_hues():
+    """A warm kitchen and a blue bathroom must not read as the same setting."""
+    assert image_qc.color_distance(ORANGE, BLUE) > 0.5
+
+
+def test_color_distance_two_renders_of_one_setting_stay_under_the_margin():
+    """The calibration that makes the tiebreaker safe: re-rendering the SAME
+    setting moves this number by ~0.001, far below CONTINUITY_MARGIN, so
+    render noise alone can never claim a continuity win."""
+    assert image_qc.color_distance(ORANGE, ORANGE_AGAIN) < \
+        image_qc.CONTINUITY_MARGIN
+
+
+def test_color_distance_is_symmetric():
+    assert image_qc.color_distance(ORANGE, BLUE) == \
+        image_qc.color_distance(BLUE, ORANGE)
+
+
+@pytest.mark.parametrize("junk", [b"", b"not an image at all", None, "a str"])
+def test_color_distance_never_raises_on_junk(junk):
+    """cv2.imdecode ASSERTS on a zero-length buffer instead of returning None
+    — the same hazard analyze_integrity guards. Nothing here may abort a
+    batch, so junk on either side is 'no answer', not an exception."""
+    assert image_qc.color_distance(junk, ORANGE) is None
+    assert image_qc.color_distance(ORANGE, junk) is None
+
+
+# ---- continuity_signals ---------------------------------------------------
+
+class _OneFaceEmbedder:
+    """Every frame holds the SAME face. Isolates the colour axis."""
+
+    def embed_all(self, img_bytes):
+        return [np.array([1.0, 0.0, 0.0])]
+
+
+class _NoFaceEmbedder:
+    def embed_all(self, img_bytes):
+        return []
+
+
+def test_continuity_signals_perfect_match_on_an_identical_frame():
+    sig = image_qc.continuity_signals(_OneFaceEmbedder(), ORANGE, ORANGE)
+    assert sig["face_sim"] == pytest.approx(1.0)
+    assert sig["color_distance"] == 0.0
+
+
+def test_continuity_signals_no_face_still_measures_colour():
+    """A b-roll prop shot has no face. The persona axis goes quiet; the
+    setting axis still has something to say."""
+    sig = image_qc.continuity_signals(_NoFaceEmbedder(), ORANGE, BLUE)
+    assert sig["face_sim"] is None
+    assert sig["color_distance"] > 0.5
+
+
+def test_continuity_signals_without_an_embedder_still_measures_colour():
+    """The face model is optional (no --avatar-node, a py3.13 wheel that would
+    not install). Colour costs nothing and must survive its absence."""
+    sig = image_qc.continuity_signals(None, ORANGE, BLUE)
+    assert sig["face_sim"] is None
+    assert sig["color_distance"] > 0.5
+
+
+def test_continuity_signals_carry_the_anchor_variant_id():
+    """The report has to say WHAT it compared against, per variant, or a
+    reader cannot tell a good match from a match against the wrong frame."""
+    sig = image_qc.continuity_signals(None, ORANGE, BLUE, parent_variant_id=17572)
+    assert sig["parent_variant_id"] == 17572
+    assert image_qc.continuity_signals(None, ORANGE, BLUE)[
+        "parent_variant_id"] is None
+
+
+def test_continuity_signals_on_junk_bytes_are_all_none():
+    sig = image_qc.continuity_signals(_OneFaceEmbedder(), b"", b"")
+    assert sig["face_sim"] is None and sig["color_distance"] is None
+
+
+def test_continuity_signals_survive_an_embedder_that_throws(capsys):
+    """onnxruntime can throw on a call, not only on construction. The colour
+    half of the answer must still land."""
+    class _Boom:
+        def embed_all(self, img_bytes):
+            raise RuntimeError("onnx exploded")
+
+    sig = image_qc.continuity_signals(_Boom(), ORANGE, BLUE)
+    assert sig["face_sim"] is None
+    assert sig["color_distance"] > 0.5
+
+
+# ---- the margin -----------------------------------------------------------
+
+def _cont(face=None, color=None, parent=17572):
+    return {"face_sim": face, "color_distance": color,
+            "parent_variant_id": parent}
+
+
+def test_continuity_margin_is_conservative_and_named():
+    """Pinned so a future edit is a deliberate recalibration and not a typo.
+    Two renders of one setting differ by ~0.001 here, so 0.05 is ~50x the
+    noise floor it has to clear."""
+    assert image_qc.CONTINUITY_MARGIN == 0.05
+
+
+def test_continuity_favors_needs_the_full_margin_on_the_face():
+    assert image_qc.continuity_favors(_cont(face=0.90), _cont(face=0.85)) is True
+    assert image_qc.continuity_favors(_cont(face=0.89), _cont(face=0.85)) is False
+
+
+def test_continuity_favors_needs_the_full_margin_on_the_colour():
+    """Lower colour distance is the better match, so the sign flips."""
+    assert image_qc.continuity_favors(_cont(color=0.10),
+                                      _cont(color=0.15)) is True
+    assert image_qc.continuity_favors(_cont(color=0.10),
+                                      _cont(color=0.14)) is False
+
+
+def test_continuity_favors_refuses_a_split_decision():
+    """Better face, worse setting is not a continuity win — it is two signals
+    disagreeing, which is exactly the state this stage exists to REFUSE to
+    guess about."""
+    assert image_qc.continuity_favors(_cont(face=0.95, color=0.40),
+                                      _cont(face=0.60, color=0.10)) is False
+
+
+def test_continuity_favors_accepts_a_clean_sweep():
+    assert image_qc.continuity_favors(_cont(face=0.95, color=0.10),
+                                      _cont(face=0.60, color=0.40)) is True
+
+
+def test_continuity_favors_tolerates_a_tie_on_the_quiet_axis():
+    """'Not worse on the other axis' means EQUAL is fine — only an actual
+    regression blocks the win."""
+    assert image_qc.continuity_favors(_cont(face=0.95, color=0.20),
+                                      _cont(face=0.60, color=0.20)) is True
+
+
+@pytest.mark.parametrize("a, b", [
+    (None, None),
+    (_cont(), _cont()),                                  # both axes absent
+    (_cont(face=0.9), _cont()),                          # nothing to compare to
+    (_cont(), _cont(face=0.1)),
+    ({}, {}),
+    ("junk", _cont(face=0.1)),
+    (_cont(face=True), _cont(face=0.1)),                 # a bool is not a score
+])
+def test_continuity_favors_is_false_without_two_measured_sides(a, b):
+    """No signal is NOT a win. The absent answer never votes, in either
+    direction — the same reading face_similarity already gives None."""
+    assert image_qc.continuity_favors(a, b) is False
+
+
+# ---- ranking: a tiebreaker, never a gate ----------------------------------
+
+def _vc(vid, face=0.6, overall=7, cont=None, ok=True, verdict="pass"):
+    """A ranked variant carrying continuity. `cont=None` means the signal was
+    never available for this variant."""
+    row = _v(vid, ok=ok, face=face, overall=overall, verdict=verdict)
+    row["continuity"] = cont
+    return row
+
+
+def test_rank_continuity_breaks_a_tie_the_judge_could_not():
+    """The whole point. Equal integrity, equal verdict, equal score — today
+    that falls to the variant_id coin flip. Continuity has a real answer."""
+    ranked = rank_variants([_vc(1, cont=_cont(face=0.50, color=0.40)),
+                            _vc(2, cont=_cont(face=0.95, color=0.10))])
+    assert [r["variant_id"] for r in ranked] == [2, 1]
+
+
+def test_rank_continuity_colour_decides_when_the_faces_match_equally():
+    ranked = rank_variants([_vc(1, cont=_cont(face=0.9, color=0.40)),
+                            _vc(2, cont=_cont(face=0.9, color=0.10))])
+    assert [r["variant_id"] for r in ranked] == [2, 1]
+
+
+def test_rank_continuity_face_outranks_continuity_colour():
+    """Persona identity is the more damaging break, so it sorts first: the
+    better face wins even while carrying the worse colour distance."""
+    ranked = rank_variants([_vc(1, cont=_cont(face=0.95, color=0.40)),
+                            _vc(2, cont=_cont(face=0.60, color=0.10))])
+    assert [r["variant_id"] for r in ranked] == [1, 2]
+
+
+def test_rank_continuity_never_outranks_the_judge_score():
+    """BELOW `overall`, deliberately. Continuity answers 'does this follow the
+    last frame', not 'is this a good render' — a better-matching but
+    lower-scored variant does not get promoted over the judge."""
+    ranked = rank_variants([_vc(1, overall=9, cont=_cont(face=0.30, color=0.90)),
+                            _vc(2, overall=6, cont=_cont(face=0.99, color=0.01))])
+    assert [r["variant_id"] for r in ranked] == [1, 2]
+
+
+@pytest.mark.parametrize("broken", [
+    {"ok": False}, {"verdict": "fail"}, {"face": 0.05},
+])
+def test_rank_continuity_never_outranks_health(broken):
+    """Integrity, the judge's verdict and the avatar face floor all still sort
+    above it. A perfect continuity match on a broken render is still a broken
+    render — continuity may not RESCUE a variant any more than it may fail
+    one."""
+    ranked = rank_variants([_vc(1, cont=_cont(face=0.99, color=0.01), **broken),
+                            _vc(2, cont=_cont(face=0.30, color=0.90))])
+    assert [r["variant_id"] for r in ranked] == [2, 1]
+
+
+def test_rank_continuity_outranks_the_avatar_face_tiebreak():
+    """ABOVE the old arbitrary tiebreakers. face_sim-to-avatar is a gate that
+    already passed; continuity is evidence about THIS sequence."""
+    ranked = rank_variants([_vc(1, face=0.95, cont=_cont(face=0.50, color=0.40)),
+                            _vc(2, face=0.40, cont=_cont(face=0.95, color=0.10))])
+    assert [r["variant_id"] for r in ranked] == [2, 1]
+
+
+def test_rank_a_missing_continuity_signal_is_never_penalised():
+    """NEUTRAL, not worst. A variant we could not measure must not sink below
+    one we could — that is the difference between 'no answer' and 'no match',
+    and the avatar face gate already reads None the same way. With the axis
+    off, the ranking falls through to today's tiebreakers, so variant 1 keeps
+    its place on the variant_id tiebreak."""
+    ranked = rank_variants([_vc(1, cont=None),
+                            _vc(2, cont=_cont(face=0.99, color=0.01))])
+    assert [r["variant_id"] for r in ranked] == [1, 2]
+    # ...and the mirror: the measured one is not penalised either
+    flipped = rank_variants([_vc(1, cont=_cont(face=0.99, color=0.01)),
+                             _vc(2, cont=None)])
+    assert [r["variant_id"] for r in flipped] == [1, 2]
+
+
+def test_rank_a_half_measured_axis_switches_only_that_axis_off():
+    """Variant 3 has no FACE reading (a b-roll frame with nobody in it), so
+    the face axis goes quiet for the whole tie group — but colour is measured
+    on all three, so colour still decides."""
+    ranked = rank_variants([_vc(1, cont=_cont(face=0.99, color=0.40)),
+                            _vc(2, cont=_cont(face=0.60, color=0.10)),
+                            _vc(3, cont=_cont(face=None, color=0.20))])
+    assert [r["variant_id"] for r in ranked] == [2, 3, 1]
+
+
+def test_rank_without_any_continuity_is_exactly_todays_order():
+    """The no-chain-parent case, which is most nodes. Adding the stage must
+    not move a single row when it has nothing to say."""
+    rows = [_v(3, face=0.9, overall=7), _v(1, face=0.9, overall=7),
+            _v(2, face=0.2, overall=9), _v(4, overall=None, ok=False)]
+    assert [r["variant_id"] for r in rank_variants(rows)] == [1, 3, 2, 4]
+
+
+def test_rank_survives_a_malformed_continuity_field():
+    """A hand-edited or half-written report must not abort a batch."""
+    for junk in ("continuity", 7, [], {"face_sim": "high"}):
+        ranked = rank_variants([_vc(1, cont=junk), _vc(2, cont=junk)])
+        assert [r["variant_id"] for r in ranked] == [1, 2]
+
+
+# ---- confidence: a new recommendable state --------------------------------
+
+def test_confidence_continuity_breaks_a_pass_one_tie():
+    """8 of 13 production nodes land here. The judge scored them equal, so
+    pass 2 was never bought — continuity is the only evidence in the room."""
+    assert classify_confidence(_judged(7), _judged(7), None, None,
+                               True) == image_qc.CONF_CONTINUITY
+    assert classify_confidence(_judged(7), _judged(7), None, None,
+                               False) == CONF_TIED
+
+
+def test_confidence_continuity_breaks_a_pass_two_flip():
+    """Pass 1 said A, pass 2 said B: the judge contradicted itself. That is a
+    tie today. Continuity is an INDEPENDENT signal, so it may still name the
+    variant the report is about."""
+    assert classify_confidence(_judged(9), _judged(6), _judged(5), _judged(8),
+                               True) == image_qc.CONF_CONTINUITY
+
+
+def test_confidence_continuity_never_rescues_an_outage():
+    """`unverified` is a statement about a FAILED CALL, not about a tie.
+    Recommending off it would let a 503 produce a recommendation."""
+    assert classify_confidence(_judged(9), _judged(6), None, _judged(5),
+                               True) == CONF_UNVERIFIED
+
+
+def test_confidence_continuity_never_rescues_a_rejected_winner():
+    """The second read FAILED the variant the report would name. A good colour
+    match on a variant with a v808 hit in it is not a reason to ship it."""
+    assert classify_confidence(_judged(9), _judged(6), _judged(9, "fail"),
+                               _judged(5), True) == CONF_SECOND_REJECTED
+
+
+def test_confidence_continuity_does_not_touch_a_confirmed_or_sole_call():
+    assert classify_confidence(_judged(9), _judged(6), _judged(9), _judged(5),
+                               True) == CONF_CONFIRMED
+    assert classify_confidence(_judged(9), None, None, None,
+                               True) == CONF_SOLE
+    assert classify_confidence(None, None, None, None,
+                               True) == CONF_NONE_HEALTHY
+
+
+def test_confidence_continuity_is_recommendable():
+    """Unlike an invented quality difference, this one is evidence: the
+    operator already approved the frame it was measured against."""
+    assert image_qc.CONF_CONTINUITY in CONF_RECOMMENDABLE
+
+
+def test_confidence_full_truth_table_with_continuity():
+    """The WHOLE matrix again, with the continuity flag as a third dimension,
+    so a future edit cannot quietly move one cell. The flag may only ever
+    convert a `tied` — every other cell is identical with it on or off."""
+    def expected(a1, b1, a2, b2, verdict_a, leads):
+        if not a1 > b1:
+            return image_qc.CONF_CONTINUITY if leads else CONF_TIED
+        if verdict_a != "pass":
+            return CONF_SECOND_REJECTED
+        if a2 > b2:
+            return CONF_CONFIRMED
+        return image_qc.CONF_CONTINUITY if leads else CONF_TIED
+
+    for a1, b1, a2, b2, va, leads in itertools.product(
+            [4, 5, 6], [4, 5, 6], [4, 5, 6], [4, 5, 6], ["pass", "fail"],
+            [True, False]):
+        got = classify_confidence(_judged(a1), _judged(b1),
+                                  _judged(a2, va), _judged(b2), leads)
+        assert got == expected(a1, b1, a2, b2, va, leads), (a1, b1, a2, b2, va,
+                                                            leads)
+
+
+# ---- the report -----------------------------------------------------------
+
+def test_compose_report_carries_the_continuity_anchor():
+    """The operator has to be able to see WHAT the ranking was compared
+    against — a match against the wrong previous frame is worse than none."""
+    anchor = {"parent_node_id": 5073, "variant_id": 17572}
+    report = compose_report([_vc(1, cont=_cont(face=0.9, color=0.1))], [],
+                            CONF_SOLE, anchor)
+    assert report["continuity_anchor"] == anchor
+    assert report["variants"]["1"]["continuity"]["parent_variant_id"] == 17572
+
+
+def test_compose_report_anchor_is_null_when_there_was_none():
+    report = compose_report([_v(1)], [], CONF_SOLE)
+    assert report["continuity_anchor"] is None
+    assert report["variants"]["1"]["continuity"] is None
+
+
+def test_compose_report_recommends_on_a_continuity_call():
+    report = compose_report([_vc(1, cont=_cont(face=0.9)), _vc(2)], [],
+                            image_qc.CONF_CONTINUITY)
+    assert report["recommended_variant_id"] == 1
+
+
+def test_compose_report_continuity_still_obeys_the_health_gate():
+    """Recommendable is not a bypass: a broken top variant is still not
+    recommended, however well it matches the previous frame."""
+    report = compose_report([_vc(1, ok=False, cont=_cont(face=0.99))], [],
+                            image_qc.CONF_CONTINUITY)
+    assert report["recommended_variant_id"] is None
+
+
+def test_report_with_continuity_round_trips_through_json():
+    report = compose_report([_vc(1, cont=_cont(face=0.9, color=0.1))], [],
+                            image_qc.CONF_CONTINUITY,
+                            {"parent_node_id": 5073, "variant_id": 17572})
+    assert json.loads(json.dumps(report)) == report
+
+
+# ---- agreement + the --report line ----------------------------------------
+
+def test_agreement_stats_counts_continuity_as_its_own_bucket():
+    """Its own bucket for the same reason `sole` has one: it is DIFFERENT
+    evidence. `confirmed` means the judge repeated itself; `continuity` means
+    the judge never separated them and the approved frame did."""
+    s = agreement_stats([
+        {"chosen_variant_id": 1, "qc": {"recommended_variant_id": 1,
+                                        "confidence": image_qc.CONF_CONTINUITY}},
+        {"chosen_variant_id": 2, "qc": {"recommended_variant_id": 3,
+                                        "confidence": image_qc.CONF_CONTINUITY}},
+        {"chosen_variant_id": 4, "qc": {"recommended_variant_id": 4,
+                                        "confidence": CONF_CONFIRMED}},
+    ])
+    assert (s["continuity"], s["continuity_agree"]) == (2, 1)
+    assert s["comparable"] == 3 and s["agree"] == 2
+    assert s["confirmed"] + s["sole"] + s["continuity"] == s["comparable"]
+
+
+def test_run_report_prints_the_continuity_bucket(monkeypatch, capsys):
+    _stub_nodes(monkeypatch, [
+        {"chosen_variant_id": 1, "qc": {"recommended_variant_id": 1,
+                                        "confidence": image_qc.CONF_CONTINUITY}},
+    ])
+    image_qc._run_report(_StubSession(), "https://k.com",
+                         _batch_args(report=True))
+    assert "continuity: 1/1" in capsys.readouterr().out
+
+
+# ---- the anchor cache + score_node wiring ---------------------------------
+
+def _chain_node(nid=5083, parent_id=5073, n=2, prompt="a woman, sunlit kitchen"):
+    node = _ai_node(nid, n=n)
+    node["prompt"] = prompt
+    node["parents"] = [
+        {"parent_node_id": 4970, "kind": "character", "role": "persona",
+         "slot_order": 0},
+        {"parent_node_id": parent_id, "kind": "chain",
+         "role": "chain_from_image_3", "slot_order": 1},
+    ]
+    return node
+
+
+def _parent_payload(node_id=5073, chosen=17572, url="/api/images/files/anchor.png"):
+    return {"id": node_id, "kind": "generated", "status": "ready",
+            "chosen_variant_id": chosen,
+            "chosen_variant": {"id": chosen, "image_url": url},
+            "variants": [{"id": chosen, "source": "ai", "image_url": url}]}
+
+
+_DEFAULT_PARENT = object()          # sentinel: no mutable default argument
+
+
+class _ChainSession:
+    """Serves the chain parent's node JSON and PNG bytes for image urls, and
+    COUNTS every GET — the cache claim is only worth making if it is measured.
+    """
+
+    def __init__(self, parent=_DEFAULT_PARENT, anchor=None, dead=()):
+        self.parent = _parent_payload() if parent is _DEFAULT_PARENT else parent
+        self.anchor = ORANGE if anchor is None else anchor
+        self.dead = set(dead)
+        self.gets = []
+        self.posts = []
+
+    def get(self, url, **kw):
+        self.gets.append(url)
+        if any(name in url for name in self.dead):
+            return _StubResponse(404)
+        if "/api/images/nodes/" in url:
+            if self.parent is None:
+                return _StubResponse(404)
+            return _StubResponse(200, payload=self.parent)
+        if "anchor.png" in url:
+            return _StubResponse(200, content=self.anchor)
+        return _StubResponse(200, content=ORANGE_AGAIN)
+
+    def post(self, url, json=None, **kw):
+        self.posts.append((url, json))
+        return _StubResponse(200)
+
+    def node_gets(self):
+        return [u for u in self.gets if "/api/images/nodes/" in u]
+
+    def anchor_gets(self):
+        return [u for u in self.gets if "anchor.png" in u]
+
+
+def test_score_node_measures_continuity_against_the_chain_parents_pick():
+    session = _ChainSession()
+    report = score_node(session, "https://k.com", None, None, None,
+                        _chain_node())
+    assert report["continuity_anchor"] == {"parent_node_id": 5073,
+                                           "variant_id": 17572}
+    for entry in report["variants"].values():
+        assert entry["continuity"]["parent_variant_id"] == 17572
+        # ORANGE_AGAIN against ORANGE: the same setting rendered twice
+        assert entry["continuity"]["color_distance"] < image_qc.CONTINUITY_MARGIN
+
+
+def test_score_node_fetches_the_shared_anchor_once_for_the_whole_batch():
+    """8 of this batch's 13 nodes chain off ONE approved frame. A naive
+    implementation re-downloads and re-embeds it per node, per variant."""
+    session = _ChainSession()
+    anchors = image_qc._ContinuityAnchors(session, "https://k.com")
+    for nid in (5083, 5084, 5085):
+        score_node(session, "https://k.com", None, None, None,
+                   _chain_node(nid), anchors=anchors)
+    assert len(session.node_gets()) == 1
+    assert len(session.anchor_gets()) == 1
+
+
+def test_score_node_embeds_the_shared_anchor_once_for_the_whole_batch():
+    """The bytes half of the saving is only half of it: InsightFace on CPU is
+    ~0.3s a frame, and 3 nodes x 2 variants would pay it 6 times for an answer
+    that cannot change."""
+    inner = _CountingEmbedder()
+    embedder = _RefFaceCache(inner, b"avatar-ref")
+    session = _ChainSession()
+    anchors = image_qc._ContinuityAnchors(session, "https://k.com")
+    for nid in (5083, 5084, 5085):
+        score_node(session, "https://k.com", None, embedder, b"avatar-ref",
+                   _chain_node(nid), anchors=anchors)
+    assert sum(1 for call in inner.calls if call == ORANGE) == 1
+
+
+def test_score_node_without_a_chain_parent_never_touches_the_network_for_one():
+    """Most nodes have no chain parent. They must behave EXACTLY as before —
+    no extra GET, and the two new keys reading null."""
+    session = _ChainSession()
+    report = score_node(session, "https://k.com", None, None, None, _ai_node())
+    assert session.node_gets() == []
+    assert report["continuity_anchor"] is None
+    assert all(entry["continuity"] is None
+               for entry in report["variants"].values())
+
+
+def test_score_node_ignores_character_and_product_parents():
+    """Only `kind == 'chain'` is the previous image in the sequence. The
+    avatar upload is a REFERENCE, not a frame to continue from."""
+    node = _ai_node()
+    node["parents"] = [{"parent_node_id": 4970, "kind": "character",
+                        "slot_order": 0},
+                       {"parent_node_id": 4971, "kind": "product",
+                        "slot_order": 1}]
+    session = _ChainSession()
+    assert score_node(session, "https://k.com", None, None, None,
+                      node)["continuity_anchor"] is None
+    assert session.node_gets() == []
+
+
+def test_score_node_degrades_when_the_parent_has_no_chosen_variant_yet():
+    """A chain parent whose variant the operator has not picked yet is 'no
+    continuity signal', never an error."""
+    session = _ChainSession(parent=_parent_payload(chosen=None))
+    session.parent["chosen_variant"] = None
+    report = score_node(session, "https://k.com", None, None, None,
+                        _chain_node())
+    assert report["continuity_anchor"] is None
+    assert all(e["continuity"] is None for e in report["variants"].values())
+
+
+def test_score_node_degrades_when_the_parent_is_outside_the_fetched_set():
+    """A chain parent from another batch, or deleted. fetch_node answers None
+    and the funnel carries on."""
+    session = _ChainSession(parent=None)
+    report = score_node(session, "https://k.com", None, None, None,
+                        _chain_node())
+    assert report["continuity_anchor"] is None
+
+
+def test_score_node_degrades_when_the_anchor_image_will_not_download():
+    session = _ChainSession(dead=["anchor.png"])
+    report = score_node(session, "https://k.com", None, None, None,
+                        _chain_node())
+    assert report["continuity_anchor"] is None
+    assert all(e["continuity"] is None for e in report["variants"].values())
+
+
+def test_score_node_caches_a_missing_parent_too():
+    """A dead parent must be looked up ONCE. Re-asking per node is the
+    slowest possible way to keep getting the same 404."""
+    session = _ChainSession(parent=None)
+    anchors = image_qc._ContinuityAnchors(session, "https://k.com")
+    for nid in (5083, 5084, 5085):
+        score_node(session, "https://k.com", None, None, None,
+                   _chain_node(nid), anchors=anchors)
+    assert len(session.node_gets()) == 1
+
+
+def test_score_node_continuity_can_never_fail_a_variant():
+    """The design constraint. A wardrobe or lighting difference is not
+    'broken' — it is merely worse for the sequence, and the last over-broad
+    hard fail this module shipped blacked out 13 of 13 nodes."""
+    session = _ChainSession(anchor=BLUE)      # nothing matches the anchor
+    report = score_node(session, "https://k.com", None, None, None,
+                        _chain_node())
+    for entry in report["variants"].values():
+        assert entry["integrity"]["ok"] is True
+        assert entry["continuity"]["color_distance"] > 0.5
+    assert "continuity" not in report["skipped_checks"]
+
+
+def test_ref_face_cache_remembers_an_extra_anchor_frame():
+    """The avatar reference is not the only frame reused across a batch. A
+    remembered frame is embedded once and served from the cache after."""
+    inner = _CountingEmbedder()
+    cached = _RefFaceCache(inner, b"ref")
+    anchor = b"anchor-bytes"
+    cached.remember(anchor)
+    for _ in range(4):
+        assert face_similarity(cached, anchor, b"cand") == pytest.approx(1.0)
+    assert inner.calls.count(anchor) == 1
+    assert inner.calls.count(b"cand") == 4
+
+
+def test_ref_face_cache_remember_tolerates_none():
+    cached = _RefFaceCache(_CountingEmbedder(), b"ref")
+    cached.remember(None)                       # no anchor resolved
+    assert face_similarity(cached, b"ref", b"cand") == pytest.approx(1.0)
