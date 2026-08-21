@@ -1,3 +1,4 @@
+import itertools
 import json
 
 import numpy as np
@@ -1008,11 +1009,57 @@ def test_confidence_tied_when_the_runner_up_led_pass_one():
 
 def test_confidence_survives_a_degraded_judge_dict():
     """Nothing in this module may abort a batch, including on a caller bug
-    (judge set to {} rather than None). Unscoreable compares as equal, which
-    lands on 'tied' — the answer that recommends nothing."""
+    (judge set to {} rather than None). Every degraded shape still returns a
+    word, and every one of those words recommends nothing.
+
+    Which word depends on WHERE the dict is degraded, and both readings are
+    deliberate. Degraded in pass 1: unscoreable compares as equal, so pass 1
+    never separated the pair -> `tied`. Degraded in pass 2: the verdict gate
+    is inverted, so a missing verdict is not evidence of a pass and fails
+    CLOSED -> `second_rejected`."""
     assert classify_confidence({}, {}, {}, {}) == CONF_TIED
     assert classify_confidence(_judged(9), _judged(6),
-                               {}, _judged("junk")) == CONF_TIED
+                               {}, _judged("junk")) == CONF_SECOND_REJECTED
+    for degraded in (CONF_TIED, CONF_SECOND_REJECTED):
+        assert degraded not in CONF_RECOMMENDABLE
+
+
+def test_confidence_full_truth_table():
+    """The WHOLE matrix, so a future edit cannot quietly move one cell.
+
+    Pass-1 order x pass-2 order x A's pass-2 verdict x B's pass-2 verdict.
+    B's verdict is looped precisely to prove it changes NOTHING — only the
+    variant the report would name can be rejected by the second look."""
+    def expected(a1, b1, a2, b2, verdict_a):
+        if not a1 > b1:
+            return CONF_TIED                 # pass 1 never separated them
+        if verdict_a != "pass":
+            return CONF_SECOND_REJECTED      # verdict outranks the scores
+        return CONF_CONFIRMED if a2 > b2 else CONF_TIED
+
+    for a1, b1, a2, b2, va, vb in itertools.product(
+            [4, 5, 6], [4, 5, 6], [4, 5, 6], [4, 5, 6], ["pass", "fail"],
+            ["pass", "fail"]):
+        got = classify_confidence(_judged(a1), _judged(b1),
+                                  _judged(a2, va), _judged(b2, vb))
+        assert got == expected(a1, b1, a2, b2, va), (a1, b1, a2, b2, va, vb)
+
+
+def test_confidence_a_malformed_pass_two_verdict_fails_closed():
+    """Hand-built-dict hardening. Matching the literal "fail" would fail OPEN
+    on anything that means fail but is not spelled that way, so the test is
+    inverted: only an exact "pass" clears the gate. "FAILED" is the obvious
+    one; "rejected" is the case a fail-prefix match would still miss."""
+    for malformed in ("FAILED", "Failed", "fail (compliance)", "rejected",
+                      "not passing", "", "unknown"):
+        assert classify_confidence(_judged(9), _judged(6),
+                                   _judged(9, malformed), _judged(5)
+                                   ) == CONF_SECOND_REJECTED, malformed
+    # ...while a genuine pass still clears it through whitespace and case
+    for ok in ("pass", "PASS", " Pass "):
+        assert classify_confidence(_judged(9), _judged(6),
+                                   _judged(9, ok), _judged(5)
+                                   ) == CONF_CONFIRMED, ok
 
 
 def test_confidence_pass_one_tie_short_circuits_before_pass_two():
@@ -1933,6 +1980,28 @@ def test_score_node_refuses_to_recommend_when_pass_two_fails_the_winner():
     assert report["recommended_variant_id"] is None
     # the evidence is stored, and it agrees with the refusal
     assert report["variants"]["1"]["verify"]["verdict"] == "fail"
+
+
+def test_score_node_explains_a_second_rejection_by_name(capsys):
+    """The state most worth explaining gets its own line. The ranking still
+    puts variant 1 on top, so a bare missing star reads as indecision — the
+    log has to say the re-read FAILED that variant, and name it."""
+    client = _ScriptedClient([_reply(9), _reply(6),
+                              _reply(9, verdict="fail"), _reply(5)])
+    _score(client, n=2)
+    out = capsys.readouterr().out
+    assert "second read REJECTED variant 1" in out
+    assert "do not just take the top row" in out
+    assert "did not separate" not in out      # not the tied wording
+    assert out.isascii()
+
+
+def test_score_node_tied_keeps_its_own_wording(capsys):
+    """The two explanations must not collapse into one another."""
+    _score(_ScriptedClient([_reply(8), _reply(8)]), n=2)
+    out = capsys.readouterr().out
+    assert "did not separate (tied)" in out
+    assert "REJECTED" not in out
 
 
 def test_score_node_degrades_to_unverified_when_a_second_call_dies(monkeypatch):

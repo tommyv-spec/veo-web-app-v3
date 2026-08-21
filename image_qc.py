@@ -578,6 +578,20 @@ def _judge_overall(judge: Optional[Dict[str, Any]]) -> int:
         return -1
 
 
+def _separated(first_a: Optional[Dict[str, Any]],
+               first_b: Optional[Dict[str, Any]]) -> bool:
+    """Did pass 1 actually SEPARATE the top two?
+
+    ONE definition, shared by `classify_confidence` (which answers `tied` when
+    it is False) and `score_node` (which skips both pass-2 calls on the same
+    condition). Written once because the two must agree exactly: if score_node
+    ever skipped the calls where classify_confidence still expected them, the
+    node would silently report `unverified` instead of `tied` — a spend
+    optimisation quietly turning into a wrong answer.
+    """
+    return _judge_overall(first_a) > _judge_overall(first_b)
+
+
 def classify_confidence(first_a: Optional[Dict[str, Any]],
                         first_b: Optional[Dict[str, Any]],
                         second_a: Optional[Dict[str, Any]],
@@ -631,7 +645,7 @@ def classify_confidence(first_a: Optional[Dict[str, Any]],
     # say changes this answer, and the compressed 5-7 score band makes an
     # equal pair common rather than exceptional — buying 2 calls to confirm a
     # verdict that cannot move is pure spend.
-    if not _judge_overall(first_a) > _judge_overall(first_b):
+    if not _separated(first_a, first_b):
         return CONF_TIED
     if second_a is None or second_b is None:
         return CONF_UNVERIFIED
@@ -646,7 +660,16 @@ def classify_confidence(first_a: Optional[Dict[str, Any]],
     #
     # Only A's verdict gates the recommendation, because A is the variant the
     # report would name. B failing pass 2 does not weaken A.
-    if str((second_a or {}).get("verdict", "")).strip().lower() == "fail":
+    #
+    # The test is INVERTED — only an exact "pass" clears it — rather than
+    # matching the literal "fail". Matching "fail" fails OPEN on anything that
+    # means fail but is not spelled that way ("FAILED", "rejected", "not
+    # passing"), and an unreadable verdict is not evidence of a pass. This is
+    # the same reading `_healthy_axes` already applies to pass 1
+    # (`verdict == "pass"`), so both passes judge the word identically.
+    # Whitespace and case are normalised because " PASS " genuinely means
+    # pass; leniency in that direction cannot let a defect through.
+    if str((second_a or {}).get("verdict", "")).strip().lower() != "pass":
         return CONF_SECOND_REJECTED
     if _judge_overall(second_a) > _judge_overall(second_b):
         return CONF_CONFIRMED
@@ -1837,8 +1860,7 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
     # nothing pass 2 could say would move it — so the 2 calls are skipped
     # outright. Not a micro-optimisation: scores sit compressed in a 5-7 band,
     # so an equal top pair is the common case and this is real money.
-    separated = (len(healthy) >= 2
-                 and _judge_overall(first_a) > _judge_overall(first_b))
+    separated = len(healthy) >= 2 and _separated(first_a, first_b)
     if judge_on and separated:
         seconds: List[Optional[Dict[str, Any]]] = []
         for row in healthy[:2]:
@@ -1868,7 +1890,16 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
         second_a, second_b = seconds
 
     confidence = classify_confidence(first_a, first_b, second_a, second_b)
-    if confidence in (CONF_TIED, CONF_UNVERIFIED):
+    if confidence == CONF_SECOND_REJECTED:
+        # The state most worth explaining, and the one an operator is most
+        # likely to override by eye: the ranking still puts this variant on
+        # top, so without this line the missing star looks like indecision
+        # rather than "the re-read found something wrong with it".
+        print(f"[qc] node {node_id}: second read REJECTED variant "
+              f"{healthy[0]['variant_id']} (the pass-1 winner) - it failed on "
+              f"re-judge, so nothing is recommended; do not just take the top "
+              f"row", flush=True)
+    elif confidence in (CONF_TIED, CONF_UNVERIFIED):
         print(f"[qc] node {node_id}: top 2 did not separate ({confidence}) - "
               f"no recommendation", flush=True)
     return compose_report(ranked, skipped, confidence)
