@@ -727,10 +727,12 @@ def cleanup_orphan_nodes():
                     if n.status == "ready":
                         n.status = "draft"
                         n.chosen_variant_id = None
+                        _clear_qc(n)  # v936: scored variants are gone
                         log.info(f"[image_platform] Cleanup: generated node {n.id} lost its variants — reset to draft")
                 elif n.chosen_variant_id and not any(v.id == n.chosen_variant_id for v in remaining):
                     # Chosen variant was among the deleted
                     n.chosen_variant_id = None
+                    _clear_qc(n)  # v936: the report scored a now-deleted variant
                     if n.status == "ready":
                         n.status = "draft"
 
@@ -969,6 +971,14 @@ def _safe_qc(raw, node_id=None):
         )
         return None
     return parsed
+
+
+def _clear_qc(node):
+    """v936: a QC report describes specific variants scored against a specific
+    prompt. Drop it whenever either is invalidated (variants deleted, prompt
+    rewritten) — a stale report points at dead ids and poisons the
+    [qc-shadow] agreement metric with guaranteed false disagreements."""
+    node.qc_json = None
 
 
 class ImageNode(Base):
@@ -3345,7 +3355,7 @@ def generate_node(
         db.delete(v)
     node.chosen_variant_id = None
     # v936: report describes deleted variants — rescore after render.
-    node.qc_json = None
+    _clear_qc(node)
     node.error_message = None
     node.status = "queued"
     _seed_chatgpt_lane(node)
@@ -3401,7 +3411,7 @@ def regenerate_node(
         db.delete(v)
     node.chosen_variant_id = None
     # v936: report describes deleted variants — rescore after render.
-    node.qc_json = None
+    _clear_qc(node)
     node.error_message = None
     node.status = "queued"
     _seed_chatgpt_lane(node)
@@ -3537,17 +3547,21 @@ def choose_variant(
     if node.status != "ready":
         node.status = "ready"
     node.updated_at = datetime.utcnow()
+    # v936: read the report BEFORE commit expires it (expire_on_commit
+    # defaults True), so the post-commit log costs no round-trip and cannot
+    # raise on a dead connection.
+    _qc = _safe_qc(node.qc_json, node_id=node.id)
+    _picked = variant.id
     db.commit()
 
     # v936 [SHADOW-METRIC] shadow-mode agreement: did the operator pick what QC
     # recommended? Read via: python code/render_logs.py --text qc-shadow
     # Logged after the commit so it records a stored fact, not an intent. This
     # line IS the feature's output — it is not removable scaffolding.
-    qc = _safe_qc(node.qc_json, node_id=node.id)
-    if qc and qc.get("recommended_variant_id"):
-        agree = (qc["recommended_variant_id"] == variant.id)
-        log.info(f"[image_platform] [qc-shadow] node {node_id} operator={variant.id} "
-                 f"qc={qc['recommended_variant_id']} agree={agree}")
+    if _qc and _qc.get("recommended_variant_id"):
+        agree = (_qc["recommended_variant_id"] == _picked)
+        log.info(f"[image_platform] [qc-shadow] node {node_id} operator={_picked} "
+                 f"qc={_qc['recommended_variant_id']} agree={agree}")
 
     # Auto-promote any draft children that were waiting on this node
     try:
@@ -3590,6 +3604,11 @@ def set_node_qc(
         raise HTTPException(422, "variants must be an object keyed by variant id")
     rec = rep.get("recommended_variant_id")
     if rec is not None:
+        # bool is an int subclass — JSON `true` would otherwise resolve to
+        # variant 1. Floats are rejected rather than silently truncated.
+        # Digit strings stay accepted for producer tolerance.
+        if isinstance(rec, bool) or not isinstance(rec, (int, str)):
+            raise HTTPException(422, "recommended_variant_id must be an integer")
         try:
             rec = int(rec)
         except (TypeError, ValueError):
@@ -3783,6 +3802,11 @@ async def upload_manual_variant(
             except Exception as _e:
                 log.warning(f"[manual-variant] could not delete {v.image_path}: {_e}")
             db.delete(v)
+        if existing_manual:
+            # v936: anchored on the DELETION, not on the chosen-pick guard
+            # above — every manual variant here is destroyed whether or not it
+            # was the chosen one, so any report scoring them is now stale.
+            _clear_qc(node)
         db.flush()
 
     # --- Compute next variant_index (sort after existing variants) ---
@@ -4084,8 +4108,13 @@ def serve_image_file(
                                 owner = db2.query(ImageNode).filter(
                                     ImageNode.id == v_now.node_id
                                 ).first()
-                                if owner and owner.chosen_variant_id == v_now.id:
-                                    owner.chosen_variant_id = None
+                                if owner:
+                                    # v936: the row goes regardless of whether
+                                    # it was the chosen one, so clear the report
+                                    # on any owner losing a scored variant.
+                                    _clear_qc(owner)
+                                    if owner.chosen_variant_id == v_now.id:
+                                        owner.chosen_variant_id = None
                             db2.delete(v_now)
                             db2.commit()
                 except Exception as e:
@@ -7228,6 +7257,10 @@ def _import_scene_table_impl(
             # point of sending the node back to draft for regeneration.
             _v891_stale_pick = existing.chosen_variant_id
             existing.chosen_variant_id = None
+            # v936: the report scored the OLD renders against the OLD prompt.
+            # Both die here, so the rubric it was judged under no longer
+            # exists — keeping it would badge dead ids in the review UI.
+            _clear_qc(existing)
             # v891.3 - an AI variant is just a render of the prompt. Once the
             # prompt is rewritten those images depict something that is no
             # longer being asked for, so they have to go with it. Banana's
