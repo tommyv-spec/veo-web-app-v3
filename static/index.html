@@ -15424,9 +15424,216 @@ Ambient: same kitchen room tone, soft pour sound.
             }
         }
 
+        // ─────────────────────────────────────────────────────────────────────
+        // v928 — Auto-Edit card.
+        // Turns a finished export into a posted-ready video (b-roll picture-in-
+        // picture, keyed hook, enhanced voice, word-by-word captions). The server
+        // only QUEUES the run; the rendering happens on the operator's own PC via
+        // `autoedit_worker.py --watch`. That is why the card says so out loud — a
+        // queued run with no worker running looks stuck forever otherwise.
+        // ─────────────────────────────────────────────────────────────────────
+        let _autoEditTimer = null;        // setTimeout id of the 5s status poll
+        let _autoEditTimerJob = null;     // which job that poll belongs to
+        let _autoEditTemplates = null;    // cached {default, local, builtin}
+
+        function _autoEditStopPoll() {
+            if (_autoEditTimer) { clearTimeout(_autoEditTimer); _autoEditTimer = null; }
+            _autoEditTimerJob = null;
+        }
+
+        // escapeHtml() leaves quotes alone, so it is unsafe inside an attribute.
+        function _autoEditAttr(s) {
+            return String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        function _autoEditStageLabel(stage) {
+            const map = {
+                download: 'getting the video',
+                scan: 'watching the video',
+                layout: 'placing the b-roll',
+                audio: 'cleaning up the voice',
+                compose: 'putting the video together',
+                captions: 'adding the captions',
+            };
+            return map[stage] || (stage ? String(stage) : '');
+        }
+
+        function _autoEditStateLabel(state) {
+            if (state === 'queued') return 'waiting for your PC to pick it up';
+            if (state === 'claimed') return 'your PC picked it up';
+            if (state === 'running') return 'working on it';
+            return String(state || '');
+        }
+
+        async function _autoEditGetTemplates() {
+            if (_autoEditTemplates) return _autoEditTemplates;
+            // An older server has no such endpoint — return null, render nothing,
+            // and never cache the miss so a later deploy is picked up.
+            const r = await fetch(`${API}/autoedit/templates`);
+            if (!r.ok) return null;
+            const data = await r.json();
+            if (!data) return null;
+            _autoEditTemplates = data;
+            return data;
+        }
+
+        async function _autoEditGetStatus(jobId) {
+            // 404 = never run for this job. That is normal, not an error.
+            try {
+                const r = await fetch(`${API}/jobs/${jobId}/autoedit-status`);
+                if (!r.ok) return null;
+                return await r.json();
+            } catch (e) {
+                return null;
+            }
+        }
+
+        async function renderAutoEditCard(jobId) {
+            try {
+                // A poll left over from another job must never repaint this one.
+                if (_autoEditTimerJob && _autoEditTimerJob !== jobId) _autoEditStopPoll();
+
+                const tpl = await _autoEditGetTemplates();
+                if (!tpl) return;                        // old server → no card, exports still render
+                const status = await _autoEditGetStatus(jobId);
+                if (selectedJobId !== jobId) return;     // operator switched jobs mid-fetch
+
+                const section = ensureExportsSection(jobId);
+                if (!section) return;
+                const content = section.querySelector('.exports-content');
+                if (!content) return;
+
+                // Keep whatever the operator already picked across a repaint.
+                const old = content.querySelector('.autoedit-card');
+                let pickedTemplate = old ? (old.querySelector('.autoedit-template') || {}).value : null;
+                const oldSmart = old && old.querySelector('.autoedit-smart');
+                const pickedSmart = oldSmart ? oldSmart.checked : true;   // on by default
+                if (old) old.remove();                   // dedupe — loadExistingExports can run twice
+
+                const names = [].concat(tpl.local || [], tpl.builtin || []);
+                const chosen = pickedTemplate && names.indexOf(pickedTemplate) !== -1
+                    ? pickedTemplate : (tpl.default || names[0] || '');
+                const options = names.map(n =>
+                    `<option value="${_autoEditAttr(n)}"${n === chosen ? ' selected' : ''}>${escapeHtml(n)}</option>`
+                ).join('');
+
+                const state = status && status.state;
+                const live = state === 'queued' || state === 'claimed' || state === 'running';
+
+                let body = '';
+                if (live) {
+                    const stage = _autoEditStageLabel(status.stage);
+                    body = `
+                        <div style="margin-top:8px;font-size:12px;color:var(--text-primary);">
+                            ⏳ ${escapeHtml(_autoEditStateLabel(state))}${stage ? ` — ${escapeHtml(stage)}` : ''}
+                        </div>
+                        <div style="margin-top:4px;font-size:11px;color:var(--text-secondary);">
+                            Your PC does the rendering. Keep <code>autoedit_worker.py --watch</code> running or this waits forever.
+                        </div>`;
+                } else if (state === 'done' && status.result_filename) {
+                    const fn = status.result_filename;
+                    const url = `${API}/jobs/${jobId}/outputs/${encodeURIComponent(fn)}`;
+                    body = `
+                        <video controls preload="metadata" src="${_autoEditAttr(url)}" style="width:220px;max-width:100%;margin-top:8px;border-radius:var(--radius-sm);background:#000;display:block;"></video>
+                        <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                            <a href="${_autoEditAttr(url)}?download=1" class="btn btn-secondary btn-sm" style="text-decoration:none;">📥 Download</a>
+                            <button class="btn btn-primary btn-sm autoedit-run-btn" onclick="queueAutoEdit('${_autoEditAttr(jobId)}')">🔁 Re-run</button>
+                        </div>
+                        <div style="margin-top:4px;font-size:11px;color:var(--text-secondary);word-break:break-all;">${escapeHtml(fn)}</div>`;
+                } else if (state === 'failed') {
+                    const err = String(status.error || 'no reason given');
+                    const shortErr = err.length > 160 ? err.slice(0, 160) + '…' : err;
+                    body = `
+                        <div style="margin-top:8px;font-size:12px;color:var(--error);word-break:break-word;">❌ ${escapeHtml(shortErr)}</div>
+                        <div style="margin-top:6px;">
+                            <button class="btn btn-primary btn-sm autoedit-run-btn" onclick="queueAutoEdit('${_autoEditAttr(jobId)}')">✂️ Auto-Edit</button>
+                        </div>`;
+                } else {
+                    body = `
+                        <div style="margin-top:8px;">
+                            <button class="btn btn-primary btn-sm autoedit-run-btn" onclick="queueAutoEdit('${_autoEditAttr(jobId)}')">✂️ Auto-Edit</button>
+                        </div>`;
+                }
+
+                const cardHtml = `
+                    <div class="autoedit-card" data-job-id="${_autoEditAttr(jobId)}" style="background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-md);padding:10px 12px;margin-bottom:10px;">
+                        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">
+                            <h4 style="margin:0;font-size:13px;color:var(--text-primary);">✂️ Auto-Edit</h4>
+                            <span style="font-size:11px;color:var(--text-secondary);">b-roll + captions + voice</span>
+                        </div>
+                        <div style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                            <label style="font-size:11px;color:var(--text-secondary);display:flex;align-items:center;gap:5px;">
+                                caption style
+                                <select class="autoedit-template" style="padding:4px 6px;font-size:11px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:var(--radius-sm);">${options}</select>
+                            </label>
+                            <label style="font-size:11px;color:var(--text-secondary);display:flex;align-items:center;gap:5px;cursor:pointer;">
+                                <input type="checkbox" class="autoedit-smart"${pickedSmart ? ' checked' : ''} style="cursor:pointer;">
+                                smart captions (never cover faces or the action)
+                            </label>
+                        </div>
+                        ${body}
+                    </div>
+                `;
+                content.insertAdjacentHTML('afterbegin', cardHtml);
+
+                if (live) {
+                    _autoEditStopPoll();
+                    _autoEditTimerJob = jobId;
+                    _autoEditTimer = setTimeout(() => {
+                        _autoEditTimer = null;
+                        if (selectedJobId !== jobId) { _autoEditTimerJob = null; return; }
+                        renderAutoEditCard(jobId);
+                    }, 5000);
+                } else {
+                    _autoEditStopPoll();
+                }
+            } catch (e) {
+                // Never let this break the export list underneath it.
+                console.log('[AutoEdit/v928] card render skipped:', e);
+            }
+        }
+
+        async function queueAutoEdit(jobId) {
+            const card = document.querySelector(`.autoedit-card[data-job-id="${jobId}"]`);
+            const sel = card && card.querySelector('.autoedit-template');
+            const chk = card && card.querySelector('.autoedit-smart');
+            const btn = card && card.querySelector('.autoedit-run-btn');
+            const template = sel ? sel.value : '';
+            const placement = (chk && chk.checked) ? 'dynamic' : 'constant';
+            const resetBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '✂️ Auto-Edit'; } };
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ Starting...'; }
+            try {
+                const r = await fetch(`${API}/jobs/${jobId}/autoedit`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ template: template, placement: placement, offset: null })
+                });
+                if (!r.ok) {
+                    // The 409 an operator hits most is "Export the final video first".
+                    let detail = `Auto-edit could not start (${r.status})`;
+                    try {
+                        const j = await r.json();
+                        if (j && j.detail) detail = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail);
+                    } catch (e) { /* non-JSON error body */ }
+                    showToast(detail, '#ef4444');
+                    resetBtn();
+                    return;
+                }
+                showToast('Auto-edit queued — your PC does the rendering');
+            } catch (e) {
+                showToast('Auto-edit could not start — no connection to the server', '#ef4444');
+                resetBtn();
+                return;
+            }
+            renderAutoEditCard(jobId);
+        }
+
         // Load existing exports when switching jobs
         async function loadExistingExports(jobId) {
             reconnectActiveExport(jobId);    // v864 — fire-and-forget: re-show a live export banner even when no file exists yet
+            renderAutoEditCard(jobId);       // v928 — fire-and-forget: the card shows whether or not a result exists yet
             try {
                 const response = await fetch(`${API}/jobs/${jobId}/list-outputs`);
                 if (!response.ok) return;
@@ -15444,7 +15651,8 @@ Ambient: same kitchen room tone, soft pour sound.
                     (f.startsWith('final_export_')
                      || f.startsWith('final_broll_')
                      || f.startsWith('voice_cloned')
-                     || f.startsWith('support_track'))  // v825 — support-overlay track
+                     || f.startsWith('support_track')   // v825 — support-overlay track
+                     || f.startsWith('autoedit_'))      // v928 — auto-edit result
                 );
 
                 // v701m — order exports newest-first, with speaker + broll
@@ -15476,6 +15684,7 @@ Ambient: same kitchen room tone, soft pour sound.
                     if (fn.startsWith('final_broll_')) return 1;
                     if (fn.startsWith('voice_cloned')) return 2;
                     if (fn.startsWith('support_track')) return 3;  // v825
+                    if (fn.startsWith('autoedit_')) return 4;      // v928
                     return 9;
                 };
                 exportFiles.sort((a, b) => {
@@ -15573,6 +15782,24 @@ Ambient: same kitchen room tone, soft pour sound.
                                     </div>
                                     <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
                                         <button onclick="downloadClip('${url}','${filename}')" style="padding:5px 8px;background:white;color:#0284c7;border:none;border-radius:var(--radius-sm);font-size:11px;font-weight:600;cursor:pointer;" title="Download support overlay track">📥</button>
+                                        <button onclick="this.closest('.export-complete').remove()" style="padding:5px 8px;background:rgba(255,255,255,0.2);color:white;border:none;border-radius:var(--radius-sm);font-size:11px;cursor:pointer;" title="Remove">✕</button>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                        content.insertAdjacentHTML('beforeend', cardHtml);
+                    } else if (filename.startsWith('autoedit_')) {
+                        // v928 — finished auto-edit result. autoedit_<job8>_<template>_<id6>.mp4
+                        const _aeTpl = (filename.match(/^autoedit_[^_]+_(.+)_[^_]+\.mp4$/) || [])[1] || '';
+                        const cardHtml = `
+                            <div class="export-complete" data-filename="${filename}" style="background:linear-gradient(90deg, #f59e0b 0%, #d97706 100%);padding:10px 16px;border-radius:var(--radius-md);margin-bottom:8px;">
+                                <div style="display:flex;align-items:center;justify-content:space-between;width:100%;flex-wrap:wrap;gap:8px;">
+                                    <div style="flex:1;min-width:0;">
+                                        <h3 style="margin:0;font-size:13px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">✂️ Auto-Edit · ${filename}</h3>
+                                        <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">b-roll + captions + voice${_aeTpl ? ` • style ${_aeTpl}` : ''}</p>
+                                    </div>
+                                    <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
+                                        <button onclick="downloadClip('${url}','${filename}')" style="padding:5px 8px;background:white;color:#d97706;border:none;border-radius:var(--radius-sm);font-size:11px;font-weight:600;cursor:pointer;" title="Download video">📥</button>
                                         <button onclick="this.closest('.export-complete').remove()" style="padding:5px 8px;background:rgba(255,255,255,0.2);color:white;border:none;border-radius:var(--radius-sm);font-size:11px;cursor:pointer;" title="Remove">✕</button>
                                     </div>
                                 </div>
