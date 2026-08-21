@@ -21,6 +21,19 @@ import subprocess
 import sys
 from pathlib import Path
 
+
+class AutoEditError(RuntimeError):
+    """Pipeline failure — catchable by callers (worker, server, CLI).
+
+    Library code in this module must always raise this (never the
+    process-exit exception argparse-style CLIs use): that one derives
+    from BaseException, not Exception, so a caller's normal
+    `except Exception` (a background worker reporting failures to the
+    server, for instance) would not catch it and the process would die
+    silently instead of reporting the failure.
+    """
+
+
 # The platform's DeepFilter helper prints emoji; on cp1252 consoles that print
 # CRASHES the call and masquerades as a Modal failure. Force utf-8 stdout.
 if hasattr(sys.stdout, "reconfigure"):
@@ -33,6 +46,15 @@ TEMPLATES_DIR = CODE_DIR / "caption_templates"
 PIP_W, PIP_H, PIP_X, PIP_Y = 800, 450, 140, 1050  # clears the Reels bottom-420px UI zone
 BUILTIN_TEMPLATES = ["classic", "default", "explosive", "fast", "hype", "line-focus",
                      "minimalist", "model", "neo-minimal", "retro-gaming", "vibrant", "word-focus"]
+# Watermark font: this pipeline only runs on this Windows PC today, so the
+# Windows path stays first (byte-identical behavior there). The other two
+# are a minimal fallback so a non-Windows machine fails with a clear error
+# instead of a cryptic ffmpeg one, if this ever runs elsewhere.
+WATERMARK_FONT_CANDIDATES = [
+    "C:/Windows/Fonts/arial.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+]
 
 
 def run(cmd, **kw):
@@ -40,7 +62,7 @@ def run(cmd, **kw):
                        encoding="utf-8", errors="replace", **kw)
     if r.returncode != 0:
         print(r.stderr[-2000:] if r.stderr else r.stdout[-2000:])
-        raise SystemExit(f"command failed: {cmd[0]} ...")
+        raise AutoEditError(f"command failed: {cmd[0]} ...")
     return r
 
 
@@ -51,7 +73,7 @@ def pycaps_exe():
     guess = Path(os.environ.get("APPDATA", "")) / "Python" / "Python313" / "Scripts" / "pycaps.exe"
     if guess.exists():
         return str(guess)
-    raise SystemExit("pycaps not found: pip install git+https://github.com/francozanardi/pycaps")
+    raise AutoEditError("pycaps not found: pip install git+https://github.com/francozanardi/pycaps")
 
 
 def local_styles():
@@ -64,7 +86,7 @@ def api_get(path, token, stream=False):
     r = requests.get(f"{BASE_URL}{path}", headers={"Authorization": f"Bearer {token}"},
                      timeout=600, stream=stream)
     if r.status_code != 200:
-        raise SystemExit(f"GET {path} -> {r.status_code}: {r.text[:200]}")
+        raise AutoEditError(f"GET {path} -> {r.status_code}: {r.text[:200]}")
     return r
 
 
@@ -85,7 +107,7 @@ def fetch_job_files(job_id, work: Path):
     print(f"token: {source}")
     st = api_get(f"/api/jobs/{job_id}/export-status", token).json()
     if st.get("state") != "done":
-        raise SystemExit(f"export not done for this job (state={st.get('state')}) — export it in the platform first")
+        raise AutoEditError(f"export not done for this job (state={st.get('state')}) — export it in the platform first")
     base_fn = st["result"]["filename"]
     outs = api_get(f"/api/jobs/{job_id}/list-outputs", token).json()["files"]
     sup_fn = next((f for f in outs if f.startswith("support_track_") and f.endswith(".mp4")), None)
@@ -309,6 +331,20 @@ def enhance_audio(base, work: Path):
     return pol
 
 
+def watermark_font():
+    """First existing font from WATERMARK_FONT_CANDIDATES, escaped for
+    ffmpeg's drawtext filter. A drive-letter colon (C:) is also the
+    filter-option separator, so it must be escaped as C\\: or ffmpeg's
+    parser misreads the path as a key:value pair."""
+    for path in WATERMARK_FONT_CANDIDATES:
+        if Path(path).exists():
+            if len(path) > 1 and path[1] == ":":
+                return path[0] + "\\:" + path[2:]
+            return path
+    raise AutoEditError(
+        "no watermark font found on this machine — tried: " + ", ".join(WATERMARK_FONT_CANDIDATES))
+
+
 def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio, pip_y=PIP_Y):
     nocap = work / f"nocap_wm_y{pip_y}.mp4"  # pip_y in the name invalidates the cache on layout change
     if nocap.exists():
@@ -347,7 +383,7 @@ def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio, pip_y=PI
         vin, idx = "[v1]", idx + 2
     inputs += ["-i", str(audio)]
     aidx = idx
-    fontfile = "C\\:/Windows/Fonts/arial.ttf"
+    fontfile = watermark_font()
     fc_parts.append(f"{vin}drawtext=text='syntheticperformer':fontfile='{fontfile}'"
                     f":fontcolor=white@0.5:fontsize=34:x=44:y=h-78[vout]")
     print("compose: rendering base (no captions) ...")
@@ -368,7 +404,7 @@ def render_captions(nocap: Path, out: Path, template: str, offset=-0.05):
                        cwd=cwd, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     if r.returncode != 0 or not out.exists():
         print((r.stderr or r.stdout)[-2000:])
-        raise SystemExit("pycaps render failed")
+        raise AutoEditError("pycaps render failed")
 
 
 def render_captions_dynamic(nocap: Path, out: Path, template: str, windows, work: Path):
@@ -404,10 +440,13 @@ def render_captions_dynamic(nocap: Path, out: Path, template: str, windows, work
          "-c:a", "copy", "-movflags", "+faststart", "-y", str(out)])
 
 
-def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
-                 placement: str = "dynamic", offset: float | None = None,
-                 progress=lambda stage: None) -> Path:
-    """The whole pass. `progress` gets called with a stage-name string."""
+def prepare_composition(job_id: str, work: Path, progress=lambda stage: None):
+    """Everything up to (and including) the uncaptioned composed video.
+    Returns (nocap_path, dur, segs, auto_offset, pip_y, chin, base_path).
+    `base_path` is returned too (in addition to the documented 6 fields)
+    because the caption-placement stage's occupancy scan needs the raw
+    downloaded video, not the composed one — dropping it would change
+    what build_occupancy() scans on an uncached run."""
     work.mkdir(parents=True, exist_ok=True)
     progress("download")
     base, sup = fetch_job_files(job_id, work)
@@ -433,6 +472,14 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
     audio = enhance_audio(base, work)
     progress("compose")
     nocap = compose(base, sup, work, dur, hook_end, key_hex, segs, audio, pip_y)
+    return nocap, dur, segs, auto_offset, pip_y, chin, base
+
+
+def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
+                 placement: str = "dynamic", offset: float | None = None,
+                 progress=lambda stage: None) -> Path:
+    """The whole pass. `progress` gets called with a stage-name string."""
+    nocap, dur, segs, auto_offset, pip_y, chin, base = prepare_composition(job_id, work, progress)
     progress("captions")
     if placement == "dynamic" and offset is None:
         occ_file = work / "occupancy.json"
