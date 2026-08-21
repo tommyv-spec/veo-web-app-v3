@@ -81,14 +81,21 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 # silently re-broken the face detection the caption placement needs — the same
 # failure this project already hit once. Non-headless is fine here: libgl1,
 # libsm6 and libxext6 are installed above.
+# openai-whisper is pycaps' own transcription backend and is an OPTIONAL extra:
+# without it every render dies with "No module named 'whisper'". It is separate
+# from the faster-whisper this app already uses. torch is already installed
+# (CPU wheels, see requirements.txt) so this adds little.
 RUN pip install --no-cache-dir \
         "pycaps @ git+https://github.com/francozanardi/pycaps" \
         playwright \
+        openai-whisper \
         "opencv-python<5" && \
     python -m playwright install --with-deps chromium && \
     chmod -R a+rX /ms-playwright && \
     python -c "import cv2, sys; assert hasattr(cv2,'CascadeClassifier'), 'cv2 lost CascadeClassifier'; print('cv2', cv2.__version__, 'ok')" && \
     python -c "import skia; print('skia ok')" && \
+    python -c "import whisper; print('whisper ok')" && \
+    python -c "import pycaps; print('pycaps ok')" && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy application code
