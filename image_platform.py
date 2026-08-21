@@ -3344,6 +3344,8 @@ def generate_node(
             continue
         db.delete(v)
     node.chosen_variant_id = None
+    # v936: report describes deleted variants — rescore after render.
+    node.qc_json = None
     node.error_message = None
     node.status = "queued"
     _seed_chatgpt_lane(node)
@@ -3398,6 +3400,8 @@ def regenerate_node(
             continue
         db.delete(v)
     node.chosen_variant_id = None
+    # v936: report describes deleted variants — rescore after render.
+    node.qc_json = None
     node.error_message = None
     node.status = "queued"
     _seed_chatgpt_lane(node)
@@ -3530,17 +3534,20 @@ def choose_variant(
     if not variant:
         raise HTTPException(404, "Variant not found on this node")
     node.chosen_variant_id = variant.id
-    # v936 [TEMP-DIAG] shadow-mode agreement: did the operator pick what QC
+    if node.status != "ready":
+        node.status = "ready"
+    node.updated_at = datetime.utcnow()
+    db.commit()
+
+    # v936 [SHADOW-METRIC] shadow-mode agreement: did the operator pick what QC
     # recommended? Read via: python code/render_logs.py --text qc-shadow
+    # Logged after the commit so it records a stored fact, not an intent. This
+    # line IS the feature's output — it is not removable scaffolding.
     qc = _safe_qc(node.qc_json, node_id=node.id)
     if qc and qc.get("recommended_variant_id"):
         agree = (qc["recommended_variant_id"] == variant.id)
         log.info(f"[image_platform] [qc-shadow] node {node_id} operator={variant.id} "
                  f"qc={qc['recommended_variant_id']} agree={agree}")
-    if node.status != "ready":
-        node.status = "ready"
-    node.updated_at = datetime.utcnow()
-    db.commit()
 
     # Auto-promote any draft children that were waiting on this node
     try:
@@ -3571,16 +3578,31 @@ def set_node_qc(
     ).first()
     if not node:
         raise HTTPException(404, "Node not found")
-    rep = req.report or {}
+    # Same convention as generate/regenerate: a node mid-render is about to
+    # replace its variants, so a report scored now would be stale on arrival.
+    if node.status in ("queued", "generating"):
+        raise HTTPException(409, f"Node is {node.status} — rescore after it lands")
+    rep = req.report
     if rep.get("version") != 1:
         raise HTTPException(422, "qc report must carry version: 1")
+    variants = rep.get("variants")
+    if variants is not None and not isinstance(variants, dict):
+        raise HTTPException(422, "variants must be an object keyed by variant id")
     rec = rep.get("recommended_variant_id")
     if rec is not None:
+        try:
+            rec = int(rec)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "recommended_variant_id must be an integer")
+        rep["recommended_variant_id"] = rec   # stored report and log comparison must agree
         owned = db.query(ImageVariant).filter(
             ImageVariant.id == rec, ImageVariant.node_id == node_id).first()
         if not owned:
             raise HTTPException(422, "recommended_variant_id not on this node")
-    node.qc_json = json.dumps(rep)
+    blob = json.dumps(rep)
+    if len(blob) > 64_000:
+        raise HTTPException(413, f"qc report too large ({len(blob)} bytes, cap 64000)")
+    node.qc_json = blob
     node.updated_at = datetime.utcnow()
     db.commit()
     log.info(f"[image_platform] [qc] node {node_id} scored: recommended={rec} "
