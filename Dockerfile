@@ -69,9 +69,23 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # lands in /root/.cache, which the non-root appuser below cannot read, so the
 # browser would be present and unusable at runtime.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN pip install --no-cache-dir "pycaps @ git+https://github.com/francozanardi/pycaps" && \
+# playwright is an OPTIONAL extra of pycaps, so it is named explicitly here —
+# without it `python -m playwright install` fails with "No module named
+# playwright" and the whole build stops.
+#
+# opencv-python is pinned <5 because pycaps depends on it and pip happily
+# resolved 5.0.0.93, which SHADOWS the opencv-python-headless<5 in
+# requirements.txt. OpenCV 5 has no cv2.CascadeClassifier, so that would have
+# silently re-broken the face detection the caption placement needs — the same
+# failure this project already hit once. Non-headless is fine here: libgl1,
+# libsm6 and libxext6 are installed above.
+RUN pip install --no-cache-dir \
+        "pycaps @ git+https://github.com/francozanardi/pycaps" \
+        playwright \
+        "opencv-python<5" && \
     python -m playwright install --with-deps chromium && \
     chmod -R a+rX /ms-playwright && \
+    python -c "import cv2, sys; assert hasattr(cv2,'CascadeClassifier'), 'cv2 lost CascadeClassifier'; print('cv2', cv2.__version__, 'ok')" && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy application code
