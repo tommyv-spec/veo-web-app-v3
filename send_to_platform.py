@@ -18,6 +18,17 @@ Usage:
   python send_to_platform.py set-token <token>   # save once, forget forever
   python send_to_platform.py set-alias nuri 1313 # name an upload once...
   python send_to_platform.py videos/build.md --avatar nuri --product korella
+  python send_to_platform.py autoedit 1234                       # queue + wait
+  python send_to_platform.py autoedit 1234 --download videos_out # ...+ save the mp4
+  python send_to_platform.py autoedit 1234 --no-wait             # queue and return
+  python send_to_platform.py autoedit --list-styles              # show templates, no job needed
+
+Autoedit turns a finished render into a posted-ready video (b-roll picture-in-
+picture, keyed hook, enhanced voice, karaoke captions). The server just queues
+the run — it renders on the OPERATOR'S OWN PC. Start that worker first:
+  python code/static/autoedit_worker.py --watch
+If it is not running, a queued run just sits there; this CLI prints a hint
+after ~60s so a silent worker never looks like a silent hang.
 
 Variant approval: the operator picks variants in the UI (default). The run
 stops when images are ready and prints the resume command; continue with
@@ -489,6 +500,22 @@ class Client:
         except self._rq.exceptions.Timeout:
             raise PlatformError(EXIT_WORKER, f"STALL: upload timed out: {path}")
 
+    def download(self, path, dest_path):
+        """Stream a binary file (e.g. an autoedit result mp4) to dest_path.
+        Not routed through get() — get() calls resp.json(), which chokes on
+        binary content."""
+        try:
+            resp = self.s.get(self.base + path, timeout=300, stream=True)
+        except self._rq.exceptions.Timeout:
+            raise PlatformError(EXIT_WORKER, f"STALL: download timed out: {path}")
+        if resp.status_code >= 400:
+            raise classify_http_error(resp)
+        with open(dest_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1 << 16):
+                if chunk:
+                    f.write(chunk)
+        return dest_path
+
 
 def check_health(client, report):
     """GET /api/health (public) + both worker liveness endpoints.
@@ -910,10 +937,103 @@ def poll_render(client, job_id, args, report):
         time.sleep(args.poll_interval)
 
 
+AUTOEDIT_POLL_SECONDS = 10
+AUTOEDIT_STALL_HINT_SECONDS = 60
+
+
+def cmd_autoedit_list_styles(client, as_json):
+    data = client.get("/api/autoedit/templates")
+    if as_json:
+        print(json.dumps(data, indent=2))
+        return EXIT_OK
+    print(f"default: {data.get('default')}")
+    local = data.get("local") or []
+    builtin = data.get("builtin") or []
+    if local:
+        print("local styles:")
+        for name in local:
+            print(f"  - {name}")
+    if builtin:
+        print("builtin styles:")
+        for name in builtin:
+            print(f"  - {name}")
+    if not local and not builtin:
+        print("no styles found")
+    return EXIT_OK
+
+
+def cmd_autoedit(client, args, report):
+    """Queue an autoedit run for a finished job, then poll until it lands.
+
+    Rendering happens on the operator's own PC (a local worker claims the
+    run) — the server only queues it. A run stuck at 'queued' usually just
+    means nobody started that worker yet, so we hint after ~60s instead of
+    letting it look like a silent hang.
+    """
+    if args.list_styles:
+        return cmd_autoedit_list_styles(client, args.as_json)
+
+    if not args.job_id:
+        raise PlatformError(EXIT_UNKNOWN,
+                            "autoedit needs a job id: send_to_platform.py autoedit <job-id>")
+
+    payload = {"template": args.template, "placement": args.placement, "offset": None}
+    run = client.post(f"/api/jobs/{args.job_id}/autoedit", payload)
+    autoedit_id = run.get("autoedit_id")
+    report["autoedit"] = run
+    report["stages"].append("autoedit:queued")
+    print(f"autoedit queued: run {autoedit_id}, template={run.get('template')}", flush=True)
+
+    if args.no_wait:
+        return EXIT_OK
+
+    start = time.time()
+    hinted = False
+    last_seen = (None, None)
+    while True:
+        run = client.get(f"/api/jobs/{args.job_id}/autoedit-status",
+                          params={"autoedit_id": autoedit_id})
+        report["autoedit"] = run
+        state = run.get("state")
+        stage = run.get("stage")
+        seen = (state, stage)
+        if seen != last_seen:
+            last_seen = seen
+            stage_txt = f" ({stage})" if stage else ""
+            print(f"  autoedit: {state}{stage_txt}", flush=True)
+
+        if state == "done":
+            report["stages"].append("autoedit:done")
+            result_filename = run.get("result_filename")
+            if args.download:
+                if not result_filename:
+                    raise PlatformError(EXIT_UNKNOWN,
+                                        "autoedit done but the run has no result_filename")
+                os.makedirs(args.download, exist_ok=True)
+                dest = os.path.join(args.download, result_filename)
+                client.download(f"/api/jobs/{args.job_id}/outputs/{result_filename}", dest)
+                report["stages"].append("autoedit:downloaded")
+                print(f"saved: {dest}", flush=True)
+            return EXIT_OK
+
+        if state == "failed":
+            raise PlatformError(EXIT_RENDER_FAIL,
+                                f"AUTOEDIT_FAIL: {run.get('error') or '(no error message)'}")
+
+        if state == "queued" and not hinted and time.time() - start > AUTOEDIT_STALL_HINT_SECONDS:
+            hinted = True
+            print("  hint: still queued after 60s — is the local worker running? "
+                  "python code/static/autoedit_worker.py --watch", flush=True)
+
+        time.sleep(AUTOEDIT_POLL_SECONDS)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description="Send a videos/*.md build to the platform and render it.")
-    p.add_argument("md_file", help="path to videos/<build>.md, or the literal 'list-uploads'")
-    p.add_argument("token_value", nargs="?", help="the token (only with set-token)")
+    p.add_argument("md_file", help="path to videos/<build>.md, or one of: "
+                                    "list-uploads, set-token, set-alias, autoedit")
+    p.add_argument("token_value", nargs="?",
+                    help="the token (set-token) / alias name (set-alias) / job id (autoedit)")
     p.add_argument("extra_value", nargs="?", help="node id (only with set-alias)")
     p.add_argument("--avatar", help="persona upload by NAME or alias (instead of --subject id)")
     p.add_argument("--product", help="product upload by NAME or alias (instead of --product-node id)")
@@ -952,6 +1072,16 @@ def main(argv=None):
     p.add_argument("--timeout-min", type=int, default=45, help="image-gen phase timeout")
     p.add_argument("--render-timeout-min", type=int, default=90)
     p.add_argument("--stall-min", type=int, default=10)
+    p.add_argument("--template", default="korella",
+                   help="autoedit: style to render with (see --list-styles)")
+    p.add_argument("--placement", choices=("dynamic", "constant"), default="dynamic",
+                   help="autoedit: b-roll picture-in-picture placement mode")
+    p.add_argument("--download", metavar="DIR",
+                   help="autoedit: once done, save the result mp4 into this directory")
+    p.add_argument("--no-wait", action="store_true", dest="no_wait",
+                   help="autoedit: queue the run and exit, don't poll for progress")
+    p.add_argument("--list-styles", action="store_true", dest="list_styles",
+                   help="autoedit: print available templates and exit (no job id needed)")
     args = p.parse_args(argv)
 
     if args.external_refs_plan and not args.external_refs:
@@ -979,6 +1109,10 @@ def main(argv=None):
 
         if args.md_file == "list-uploads":
             return cmd_list_uploads(client, args.as_json)
+
+        if args.md_file == "autoedit":
+            args.job_id = args.token_value
+            return cmd_autoedit(client, args, report)
 
         md_text = open(args.md_file, encoding="utf-8").read()
 
@@ -1159,7 +1293,10 @@ def main(argv=None):
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
         return EXIT_UNKNOWN
     finally:
-        if 'args' in dir() and getattr(args, "as_json", False) and args.md_file != "list-uploads":
+        skip_report = args.md_file == "list-uploads" if 'args' in dir() else False
+        skip_report = skip_report or (
+            'args' in dir() and args.md_file == "autoedit" and getattr(args, "list_styles", False))
+        if 'args' in dir() and getattr(args, "as_json", False) and not skip_report:
             print(json.dumps(report, indent=2, default=str))
 
 
