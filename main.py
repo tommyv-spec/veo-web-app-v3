@@ -10718,7 +10718,12 @@ async def _autoedit_store_result(db, run, qc: dict, write_tmp) -> dict:
     if not job:
         raise HTTPException(status_code=404, detail="job for this run no longer exists")
 
-    fn = f"autoedit_{run.job_id[:8]}_{run.template}_{run.id[:6]}.mp4"
+    # v938.2 — the name carries a timestamp so the operator can see which
+    # auto-edit is the newest. Without it every result sorted under an empty
+    # key and three files sat in the list with nothing to tell them apart.
+    # The YYYYMMDD_HHMMSS shape is the one the exports list already sorts on.
+    _stamp = (run.created_at or datetime.utcnow()).strftime("%Y%m%d_%H%M%S")
+    fn = f"autoedit_{run.job_id[:8]}_{run.template}_{_stamp}_{run.id[:6]}.mp4"
     output_dir = Path(job.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     dest = output_dir / fn
@@ -13161,7 +13166,11 @@ async def autoedit_status(
     run = q.order_by(AutoEditRun.created_at.desc()).first()
     if not run:
         raise HTTPException(status_code=404, detail="No auto-edit for this job")
-    return run.to_dict()
+    # v938.2 — this is a POLL. It carried no cache headers, so a browser was
+    # free to serve a cached copy and the progress bar sat frozen on whatever
+    # the first poll returned. Say explicitly that it must never be cached.
+    return JSONResponse(content=run.to_dict(),
+                        headers={"Cache-Control": "no-store, max-age=0"})
 
 
 @app.post("/api/jobs/{job_id}/autoedit/{autoedit_id}/cancel")

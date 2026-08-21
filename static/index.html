@@ -15535,7 +15535,11 @@ Ambient: same kitchen room tone, soft pour sound.
         async function _autoEditGetStatus(jobId) {
             // 404 = never run for this job. That is normal, not an error.
             try {
-                const r = await fetch(`${API}/jobs/${jobId}/autoedit-status`);
+                // v938.2 — belt and braces against a frozen progress bar: the
+                // server now sends no-store, and this asks the browser not to
+                // hand back a cached poll either.
+                const r = await fetch(`${API}/jobs/${jobId}/autoedit-status?_=${Date.now()}`,
+                                      { cache: 'no-store' });
                 if (!r.ok) return null;
                 return await r.json();
             } catch (e) {
@@ -15645,7 +15649,13 @@ Ambient: same kitchen room tone, soft pour sound.
                             ${ready ? '✓ READY TO PUBLISH' : '⚠ NEEDS MANUAL EDIT'}
                         </div>
                         ${reasons ? `<ul style="margin:6px 0 0 18px;padding:0;font-size:11px;color:var(--text-secondary);">${reasons}</ul>` : ''}
-                        <video controls preload="metadata" src="${_autoEditAttr(url)}" style="width:220px;max-width:100%;margin-top:8px;border-radius:var(--radius-sm);background:#000;display:block;"></video>
+                        <div style="margin-top:8px;font-size:11px;color:var(--text-secondary);">
+                            <strong style="color:var(--text-primary);">Latest</strong>
+                            — ${escapeHtml(status.template || '')} style${status.finished_at
+                                ? `, finished ${escapeHtml(new Date(status.finished_at.endsWith('Z') ? status.finished_at : status.finished_at + 'Z').toLocaleString())}` : ''}
+                            <div style="font-family:monospace;font-size:10px;opacity:.75;word-break:break-all;">${escapeHtml(fn)}</div>
+                        </div>
+                        <video controls preload="metadata" src="${_autoEditAttr(url)}" style="width:220px;max-width:100%;margin-top:6px;border-radius:var(--radius-sm);background:#000;display:block;"></video>
                         <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
                             <a href="${_autoEditAttr(url)}?download=1" class="btn btn-secondary btn-sm" style="text-decoration:none;">${ready ? '📥 Download' : '✂️ Download for CapCut'}</a>
                             <button class="btn btn-primary btn-sm autoedit-run-btn" onclick="queueAutoEdit('${_autoEditAttr(jobId)}')">Re-run finish</button>
@@ -15898,7 +15908,14 @@ Ambient: same kitchen room tone, soft pour sound.
                         // fallback made the header read "Export export". Give that
                         // group its own plain label instead.
                         let _hdr = `📦 Export ${_lbl}`;
-                        if (!_tm && filename.startsWith('autoedit_')) _hdr = 'Automatic Finish';
+                        // v938.2 — auto-edit results now carry a timestamp in the
+                        // filename, so they sort newest-first like exports. Keep
+                        // their own label either way: without the date the group
+                        // read "Export export", with it, it must still say what
+                        // it is rather than look like a plain export.
+                        if (filename.startsWith('autoedit_')) {
+                            _hdr = _tm ? `Automatic Finish ${_lbl}` : 'Automatic Finish';
+                        }
                         content.insertAdjacentHTML('beforeend', `<div class="export-group-header" style="margin:14px 0 6px;font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.5px;border-top:1px solid rgba(255,255,255,0.10);padding-top:8px;">${_hdr}</div>`);
                     }
 
