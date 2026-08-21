@@ -12432,6 +12432,116 @@ async def export_status(
     return run.to_dict()
 
 
+# ============ Auto-edit (CapCut-pass) — queue here, render on a local worker ============
+# The render needs OpenCV + a headless browser and several minutes of CPU; this
+# box has 1 CPU / 2GB. So the server only queues rows and stores results, and a
+# worker on the operator's PC claims them. autoedit_pipeline is imported INSIDE
+# each function on purpose — its heavy deps live inside function bodies, and
+# keeping the import local means a missing optional dep can never break boot.
+
+AUTOEDIT_PLACEMENTS = ("dynamic", "constant")
+
+
+def _autoedit_valid_templates():
+    from autoedit_pipeline import local_styles, BUILTIN_TEMPLATES
+    return list(local_styles()) + list(BUILTIN_TEMPLATES)
+
+
+def _autoedit_validate(template: str, placement: str):
+    """Reject a bad template/placement HERE. Otherwise the row queues fine and
+    only blows up in the worker, after a download and minutes of rendering."""
+    valid = _autoedit_valid_templates()
+    if template not in valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown template '{template}'. Valid templates: {', '.join(valid)}")
+    if placement not in AUTOEDIT_PLACEMENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown placement '{placement}'. Valid placements: "
+                   f"{', '.join(AUTOEDIT_PLACEMENTS)}")
+
+
+class AutoEditRequest(BaseModel):
+    template: str = "korella"
+    placement: str = "dynamic"     # dynamic|constant
+    offset: Optional[float] = None
+
+
+@app.post("/api/jobs/{job_id}/autoedit")
+async def queue_autoedit(
+    job_id: str,
+    req: AutoEditRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Queue an auto-edit for this job. Needs a finished export to work on."""
+    from models import AutoEditRun, ExportRun
+    from autoedit_queue import can_queue
+    import uuid as _uuid
+
+    job = get_user_job(db, job_id, current_user)
+    _autoedit_validate(req.template, req.placement)
+
+    exp = db.query(ExportRun).filter(
+        ExportRun.job_id == job_id, ExportRun.state == "done"
+    ).order_by(ExportRun.created_at.desc()).first()
+    if not exp:
+        raise HTTPException(
+            status_code=409,
+            detail="Export the final video first — auto-edit runs on the export")
+
+    states = [r.state for r in db.query(AutoEditRun).filter(AutoEditRun.job_id == job_id)]
+    if not can_queue(states):
+        raise HTTPException(
+            status_code=409,
+            detail="An auto-edit is already queued or running for this job")
+
+    run = AutoEditRun(
+        id=str(_uuid.uuid4()), job_id=job_id,
+        user_id=getattr(current_user, "id", None),
+        template=req.template, placement=req.placement, offset=req.offset,
+    )
+    db.add(run)
+    db.commit()
+    print(f"[AutoEdit] queued {run.id} job={job_id} template={req.template}", flush=True)
+    return run.to_dict()
+
+
+@app.get("/api/jobs/{job_id}/autoedit-status")
+async def autoedit_status(
+    job_id: str,
+    autoedit_id: str = None,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Poll target for the frontend: the named run, or the newest for this job."""
+    from models import AutoEditRun
+
+    get_user_job(db, job_id, current_user)
+
+    q = db.query(AutoEditRun).filter(AutoEditRun.job_id == job_id)
+    if autoedit_id:
+        q = q.filter(AutoEditRun.id == autoedit_id)
+    run = q.order_by(AutoEditRun.created_at.desc()).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="No auto-edit for this job")
+    return run.to_dict()
+
+
+@app.get("/api/autoedit/templates")
+async def autoedit_templates():
+    """Style menu for the UI. Local templates + pycaps builtins."""
+    from autoedit_pipeline import local_styles, BUILTIN_TEMPLATES
+    return {"default": "korella",
+            "local": local_styles(), "builtin": BUILTIN_TEMPLATES}
+
+
+# The four WORKER-side auto-edit endpoints live further down, right after
+# verify_user_worker_token is defined — `Depends(...)` reads that name while the
+# module is still executing, so they cannot sit above its def.
+
+
 @app.get("/api/vad-available")
 async def check_vad_availability():
     """Check if VAD dependencies are installed."""
@@ -15830,6 +15940,136 @@ def verify_user_worker_token(
         db.commit()
 
     return token.user_id
+
+
+# ============ Auto-edit worker endpoints ============
+# The user-facing half (queue / status / templates) sits up by export-status.
+# These four live here because Depends(verify_user_worker_token) is resolved
+# while the module executes, so the name must already be defined above.
+# Every one scopes on user_id: a worker only ever sees its own account's rows.
+
+
+def _autoedit_run_for_worker(db, autoedit_id: str, worker_user_id: str):
+    """Look up a run scoped to the worker's own account. 404 on someone else's
+    row — that leaks nothing, and it is also the honest answer for the worker."""
+    from models import AutoEditRun
+    run = db.query(AutoEditRun).filter(
+        AutoEditRun.id == autoedit_id,
+        AutoEditRun.user_id == worker_user_id,
+    ).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="unknown run")
+    return run
+
+
+@app.post("/api/autoedit/claim")
+async def claim_autoedit(
+    db: DBSession = Depends(get_db_session),
+    worker_user_id: str = Depends(verify_user_worker_token),
+):
+    """Hand the worker its next runnable row, or `autoedit_id: None`."""
+    from models import AutoEditRun
+    from autoedit_queue import is_claimable
+    from datetime import datetime as _dt
+
+    now = _dt.utcnow()
+    for run in db.query(AutoEditRun).filter(
+            AutoEditRun.user_id == worker_user_id,
+            AutoEditRun.state.in_(["queued", "claimed", "running"])
+    ).order_by(AutoEditRun.created_at.asc()).all():
+        if is_claimable(run.state, run.heartbeat_at, now):
+            run.state, run.claimed_by, run.heartbeat_at = "claimed", worker_user_id[:8], now
+            run.attempts += 1
+            db.commit()
+            print(f"[AutoEdit] claimed {run.id} by {run.claimed_by} attempt={run.attempts}",
+                  flush=True)
+            return run.to_dict()
+    return {"autoedit_id": None}
+
+
+class AutoEditProgress(BaseModel):
+    stage: str
+
+
+@app.post("/api/autoedit/{autoedit_id}/progress")
+async def autoedit_progress(
+    autoedit_id: str,
+    p: AutoEditProgress,
+    db: DBSession = Depends(get_db_session),
+    worker_user_id: str = Depends(verify_user_worker_token),
+):
+    """Heartbeat + stage label. Silence for STALE_AFTER makes the row claimable again."""
+    from datetime import datetime as _dt
+
+    run = _autoedit_run_for_worker(db, autoedit_id, worker_user_id)
+    run.state, run.stage, run.heartbeat_at = "running", p.stage, _dt.utcnow()
+    db.commit()
+    return {"ok": True}
+
+
+@app.post("/api/autoedit/{autoedit_id}/complete")
+async def autoedit_complete(
+    autoedit_id: str,
+    video: UploadFile = File(...),
+    db: DBSession = Depends(get_db_session),
+    worker_user_id: str = Depends(verify_user_worker_token),
+):
+    """Worker uploads the finished mp4; we store it next to the job's outputs."""
+    from datetime import datetime as _dt
+    from models import Job
+
+    run = _autoedit_run_for_worker(db, autoedit_id, worker_user_id)
+
+    job = db.query(Job).filter(Job.id == run.job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="job for this run no longer exists")
+
+    fn = f"autoedit_{run.job_id[:8]}_{run.template}_{run.id[:6]}.mp4"
+    output_dir = Path(job.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dest = output_dir / fn
+    with open(dest, "wb") as f:
+        while chunk := await video.read(1 << 20):
+            f.write(chunk)
+
+    try:  # R2 so it survives a redeploy — same key scheme the exports use
+        from backends.storage import is_storage_configured, get_storage
+        if is_storage_configured():
+            get_storage().upload_file(str(dest), f"jobs/{run.job_id}/outputs/{fn}")
+    except Exception as e:
+        print(f"[AutoEdit] R2 upload failed (non-fatal): {e}", flush=True)
+
+    run.state, run.result_filename, run.finished_at = "done", fn, _dt.utcnow()
+    db.commit()
+    print(f"[AutoEdit] done {run.id} -> {fn} ({dest.stat().st_size / 1e6:.1f} MB)", flush=True)
+    return {"ok": True, "filename": fn,
+            "download_url": f"/api/jobs/{run.job_id}/outputs/{fn}"}
+
+
+class AutoEditFail(BaseModel):
+    error: str
+
+
+@app.post("/api/autoedit/{autoedit_id}/fail")
+async def autoedit_fail(
+    autoedit_id: str,
+    p: AutoEditFail,
+    db: DBSession = Depends(get_db_session),
+    worker_user_id: str = Depends(verify_user_worker_token),
+):
+    """Worker reports a failure. Back to `queued` until MAX_ATTEMPTS is spent."""
+    from datetime import datetime as _dt
+    from autoedit_queue import next_state_on_fail
+
+    run = _autoedit_run_for_worker(db, autoedit_id, worker_user_id)
+    run.state = next_state_on_fail(run.attempts)
+    run.error = p.error[:2000]
+    if run.state == "failed":
+        run.finished_at = _dt.utcnow()
+    db.commit()
+    print(f"[AutoEdit] fail {run.id} attempt={run.attempts} -> {run.state}: {p.error[:120]}",
+          flush=True)
+    return {"ok": True, "state": run.state}
 
 
 # v899 — per-worker liveness for the Flow worker: user_id -> (worker_id, ts).
