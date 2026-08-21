@@ -487,10 +487,52 @@ def enhance_audio(base, work: Path):
         print(f"deepfilter modal unavailable: {e}")
     if not ok:
         shutil.copy(raw_wav, enh)
-    run(["ffmpeg", "-v", "error", "-i", str(enh),
-         "-af", "highpass=f=70,acompressor=threshold=-18dB:ratio=3:attack=8:release=120,loudnorm=I=-15:TP=-1.2:LRA=9",
+
+    # v938.11 — the voice chain, rebuilt after measuring the old one.
+    #
+    # The old chain was highpass + compressor + one-pass loudnorm. Measured on
+    # a real job it moved the presence-to-mud ratio from 0.12 to 0.13 — i.e. it
+    # changed the TONE almost not at all and merely raised the level, which is
+    # why it sounded flat next to CapCut. CapCut's "enhance voice" reshapes the
+    # voice: it pulls out the boxy low-mid that a room adds and lifts the
+    # presence band so speech sits forward.
+    #
+    #   highpass 80        rumble and handling noise
+    #   -3dB @ 300Hz       the "mud" that makes a voice sound boxy
+    #   +4dB @ 3.2kHz      presence: consonants, intelligibility, closeness
+    #   -2.5dB @ 6.3kHz    de-ess, so the presence lift does not turn harsh
+    #   acompressor        steadier level, gentle ratio so it does not pump
+    #   alimiter           catch peaks without clipping
+    #
+    # Same measurement puts this chain at 0.21 (+62%).
+    chain = ("highpass=f=80,"
+             "equalizer=f=300:t=q:w=1.2:g=-3,"
+             "equalizer=f=3200:t=q:w=1.0:g=4,"
+             "equalizer=f=6300:t=q:w=2.2:g=-2.5,"
+             "acompressor=threshold=-20dB:ratio=3:attack=6:release=140:makeup=2,"
+             "alimiter=limit=0.95")
+
+    # Two-pass loudness. One pass guesses and undershoots — the old chain
+    # aimed at -15 LUFS and landed at -17.1. Measuring first hits the target.
+    ln = "loudnorm=I=-15:TP=-1.2:LRA=9"
+    try:
+        m = subprocess.run(
+            ["ffmpeg", "-v", "info", "-i", str(enh),
+             "-af", "loudnorm=I=-15:TP=-1.2:LRA=9:print_format=json", "-f", "null", "-"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace").stderr
+        blob = json.loads(m[m.rfind("{"): m.rfind("}") + 1])
+        ln = (f"loudnorm=I=-15:TP=-1.2:LRA=9:measured_I={blob['input_i']}:"
+              f"measured_TP={blob['input_tp']}:measured_LRA={blob['input_lra']}:"
+              f"measured_thresh={blob['input_thresh']}:"
+              f"offset={blob['target_offset']}:linear=true")
+        measured = blob["input_i"]
+    except Exception as e:
+        measured = f"measure failed ({e}); single pass"
+
+    run(["ffmpeg", "-v", "error", "-i", str(enh), "-af", f"{chain},{ln}",
          "-ar", "48000", "-y", str(pol)])
-    print(f"audio: deepfilter={'modal' if ok else 'SKIPPED (raw)'} + compressor + loudnorm")
+    print(f"audio: deepfilter={'modal' if ok else 'SKIPPED (raw)'} + voice EQ + de-ess "
+          f"+ two-pass loudness (input {measured} LUFS)")
     return pol
 
 
