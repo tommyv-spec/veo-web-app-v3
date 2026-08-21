@@ -1647,6 +1647,10 @@ class ChooseVariantRequest(BaseModel):
     variant_id: int
 
 
+class NodeQCRequest(BaseModel):
+    report: Dict[str, Any]
+
+
 # =============================================================================
 # Worker bridge (watch folder)
 # =============================================================================
@@ -3526,6 +3530,13 @@ def choose_variant(
     if not variant:
         raise HTTPException(404, "Variant not found on this node")
     node.chosen_variant_id = variant.id
+    # v936 [TEMP-DIAG] shadow-mode agreement: did the operator pick what QC
+    # recommended? Read via: python code/render_logs.py --text qc-shadow
+    qc = _safe_qc(node.qc_json, node_id=node.id)
+    if qc and qc.get("recommended_variant_id"):
+        agree = (qc["recommended_variant_id"] == variant.id)
+        log.info(f"[image_platform] [qc-shadow] node {node_id} operator={variant.id} "
+                 f"qc={qc['recommended_variant_id']} agree={agree}")
     if node.status != "ready":
         node.status = "ready"
     node.updated_at = datetime.utcnow()
@@ -3539,6 +3550,42 @@ def choose_variant(
 
     db.refresh(node)
     return node.to_dict()
+
+
+@router.post("/nodes/{node_id}/qc")
+def set_node_qc(
+    node_id: int,
+    req: NodeQCRequest,
+    db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v936 — store the shadow-mode QC report for a node.
+
+    Written by code/image_qc.py from the operator's box. Never chooses a
+    variant (v886.3): purely additive metadata for the review UI + the
+    agreement report. Overwrites any previous report (latest scoring wins —
+    a regenerated node gets rescored)."""
+    node = db.query(ImageNode).filter(
+        ImageNode.id == node_id,
+        ImageNode.user_id == current_user.id,
+    ).first()
+    if not node:
+        raise HTTPException(404, "Node not found")
+    rep = req.report or {}
+    if rep.get("version") != 1:
+        raise HTTPException(422, "qc report must carry version: 1")
+    rec = rep.get("recommended_variant_id")
+    if rec is not None:
+        owned = db.query(ImageVariant).filter(
+            ImageVariant.id == rec, ImageVariant.node_id == node_id).first()
+        if not owned:
+            raise HTTPException(422, "recommended_variant_id not on this node")
+    node.qc_json = json.dumps(rep)
+    node.updated_at = datetime.utcnow()
+    db.commit()
+    log.info(f"[image_platform] [qc] node {node_id} scored: recommended={rec} "
+             f"skipped={rep.get('skipped_checks')}")
+    return {"ok": True, "node_id": node_id}
 
 
 # ---- uploads (seed nodes) ------------------------------------------------
