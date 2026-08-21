@@ -339,6 +339,14 @@ def build_judge_prompt(spec: str) -> str:
     separately, asked BEFORE the leave-alone clause (a model reads these in
     order), and the clause carves text out of itself explicitly. A wrong
     brand name is never a nitpick.
+
+    text_errors is the SINGLE home for that defect, and item 2 no longer
+    offers a second one. `artifacts` used to invite "garbled or misspelled
+    rendered text" while sitting OUTSIDE the forced-fail chain, so the same
+    AORELLA finding parsed back to PASS purely on where the model chose to
+    file it. Two homes for one defect left the routing to the model's
+    judgement, which is exactly what this design removes everywhere else —
+    hence the explicit "never in artifacts" routing line.
     """
     return (
         "You are a strict production QC judge for an AI-generated ad image.\n"
@@ -350,7 +358,7 @@ def build_judge_prompt(spec: str) -> str:
         "1. element_misses: every element the SPEC names that is missing, "
         "wrong, or replaced (prop, pose, wardrobe, setting, on-image text).\n"
         "2. artifacts: malformed hands or fingers, warped limbs or faces, "
-        "garbled or misspelled rendered text, impossible object geometry.\n"
+        "impossible object geometry.\n"
         "3. compliance: report if the image shows " + COMPLIANCE_BANS + ", or "
         + MINOR_BAN + ". Report only what is clearly and unambiguously "
         "visible; if you are unsure, do not report it.\n"
@@ -360,7 +368,9 @@ def build_judge_prompt(spec: str) -> str:
         "or different from what the SPEC says it should say. A brand or "
         "product name that is wrong by even one character is always a defect, "
         "never a minor issue - report it here regardless of how small it "
-        "looks.\n"
+        "looks. ANY defect in rendered text belongs in text_errors and never "
+        "in artifacts, however it looks to you: put it here even when it "
+        "reads like a rendering glitch rather than a spelling mistake.\n"
         "5. overall: 0-10 for how well the image fulfils the SPEC (10 = every "
         "element present, clean, subject not cropped or obstructed).\n"
         "Ignore interpretation rather than error: exact colour shade, crop or "
@@ -545,6 +555,7 @@ CONF_CONFIRMED = "confirmed"        # pass 2 kept pass 1's order
 CONF_TIED = "tied"                  # pass 2 flipped it, or scored them equal
 CONF_UNVERIFIED = "unverified"      # a pass-2 call produced no answer
 CONF_NONE_HEALTHY = "none_healthy"  # nothing was worth recommending
+CONF_SECOND_REJECTED = "second_rejected"   # pass 2 FAILED the pass-1 winner
 
 # The ONLY two states that may carry a recommendation. Kept as a constant so
 # `compose_report`'s gate and any future reader agree by construction rather
@@ -579,20 +590,28 @@ def classify_confidence(first_a: Optional[Dict[str, Any]],
     None when every attempt failed, and there simply may not BE a second
     candidate.
 
-    The five answers, in the order they are decided:
-      sole         — no second candidate existed. Recommend A; the healthy
-                     gate already vouched for it and there was never a
-                     comparison to get wrong. Costs zero extra calls.
-      confirmed    — A scored strictly higher in BOTH passes. The only state
-                     that earns a recommendation off a comparison.
-      tied         — pass 2 flipped the order, or either pass scored them
-                     equal. Recommend NOTHING.
-      unverified   — a pass-2 call produced no answer. Recommend NOTHING, and
-                     stay distinct from `tied`: an outage is not the judge
-                     contradicting itself, and merging the two would slowly
-                     libel it. Same distinction the retired
-                     PAIRWISE_CALL_FAILED drew.
-      none_healthy — there was no candidate at all.
+    The six answers, IN THE ORDER THEY ARE DECIDED (the order is part of the
+    contract — see `second_rejected` and the pass-1 short circuit):
+      none_healthy    — there was no candidate at all.
+      sole            — no second candidate existed. Recommend A; the healthy
+                        gate already vouched for it and there was never a
+                        comparison to get wrong. Costs zero extra calls.
+      tied (pass 1)   — pass 1 did not separate the pair, so pass 2 cannot
+                        change the answer. Decided BEFORE the pass-2 arguments
+                        are read, which is what lets `score_node` skip both
+                        calls; `second_*` are expected to be None here.
+      unverified      — a pass-2 call produced no answer. Recommend NOTHING,
+                        and stay distinct from `tied`: an outage is not the
+                        judge contradicting itself, and merging the two would
+                        slowly libel it. Same distinction the retired
+                        PAIRWISE_CALL_FAILED drew.
+      second_rejected — pass 2 FAILED the variant we were about to recommend.
+                        Outranks the score comparison on purpose: verdicts
+                        reproduce, scores do not.
+      confirmed       — A scored strictly higher in BOTH passes and pass 2 did
+                        not fail it. The only state that earns a
+                        recommendation off a comparison.
+      tied (pass 2)   — pass 2 flipped the order or scored them equal.
 
     This function is A-ORIENTED, and that is the load-bearing detail.
     `compose_report` recommends `ranked[0]`, which IS A, so "confirmed" has
@@ -607,11 +626,31 @@ def classify_confidence(first_a: Optional[Dict[str, Any]],
         return CONF_NONE_HEALTHY
     if first_b is None:
         return CONF_SOLE
+    # Decided BEFORE pass 2 is even looked at, so the caller may skip both
+    # pass-2 calls when pass 1 did not separate the pair. Nothing pass 2 could
+    # say changes this answer, and the compressed 5-7 score band makes an
+    # equal pair common rather than exceptional — buying 2 calls to confirm a
+    # verdict that cannot move is pure spend.
+    if not _judge_overall(first_a) > _judge_overall(first_b):
+        return CONF_TIED
     if second_a is None or second_b is None:
         return CONF_UNVERIFIED
-    led_pass_1 = _judge_overall(first_a) > _judge_overall(first_b)
-    led_pass_2 = _judge_overall(second_a) > _judge_overall(second_b)
-    return CONF_CONFIRMED if (led_pass_1 and led_pass_2) else CONF_TIED
+    # The VERDICT outranks the score comparison, and this order is the whole
+    # point. Gross defects reproduce (a six-finger hand 3/3, a misspelled
+    # label 3/3) where scores reproduce only at r=0.69 — so "pass 2 says this
+    # variant is broken" is the most trustworthy bit the stage produces, and
+    # a score ordering that survived cannot outvote it. Without this a report
+    # would recommend a variant while carrying `verify: {"verdict": "fail"}`
+    # on that same variant, which is the shape of a compliance or v808 hit
+    # that only the second look caught.
+    #
+    # Only A's verdict gates the recommendation, because A is the variant the
+    # report would name. B failing pass 2 does not weaken A.
+    if str((second_a or {}).get("verdict", "")).strip().lower() == "fail":
+        return CONF_SECOND_REJECTED
+    if _judge_overall(second_a) > _judge_overall(second_b):
+        return CONF_CONFIRMED
+    return CONF_TIED
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1111,18 +1150,34 @@ def agreement_stats(nodes: Iterable[Any]) -> Dict[str, Any]:
       * scored             — nodes carrying a report at all. Tells "nothing has
                              been scored yet" apart from "scored, never
                              comparable".
-      * comparable         — BOTH sides named a variant. Only these can agree
-                             or disagree. Since v936.1 only a `confirmed` or
-                             `sole` node can name one, so this counts the
-                             nodes the judge actually COMMITTED to.
+      * comparable         — BOTH sides named a variant AND the report's
+                             confidence explains why. `confirmed + sole` by
+                             construction; the headline denominator.
       * agree              — of those, the same variant.
+      * confirmed / sole   — `comparable` split, because the two are NOT the
+                             same evidence. A `sole` node bought ZERO
+                             verification: there was one candidate and the
+                             operator will nearly always pick the only thing on
+                             offer, so folding it in inflates the very number
+                             that is supposed to prove the second opinion
+                             works. `confirmed` is the bucket that validates
+                             the stage; read it first.
+      * legacy             — a recommendation this metric cannot attribute to
+                             a verified state: a pre-v936.1 report (no
+                             `confidence` key), or one whose recommendation
+                             contradicts its own confidence. EXCLUDED from the
+                             headline — those picks came from the coin-flip
+                             judge v936.1 replaced, and counting them would
+                             measure the old stage and call it evidence for
+                             the new one.
       * tied               — the report said "I looked twice and could not
-                             separate the top two" (CONF_TIED) or "I could not
-                             complete the second look" (CONF_UNVERIFIED).
+                             separate the top two" (CONF_TIED), "I could not
+                             complete the second look" (CONF_UNVERIFIED), or
+                             "the second look FAILED my own winner"
+                             (CONF_SECOND_REJECTED).
       * no_recommendation  — the report said "none of these is good enough"
-                             (CONF_NONE_HEALTHY), plus legacy reports written
-                             before v936.1, which carry no `confidence` key
-                             and cannot be sorted more finely than this.
+                             (CONF_NONE_HEALTHY), plus pre-v936.1 reports that
+                             recommended nothing.
 
     Splitting `tied` out of `no_recommendation` is the honesty fix. They are
     two different silences: `tied` is a statement about the JUDGE (it could
@@ -1142,7 +1197,10 @@ def agreement_stats(nodes: Iterable[Any]) -> Dict[str, Any]:
     tolerant producer can carry '5' where the node carries 5, and a string
     comparison would score a real agreement as a disagreement.
     """
-    scored = comparable = agree = tied = no_recommendation = 0
+    scored = tied = no_recommendation = 0
+    # (count, agree) per bucket. `confirmed` and `sole` add up to the headline;
+    # `legacy` is deliberately outside it.
+    buckets = {CONF_CONFIRMED: [0, 0], CONF_SOLE: [0, 0], "legacy": [0, 0]}
     for node in nodes or []:
         if not isinstance(node, dict):
             continue
@@ -1151,13 +1209,14 @@ def agreement_stats(nodes: Iterable[Any]) -> Dict[str, Any]:
             continue
         scored += 1
         chosen, rec = node.get("chosen_variant_id"), qc.get("recommended_variant_id")
+        confidence = qc.get("confidence")
         if not chosen:
             continue
         if not rec:
             # An ABSENT confidence key is a pre-v936.1 report, not a claim of
             # tiedness — it falls to no_recommendation, which is where those
             # reports have always been counted.
-            if qc.get("confidence") in (CONF_TIED, CONF_UNVERIFIED):
+            if confidence in (CONF_TIED, CONF_UNVERIFIED, CONF_SECOND_REJECTED):
                 tied += 1
             else:
                 no_recommendation += 1
@@ -1169,12 +1228,31 @@ def agreement_stats(nodes: Iterable[Any]) -> Dict[str, Any]:
             # disagreement either; it is an unreadable report. Skipped rather
             # than raised: this runs over a whole batch's history.
             continue
-        comparable += 1
-        agree += 1 if same else 0
+        # Bucket by the confidence that PRODUCED the recommendation. Anything
+        # that is not a v936.1 verified state lands in `legacy`: a pre-v936.1
+        # report (no key), or a report whose recommendation contradicts its own
+        # confidence (hand-edited or corrupt — our producer's gate forbids it).
+        # Both would otherwise measure the OLD coin-flip stage and be read as
+        # evidence for the new one.
+        key = confidence if confidence in CONF_RECOMMENDABLE else "legacy"
+        buckets[key][0] += 1
+        buckets[key][1] += 1 if same else 0
+
+    confirmed, confirmed_agree = buckets[CONF_CONFIRMED]
+    sole, sole_agree = buckets[CONF_SOLE]
+    legacy, legacy_agree = buckets["legacy"]
+    comparable = confirmed + sole
+    agree = confirmed_agree + sole_agree
     return {
         "scored": scored,
         "comparable": comparable,
         "agree": agree,
+        "confirmed": confirmed,
+        "confirmed_agree": confirmed_agree,
+        "sole": sole,
+        "sole_agree": sole_agree,
+        "legacy": legacy,
+        "legacy_agree": legacy_agree,
         "tied": tied,
         "no_recommendation": no_recommendation,
         "agreement_pct": (round(100.0 * agree / comparable, 1)
@@ -1675,9 +1753,13 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
     at ~2 MB — deliberately not engineered around.
 
     Call budget per node is V + 2 (V pass-1 judgements, plus 2 second
-    opinions), which is exactly what the retired pairwise stage cost. A node
-    with fewer than 2 healthy variants spends V flat: there is nothing to
-    compare.
+    opinions), which is exactly what the retired pairwise stage cost. Two
+    branches spend V flat instead, because in both there is nothing a second
+    opinion could decide:
+      * fewer than 2 healthy variants — nothing to compare;
+      * pass 1 did not SEPARATE the top two (equal scores, or the ranker's
+        tiebreak did the ordering) — the answer is already `tied`, and the
+        compressed 5-7 score band makes this common rather than rare.
     """
     node_id = node.get("id")
     prompt = (node.get("prompt") or "").strip()
@@ -1750,7 +1832,14 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
     first_a = healthy[0]["judge"] if healthy else None
     first_b = healthy[1]["judge"] if len(healthy) >= 2 else None
     second_a = second_b = None
-    if judge_on and len(healthy) >= 2:
+    # Pass 1 has to SEPARATE the pair before a second opinion is worth buying.
+    # If it did not, `classify_confidence` answers `tied` on pass 1 alone and
+    # nothing pass 2 could say would move it — so the 2 calls are skipped
+    # outright. Not a micro-optimisation: scores sit compressed in a 5-7 band,
+    # so an equal top pair is the common case and this is real money.
+    separated = (len(healthy) >= 2
+                 and _judge_overall(first_a) > _judge_overall(first_b))
+    if judge_on and separated:
         seconds: List[Optional[Dict[str, Any]]] = []
         for row in healthy[:2]:
             img = variant_bytes.get(row["variant_id"])
@@ -1929,14 +2018,19 @@ def _run_report(session: Any, base: str, args: Any) -> int:
     scope = f"batch {args.batch}" if args.batch else f"last {args.since_days} days"
     pct = "n/a" if stats["agreement_pct"] is None else f"{stats['agreement_pct']}%"
     print(f"[qc] {scope}: {stats['scored']} scored node(s)", flush=True)
-    # All five counters, because the three silences mean different things and
-    # the operator reads this line to decide whether to trust the judge:
-    # agreement is measured only over nodes it committed to, ties say it
-    # looked twice and could not separate the top two, and none-good says the
-    # renders were the problem.
+    # Every bucket, because they mean different things and the operator reads
+    # this line to decide whether to trust the judge. The headline is split on
+    # the next line: `confirmed` is the only bucket that bought verification,
+    # `sole` had one candidate to begin with, and `legacy` sits outside the
+    # percentage because those picks came from the stage v936.1 replaced.
     print(f"shadow agreement: {stats['agree']}/{stats['comparable']} ({pct}) "
           f"| tied-or-unverified: {stats['tied']} "
           f"| none-good: {stats['no_recommendation']}", flush=True)
+    print(f"  of that: confirmed: {stats['confirmed_agree']}/"
+          f"{stats['confirmed']} (the verified bucket) "
+          f"| sole (unverified): {stats['sole_agree']}/{stats['sole']} "
+          f"| legacy (pre-v936.1, excluded): {stats['legacy_agree']}/"
+          f"{stats['legacy']}", flush=True)
     return EXIT_OK
 
 

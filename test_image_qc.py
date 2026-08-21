@@ -15,7 +15,7 @@ from image_qc import (analyze_integrity, build_judge_prompt, parse_judge_reply,
                       PAIRWISE_CALL_FAILED,
                       classify_confidence, CONF_SOLE, CONF_CONFIRMED,
                       CONF_TIED, CONF_UNVERIFIED, CONF_NONE_HEALTHY,
-                      CONF_RECOMMENDABLE,
+                      CONF_SECOND_REJECTED, CONF_RECOMMENDABLE,
                       face_similarity, load_embedder, InsightFaceEmbedder,
                       rank_variants, compose_report, RANK_FACE_SIM_FLOOR,
                       agreement_stats, fit_report, pick_scorable_nodes,
@@ -387,6 +387,27 @@ def test_judge_prompt_asks_for_text_errors_above_the_leave_alone_clause():
     assert "character by character" in low
     # the schema hint has to advertise the key or the model never emits it
     assert p.count("text_errors") >= 2
+
+
+def test_judge_prompt_does_not_offer_artifacts_as_a_home_for_text_defects():
+    """Asserted against the RENDERED prompt, not the source string. Change B
+    added text_errors without closing the old door: item 2 still invited
+    'garbled or misspelled rendered text' into `artifacts`, and artifacts is
+    NOT in the forced-fail chain — so the AORELLA defect filed there parses
+    straight back to PASS. Two homes for one defect left the routing to the
+    model, which is the judgement call this design removes everywhere else."""
+    p = build_judge_prompt("A woman holds a KORELLA saffron bottle.")
+    item_2 = [ln for ln in p.split("\n") if ln.strip().startswith("2.")][0]
+    assert "text" not in item_2.lower(), item_2
+
+
+def test_judge_prompt_routes_every_text_defect_to_text_errors():
+    """One home, stated explicitly, so a model that spots a misspelling
+    cannot file it somewhere the forced-fail chain does not read."""
+    low = build_judge_prompt("A woman holds a KORELLA saffron bottle.").lower()
+    assert "never in artifacts" in low
+    routing = low[low.index("never in artifacts") - 300:]
+    assert "text_errors" in routing
 
 
 def test_judge_prompt_exempts_rendered_text_from_the_leave_alone_clause():
@@ -888,6 +909,37 @@ def _judged(overall, verdict="pass"):
             "reasons": []}
 
 
+def test_confidence_second_rejected_when_pass_two_fails_the_winner():
+    """The verdict is the most trustworthy bit in the whole stage — gross
+    defects reproduce 3/3 where scores reproduce at r=0.69 — so pass 2 saying
+    'fail' about the variant we are about to recommend outranks any score
+    comparison. Discarding it was the bug: the report would recommend a
+    variant while carrying verify.verdict == 'fail' on that same variant."""
+    # score order UNCHANGED (A still leads both passes) — only the verdict moved
+    assert classify_confidence(_judged(9), _judged(6),
+                               _judged(9, "fail"), _judged(5)
+                               ) == CONF_SECOND_REJECTED
+    # and it outranks the confirmed branch even on a wide winning margin
+    assert classify_confidence(_judged(10), _judged(1),
+                               _judged(10, "fail"), _judged(1)
+                               ) == CONF_SECOND_REJECTED
+
+
+def test_confidence_second_rejected_is_never_recommendable():
+    """A compliance / v808 / text_errors hit that only pass 2 caught must not
+    reach the operator as a recommendation."""
+    assert CONF_SECOND_REJECTED not in CONF_RECOMMENDABLE
+
+
+def test_confidence_ignores_the_runner_ups_pass_two_verdict():
+    """Only A's verdict gates the recommendation, because A is the variant
+    the report would name. B failing pass 2 does not weaken A — if anything
+    it strengthens it, so `confirmed` must survive."""
+    assert classify_confidence(_judged(9), _judged(6),
+                               _judged(8), _judged(5, "fail")
+                               ) == CONF_CONFIRMED
+
+
 def test_confidence_none_healthy_when_there_is_no_first_candidate():
     """Zero healthy variants: there is no winner to confirm and nothing to
     recommend. Distinct from 'tied' — nothing was comparable in the first
@@ -963,11 +1015,32 @@ def test_confidence_survives_a_degraded_judge_dict():
                                {}, _judged("junk")) == CONF_TIED
 
 
+def test_confidence_pass_one_tie_short_circuits_before_pass_two():
+    """A pass-1 tie is decided by pass 1 alone, so the answer must not depend
+    on pass 2 having been called at all. This is what lets score_node skip
+    both calls: `tied` regardless, with second_a/second_b absent."""
+    assert classify_confidence(_judged(7), _judged(7), None, None) == CONF_TIED
+    assert classify_confidence(_judged(4), _judged(9), None, None) == CONF_TIED
+    # ...and it does not become `unverified` just because pass 2 is missing
+    assert classify_confidence(_judged(7), _judged(7),
+                               None, None) != CONF_UNVERIFIED
+
+
+def test_judge_overall_missing_score_sentinel_is_below_a_real_zero():
+    """Pins the -1 sentinel in _judge_overall. A real 0 is a measurement and
+    an unreadable judge is not, so 0 must outrank 'no answer'. Mutating the
+    sentinel to 0 flips this to `tied` and is otherwise invisible."""
+    assert image_qc._judge_overall({}) == -1
+    assert image_qc._judge_overall({"overall": 0}) == 0
+    assert classify_confidence(_judged(0), {}, _judged(0), {}) == CONF_CONFIRMED
+
+
 def test_only_confirmed_and_sole_are_recommendable():
-    """The whole point of Change C: three of the five states must never
+    """The whole point of Change C: four of the six states must never
     produce a recommended_variant_id."""
     assert set(CONF_RECOMMENDABLE) == {CONF_CONFIRMED, CONF_SOLE}
-    for refused in (CONF_TIED, CONF_UNVERIFIED, CONF_NONE_HEALTHY):
+    for refused in (CONF_TIED, CONF_UNVERIFIED, CONF_NONE_HEALTHY,
+                    CONF_SECOND_REJECTED):
         assert refused not in CONF_RECOMMENDABLE
 
 
@@ -1174,7 +1247,8 @@ def test_compose_report_refuses_to_recommend_on_an_unconfident_verdict():
     ranked = rank_variants([_v(1, overall=9), _v(2, overall=8)])
     # the top row passes every health axis — health is NOT what is refusing
     assert all(image_qc._healthy_axes(ranked[0]))
-    for refused in (CONF_TIED, CONF_UNVERIFIED, CONF_NONE_HEALTHY):
+    for refused in (CONF_TIED, CONF_UNVERIFIED, CONF_NONE_HEALTHY,
+                    CONF_SECOND_REJECTED):
         rep = compose_report(ranked, skipped=[], confidence=refused)
         assert rep["recommended_variant_id"] is None, refused
         assert rep["confidence"] == refused
@@ -1257,10 +1331,14 @@ def test_compose_report_round_trips_through_json():
 
 def test_agreement_stats():
     nodes = [
-        {"chosen_variant_id": 5, "qc": {"recommended_variant_id": 5}},
-        {"chosen_variant_id": 6, "qc": {"recommended_variant_id": 7}},
-        {"chosen_variant_id": 8, "qc": {"recommended_variant_id": None}},
-        {"chosen_variant_id": None, "qc": {"recommended_variant_id": 9}},
+        {"chosen_variant_id": 5, "qc": {"recommended_variant_id": 5,
+                                        "confidence": CONF_CONFIRMED}},
+        {"chosen_variant_id": 6, "qc": {"recommended_variant_id": 7,
+                                        "confidence": CONF_CONFIRMED}},
+        {"chosen_variant_id": 8, "qc": {"recommended_variant_id": None,
+                                        "confidence": CONF_NONE_HEALTHY}},
+        {"chosen_variant_id": None, "qc": {"recommended_variant_id": 9,
+                                           "confidence": CONF_CONFIRMED}},
         {"chosen_variant_id": 3, "qc": None},
     ]
     s = agreement_stats(nodes)
@@ -1282,49 +1360,78 @@ def test_agreement_stats_counts_tied_apart_from_none_healthy():
                                         "confidence": CONF_TIED}},
         {"chosen_variant_id": 2, "qc": {"recommended_variant_id": None,
                                         "confidence": CONF_UNVERIFIED}},
+        {"chosen_variant_id": 5, "qc": {"recommended_variant_id": None,
+                                        "confidence": CONF_SECOND_REJECTED}},
         {"chosen_variant_id": 3, "qc": {"recommended_variant_id": None,
                                         "confidence": CONF_NONE_HEALTHY}},
         {"chosen_variant_id": 4, "qc": {"recommended_variant_id": 4,
                                         "confidence": CONF_CONFIRMED}},
     ])
-    assert s["tied"] == 2                 # tied + unverified
+    assert s["tied"] == 3                 # tied + unverified + second_rejected
     assert s["no_recommendation"] == 1    # none_healthy only
     assert s["comparable"] == 1 and s["agree"] == 1
-    assert s["scored"] == 4
+    assert s["scored"] == 5
 
 
-def test_agreement_stats_comparable_only_counts_confident_nodes():
-    """Only 'confirmed' and 'sole' can carry a recommendation, so the
-    agreement percentage is now computed over the nodes the judge actually
-    committed to — which is the point of the redesign. A 4-node batch where
-    the judge committed once is 100% of one, not 25% of four."""
+def test_agreement_stats_splits_confirmed_from_sole():
+    """A `sole` node bought ZERO verification — there was one candidate and
+    the operator will nearly always pick the only thing on offer, so folding
+    it in with `confirmed` inflates the number that is supposed to prove the
+    second opinion works. Reported separately; `confirmed` is the bucket that
+    actually validates the stage."""
     s = agreement_stats([
-        {"chosen_variant_id": 9, "qc": {"recommended_variant_id": 9,
+        {"chosen_variant_id": 1, "qc": {"recommended_variant_id": 1,
+                                        "confidence": CONF_CONFIRMED}},
+        {"chosen_variant_id": 2, "qc": {"recommended_variant_id": 3,
+                                        "confidence": CONF_CONFIRMED}},
+        {"chosen_variant_id": 4, "qc": {"recommended_variant_id": 4,
                                         "confidence": CONF_SOLE}},
-        {"chosen_variant_id": 8, "qc": {"recommended_variant_id": None,
-                                        "confidence": CONF_TIED}},
-        {"chosen_variant_id": 7, "qc": {"recommended_variant_id": None,
-                                        "confidence": CONF_TIED}},
-        {"chosen_variant_id": 6, "qc": {"recommended_variant_id": None,
-                                        "confidence": CONF_TIED}},
     ])
-    assert s["comparable"] == 1 and s["agree"] == 1
-    assert s["agreement_pct"] == 100.0
-    assert s["tied"] == 3
+    assert (s["confirmed"], s["confirmed_agree"]) == (2, 1)
+    assert (s["sole"], s["sole_agree"]) == (1, 1)
+    # the headline still spans both, and the buckets must add up to it
+    assert s["comparable"] == 3 and s["agree"] == 2
+    assert s["confirmed"] + s["sole"] == s["comparable"]
 
 
-def test_agreement_stats_legacy_reports_without_confidence_stay_readable():
-    """Reports written before v936.1 carry no `confidence` key at all. They
-    must not crash the metric and must not be counted as ties — an absent
-    key is not a claim of tiedness."""
+def test_agreement_stats_excludes_legacy_reports_from_the_headline():
+    """Reports written before v936.1 carry no `confidence` key, so their
+    recommendation came from the coin-flip judge this change replaced.
+    Counting them in the headline would measure the OLD stage and call it
+    evidence for the new one."""
     s = agreement_stats([
-        {"chosen_variant_id": 1, "qc": {"recommended_variant_id": None}},
         {"chosen_variant_id": 2, "qc": {"recommended_variant_id": 2,
                                         "pairwise_reason": "consistent"}},
+        {"chosen_variant_id": 5, "qc": {"recommended_variant_id": 9}},
+        {"chosen_variant_id": 7, "qc": {"recommended_variant_id": 7,
+                                        "confidence": CONF_CONFIRMED}},
     ])
-    assert s["tied"] == 0
-    assert s["no_recommendation"] == 1
-    assert s["comparable"] == 1 and s["agree"] == 1
+    assert (s["legacy"], s["legacy_agree"]) == (2, 1)
+    assert s["comparable"] == 1 and s["agree"] == 1     # the v936.1 node only
+    assert s["agreement_pct"] == 100.0
+    assert s["scored"] == 3
+
+
+def test_agreement_stats_legacy_null_recommendation_is_not_a_tie():
+    """An absent confidence key is not a claim of tiedness — a pre-v936.1
+    report that recommended nothing lands in no_recommendation, where those
+    reports have always been counted."""
+    s = agreement_stats([{"chosen_variant_id": 1,
+                          "qc": {"recommended_variant_id": None}}])
+    assert s["tied"] == 0 and s["no_recommendation"] == 1
+
+
+def test_agreement_stats_a_recommendation_that_contradicts_its_confidence():
+    """Our producer cannot emit this (the gate forbids it), but a hand-edited
+    or corrupted report can. It must never reach the headline: we cannot
+    attribute it to a verified state, so it is bucketed with legacy rather
+    than silently strengthening the number."""
+    s = agreement_stats([
+        {"chosen_variant_id": 3, "qc": {"recommended_variant_id": 3,
+                                        "confidence": CONF_TIED}},
+    ])
+    assert s["comparable"] == 0
+    assert s["legacy"] == 1
 
 
 def test_agreement_stats_counts_scored_and_percent():
@@ -1334,8 +1441,11 @@ def test_agreement_stats_counts_scored_and_percent():
     comparable — a 0% agreement claim off zero samples would be a lie."""
     empty = agreement_stats([{"chosen_variant_id": 1, "qc": None}])
     assert empty["scored"] == 0 and empty["agreement_pct"] is None
-    both = agreement_stats([{"chosen_variant_id": 4, "qc": {"recommended_variant_id": 4}},
-                            {"chosen_variant_id": 4, "qc": {"recommended_variant_id": 5}}])
+    both = agreement_stats([
+        {"chosen_variant_id": 4, "qc": {"recommended_variant_id": 4,
+                                        "confidence": CONF_CONFIRMED}},
+        {"chosen_variant_id": 4, "qc": {"recommended_variant_id": 5,
+                                        "confidence": CONF_CONFIRMED}}])
     assert both["scored"] == 2 and both["agreement_pct"] == 50.0
 
 
@@ -1344,12 +1454,16 @@ def test_agreement_stats_tolerates_digit_strings_and_junk():
     written by an older producer can carry one. Comparing '5' to 5 as strings
     would score a real agreement as a disagreement."""
     s = agreement_stats([
-        {"chosen_variant_id": 5, "qc": {"recommended_variant_id": "5"}},
-        {"chosen_variant_id": 6, "qc": {"recommended_variant_id": "not a number"}},
+        {"chosen_variant_id": 5, "qc": {"recommended_variant_id": "5",
+                                        "confidence": CONF_CONFIRMED}},
+        {"chosen_variant_id": 6, "qc": {"recommended_variant_id": "not a number",
+                                        "confidence": CONF_CONFIRMED}},
         {"chosen_variant_id": 7, "qc": "a string report"},
         "not a node",
     ])
     assert s["comparable"] == 1 and s["agree"] == 1
+    # the coercion has to work inside the bucket too, not just in the total
+    assert (s["confirmed"], s["confirmed_agree"]) == (1, 1)
 
 
 # ---- fit_report -----------------------------------------------------------
@@ -1785,14 +1899,40 @@ def test_score_node_refuses_to_recommend_when_pass_two_flips_the_winner():
     assert len(client.calls) == 4         # still V + 2
 
 
-def test_score_node_refuses_to_recommend_when_the_scores_are_equal():
-    """Scores sit compressed in a 5-7 band, so 'both an 8' is the common
-    case. Equal has not separated anything, and the variant_id tiebreak that
-    would otherwise decide it is not evidence."""
-    client = _ScriptedClient([_reply(8), _reply(8), _reply(7), _reply(7)])
+def test_score_node_skips_pass_two_entirely_when_pass_one_did_not_separate():
+    """Real money. Scores sit compressed in a 5-7 band, so 'both an 8' is the
+    common case, not an edge case — and a pass-1 tie is already `tied` no
+    matter what pass 2 says. Buying two calls to confirm a verdict that
+    cannot change is pure spend, so the stage is skipped: V calls, not V + 2.
+
+    The client is scripted with ONLY the two pass-1 replies, so a regression
+    that re-enables the calls raises IndexError off the empty queue rather
+    than failing some soft assertion."""
+    client = _ScriptedClient([_reply(8), _reply(8)])
     report = _score(client, n=2)
     assert report["confidence"] == CONF_TIED
     assert report["recommended_variant_id"] is None
+    assert len(client.calls) == 2         # V + 0, NOT V + 2
+    # nothing was re-judged, so nothing may claim it was
+    assert report["variants"]["1"]["verify"] is None
+    assert report["variants"]["2"]["verify"] is None
+
+
+def test_score_node_refuses_to_recommend_when_pass_two_fails_the_winner():
+    """C1 end to end. Pass 2 finds a compliance hit on the top variant that
+    pass 1 missed. The score order is unchanged, so the old code called this
+    `confirmed` and recommended a variant whose own stored verify said
+    'fail'."""
+    client = _ScriptedClient([
+        _reply(9), _reply(6),                                   # pass 1
+        _reply(9, verdict="fail", compliance=["lab coat"]),     # pass 2, v1
+        _reply(5),                                              # pass 2, v2
+    ])
+    report = _score(client, n=2)
+    assert report["confidence"] == CONF_SECOND_REJECTED
+    assert report["recommended_variant_id"] is None
+    # the evidence is stored, and it agrees with the refusal
+    assert report["variants"]["1"]["verify"]["verdict"] == "fail"
 
 
 def test_score_node_degrades_to_unverified_when_a_second_call_dies(monkeypatch):
@@ -1974,22 +2114,30 @@ def test_run_report_prints_tied_apart_from_none_good(monkeypatch, capsys):
     _stub_nodes(monkeypatch, [
         {"chosen_variant_id": 1, "qc": {"recommended_variant_id": 1,
                                         "confidence": CONF_CONFIRMED}},
+        {"chosen_variant_id": 4, "qc": {"recommended_variant_id": 4,
+                                        "confidence": CONF_SOLE}},
         {"chosen_variant_id": 2, "qc": {"recommended_variant_id": None,
                                         "confidence": CONF_TIED}},
         {"chosen_variant_id": 3, "qc": {"recommended_variant_id": None,
                                         "confidence": CONF_NONE_HEALTHY}},
+        {"chosen_variant_id": 5, "qc": {"recommended_variant_id": 5}},
     ])
     assert image_qc._run_report(_StubSession(), "https://k.com",
                                 _batch_args(report=True)) == EXIT_OK
     out = capsys.readouterr().out
-    assert "3 scored node(s)" in out
-    assert "1/1 (100.0%)" in out
+    assert "5 scored node(s)" in out
+    assert "2/2 (100.0%)" in out
+    # the two headline buckets are broken out, because only one of them
+    # actually bought verification
+    assert "confirmed: 1/1" in out
+    assert "sole (unverified): 1/1" in out
     assert "tied-or-unverified: 1" in out
     assert "none-good: 1" in out
+    assert "legacy (pre-v936.1, excluded): 1/1" in out
 
 
 def test_run_report_json_carries_every_counter(monkeypatch, capsys):
-    """--json is what a script reads, so the new counter has to be in the
+    """--json is what a script reads, so every counter has to be in the
     payload and not only in the prose line."""
     _stub_nodes(monkeypatch, [
         {"chosen_variant_id": 2, "qc": {"recommended_variant_id": None,
@@ -2001,8 +2149,11 @@ def test_run_report_json_carries_every_counter(monkeypatch, capsys):
     assert payload["tied"] == 1
     assert payload["no_recommendation"] == 0
     assert payload["agreement_pct"] is None
-    assert set(payload) == {"scored", "comparable", "agree", "tied",
-                            "no_recommendation", "agreement_pct"}
+    assert set(payload) == {"scored", "comparable", "agree", "agreement_pct",
+                            "confirmed", "confirmed_agree",
+                            "sole", "sole_agree",
+                            "legacy", "legacy_agree",
+                            "tied", "no_recommendation"}
 
 
 # ---- argparse validation + auth exit code ---------------------------------
@@ -2049,7 +2200,8 @@ def test_main_returns_the_auth_code_when_the_server_rejects_the_token(
 def test_main_report_json_prints_the_agreement_dict(monkeypatch, capsys):
     monkeypatch.setattr(image_qc, "_auth_session", lambda token: _StubSession())
     _stub_nodes(monkeypatch, [{"chosen_variant_id": 5,
-                               "qc": {"recommended_variant_id": 5}}])
+                               "qc": {"recommended_variant_id": 5,
+                                      "confidence": CONF_CONFIRMED}}])
     assert main(["--batch", "b-1", "--report", "--json"]) == EXIT_OK
     out = json.loads(capsys.readouterr().out.strip())
     assert out["agree"] == 1 and out["comparable"] == 1
