@@ -18,7 +18,11 @@ does not lose the run.
 
 File layout:
   SHARED PLUMBING -> INTEGRITY -> JUDGE (pure, then API) ->
-  PAIRWISE (pure, then API) -> FACE
+  PAIRWISE (pure, then API) -> FACE -> RANK & REPORT
+
+RANK & REPORT sits LAST because it is the only stage that reads every other
+stage's output shape at once; reading it after the stages it consumes means
+each shape it destructures has already been defined above it.
 
 Server contract (Task 2): reports carry version: 1, recommended_variant_id
 must be a plain int, reports stay under 64,000 bytes, POST returns 409 while
@@ -706,3 +710,128 @@ def load_embedder() -> Optional[Any]:
         print(f"[qc] face gate unavailable ({e.__class__.__name__}) - "
               f"skipping face checks", flush=True)
         return None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# RANK & REPORT (pure) — the funnel's output, no model and no I/O
+# Reads what every stage above produced and answers two questions: what
+# order would the machine have put these in, and would it have picked one.
+# ══════════════════════════════════════════════════════════════════════
+
+# Below this cosine similarity against the avatar upload, the frame is a
+# DIFFERENT PERSON. Deliberately a LOW bar: AI renders drift, so this catches
+# "wrong face", not "slightly off" — a strict floor here would demote good
+# variants over lighting and angle, which is the failure that makes a shadow
+# report unusable. Prefixed with the stage that owns it, like INTEGRITY_* /
+# JUDGE_* / PAIRWISE_*: the floor is a RANKING decision, not something the
+# face embedder above knows or enforces.
+#
+# A face_sim of None is NEUTRAL and never a fail — "None means no answer,
+# never no match" (see `face_similarity`). It is compared with `<`, so a
+# variant sitting exactly ON the floor is above it.
+RANK_FACE_SIM_FLOOR = 0.25
+
+
+def _above_face_floor(face_sim: Optional[float]) -> bool:
+    """One reading of the floor, shared by the ranker and the recommendation,
+    so the two can never drift into disagreeing about the same variant."""
+    return face_sim is None or face_sim >= RANK_FACE_SIM_FLOOR
+
+
+def rank_variants(variant_reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Deterministic ordering, best first, with a dense 1-based `rank` added.
+
+    Sort axes, each one a full tie-break of the one before it:
+      1. integrity ok        — a broken render is never a candidate
+      2. judge verdict pass  — 'fail' and "no judge at all" both sink
+      3. face at/above floor — a different person outranks nothing
+      4. judge overall desc  — the actual quality score
+      5. face_sim desc       — None reads as 0.0 HERE ONLY, as a tiebreak
+                               between variants already past axis 3; it never
+                               decides a pass/fail, so "no answer" costs a
+                               variant nothing that a real score could win
+      6. variant_id asc      — the final tiebreak, which is what makes the
+                               ordering TOTAL: two variants that are equal on
+                               every measurable axis still have exactly one
+                               legal order, so the same batch never ranks two
+                               ways and a shadow-agreement number stays
+                               comparable across runs
+
+    Returns FRESH per-variant dicts (shallow copies): the caller's accumulated
+    funnel output is not edited under it, so a rank pass can be re-run or run
+    on a slice without leaving `rank` keys behind. The nested integrity/judge
+    dicts are shared, not deep-copied — nothing downstream writes to them.
+
+    Never raises on a fully-degraded variant (metrics None, judge None,
+    face_sim None): that variant is exactly what a dead judge plus an absent
+    face model plus a failed download produce, and the ranker is the last
+    stage that could turn a degraded report into a lost batch.
+    """
+    def key(report: Dict[str, Any]) -> Tuple[Any, ...]:
+        judge = report.get("judge")
+        face_sim = report.get("face_sim")
+        integrity_ok = 1 if report["integrity"]["ok"] else 0
+        verdict_pass = 1 if (judge and judge["verdict"] == "pass") else 0
+        face_ok = 1 if _above_face_floor(face_sim) else 0
+        # -1 sorts an unjudged variant below a real 0, which is right: a 0 is
+        # a measurement, a missing judge is not.
+        overall = judge["overall"] if judge else -1
+        return (-integrity_ok, -verdict_pass, -face_ok, -overall,
+                -(face_sim if face_sim is not None else 0.0),
+                report["variant_id"])
+
+    ranked = [dict(report) for report in sorted(variant_reports, key=key)]
+    for position, report in enumerate(ranked, start=1):
+        report["rank"] = position
+    return ranked
+
+
+# Exactly the keys a report carries per variant. Whitelisted rather than
+# copied wholesale so a caller that accumulated extra scratch fields (raw
+# replies, byte buffers, timings) cannot push the report past the server's
+# 64,000-byte cap.
+_REPORT_VARIANT_FIELDS = ("integrity", "face_sim", "judge", "rank")
+
+
+def compose_report(ranked: List[Dict[str, Any]], skipped: List[str],
+                   pairwise_reason: Optional[str] = None) -> Dict[str, Any]:
+    """One node's shadow report, ready to POST.
+
+    `recommended_variant_id` is None unless the TOP-ranked variant is
+    genuinely healthy: integrity ok, judged and passed, and at or above the
+    face floor when a face was actually measured. None is a real answer here —
+    "every candidate looks bad" — and it is deliberately not "the least bad
+    one", because this report never chooses (v886.3) and a recommendation the
+    machine does not believe would poison the agreement number Task 10 reads.
+
+    An unjudged top variant cannot be recommended either: a dead judge
+    degrades the report, it does not promote whatever survived the free gates.
+
+    `skipped` names the stages that did not run at all ('face', 'judge') so a
+    None recommendation can be told apart from a gate that never fired, and
+    `pairwise_reason` is one of PAIRWISE_CONSISTENT / PAIRWISE_DISAGREED /
+    PAIRWISE_CALL_FAILED, or None when no pair was compared.
+    """
+    recommended: Optional[int] = None
+    if ranked:
+        top = ranked[0]
+        judge = top.get("judge")
+        healthy = (top["integrity"]["ok"]
+                   and judge is not None and judge["verdict"] == "pass"
+                   and _above_face_floor(top.get("face_sim")))
+        if healthy:
+            # int() not the raw value: the server rejects a non-plain-int
+            # recommended_variant_id (image_platform.py:3610).
+            recommended = int(top["variant_id"])
+    return {
+        "version": 1,
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "recommended_variant_id": recommended,
+        "skipped_checks": list(skipped),
+        "pairwise_reason": pairwise_reason,
+        # JSON object keys are strings on the wire anyway; making that explicit
+        # here means the dict a test reads is the dict the server receives.
+        "variants": {str(report["variant_id"]):
+                     {field: report[field] for field in _REPORT_VARIANT_FIELDS}
+                     for report in ranked},
+    }

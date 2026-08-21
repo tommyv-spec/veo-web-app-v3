@@ -13,7 +13,8 @@ from image_qc import (analyze_integrity, build_judge_prompt, parse_judge_reply,
                       build_pairwise_prompt, _parse_winner,
                       PAIRWISE_CONSISTENT, PAIRWISE_DISAGREED,
                       PAIRWISE_CALL_FAILED,
-                      face_similarity, load_embedder, InsightFaceEmbedder)
+                      face_similarity, load_embedder, InsightFaceEmbedder,
+                      rank_variants, compose_report, RANK_FACE_SIM_FLOOR)
 
 
 def _png(arr):
@@ -783,3 +784,148 @@ def test_load_embedder_returns_the_embedder_when_available(monkeypatch):
     sentinel = FakeEmbedder()
     monkeypatch.setattr(image_qc, "InsightFaceEmbedder", lambda: sentinel)
     assert load_embedder() is sentinel
+
+
+# --- RANK & REPORT ---------------------------------------------------------
+
+
+def _v(vid, ok=True, reasons=None, face=0.6, overall=7, verdict="pass"):
+    """One variant's accumulated funnel output, in the shape the stages above
+    actually produce. overall=None means the judge gave no answer at all."""
+    return {
+        "variant_id": vid,
+        "integrity": {"ok": ok, "reasons": reasons or [],
+                      "metrics": {"short_side": 576, "gray_std": 40.0,
+                                  "lap_var": 300.0} if ok else None},
+        "face_sim": face,
+        "judge": None if overall is None else
+                 {"overall": overall, "verdict": verdict,
+                  "element_misses": [], "artifacts": [], "compliance": [],
+                  "reasons": []},
+    }
+
+
+def test_rank_broken_integrity_always_last():
+    ranked = rank_variants([_v(1, ok=False, reasons=["blank_frame"], overall=None),
+                            _v(2, overall=5)])
+    assert [r["variant_id"] for r in ranked] == [2, 1]
+
+
+def test_rank_judge_fail_below_pass():
+    ranked = rank_variants([_v(1, overall=9, verdict="fail"),
+                            _v(2, overall=6, verdict="pass")])
+    assert ranked[0]["variant_id"] == 2
+
+
+def test_rank_face_floor_beats_higher_judge_score():
+    ranked = rank_variants([_v(1, face=0.05, overall=9),
+                            _v(2, face=0.70, overall=7)])
+    assert ranked[0]["variant_id"] == 2
+
+
+def test_rank_face_none_is_not_penalized():
+    # no face found / face gate skipped -> neutral, judge decides
+    ranked = rank_variants([_v(1, face=None, overall=8),
+                            _v(2, face=0.7, overall=6)])
+    assert ranked[0]["variant_id"] == 1
+
+
+def test_rank_face_exactly_at_the_floor_is_above_it():
+    """The floor is a FLOOR, not a threshold to clear: at-or-above passes.
+    Below it is 'a different person', which is the only thing it catches."""
+    ranked = rank_variants([_v(1, face=RANK_FACE_SIM_FLOOR, overall=7),
+                            _v(2, face=RANK_FACE_SIM_FLOOR - 0.001, overall=10)])
+    assert ranked[0]["variant_id"] == 1
+
+
+def test_rank_is_deterministic_on_equal_scores():
+    # equal on every axis -> variant_id ascending as the final tiebreak
+    ranked = rank_variants([_v(9), _v(3), _v(5)])
+    assert [r["variant_id"] for r in ranked] == [3, 5, 9]
+
+
+def test_rank_assigns_dense_ranks():
+    ranked = rank_variants([_v(1, overall=9), _v(2, overall=3)])
+    assert [r["rank"] for r in ranked] == [1, 2]
+
+
+def test_rank_survives_the_fully_degraded_variant():
+    """Every optional stage answered 'no answer' at once: undecodable image
+    (metrics None), no judge, no face. Nothing in the funnel may abort a batch,
+    and that includes the ranker reading what the funnel produced."""
+    degraded = {"variant_id": 2,
+                "integrity": {"ok": False, "reasons": ["undecodable"],
+                              "metrics": None},
+                "face_sim": None, "judge": None}
+    ranked = rank_variants([degraded, _v(1, overall=4)])
+    assert [r["variant_id"] for r in ranked] == [1, 2]
+
+
+def test_rank_does_not_mutate_its_input():
+    """rank_variants returns fresh per-variant dicts, so the caller's
+    accumulated funnel output is never edited under it."""
+    original = _v(1)
+    rank_variants([original])
+    assert "rank" not in original
+
+
+def test_rank_of_nothing_is_nothing():
+    assert rank_variants([]) == []
+
+
+def test_compose_report_no_recommendation_when_top_fails():
+    ranked = rank_variants([_v(1, overall=2, verdict="fail"),
+                            _v(2, ok=False, reasons=["blank_frame"], overall=None)])
+    rep = compose_report(ranked, skipped=[])
+    assert rep["recommended_variant_id"] is None
+    assert rep["version"] == 1
+
+
+def test_compose_report_happy_path():
+    ranked = rank_variants([_v(4, overall=8), _v(7, overall=5)])
+    rep = compose_report(ranked, skipped=["face"], pairwise_reason="consistent")
+    assert rep["recommended_variant_id"] == 4
+    assert rep["skipped_checks"] == ["face"]
+    assert rep["pairwise_reason"] == "consistent"
+    assert set(rep["variants"].keys()) == {"4", "7"}
+    assert rep["variants"]["4"]["rank"] == 1
+    assert len(json.dumps(rep)) < 64_000
+
+
+def test_compose_report_face_floor_blocks_recommendation():
+    # top-ranked variant is below the face floor -> no recommendation
+    ranked = rank_variants([_v(1, face=0.05, overall=9)])
+    rep = compose_report(ranked, skipped=[])
+    assert rep["recommended_variant_id"] is None
+
+
+def test_compose_report_no_recommendation_without_a_judge():
+    """A dead judge degrades the report; it never silently promotes an
+    unjudged variant into a recommendation."""
+    ranked = rank_variants([_v(1, overall=None)])
+    assert compose_report(ranked, skipped=["judge"])["recommended_variant_id"] is None
+
+
+def test_compose_report_of_an_empty_batch_is_valid():
+    rep = compose_report([], skipped=["face", "judge"])
+    assert rep["recommended_variant_id"] is None
+    assert rep["variants"] == {}
+
+
+def test_compose_report_recommendation_is_a_plain_int():
+    """Server contract (image_platform.py): recommended_variant_id must be a
+    plain int — a numpy scalar or a bool would be rejected at POST."""
+    rep = compose_report(rank_variants([_v(4, overall=8)]), skipped=[])
+    assert type(rep["recommended_variant_id"]) is int
+
+
+def test_compose_report_round_trips_through_json():
+    """The report goes over the wire as JSON, so every value it carries has to
+    survive a dumps/loads — including the degraded variant's None metrics."""
+    ranked = rank_variants([_v(1, overall=8),
+                            _v(2, ok=False, reasons=["undecodable"], overall=None)])
+    rep = compose_report(ranked, skipped=[], pairwise_reason=PAIRWISE_DISAGREED)
+    back = json.loads(json.dumps(rep))
+    assert back["variants"]["2"]["rank"] == 2
+    assert back["variants"]["2"]["integrity"]["metrics"] is None
+    assert back["pairwise_reason"] == PAIRWISE_DISAGREED
