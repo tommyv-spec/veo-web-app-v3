@@ -571,6 +571,53 @@ class ExportRun(Base):
         }
 
 
+class AutoEditRun(Base):
+    """One auto-edit request (CapCut-pass): a LOCAL worker claims it, runs the
+    pipeline, uploads the result. Server only queues.
+
+    The server has 1 CPU / 2GB and no OpenCV / headless browser, so the actual
+    render (b-roll picture-in-picture, keyed hook, enhanced voice, karaoke
+    captions) cannot run here. This row is just the queue ticket; a worker on
+    the operator's PC does the work and writes the result back.
+
+    State machine lives in autoedit_queue.py (pure, unit-tested), same split
+    as ExportRun / export_queue.py above.
+    """
+    __tablename__ = "autoedit_runs"
+
+    id = Column(String(36), primary_key=True)
+    job_id = Column(String(36), ForeignKey("jobs.id"), nullable=False, index=True)
+    user_id = Column(String(36), nullable=True)
+
+    state = Column(String(16), default="queued", nullable=False)  # queued|claimed|running|done|failed
+    template = Column(String(64), default="korella", nullable=False)
+    placement = Column(String(16), default="dynamic", nullable=False)  # dynamic|constant
+    # Python attr stays `offset`; DB column is named `caption_offset` because
+    # OFFSET is a reserved SQL keyword (used in LIMIT/OFFSET clauses) — giving
+    # it an explicit safe column name avoids relying on each dialect's
+    # auto-quoting to get this right.
+    offset = Column("caption_offset", Float, nullable=True)  # manual override, else NULL
+    stage = Column(String(32), nullable=True)      # download|scan|layout|audio|compose|captions
+    result_filename = Column(String(255), nullable=True)
+    error = Column(Text, nullable=True)
+    attempts = Column(Integer, default=0, nullable=False)
+    claimed_by = Column(String(64), nullable=True)
+    heartbeat_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
+
+    def to_dict(self):
+        return {
+            "autoedit_id": self.id, "job_id": self.job_id, "state": self.state,
+            "template": self.template, "placement": self.placement, "offset": self.offset,
+            "stage": self.stage, "result_filename": self.result_filename,
+            "error": self.error, "attempts": self.attempts,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+        }
+
+
 class JobLog(Base):
     """Log entries for a job - enables real-time streaming"""
     __tablename__ = "job_logs"
