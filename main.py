@@ -12440,6 +12440,9 @@ async def export_status(
 # keeping the import local means a missing optional dep can never break boot.
 
 AUTOEDIT_PLACEMENTS = ("dynamic", "constant")
+# ~10x a real auto-edit output (they run ~50MB). The write streams to disk in
+# 1MB chunks so memory is never the worry — DISK is, on a 2GB box.
+AUTOEDIT_MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 
 
 def _autoedit_valid_templates():
@@ -12497,9 +12500,18 @@ async def queue_autoedit(
             status_code=409,
             detail="An auto-edit is already queued or running for this job")
 
+    # A NULL user_id can never match the worker's claim filter, so the row would
+    # sit queued forever with nothing anywhere reporting a problem. That is a
+    # server-side invariant break, not the caller's fault — fail loud, 500.
+    user_id = getattr(current_user, "id", None)
+    if not user_id:
+        raise HTTPException(
+            status_code=500,
+            detail="Cannot queue auto-edit: the signed-in user has no id, so no "
+                   "worker could ever claim the run")
+
     run = AutoEditRun(
-        id=str(_uuid.uuid4()), job_id=job_id,
-        user_id=getattr(current_user, "id", None),
+        id=str(_uuid.uuid4()), job_id=job_id, user_id=user_id,
         template=req.template, placement=req.placement, offset=req.offset,
     )
     db.add(run)
@@ -15973,12 +15985,19 @@ async def claim_autoedit(
     from datetime import datetime as _dt
 
     now = _dt.utcnow()
+    # skip_locked: without the row lock, two workers polling at the same instant
+    # both read the same row, both pass is_claimable, both commit — two renders
+    # of one job. Postgres (production) honours FOR UPDATE SKIP LOCKED; SQLite
+    # (local tests) silently renders no lock at all, which is why the lock looks
+    # like it does nothing when you run the test suite.
     for run in db.query(AutoEditRun).filter(
             AutoEditRun.user_id == worker_user_id,
             AutoEditRun.state.in_(["queued", "claimed", "running"])
-    ).order_by(AutoEditRun.created_at.asc()).all():
+    ).order_by(AutoEditRun.created_at.asc()).with_for_update(skip_locked=True).all():
         if is_claimable(run.state, run.heartbeat_at, now):
             run.state, run.claimed_by, run.heartbeat_at = "claimed", worker_user_id[:8], now
+            # A stale reclaim counts too, so the MAX_ATTEMPTS cap means "attempts
+            # including reclaims" — a worker that keeps crashing burns the budget.
             run.attempts += 1
             db.commit()
             print(f"[AutoEdit] claimed {run.id} by {run.claimed_by} attempt={run.attempts}",
@@ -16028,14 +16047,36 @@ async def autoedit_complete(
     output_dir = Path(job.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     dest = output_dir / fn
-    with open(dest, "wb") as f:
-        while chunk := await video.read(1 << 20):
-            f.write(chunk)
 
-    try:  # R2 so it survives a redeploy — same key scheme the exports use
+    # Write under a temp name, rename only once the file is closed. Writing
+    # straight to `dest` would leave a truncated mp4 under the FINAL name if
+    # anything went wrong mid-write, and the outputs list would offer that
+    # half-file as a finished video.
+    tmp = output_dir / f".{fn}.part"
+    written = 0
+    try:
+        with open(tmp, "wb") as f:
+            while chunk := await video.read(1 << 20):
+                written += len(chunk)
+                if written > AUTOEDIT_MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Auto-edit upload is larger than "
+                               f"{AUTOEDIT_MAX_UPLOAD_BYTES // (1 << 20)} MB")
+                f.write(chunk)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    tmp.replace(dest)
+
+    try:  # R2 so it survives a redeploy — same key scheme the exports use.
+        # to_thread: upload_file is a synchronous multi-second network call, and
+        # this handler is async on a 1-CPU box — inline it would stall every
+        # other request for the whole upload.
         from backends.storage import is_storage_configured, get_storage
         if is_storage_configured():
-            get_storage().upload_file(str(dest), f"jobs/{run.job_id}/outputs/{fn}")
+            await asyncio.to_thread(get_storage().upload_file, str(dest),
+                                    f"jobs/{run.job_id}/outputs/{fn}")
     except Exception as e:
         print(f"[AutoEdit] R2 upload failed (non-fatal): {e}", flush=True)
 
