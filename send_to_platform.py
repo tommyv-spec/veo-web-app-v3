@@ -782,25 +782,56 @@ def _run_shadow_qc(batch_id, args):
         # the second, wider net.
         import image_qc
     except ImportError as e:
-        print(f"qc: scoring skipped (missing dependency: {e.name}) - "
+        print(f"qc: scoring skipped (missing dependency: {e.name or e}) - "
               f"review continues without scores", flush=True)
         return
     except Exception as e:
         print(f"qc: scoring skipped ({e.__class__.__name__}) - "
               f"review continues without scores", flush=True)
         return
-    qc_args = ["--batch", str(batch_id), "--json", "--base-url", args.url]
-    if args.subject:
-        qc_args += ["--avatar-node", str(args.subject)]
+    # Everything past the import lives inside the try: this function must be
+    # total, and building qc_args reads attributes off `args`.
     try:
+        # Said BEFORE the call because the call is the one multi-minute
+        # synchronous step in a send: scoring, plus a possible first-run
+        # buffalo_l model download. Without this the operator watches an
+        # unexplained pause and reasonably reaches for Ctrl-C.
+        print(f"qc: scoring batch {batch_id} variants (shadow only - nothing is "
+              f"chosen; scores appear as badges in the review UI). "
+              f"Skip with --no-qc.", flush=True)
+        if getattr(args, "resume_batch", None) and not args.subject:
+            # Deliberately only a warning: resolving the avatar here would be
+            # v888.1 scope, and a report without the face gate still beats no
+            # report. The operator can rerun with --avatar if they want it.
+            print("qc: resume without --avatar: face gate skipped; pass "
+                  "--avatar to keep face-gated reports", flush=True)
+        qc_args = ["--batch", str(batch_id), "--json", "--base-url", args.url]
+        if args.subject:
+            qc_args += ["--avatar-node", str(args.subject)]
+        if getattr(args, "token", ""):
+            # Thread the SEND's credential. Without this an explicit --token
+            # run would score under whatever token image_qc discovers for
+            # itself — possibly a different account's view of the batch.
+            qc_args += ["--token", args.token]
         rc = image_qc.main(qc_args)
-        if rc == EXIT_AUTH:
+        # Codes are read OFF the imported module rather than compared to this
+        # file's own EXIT_AUTH/EXIT_OK. The two CLIs share 0-3 by agreement
+        # (image_qc.py:1098-1104 says so explicitly), not by construction, and
+        # this is the one place that would silently misread the other's exit
+        # code if that agreement ever lapsed.
+        if rc == image_qc.EXIT_AUTH:
             print("qc: auth failed - scores not stored (sending unaffected)", flush=True)
-        elif rc != EXIT_OK:
+        elif rc != image_qc.EXIT_OK:
             print(f"qc: scoring finished with failures (exit {rc}) - "
                   f"scores may be partial; review continues", flush=True)
-    except SystemExit as e:  # argparse inside image_qc may sys.exit
-        print(f"qc: scoring aborted (exit {e.code}) - review continues", flush=True)
+    except (KeyboardInterrupt, SystemExit) as e:
+        # BOTH are BaseException, so the broad `except Exception` below does
+        # NOT catch them. QC is the only multi-minute synchronous step in a
+        # send, which makes it the likeliest thing an operator interrupts —
+        # and a Ctrl-C that escaped here would kill the send at exit 130 and
+        # swallow the --resume-batch line they need. Stopping QC stops QC.
+        print(f"qc: scoring stopped ({e.__class__.__name__}) - review continues",
+              flush=True)
     except Exception as e:
         print(f"qc: scoring skipped ({e.__class__.__name__}) - "
               f"review continues without scores", flush=True)

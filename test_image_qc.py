@@ -1593,7 +1593,8 @@ def _stp():
 
 def _qc_args(**over):
     import argparse
-    base = {"url": "https://example.test", "subject": None, "no_qc": False}
+    base = {"url": "https://example.test", "subject": None, "no_qc": False,
+            "resume_batch": None, "token": ""}
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -1610,27 +1611,63 @@ def test_send_to_platform_has_the_no_qc_flag():
     assert "--no-qc" in res.stdout
 
 
-@pytest.mark.parametrize("scorer, expect", [
-    (lambda argv: EXIT_OK, ""),
-    (lambda argv: EXIT_AUTH, "auth failed"),
-    (lambda argv: EXIT_FAILED, "finished with failures"),
+def _module_with_main(fn):
+    """A stand-in image_qc. It carries the real EXIT_* codes because
+    _run_shadow_qc reads them OFF the module rather than assuming they match
+    send_to_platform's own — a stub without them would send every run down
+    the AttributeError path instead of the branch under test."""
+    import types
+    m = types.ModuleType("image_qc")
+    m.main = fn
+    m.EXIT_OK, m.EXIT_FAILED = EXIT_OK, EXIT_FAILED
+    m.EXIT_USAGE, m.EXIT_AUTH = EXIT_USAGE, EXIT_AUTH
+    return m
+
+
+@pytest.mark.parametrize("code, expect", [
+    (EXIT_AUTH, "auth failed"),
+    (EXIT_FAILED, "finished with failures"),
 ])
-def test_shadow_qc_never_raises_on_any_exit_code(monkeypatch, capsys,
-                                                 scorer, expect):
+def test_shadow_qc_never_raises_on_a_failing_exit_code(monkeypatch, capsys,
+                                                       code, expect):
     """Every scorer exit code returns normally, so the caller still reaches
     its resume-command print."""
     stp = _stp()
     monkeypatch.setitem(__import__("sys").modules, "image_qc",
-                        _module_with_main(scorer))
+                        _module_with_main(lambda argv: code))
     assert stp._run_shadow_qc("b-1", _qc_args()) is None
     assert expect in capsys.readouterr().out
 
 
-def _module_with_main(fn):
-    import types
-    m = types.ModuleType("image_qc")
-    m.main = fn
-    return m
+def test_shadow_qc_stays_quiet_on_a_clean_run(monkeypatch, capsys):
+    """A clean run announces itself and says nothing else. Pins that no
+    failure wording leaks onto the happy path, where a bare 'no exception'
+    assert would pass no matter what got printed."""
+    stp = _stp()
+    monkeypatch.setitem(__import__("sys").modules, "image_qc",
+                        _module_with_main(lambda argv: EXIT_OK))
+    assert stp._run_shadow_qc("b-1", _qc_args()) is None
+    out = capsys.readouterr().out
+    assert "shadow only" in out          # the announce line ran
+    for noise in ("auth failed", "finished with failures", "scoring skipped",
+                  "scoring stopped", "face gate skipped"):
+        assert noise not in out
+
+
+def test_shadow_qc_announces_before_it_calls_the_scorer(monkeypatch, capsys):
+    """The announce must be FLUSHED before the multi-minute call, or it is
+    not doing its job: the operator would meet the silent pause first."""
+    stp = _stp()
+    seen_at_call = {}
+
+    def scorer(argv):
+        seen_at_call["out"] = capsys.readouterr().out
+        return EXIT_OK
+    monkeypatch.setitem(__import__("sys").modules, "image_qc",
+                        _module_with_main(scorer))
+    stp._run_shadow_qc("b-9", _qc_args())
+    assert "scoring batch b-9" in seen_at_call["out"]
+    assert "--no-qc" in seen_at_call["out"]
 
 
 def test_shadow_qc_swallows_a_raising_scorer(monkeypatch, capsys):
@@ -1645,15 +1682,117 @@ def test_shadow_qc_swallows_a_raising_scorer(monkeypatch, capsys):
     assert "RuntimeError" in capsys.readouterr().out
 
 
-def test_shadow_qc_swallows_a_sys_exit_from_argparse(monkeypatch, capsys):
+@pytest.mark.parametrize("blow_up", [
+    lambda argv: (_ for _ in ()).throw(SystemExit(EXIT_USAGE)),
+    lambda argv: (_ for _ in ()).throw(KeyboardInterrupt()),
+])
+def test_shadow_qc_survives_both_base_exceptions(monkeypatch, capsys, blow_up):
+    """SystemExit and KeyboardInterrupt are BaseException, so the broad
+    `except Exception` does not catch them. QC is the only multi-minute
+    synchronous step in a send, which makes Ctrl-C the likeliest interrupt of
+    all — and an escaping one would kill the send at exit 130 and swallow the
+    --resume-batch line the operator needs."""
     stp = _stp()
-
-    def bail(argv):
-        raise SystemExit(EXIT_USAGE)
     monkeypatch.setitem(__import__("sys").modules, "image_qc",
-                        _module_with_main(bail))
+                        _module_with_main(blow_up))
     assert stp._run_shadow_qc("b-1", _qc_args()) is None
-    assert "aborted" in capsys.readouterr().out
+    assert "scoring stopped" in capsys.readouterr().out
+
+
+def test_shadow_qc_warns_when_resuming_without_an_avatar(monkeypatch, capsys):
+    """On --resume-batch nothing resolves the avatar (that is v888.1 scope),
+    so the face gate silently would not run. Say so."""
+    stp = _stp()
+    monkeypatch.setitem(__import__("sys").modules, "image_qc",
+                        _module_with_main(lambda argv: EXIT_OK))
+    stp._run_shadow_qc("b-1", _qc_args(resume_batch="b-1", subject=None))
+    assert "face gate skipped" in capsys.readouterr().out
+
+    stp._run_shadow_qc("b-1", _qc_args(resume_batch="b-1", subject=4970))
+    assert "face gate skipped" not in capsys.readouterr().out
+
+
+def test_shadow_qc_threads_the_explicit_token(monkeypatch):
+    """An explicit --token send must not score under a token image_qc
+    discovers for itself: that could be a different account's view."""
+    stp = _stp()
+    seen = []
+    monkeypatch.setitem(__import__("sys").modules, "image_qc",
+                        _module_with_main(lambda argv: seen.append(list(argv)) or EXIT_OK))
+
+    stp._run_shadow_qc("b-1", _qc_args(token="tok-abc"))
+    assert seen[-1][-2:] == ["--token", "tok-abc"]
+
+    stp._run_shadow_qc("b-1", _qc_args(token=""))
+    assert "--token" not in seen[-1]
+
+
+# --- v936 Task 8: skip-scored, so re-polling does not re-spend on Gemini ---
+
+def _ready_node(node_id, **extra):
+    node = {"id": node_id, "status": "ready", "kind": "generated",
+            "variants": [{"id": node_id * 10, "source": "ai"}]}
+    node.update(extra)
+    return node
+
+
+def test_scored_nodes_are_skipped_by_default():
+    """send_to_platform hits its --review stop on EVERY resume. Without this
+    filter each visit would re-spend the whole judge + pairwise budget on
+    variants whose report has not changed."""
+    fresh, scored = _ready_node(1), _ready_node(2, qc={"version": 1,
+                                                       "recommended_variant_id": 20})
+    assert [n["id"] for n in pick_scorable_nodes([fresh, scored])] == [1]
+
+
+def test_rescore_includes_the_already_scored_nodes():
+    fresh, scored = _ready_node(1), _ready_node(2, qc={"version": 1})
+    picked = pick_scorable_nodes([fresh, scored], skip_scored=False)
+    assert [n["id"] for n in picked] == [1, 2]
+
+
+@pytest.mark.parametrize("qc", [None, {}, [], "v1", {"note": "not a report"}])
+def test_a_non_report_qc_field_never_blocks_scoring(qc):
+    """Only a dict carrying "version" is a report. An empty dict, a null, or
+    a shape the server grows later must not silently cost a node its scoring."""
+    assert len(pick_scorable_nodes([_ready_node(1, qc=qc)])) == 1
+
+
+def test_regenerated_nodes_requalify_because_the_server_cleared_the_report():
+    """The server nulls qc_json whenever a node's variants are replaced
+    (image_platform.py:730/3358/3414/3809), so a re-rendered node arrives
+    with no report and re-qualifies on its own — no client-side staleness
+    check, and no way for the skip to pin a report to dead bytes."""
+    regenerated = _ready_node(2, qc=None)
+    assert [n["id"] for n in pick_scorable_nodes([regenerated])] == [2]
+
+
+def test_run_batch_reports_the_already_scored_count(monkeypatch, _no_models,
+                                                    capsys):
+    monkeypatch.setattr(image_qc, "_auth_session", lambda token: _StubSession())
+    nodes = [_ready_node(1), _ready_node(2, qc={"version": 1}),
+             _ready_node(3, qc={"version": 1})]
+    _stub_nodes(monkeypatch, nodes)
+    monkeypatch.setattr(image_qc, "score_node",
+                        lambda *a, **k: {"recommended_variant_id": 10,
+                                         "skipped_checks": [],
+                                         "pairwise_reason": "x",
+                                         "variants": {}})
+    monkeypatch.setattr(image_qc, "post_report", lambda *a, **k: (200, ""))
+    assert main(["--batch", "b-1"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "1 scorable" in out
+    assert "already scored: 2 (use --rescore to redo)" in out
+
+
+def test_run_batch_says_nothing_about_skipping_when_nothing_was_skipped(
+        monkeypatch, _no_models, capsys):
+    monkeypatch.setattr(image_qc, "_auth_session", lambda token: _StubSession())
+    _stub_nodes(monkeypatch, [_ready_node(1, qc={"version": 1})])
+    assert main(["--batch", "b-1", "--rescore"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "already scored" not in out
+    assert "1 scorable" in out
 
 
 def test_shadow_qc_passes_the_batch_the_avatar_and_the_base_url(monkeypatch):

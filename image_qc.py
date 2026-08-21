@@ -1036,11 +1036,34 @@ def fit_report(report: Dict[str, Any],
     return trimmed
 
 
-def pick_scorable_nodes(nodes: Iterable[Any]) -> List[Dict[str, Any]]:
+def _has_qc_report(node: Dict[str, Any]) -> bool:
+    """True when this node already carries a v936 report.
+
+    `qc` is ImageNode.to_dict's decoded qc_json (image_platform.py:1219) and
+    every report `compose_report` writes carries "version" (image_qc.py:881),
+    so that key — not mere truthiness — is the marker. An empty dict, a null,
+    or some shape the server grows later is NOT a report and must not be
+    allowed to block scoring.
+    """
+    qc = node.get("qc")
+    return isinstance(qc, dict) and "version" in qc
+
+
+def pick_scorable_nodes(nodes: Iterable[Any],
+                        skip_scored: bool = True) -> List[Dict[str, Any]]:
     """The nodes in a batch worth scoring, using ImageNode.to_dict's own field
     names (`status`, `kind`, `variants` — image_platform.py:1180).
 
-    Three filters, each for a different reason:
+    `skip_scored` (default ON) drops nodes that already hold a report. This is
+    what makes re-polling affordable: send_to_platform reaches its --review
+    stop on every resume, and without this filter each visit would re-spend
+    the full Gemini judge + pairwise budget on variants whose report has not
+    changed. Regenerated variants come back automatically — the server clears
+    qc_json whenever a node's variants are replaced (image_platform.py:730,
+    3358, 3414, 3809), so a re-rendered node has no report and re-qualifies on
+    its own. `--rescore` passes False to force the whole batch again.
+
+    Four filters, each for a different reason:
       * status == 'ready'  — a queued/generating node is about to REPLACE its
         variants, and the server answers a POST for one with 409 anyway
         (image_platform.py:3597). Scoring it burns Gemini calls on bytes that
@@ -1050,6 +1073,7 @@ def pick_scorable_nodes(nodes: Iterable[Any]) -> List[Dict[str, Any]]:
         judge and no spec to judge it against.
       * a non-empty variants list — 'ready' with no variants is a node whose
         variants were deleted out from under it.
+      * no report yet, when `skip_scored` — see above.
 
     An empty prompt is NOT a filter: it kills the judge stage only, and the
     integrity and face gates still measure something worth reporting.
@@ -1061,6 +1085,8 @@ def pick_scorable_nodes(nodes: Iterable[Any]) -> List[Dict[str, Any]]:
         if node.get("status") != "ready" or node.get("kind") == "upload":
             continue
         if not (node.get("variants") or []):
+            continue
+        if skip_scored and _has_qc_report(node):
             continue
         scorable.append(node)
     return scorable
@@ -1514,11 +1540,21 @@ def _run_batch(session: Any, base: str, args: Any) -> int:
     rejected" must not look like a clean run.
     """
     nodes = fetch_nodes(session, base, batch_id=args.batch)
-    scorable = pick_scorable_nodes(nodes)
+    skip_scored = not getattr(args, "rescore", False)
+    scorable = pick_scorable_nodes(nodes, skip_scored=skip_scored)
+    # The already-scored count is the gap between the two filters, measured
+    # BEFORE --limit-nodes truncates so the number describes the BATCH rather
+    # than this run's slice of it.
+    already_scored = (
+        len(pick_scorable_nodes(nodes, skip_scored=False)) - len(scorable)
+        if skip_scored else 0)
     if args.limit_nodes:
         scorable = scorable[:args.limit_nodes]
     print(f"[qc] batch {args.batch}: {len(nodes)} nodes, "
           f"{len(scorable)} scorable", flush=True)
+    if already_scored:
+        print(f"[qc] already scored: {already_scored} (use --rescore to redo)",
+              flush=True)
 
     posted = deferred = failed = skipped_nodes = 0
     if not scorable:
@@ -1679,6 +1715,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="API token; normally found automatically")
     parser.add_argument("--report", action="store_true",
                         help="print the operator-vs-machine agreement and exit")
+    parser.add_argument("--rescore", action="store_true",
+                        help="score nodes that already hold a report too "
+                             "(default: skip them, so re-polling a batch "
+                             "costs nothing for work already done)")
     parser.add_argument("--json", action="store_true",
                         help="print ONE machine-readable summary line "
                              "(the run tally, or the agreement dict)")
