@@ -16938,7 +16938,7 @@ Per node, on that node's variants:
    | `sole` | only one healthy variant existed, so there was never a comparison to get wrong. The health gate already vouched for it. Costs **zero** extra calls | that one |
    | `tied` (pass 1) | pass 1 did not SEPARATE the top two. Decided BEFORE pass 2 is even read, which is what lets the caller skip both calls | nothing |
    | `unverified` | a pass-2 call produced no answer. Kept distinct from `tied` on purpose: an outage is not the judge contradicting itself, and merging the two would slowly libel it | nothing |
-   | `second_rejected` | pass 2's VERDICT failed the very variant we were about to recommend — a compliance hit or a defect caught only on the re-read. **Outranks the score comparison**, because verdicts reproduce and scores do not | nothing |
+   | `second_rejected` | pass 2's VERDICT did not clear the very variant we were about to recommend — a compliance hit or a defect caught only on the re-read. The test is INVERTED (`!= "pass"`, not `== "fail"`): only an exact `pass` clears it, because an unreadable verdict is not evidence of a pass, and that is the same reading `_healthy_axes` already applies to pass 1. **Outranks the score comparison**, because verdicts reproduce and scores do not | nothing |
    | `confirmed` | the same variant scored strictly higher in BOTH passes, and pass 2 did not fail it. The only state that earns a recommendation off a comparison | that one |
 
    `classify_confidence` is **A-oriented**: `compose_report` recommends `ranked[0]`, so "confirmed" has to mean "the top-ranked variant is confirmed" and nothing else. If the caller ever breaks its contract and hands the pair in the wrong order, the answer falls back to `tied`, which recommends nothing.
