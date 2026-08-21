@@ -15625,6 +15625,42 @@ Ambient: same kitchen room tone, soft pour sound.
         // exactly once when it finishes.
         let _autoEditWasLive = null;
 
+        // v938.10 — THE CLOCK DOES NOT DEPEND ON THE REFRESH.
+        //
+        // renderAutoEditCard has four early exits (no templates, job switched,
+        // no section, no content). Each returned without rescheduling, so one
+        // slow request stopped the clock for the rest of the render — which is
+        // exactly what the operator kept seeing. Rather than police every exit,
+        // a 1-second ticker updates the two things that change continuously —
+        // the elapsed time and the bar — writing into the existing elements
+        // instead of rebuilding the card. It needs no network and cannot be
+        // killed by a failed fetch. The 5s poll is now only for STAGE changes.
+        let _autoEditTicker = null;
+        let _autoEditLiveInfo = null;   // {jobId, createdAt, stage, state}
+
+        function _autoEditStartTicker() {
+            if (_autoEditTicker) return;
+            _autoEditTicker = setInterval(() => {
+                const info = _autoEditLiveInfo;
+                if (!info || selectedJobId !== info.jobId) return;
+                const card = document.querySelector(`.autoedit-card[data-job-id="${info.jobId}"]`);
+                if (!card) return;
+                const clock = card.querySelector('.autoedit-clock');
+                if (clock) {
+                    const i = _AUTOEDIT_STAGES.indexOf(info.stage);
+                    const stepTxt = i >= 0 ? `step ${i + 1} of ${_AUTOEDIT_STAGES.length}` : '';
+                    const el = _autoEditElapsed(info.createdAt);
+                    clock.textContent = `${stepTxt}${stepTxt && el ? ' · ' : ''}${el}`;
+                }
+                const bar = card.querySelector('.autoedit-progress > div');
+                if (bar) bar.style.width = _autoEditPercent(info.state, info.stage, info.jobId) + '%';
+            }, 1000);
+        }
+        function _autoEditStopTicker() {
+            if (_autoEditTicker) { clearInterval(_autoEditTicker); _autoEditTicker = null; }
+            _autoEditLiveInfo = null;
+        }
+
         // v938.9 — the finished video downloads itself. Kept in sessionStorage
         // keyed by RUN id so a page reload, a job switch, or the 5s repaint
         // cannot download the same result twice.
@@ -15680,13 +15716,27 @@ Ambient: same kitchen room tone, soft pour sound.
             }
         }
 
-        async function renderAutoEditCard(jobId) {
+                // v938.10 — one place that re-arms the poll. Every early exit in
+        // renderAutoEditCard used to return without rescheduling, so a single
+        // slow request ended the refresh for the rest of the render.
+        function _autoEditRearm(jobId) {
+            if (selectedJobId !== jobId || _autoEditWasLive !== jobId) return;
+            _autoEditStopPoll();
+            _autoEditTimerJob = jobId;
+            _autoEditTimer = setTimeout(() => {
+                _autoEditTimer = null;
+                if (selectedJobId !== jobId) { _autoEditTimerJob = null; return; }
+                renderAutoEditCard(jobId);
+            }, 5000);
+        }
+
+async function renderAutoEditCard(jobId) {
             try {
                 // A poll left over from another job must never repaint this one.
                 if (_autoEditTimerJob && _autoEditTimerJob !== jobId) _autoEditStopPoll();
 
                 const tpl = await _autoEditGetTemplates();
-                if (!tpl) return;                        // old server → no card, exports still render
+                if (!tpl) { _autoEditRearm(jobId); return; }   // old server → no card, exports still render
                 const status = await _autoEditGetStatus(jobId);
                 // v938.5 — a transient failure must not repaint anything. Keep
                 // the card exactly as it is and try again on the next tick.
@@ -15707,9 +15757,9 @@ Ambient: same kitchen room tone, soft pour sound.
                 if (selectedJobId !== jobId) return;     // operator switched jobs mid-fetch
 
                 const section = ensureExportsSection(jobId);
-                if (!section) return;
+                if (!section) { _autoEditRearm(jobId); return; }
                 const content = section.querySelector('.exports-content');
-                if (!content) return;
+                if (!content) { _autoEditRearm(jobId); return; }
 
                 // Keep whatever the operator already picked across a repaint.
                 const old = content.querySelector('.autoedit-card');
@@ -15765,7 +15815,7 @@ Ambient: same kitchen room tone, soft pour sound.
                     body = `
                         <div style="margin-top:8px;display:flex;align-items:baseline;gap:8px;font-size:12px;color:var(--text-primary);">
                             <span>⏳ ${escapeHtml(stage || _autoEditStateLabel(state))}</span>
-                            <span style="margin-left:auto;font-size:11px;color:var(--text-secondary);">
+                            <span class="autoedit-clock" style="margin-left:auto;font-size:11px;color:var(--text-secondary);">
                                 ${escapeHtml(stepTxt)}${stepTxt && elapsed ? ' · ' : ''}${escapeHtml(elapsed)}
                             </span>
                         </div>
@@ -15869,6 +15919,11 @@ Ambient: same kitchen room tone, soft pour sound.
                     _autoEditStopPoll();
                     _autoEditTimerJob = jobId;
                     _autoEditWasLive = jobId;
+                    // hand the ticker what it needs so the clock keeps moving
+                    // between polls, and through a failed one
+                    _autoEditLiveInfo = { jobId: jobId, createdAt: status.created_at,
+                                          stage: status.stage, state: state };
+                    _autoEditStartTicker();
                     _autoEditTimer = setTimeout(() => {
                         _autoEditTimer = null;
                         if (selectedJobId !== jobId) { _autoEditTimerJob = null; return; }
@@ -15876,6 +15931,7 @@ Ambient: same kitchen room tone, soft pour sound.
                     }, 5000);
                 } else {
                     _autoEditStopPoll();
+                    _autoEditStopTicker();
                     // v938.5 — a finished render produced NO row in the list
                     // until a job switch or reload: nothing on the auto-edit
                     // path ever refreshed it. Refresh once, on the live->done
