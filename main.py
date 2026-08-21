@@ -10481,21 +10481,27 @@ def _requeue_local_exports_on_shutdown() -> int:
 # server rendering without waiting for a deploy. The worker path is untouched
 # by it — turning this off just returns auto-edit to queue-only.
 def _autoedit_server_enabled() -> bool:
-    # v938.3 — DEFAULT OFF, and this is a measurement, not a preference.
+    # v938.3 — DEFAULT ON. (A v938.3 comment here briefly claimed renders did
+    # not fit in 2GB and turned this off; that was a misdiagnosis, corrected
+    # below, because getting it wrong in either direction is expensive.)
     #
-    # Rendering on this box does not fit in 2GB. With the web app already at
-    # ~1560MB used / 2048MB, a render pushed it over and the platform SIGTERMed
-    # the container roughly every 11 minutes (17:08:51, 17:31:29, 17:43:00 on
-    # 2026-08-21 — no gunicorn WORKER TIMEOUT, so it was the memory limit, not
-    # a stuck worker). Every restart killed the render in flight, the run went
-    # stale, another container reclaimed it, and it burned all 3 attempts. One
-    # render did finish (12 min) — in a lucky window between restarts.
+    # What actually happened on 2026-08-21: a run burned all three attempts
+    # while the container restarted at 17:08:51, 17:31:29 and 17:43:00 UTC.
+    # Those three times match three pushes to main (19:04:54, 19:28:48 and
+    # 19:40-19:42 local, UTC+2) — a deploy restarts the container by design.
+    # It was eight deploys during an active render, not memory.
     #
-    # So the server executor traded the whole platform's stability for a
-    # feature. It stays available for a bigger instance or a dedicated worker
-    # service: set AUTOEDIT_SERVER_EXECUTOR=1 there. On this box the local
-    # worker (code/static/autoedit_worker.py --watch) is the supported path.
-    return (os.environ.get("AUTOEDIT_SERVER_EXECUTOR") or "0").strip().lower() \
+    # The memory numbers say the same: peak 1216MB of 2048MB (59%), 880-990MB
+    # free throughout. The "avail=488MB < 600MB" line that misled the first
+    # reading is the EXPORT gate's own conservative threshold, not the
+    # container limit. A full render completed in 12 minutes.
+    #
+    # Real limitation to keep in mind: a deploy DOES kill an in-flight render.
+    # The run is reclaimed after the 5-minute stale window and retried, but it
+    # starts over and only gets MAX_ATTEMPTS tries — so avoid deploying while
+    # a render is running, and expect restarts to cost a render during a
+    # deploy-heavy session.
+    return (os.environ.get("AUTOEDIT_SERVER_EXECUTOR") or "1").strip().lower() \
         not in ("0", "false", "no", "off")
 
 
