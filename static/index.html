@@ -1070,6 +1070,35 @@
             font-size: 10px; font-weight: 700; letter-spacing: 1px;
             z-index: 2;
         }
+        /* v936 — image QC badge (shadow mode). DISPLAY ONLY: it reports what the
+           scorer thought, it never selects anything. Bottom-LEFT because the other
+           three corners are taken (variant-label / manual-badge top-left,
+           chosen-badge / GPT top-right, download pill bottom-right). Clicks on it
+           bubble to the tile exactly like the GPT badge, so the choose path is
+           unchanged. */
+        .img-variant .variant-badge-qc {
+            position: absolute; bottom: 12px; left: 10px;
+            background: rgba(0, 0, 0, 0.78); color: #e5e7eb;
+            padding: 4px 8px; border-radius: 4px;
+            font-size: 10px; font-weight: 700; letter-spacing: 0.5px;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            z-index: 3;
+        }
+        /* v936 — the scorer's own pick. */
+        .img-variant .variant-badge-qc.qc-pick {
+            background: rgba(34, 197, 94, 0.92); color: white;
+            border-color: rgba(255, 255, 255, 0.45);
+        }
+        /* v936 — integrity failed or the judge said fail. */
+        .img-variant .variant-badge-qc.qc-fail {
+            background: rgba(239, 68, 68, 0.92); color: white;
+            border-color: rgba(255, 255, 255, 0.35);
+        }
+        /* v936 — manual variants already own bottom-left with the folder icon, so
+           push the QC badge above it (same trick as variant-label vs manual-badge). */
+        .img-variant.manual-variant .variant-badge-qc {
+            bottom: 42px;
+        }
         /* dual-backend — "still waiting on the ChatGPT lane" placeholder tile.
            The Banana lane owns node.status and usually finishes first, so a
            node reads 'ready' with its Banana variants on screen while the
@@ -23556,16 +23585,87 @@ Ambient: same kitchen room tone, soft pour sound.
                     }
                 }
 
+                // v936 — image QC, shadow mode. DISPLAY ONLY (v886.3): this block
+                // re-orders the tiles by the scorer's rank and paints a score badge.
+                // It adds NO handler, changes NOTHING about what POST /choose sends,
+                // and never auto-selects. Most nodes have qc === null and must render
+                // exactly as they did before v936, so every read is defensive and any
+                // malformed payload falls back to the pre-v936 rendering.
+                let qcVariants = null;       // { "<variant id>": {...} } — keys are STRINGS
+                let qcRecommendedId = null;  // INT, or null when the scorer liked none
+                let qcNodeHint = '';
+                let orderedVariants = node.variants;
+                try {
+                    const qc = node.qc;
+                    if (qc && typeof qc === 'object' && qc.variants && typeof qc.variants === 'object') {
+                        qcVariants = qc.variants;
+                        qcRecommendedId = (qc.recommended_variant_id != null) ? qc.recommended_variant_id : null;
+                        // Sort a COPY. node.variants is shared state read elsewhere;
+                        // an unscored variant sinks to the bottom (rank 99).
+                        orderedVariants = [...node.variants].sort((a, b) => {
+                            const ra = (qcVariants[String(a.id)] || {}).rank;
+                            const rb = (qcVariants[String(b.id)] || {}).rank;
+                            return (ra == null ? 99 : ra) - (rb == null ? 99 : rb);
+                        });
+                        const bits = [qcRecommendedId == null ? 'qc: no variant recommended' : 'qc: ranked'];
+                        if (Array.isArray(qc.skipped_checks) && qc.skipped_checks.length) {
+                            bits.push('skipped: ' + qc.skipped_checks.join(', '));
+                        }
+                        qcNodeHint = ` <span style="color:var(--text-muted);font-weight:400;">· ${imgEscape(bits.join(' · '))}</span>`;
+                    }
+                } catch (e) {
+                    qcVariants = null;
+                    qcRecommendedId = null;
+                    qcNodeHint = '';
+                    orderedVariants = node.variants;
+                }
+                // v936 — one badge per scored tile: "★ 6/10" (star = the scorer's
+                // pick), "–" when the judge never ran. Returns '' for any variant the
+                // QC pass never scored, so a partially-scored node still renders.
+                const qcBadgeHtml = (v) => {
+                    if (!qcVariants) return '';
+                    try {
+                        const q = qcVariants[String(v.id)];
+                        if (!q || typeof q !== 'object') return '';
+                        const integrity = (q.integrity && typeof q.integrity === 'object') ? q.integrity : null;
+                        const judge = (q.judge && typeof q.judge === 'object') ? q.judge : null;
+                        // String-compare: the payload already mixes types (variants
+                        // keyed by string, recommended_variant_id an int).
+                        const isPick = (qcRecommendedId != null && String(qcRecommendedId) === String(v.id));
+                        const failed = !!((integrity && integrity.ok === false) || (judge && judge.verdict === 'fail'));
+                        const score = (judge && judge.overall != null) ? (judge.overall + '/10') : '–';
+                        const strs = (x) => Array.isArray(x) ? x.filter(s => typeof s === 'string' && s) : [];
+                        const reasons = [
+                            ...strs(integrity && integrity.reasons),
+                            ...((judge && judge.verdict === 'fail')
+                                ? [...strs(judge.artifacts), ...strs(judge.element_misses), ...strs(judge.compliance)]
+                                : [])
+                        ];
+                        let tip = reasons.join('; ');
+                        if (!tip) {
+                            const parts = [(judge && judge.overall != null) ? ('QC ' + score) : 'QC: judge did not run'];
+                            if (typeof q.face_sim === 'number') parts.push('face ' + q.face_sim.toFixed(2));
+                            // Only claim passed/flagged when something actually ran.
+                            if (integrity || judge) parts.push(failed ? 'flagged' : 'passed');
+                            tip = parts.join(' - ');
+                        }
+                        const cls = failed ? ' qc-fail' : (isPick ? ' qc-pick' : '');
+                        return `<div class="variant-badge-qc${cls}" title="${imgEscape(tip)}">${isPick ? '★ ' : ''}${score}</div>`;
+                    } catch (e) {
+                        return '';
+                    }
+                };
+
                 variantsHtml = `
                     ${isGenerating ? `<div style="font-size:12px;color:var(--accent);margin-bottom:8px;font-weight:600;display:flex;align-items:center;gap:6px;">
                         <span class="regen-ring" style="width:12px;height:12px;"></span> Still generating more variants… (showing what's ready)
                     </div>` : ''}
                     <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;font-weight:500;">
-                        ${refTileHtml ? 'Reference + Variants' : 'Variants'} — ${node.chosen_variant_id ? 'click to change selection' : 'click to select'} · drag &amp; drop an image to upload
+                        ${refTileHtml ? 'Reference + Variants' : 'Variants'} — ${node.chosen_variant_id ? 'click to change selection' : 'click to select'} · drag &amp; drop an image to upload${qcNodeHint}
                     </div>
                     <div class="img-variants-grid" data-node-id="${node.id}">
                         ${refTileHtml}
-                        ${node.variants.map(v => {
+                        ${orderedVariants.map(v => {
                             const chosen = v.id === node.chosen_variant_id;
                             const isManual = (v.source === 'manual');
                             // dual-backend: badge the ChatGPT lane variant. Banana
@@ -23590,6 +23690,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                     ${beBadge}
                                     <span class="variant-label">${v.variant_index}</span>
                                     ${isManual ? '<div class="manual-icon" title="Manual upload">📁</div>' : ''}
+                                    ${qcBadgeHtml(v)}
                                     ${chosen ? '<div class="chosen-badge">✓</div>' : ''}
                                     <button class="img-dl-btn" title="Download the original file at full size" data-track="image_download_one"
                                             onclick="imgDownloadOne(event, ${node.id}, ${v.id}, '${vLabel}')">⬇ Download</button>
