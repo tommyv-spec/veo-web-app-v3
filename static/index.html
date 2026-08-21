@@ -15625,6 +15625,29 @@ Ambient: same kitchen room tone, soft pour sound.
         // exactly once when it finishes.
         let _autoEditWasLive = null;
 
+        // v938.9 — the finished video downloads itself. Kept in sessionStorage
+        // keyed by RUN id so a page reload, a job switch, or the 5s repaint
+        // cannot download the same result twice.
+        function _autoEditAlreadySaved(runId) {
+            try { return sessionStorage.getItem('autoedit_saved_' + runId) === '1'; }
+            catch (e) { return false; }
+        }
+        function _autoEditMarkSaved(runId) {
+            try { sessionStorage.setItem('autoedit_saved_' + runId, '1'); } catch (e) {}
+        }
+        function _autoEditAutoDownload(jobId, runId, filename) {
+            if (!runId || !filename || _autoEditAlreadySaved(runId)) return false;
+            if (localStorage.getItem('autoedit_autodownload') === 'off') return false;
+            _autoEditMarkSaved(runId);
+            const a = document.createElement('a');
+            a.href = `${API}/jobs/${jobId}/outputs/${encodeURIComponent(filename)}?download=1`;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            return true;
+        }
+
         async function _autoEditGetStatus(jobId) {
             // 404 = never run for this job. That is normal, not an error.
             try {
@@ -15773,10 +15796,20 @@ Ambient: same kitchen room tone, soft pour sound.
                                 ? `, finished ${escapeHtml(new Date(status.finished_at.endsWith('Z') ? status.finished_at : status.finished_at + 'Z').toLocaleString())}` : ''}
                             <div style="font-family:monospace;font-size:10px;opacity:.75;word-break:break-all;">${escapeHtml(fn)}</div>
                         </div>
-                        <video controls preload="metadata" src="${_autoEditAttr(url)}" style="width:220px;max-width:100%;margin-top:6px;border-radius:var(--radius-sm);background:#000;display:block;"></video>
+                        <!-- v938.9 — no inline player on purpose. The card
+                             rebuilds itself on a timer, which replaced the
+                             <video> element and killed playback the moment it
+                             started; and the operator wants the file on disk,
+                             not previewed here. -->
+                        <div class="autoedit-dl-note" style="margin-top:6px;font-size:11px;color:var(--text-secondary);"></div>
                         <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-                            <a href="${_autoEditAttr(url)}?download=1" class="btn btn-secondary btn-sm" style="text-decoration:none;">${ready ? '📥 Download' : '✂️ Download for CapCut'}</a>
+                            <a href="${_autoEditAttr(url)}?download=1" class="btn btn-secondary btn-sm" style="text-decoration:none;">${ready ? '📥 Download again' : '✂️ Download for CapCut'}</a>
                             <button class="btn btn-primary btn-sm autoedit-run-btn" onclick="queueAutoEdit('${_autoEditAttr(jobId)}')">Re-run finish</button>
+                            <label style="margin-left:auto;cursor:pointer;">
+                                <input type="checkbox" class="autoedit-autodl"${localStorage.getItem('autoedit_autodownload') === 'off' ? '' : ' checked'}
+                                       onchange="localStorage.setItem('autoedit_autodownload', this.checked ? 'on' : 'off')">
+                                save automatically
+                            </label>
                         </div>
                         <div style="margin-top:4px;font-size:11px;color:var(--text-secondary);word-break:break-all;">${escapeHtml(fn)}</div>`;
                 } else if (state === 'failed') {
@@ -15850,6 +15883,22 @@ Ambient: same kitchen room tone, soft pour sound.
                     if (_autoEditWasLive === jobId) {
                         _autoEditWasLive = null;
                         loadExistingExports(jobId);
+                    }
+                    // v938.9 — save the finished file without being asked. Runs
+                    // on every render of a done card, not just the live->done
+                    // edge, so a result that finished while the page was closed
+                    // still saves when the operator opens the job. The
+                    // sessionStorage guard is what stops it repeating.
+                    if (state === 'done' && status.result_filename) {
+                        const saved = _autoEditAutoDownload(jobId, status.autoedit_id, status.result_filename);
+                        const note = content.querySelector('.autoedit-card .autoedit-dl-note');
+                        if (note) {
+                            note.textContent = saved
+                                ? 'Saved to your downloads folder.'
+                                : (localStorage.getItem('autoedit_autodownload') === 'off'
+                                    ? 'Automatic saving is off.'
+                                    : 'Already saved to your downloads folder.');
+                        }
                     }
                 }
             } catch (e) {
