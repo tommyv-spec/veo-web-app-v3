@@ -846,13 +846,28 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
 def caption_engine() -> str:
     """Which renderer draws the captions.
 
-    `libass` (default) draws them with ffmpeg, which the server already has —
-    that is what lets a render run on Render instead of needing a PC. `pycaps`
-    draws them through a headless Chromium: better animation, but ~300MB of RAM
-    and an install the 2GB server cannot spare. Set AUTOEDIT_CAPTION_ENGINE
-    =pycaps on a machine that has it (the local worker) to use the richer path.
+    **pycaps is the quality path and the default.** It is a purpose-built
+    caption tool: CSS templates rendered through a real browser engine, with
+    proper typography, rounded highlights and animation, plus a dozen ready
+    presets. It is what makes these look like TikTok/CapCut captions rather
+    than burned-in subtitles.
+
+    `libass` is a FALLBACK, not an equal. It draws with ffmpeg, so it needs no
+    browser and runs anywhere, but it cannot do rounded corners, pop-in, or the
+    non-korella presets — it looks visibly more homemade. It exists so a
+    machine without pycaps still produces a video instead of failing.
+
+    Order: an explicit AUTOEDIT_CAPTION_ENGINE wins; otherwise pycaps when it
+    is actually installed; otherwise libass.
     """
-    return (os.environ.get("AUTOEDIT_CAPTION_ENGINE") or "libass").strip().lower()
+    forced = (os.environ.get("AUTOEDIT_CAPTION_ENGINE") or "").strip().lower()
+    if forced in ("pycaps", "libass"):
+        return forced
+    try:
+        pycaps_exe()
+        return "pycaps"
+    except AutoEditError:
+        return "libass"
 
 
 def _render_caption_pass(nocap: Path, out: Path, template: str, windows, work: Path, dur: float):
@@ -865,12 +880,15 @@ def _render_caption_pass(nocap: Path, out: Path, template: str, windows, work: P
             render_captions(nocap, out, template, windows[0][2] if windows else -0.05)
         return
     import autoedit_captions as _ac
+    print("captions: pycaps unavailable — falling back to the plainer libass "
+          "renderer (no rounded highlight, no pop-in)", flush=True)
     if not _ac.supports(template):
         # A pycaps-only style cannot be drawn by libass; say so rather than
         # silently shipping a different look than the operator picked.
         raise AutoEditError(
-            f"Caption style '{template}' needs the browser renderer. "
-            f"Styles available here: {', '.join(sorted(_ac.STYLES))}.")
+            f"Caption style '{template}' needs the browser renderer (pycaps), "
+            f"which is not installed here. The fallback renderer only has: "
+            f"{', '.join(sorted(_ac.STYLES))}.")
     audio = work / "audio_pol.wav"
     if not audio.exists():
         audio = work / "audio_enh.wav"

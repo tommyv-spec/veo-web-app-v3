@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libgl1 \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -57,6 +58,21 @@ COPY requirements.txt .
 # Install Python dependencies.
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
+
+# v938.6 — the caption renderer (pycaps) draws through a real browser engine.
+# That is what gives the captions their TikTok/CapCut look: rounded highlight,
+# pop-in, real typography, and the dozen ready presets. Without Chromium the
+# server falls back to a plainer ffmpeg/libass renderer that visibly is not
+# the same thing. Installed while still root — the USER switch is below.
+# --with-deps pulls the system libraries headless Chromium needs on slim.
+# PLAYWRIGHT_BROWSERS_PATH is set BEFORE the install on purpose: the default
+# lands in /root/.cache, which the non-root appuser below cannot read, so the
+# browser would be present and unusable at runtime.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN pip install --no-cache-dir "pycaps @ git+https://github.com/francozanardi/pycaps" && \
+    python -m playwright install --with-deps chromium && \
+    chmod -R a+rX /ms-playwright && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy application code
 COPY . .
