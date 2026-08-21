@@ -21,10 +21,13 @@ Usage:
   python send_to_platform.py autoedit 1234                       # queue + wait
   python send_to_platform.py autoedit 1234 --download videos_out # ...+ save the mp4
   python send_to_platform.py autoedit 1234 --no-wait             # queue and return
+  python send_to_platform.py autoedit 1234 --status              # inspect, do not queue
+  python send_to_platform.py autoedit 1234 --trim-start 0.3 --music-output bed.mp3
   python send_to_platform.py autoedit --list-styles              # show templates, no job needed
 
-Autoedit turns a finished render into a posted-ready video (b-roll picture-in-
-picture, keyed hook, enhanced voice, karaoke captions). The server just queues
+Autoedit turns a finished render into a finished video (support-footage picture-
+in-picture, keyed hook, enhanced voice, music, karaoke captions). It returns a
+READY or NEEDS_MANUAL_EDIT verdict with exact reasons. The server just queues
 the run — it renders on the OPERATOR'S OWN PC. Start that worker first:
   python code/static/autoedit_worker.py --watch
 If it is not running, a queued run just sits there; this CLI prints a hint
@@ -1047,7 +1050,26 @@ def cmd_autoedit(client, args, report):
         raise PlatformError(EXIT_UNKNOWN,
                             "autoedit needs a job id: send_to_platform.py autoedit <job-id>")
 
-    payload = {"template": args.template, "placement": args.placement, "offset": None}
+    if args.autoedit_status:
+        run = client.get(f"/api/jobs/{args.job_id}/autoedit-status")
+        report["autoedit"] = run
+        print(json.dumps(run, indent=2) if args.as_json else
+              f"autoedit {run.get('state')} — quality: {run.get('qc_status') or 'not checked yet'}")
+        for reason in (run.get("qc_report") or {}).get("reasons", []):
+            print(f"  - {reason}")
+        return EXIT_OK
+
+    payload = {
+        "template": args.template, "placement": args.placement,
+        "offset": args.autoedit_offset,
+        "trim_start_s": args.trim_start, "trim_end_s": args.trim_end,
+        "pip_enabled": not args.no_pip,
+        "captions_enabled": not args.no_captions,
+        "chroma_similarity": args.key_strength,
+        "chroma_blend": args.key_softness,
+        "music_filename": args.music_output,
+        "music_db": args.music_db,
+    }
     run = client.post(f"/api/jobs/{args.job_id}/autoedit", payload)
     autoedit_id = run.get("autoedit_id")
     report["autoedit"] = run
@@ -1075,6 +1097,12 @@ def cmd_autoedit(client, args, report):
         if state == "done":
             report["stages"].append("autoedit:done")
             result_filename = run.get("result_filename")
+            verdict = run.get("qc_status") or "NEEDS_MANUAL_EDIT"
+            print(f"  quality: {verdict}")
+            for reason in (run.get("qc_report") or {}).get("reasons", []):
+                print(f"    - {reason}")
+            if verdict != "READY":
+                print("  manual finish: download this result and fix the reasons above in CapCut")
             if args.download:
                 if not result_filename:
                     raise PlatformError(EXIT_UNKNOWN,
@@ -1148,6 +1176,26 @@ def main(argv=None):
                    help="autoedit: style to render with (see --list-styles)")
     p.add_argument("--placement", choices=("dynamic", "constant"), default="dynamic",
                    help="autoedit: b-roll picture-in-picture placement mode")
+    p.add_argument("--autoedit-offset", type=float,
+                   help="autoedit: fixed caption vertical offset; use with --placement constant")
+    p.add_argument("--trim-start", type=float, default=0.0,
+                   help="autoedit: seconds to remove from the start")
+    p.add_argument("--trim-end", type=float, default=0.0,
+                   help="autoedit: seconds to remove from the end")
+    p.add_argument("--no-pip", action="store_true",
+                   help="autoedit: do not add the support-track picture-in-picture")
+    p.add_argument("--no-captions", action="store_true",
+                   help="autoedit: do not burn captions into the result")
+    p.add_argument("--key-strength", type=float, default=0.10,
+                   help="autoedit: green-key similarity, 0.02-0.25")
+    p.add_argument("--key-softness", type=float, default=0.02,
+                   help="autoedit: green-key blend, 0.00-0.10")
+    p.add_argument("--music-output",
+                   help="autoedit: music filename already present in the job outputs")
+    p.add_argument("--music-db", type=float, default=-20.0,
+                   help="autoedit: music volume; starts after the hook")
+    p.add_argument("--status", action="store_true", dest="autoedit_status",
+                   help="autoedit: show the newest run without starting another")
     p.add_argument("--download", metavar="DIR",
                    help="autoedit: once done, save the result mp4 into this directory")
     p.add_argument("--no-wait", action="store_true", dest="no_wait",

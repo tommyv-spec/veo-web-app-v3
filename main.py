@@ -12469,6 +12469,14 @@ class AutoEditRequest(BaseModel):
     template: str = "korella"
     placement: str = "dynamic"     # dynamic|constant
     offset: Optional[float] = None
+    trim_start_s: float = 0.0
+    trim_end_s: float = 0.0
+    pip_enabled: bool = True
+    captions_enabled: bool = True
+    chroma_similarity: float = 0.10
+    chroma_blend: float = 0.02
+    music_filename: Optional[str] = None
+    music_db: float = -20.0
 
 
 @app.post("/api/jobs/{job_id}/autoedit")
@@ -12484,7 +12492,27 @@ async def queue_autoedit(
     import uuid as _uuid
 
     job = get_user_job(db, job_id, current_user)
-    _autoedit_validate(req.template, req.placement)
+    placement = "constant" if req.offset is not None else req.placement
+    _autoedit_validate(req.template, placement)
+    if req.offset is not None and not -0.45 <= req.offset <= 0.45:
+        raise HTTPException(
+            status_code=400,
+            detail="Caption offset must be between -0.45 and 0.45",
+        )
+    from autoedit_qc import normalize_repairs
+    try:
+        repairs = normalize_repairs({
+            "trim_start_s": req.trim_start_s,
+            "trim_end_s": req.trim_end_s,
+            "pip_enabled": req.pip_enabled,
+            "captions_enabled": req.captions_enabled,
+            "chroma_similarity": req.chroma_similarity,
+            "chroma_blend": req.chroma_blend,
+            "music_filename": req.music_filename,
+            "music_db": req.music_db,
+        })
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     exp = db.query(ExportRun).filter(
         ExportRun.job_id == job_id, ExportRun.state == "done"
@@ -12512,11 +12540,13 @@ async def queue_autoedit(
 
     run = AutoEditRun(
         id=str(_uuid.uuid4()), job_id=job_id, user_id=user_id,
-        template=req.template, placement=req.placement, offset=req.offset,
+        template=req.template, placement=placement, offset=req.offset,
+        repair_json=json.dumps(repairs, sort_keys=True),
     )
     db.add(run)
     db.commit()
-    print(f"[AutoEdit] queued {run.id} job={job_id} template={req.template}", flush=True)
+    print(f"[AutoEdit/v937 TEMP] queued {run.id} job={job_id} "
+          f"template={req.template} repairs={repairs}", flush=True)
     return run.to_dict()
 
 
@@ -12538,6 +12568,33 @@ async def autoedit_status(
     run = q.order_by(AutoEditRun.created_at.desc()).first()
     if not run:
         raise HTTPException(status_code=404, detail="No auto-edit for this job")
+    return run.to_dict()
+
+
+@app.post("/api/jobs/{job_id}/autoedit/{autoedit_id}/cancel")
+async def cancel_autoedit(
+    job_id: str,
+    autoedit_id: str,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Cancel a run that has not been claimed by the local worker."""
+    from models import AutoEditRun
+    from datetime import datetime as _dt
+
+    get_user_job(db, job_id, current_user)
+    run = db.query(AutoEditRun).filter(
+        AutoEditRun.id == autoedit_id,
+        AutoEditRun.job_id == job_id,
+    ).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="No such auto-edit run")
+    if run.state != "queued":
+        raise HTTPException(status_code=409, detail="Only a queued auto-edit can be cancelled")
+    run.state = "failed"
+    run.error = "Cancelled before the local worker started"
+    run.finished_at = _dt.utcnow()
+    db.commit()
     return run.to_dict()
 
 
@@ -16030,6 +16087,7 @@ async def autoedit_progress(
 async def autoedit_complete(
     autoedit_id: str,
     video: UploadFile = File(...),
+    qc_report: str = Form("{}"),
     db: DBSession = Depends(get_db_session),
     worker_user_id: str = Depends(verify_user_worker_token),
 ):
@@ -16038,6 +16096,20 @@ async def autoedit_complete(
     from models import Job
 
     run = _autoedit_run_for_worker(db, autoedit_id, worker_user_id)
+
+    try:
+        qc = json.loads(qc_report or "{}")
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="qc_report must be valid JSON")
+    verdict = qc.get("verdict")
+    if verdict not in ("READY", "NEEDS_MANUAL_EDIT"):
+        qc = {
+            "schema_version": 1,
+            "verdict": "NEEDS_MANUAL_EDIT",
+            "reasons": ["The local worker did not provide a valid quality verdict"],
+            "checks": [],
+        }
+        verdict = qc["verdict"]
 
     job = db.query(Job).filter(Job.id == run.job_id).first()
     if not job:
@@ -16081,9 +16153,13 @@ async def autoedit_complete(
         print(f"[AutoEdit] R2 upload failed (non-fatal): {e}", flush=True)
 
     run.state, run.result_filename, run.finished_at = "done", fn, _dt.utcnow()
+    run.qc_status = verdict
+    run.qc_report_json = json.dumps(qc, ensure_ascii=False)
     db.commit()
-    print(f"[AutoEdit] done {run.id} -> {fn} ({dest.stat().st_size / 1e6:.1f} MB)", flush=True)
+    print(f"[AutoEdit/v937 TEMP] done {run.id} verdict={verdict} -> {fn} "
+          f"({dest.stat().st_size / 1e6:.1f} MB)", flush=True)
     return {"ok": True, "filename": fn,
+            "qc_status": verdict, "qc_report": qc,
             "download_url": f"/api/jobs/{run.job_id}/outputs/{fn}"}
 
 

@@ -15456,6 +15456,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 audio: 'cleaning up the voice',
                 compose: 'putting the video together',
                 captions: 'adding the captions',
+                'quality-check': 'checking whether it is ready to publish',
             };
             return map[stage] || (stage ? String(stage) : '');
         }
@@ -15490,6 +15491,17 @@ Ambient: same kitchen room tone, soft pour sound.
             }
         }
 
+        async function _autoEditGetMusicOutputs(jobId) {
+            try {
+                const r = await fetch(`${API}/jobs/${jobId}/list-outputs`);
+                if (!r.ok) return [];
+                const data = await r.json();
+                return (data.files || []).filter(f => /\.(mp3|wav|m4a|aac)$/i.test(f));
+            } catch (e) {
+                return [];
+            }
+        }
+
         async function renderAutoEditCard(jobId) {
             try {
                 // A poll left over from another job must never repaint this one.
@@ -15498,6 +15510,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 const tpl = await _autoEditGetTemplates();
                 if (!tpl) return;                        // old server → no card, exports still render
                 const status = await _autoEditGetStatus(jobId);
+                const musicFiles = await _autoEditGetMusicOutputs(jobId);
                 if (selectedJobId !== jobId) return;     // operator switched jobs mid-fetch
 
                 const section = ensureExportsSection(jobId);
@@ -15509,14 +15522,37 @@ Ambient: same kitchen room tone, soft pour sound.
                 const old = content.querySelector('.autoedit-card');
                 let pickedTemplate = old ? (old.querySelector('.autoedit-template') || {}).value : null;
                 const oldSmart = old && old.querySelector('.autoedit-smart');
-                const pickedSmart = oldSmart ? oldSmart.checked : true;   // on by default
+                const pickedSmart = oldSmart ? oldSmart.checked
+                    : (!status || status.placement !== 'constant');   // on by default
+                const oldValue = (selector, fallback) => {
+                    const el = old && old.querySelector(selector);
+                    return el ? el.value : fallback;
+                };
+                const oldChecked = (selector, fallback) => {
+                    const el = old && old.querySelector(selector);
+                    return el ? el.checked : fallback;
+                };
+                const saved = (status && status.repairs) || {};
+                const pickedTrimStart = oldValue('.autoedit-trim-start', String(saved.trim_start_s ?? 0));
+                const pickedTrimEnd = oldValue('.autoedit-trim-end', String(saved.trim_end_s ?? 0));
+                const pickedPip = oldChecked('.autoedit-pip', saved.pip_enabled !== false);
+                const pickedCaptions = oldChecked('.autoedit-captions', saved.captions_enabled !== false);
+                const pickedKeyStrength = oldValue('.autoedit-key-strength', String(saved.chroma_similarity ?? 0.10));
+                const pickedKeySoftness = oldValue('.autoedit-key-softness', String(saved.chroma_blend ?? 0.02));
+                const pickedMusic = oldValue('.autoedit-music', saved.music_filename || '');
+                const pickedMusicDb = oldValue('.autoedit-music-db', String(saved.music_db ?? -20));
+                const pickedOffset = oldValue('.autoedit-offset', status && status.offset != null ? String(status.offset) : '');
                 if (old) old.remove();                   // dedupe — loadExistingExports can run twice
 
                 const names = [].concat(tpl.local || [], tpl.builtin || []);
+                const savedTemplate = status && names.indexOf(status.template) !== -1 ? status.template : null;
                 const chosen = pickedTemplate && names.indexOf(pickedTemplate) !== -1
-                    ? pickedTemplate : (tpl.default || names[0] || '');
+                    ? pickedTemplate : (savedTemplate || tpl.default || names[0] || '');
                 const options = names.map(n =>
                     `<option value="${_autoEditAttr(n)}"${n === chosen ? ' selected' : ''}>${escapeHtml(n)}</option>`
+                ).join('');
+                const musicOptions = [''].concat(musicFiles).map(n =>
+                    `<option value="${_autoEditAttr(n)}"${n === pickedMusic ? ' selected' : ''}>${n ? escapeHtml(n) : 'no music'}</option>`
                 ).join('');
 
                 const state = status && status.state;
@@ -15531,15 +15567,24 @@ Ambient: same kitchen room tone, soft pour sound.
                         </div>
                         <div style="margin-top:4px;font-size:11px;color:var(--text-secondary);">
                             Your PC does the rendering. Keep <code>autoedit_worker.py --watch</code> running or this waits forever.
-                        </div>`;
+                        </div>
+                        ${state === 'queued' ? `<button class="btn btn-secondary btn-sm" style="margin-top:6px;" onclick="cancelAutoEdit('${_autoEditAttr(jobId)}','${_autoEditAttr(status.autoedit_id)}')">Cancel</button>` : ''}`;
                 } else if (state === 'done' && status.result_filename) {
                     const fn = status.result_filename;
                     const url = `${API}/jobs/${jobId}/outputs/${encodeURIComponent(fn)}`;
+                    const qc = status.qc_report || {};
+                    const verdict = status.qc_status || qc.verdict || 'NEEDS_MANUAL_EDIT';
+                    const ready = verdict === 'READY';
+                    const reasons = (qc.reasons || []).map(r => `<li>${escapeHtml(String(r))}</li>`).join('');
                     body = `
+                        <div style="margin-top:8px;padding:7px 9px;border-radius:var(--radius-sm);background:${ready ? 'rgba(34,197,94,.12)' : 'rgba(245,158,11,.12)'};color:${ready ? '#22c55e' : '#f59e0b'};font-size:12px;font-weight:700;">
+                            ${ready ? '✓ READY TO PUBLISH' : '⚠ NEEDS MANUAL EDIT'}
+                        </div>
+                        ${reasons ? `<ul style="margin:6px 0 0 18px;padding:0;font-size:11px;color:var(--text-secondary);">${reasons}</ul>` : ''}
                         <video controls preload="metadata" src="${_autoEditAttr(url)}" style="width:220px;max-width:100%;margin-top:8px;border-radius:var(--radius-sm);background:#000;display:block;"></video>
                         <div style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-                            <a href="${_autoEditAttr(url)}?download=1" class="btn btn-secondary btn-sm" style="text-decoration:none;">📥 Download</a>
-                            <button class="btn btn-primary btn-sm autoedit-run-btn" onclick="queueAutoEdit('${_autoEditAttr(jobId)}')">🔁 Re-run</button>
+                            <a href="${_autoEditAttr(url)}?download=1" class="btn btn-secondary btn-sm" style="text-decoration:none;">${ready ? '📥 Download' : '✂️ Download for CapCut'}</a>
+                            <button class="btn btn-primary btn-sm autoedit-run-btn" onclick="queueAutoEdit('${_autoEditAttr(jobId)}')">Re-run finish</button>
                         </div>
                         <div style="margin-top:4px;font-size:11px;color:var(--text-secondary);word-break:break-all;">${escapeHtml(fn)}</div>`;
                 } else if (state === 'failed') {
@@ -15548,20 +15593,20 @@ Ambient: same kitchen room tone, soft pour sound.
                     body = `
                         <div style="margin-top:8px;font-size:12px;color:var(--error);word-break:break-word;">❌ ${escapeHtml(shortErr)}</div>
                         <div style="margin-top:6px;">
-                            <button class="btn btn-primary btn-sm autoedit-run-btn" onclick="queueAutoEdit('${_autoEditAttr(jobId)}')">✂️ Auto-Edit</button>
+                            <button class="btn btn-primary btn-sm autoedit-run-btn" onclick="queueAutoEdit('${_autoEditAttr(jobId)}')">Finish video</button>
                         </div>`;
                 } else {
                     body = `
                         <div style="margin-top:8px;">
-                            <button class="btn btn-primary btn-sm autoedit-run-btn" onclick="queueAutoEdit('${_autoEditAttr(jobId)}')">✂️ Auto-Edit</button>
+                            <button class="btn btn-primary btn-sm autoedit-run-btn" onclick="queueAutoEdit('${_autoEditAttr(jobId)}')">Finish video</button>
                         </div>`;
                 }
 
                 const cardHtml = `
                     <div class="autoedit-card" data-job-id="${_autoEditAttr(jobId)}" style="background:var(--bg-elevated);border:1px solid var(--border-color);border-radius:var(--radius-md);padding:10px 12px;margin-bottom:10px;">
                         <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">
-                            <h4 style="margin:0;font-size:13px;color:var(--text-primary);">✂️ Auto-Edit</h4>
-                            <span style="font-size:11px;color:var(--text-secondary);">b-roll + captions + voice</span>
+                            <h4 style="margin:0;font-size:13px;color:var(--text-primary);">Automatic Finish</h4>
+                            <span style="font-size:11px;color:var(--text-secondary);">No CapCut when the checks pass</span>
                         </div>
                         <div style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
                             <label style="font-size:11px;color:var(--text-secondary);display:flex;align-items:center;gap:5px;">
@@ -15573,6 +15618,23 @@ Ambient: same kitchen room tone, soft pour sound.
                                 smart captions (never cover faces or the action)
                             </label>
                         </div>
+                        <details style="margin-top:8px;font-size:11px;color:var(--text-secondary);">
+                            <summary style="cursor:pointer;">Repair controls</summary>
+                            <div style="margin-top:7px;display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:7px;">
+                                <label>trim start (s)<input class="autoedit-trim-start" type="number" min="0" step="0.1" value="${_autoEditAttr(pickedTrimStart)}" style="width:100%;"></label>
+                                <label>trim end (s)<input class="autoedit-trim-end" type="number" min="0" step="0.1" value="${_autoEditAttr(pickedTrimEnd)}" style="width:100%;"></label>
+                                <label>caption offset<input class="autoedit-offset" type="number" step="0.01" value="${_autoEditAttr(pickedOffset)}" placeholder="automatic" style="width:100%;"></label>
+                                <label>key strength<input class="autoedit-key-strength" type="number" min="0.02" max="0.25" step="0.01" value="${_autoEditAttr(pickedKeyStrength)}" style="width:100%;"></label>
+                                <label>key softness<input class="autoedit-key-softness" type="number" min="0" max="0.10" step="0.01" value="${_autoEditAttr(pickedKeySoftness)}" style="width:100%;"></label>
+                                <label>music<select class="autoedit-music" style="width:100%;">${musicOptions}</select></label>
+                                <label>music volume (dB)<input class="autoedit-music-db" type="number" min="-40" max="-8" step="1" value="${_autoEditAttr(pickedMusicDb)}" style="width:100%;"></label>
+                            </div>
+                            <div style="margin-top:7px;display:flex;gap:12px;flex-wrap:wrap;">
+                                <label><input type="checkbox" class="autoedit-pip"${pickedPip ? ' checked' : ''}> support footage</label>
+                                <label><input type="checkbox" class="autoedit-captions"${pickedCaptions ? ' checked' : ''}> burn captions</label>
+                            </div>
+                            <div style="margin-top:5px;">Music starts after the green-screen hook. Leave the filename empty for no music.</div>
+                        </details>
                         ${body}
                     </div>
                 `;
@@ -15602,13 +15664,36 @@ Ambient: same kitchen room tone, soft pour sound.
             const btn = card && card.querySelector('.autoedit-run-btn');
             const template = sel ? sel.value : '';
             const placement = (chk && chk.checked) ? 'dynamic' : 'constant';
-            const resetBtn = () => { if (btn) { btn.disabled = false; btn.textContent = '✂️ Auto-Edit'; } };
+            const value = (selector, fallback = '') => {
+                const el = card && card.querySelector(selector);
+                return el ? el.value : fallback;
+            };
+            const checked = (selector, fallback = true) => {
+                const el = card && card.querySelector(selector);
+                return el ? el.checked : fallback;
+            };
+            const offsetRaw = value('.autoedit-offset', '').trim();
+            const musicRaw = value('.autoedit-music', '').trim();
+            const payload = {
+                template: template,
+                placement: placement,
+                offset: offsetRaw === '' ? null : Number(offsetRaw),
+                trim_start_s: Number(value('.autoedit-trim-start', '0')),
+                trim_end_s: Number(value('.autoedit-trim-end', '0')),
+                pip_enabled: checked('.autoedit-pip', true),
+                captions_enabled: checked('.autoedit-captions', true),
+                chroma_similarity: Number(value('.autoedit-key-strength', '0.10')),
+                chroma_blend: Number(value('.autoedit-key-softness', '0.02')),
+                music_filename: musicRaw || null,
+                music_db: Number(value('.autoedit-music-db', '-20')),
+            };
+            const resetBtn = () => { if (btn) { btn.disabled = false; btn.textContent = 'Finish video'; } };
             if (btn) { btn.disabled = true; btn.textContent = '⏳ Starting...'; }
             try {
                 const r = await fetch(`${API}/jobs/${jobId}/autoedit`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ template: template, placement: placement, offset: null })
+                    body: JSON.stringify(payload)
                 });
                 if (!r.ok) {
                     // The 409 an operator hits most is "Export the final video first".
@@ -15621,13 +15706,28 @@ Ambient: same kitchen room tone, soft pour sound.
                     resetBtn();
                     return;
                 }
-                showToast('Auto-edit queued — your PC does the rendering');
+                showToast('Automatic finish queued — your PC does the rendering');
             } catch (e) {
                 showToast('Auto-edit could not start — no connection to the server', '#ef4444');
                 resetBtn();
                 return;
             }
             renderAutoEditCard(jobId);
+        }
+
+        async function cancelAutoEdit(jobId, autoeditId) {
+            try {
+                const r = await fetch(`${API}/jobs/${jobId}/autoedit/${autoeditId}/cancel`, { method: 'POST' });
+                if (!r.ok) {
+                    const j = await r.json().catch(() => ({}));
+                    showToast(j.detail || 'This auto-edit can no longer be cancelled', '#ef4444');
+                    return;
+                }
+                showToast('Auto-edit cancelled');
+                renderAutoEditCard(jobId);
+            } catch (e) {
+                showToast('Could not cancel the auto-edit', '#ef4444');
+            }
         }
 
         // Load existing exports when switching jobs
@@ -15734,7 +15834,7 @@ Ambient: same kitchen room tone, soft pour sound.
                         // fallback made the header read "Export export". Give that
                         // group its own plain label instead.
                         let _hdr = `📦 Export ${_lbl}`;
-                        if (!_tm && filename.startsWith('autoedit_')) _hdr = '✂️ Auto-Edit';
+                        if (!_tm && filename.startsWith('autoedit_')) _hdr = 'Automatic Finish';
                         content.insertAdjacentHTML('beforeend', `<div class="export-group-header" style="margin:14px 0 6px;font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.5px;border-top:1px solid rgba(255,255,255,0.10);padding-top:8px;">${_hdr}</div>`);
                     }
 
@@ -15801,8 +15901,8 @@ Ambient: same kitchen room tone, soft pour sound.
                             <div class="export-complete" data-filename="${filename}" style="background:linear-gradient(90deg, #f59e0b 0%, #d97706 100%);padding:10px 16px;border-radius:var(--radius-md);margin-bottom:8px;">
                                 <div style="display:flex;align-items:center;justify-content:space-between;width:100%;flex-wrap:wrap;gap:8px;">
                                     <div style="flex:1;min-width:0;">
-                                        <h3 style="margin:0;font-size:13px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">✂️ Auto-Edit · ${filename}</h3>
-                                        <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">b-roll + captions + voice${_aeTpl ? ` • style ${_aeTpl}` : ''}</p>
+                                        <h3 style="margin:0;font-size:13px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Automatic Finish · ${filename}</h3>
+                                        <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">No CapCut when checks pass${_aeTpl ? ` • style ${_aeTpl}` : ''}</p>
                                     </div>
                                     <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
                                         <button onclick="downloadClip('${url}','${filename}')" style="padding:5px 8px;background:white;color:#d97706;border:none;border-radius:var(--radius-sm);font-size:11px;font-weight:600;cursor:pointer;" title="Download video">📥</button>

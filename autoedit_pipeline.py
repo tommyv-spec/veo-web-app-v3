@@ -101,7 +101,7 @@ def download(path, token, dest: Path):
     print(f"  downloaded: {dest.name} ({dest.stat().st_size / 1e6:.1f} MB)")
 
 
-def fetch_job_files(job_id, work: Path):
+def fetch_job_files(job_id, work: Path, music_filename=None):
     from send_to_platform import resolve_token
     token, source = resolve_token(None)
     print(f"token: {source}")
@@ -111,13 +111,19 @@ def fetch_job_files(job_id, work: Path):
     base_fn = st["result"]["filename"]
     outs = api_get(f"/api/jobs/{job_id}/list-outputs", token).json()["files"]
     sup_fn = next((f for f in outs if f.startswith("support_track_") and f.endswith(".mp4")), None)
+    music_fn = music_filename if music_filename in outs else None
+    if music_filename and not music_fn:
+        raise AutoEditError(f"music file is not in this job's outputs: {music_filename}")
     base, sup = work / base_fn, (work / sup_fn if sup_fn else None)
+    music = work / music_fn if music_fn else None
     download(f"/api/jobs/{job_id}/outputs/{base_fn}", token, base)
     if sup_fn:
         download(f"/api/jobs/{job_id}/outputs/{sup_fn}", token, sup)
     else:
         print("  no support track found — PIP stage will be skipped")
-    return base, sup
+    if music_fn:
+        download(f"/api/jobs/{job_id}/outputs/{music_fn}", token, music)
+    return base, sup, music
 
 
 def probe_duration(path):
@@ -476,8 +482,15 @@ def watermark_font():
         "no watermark font found on this machine — tried: " + ", ".join(WATERMARK_FONT_CANDIDATES))
 
 
-def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio, pip_y=PIP_Y):
-    nocap = work / f"nocap_wm_y{pip_y}.mp4"  # pip_y in the name invalidates the cache on layout change
+def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio,
+            pip_y=PIP_Y, pip_enabled=True, chroma_similarity=0.10,
+            chroma_blend=0.02, music=None, music_db=-20.0):
+    # Every visual/audio repair setting is in the cache name. A re-run with a
+    # stronger key or different music must never silently reuse the old video.
+    music_key = music.stem[:24] if music else "none"
+    cache_key = (f"y{pip_y}_p{int(pip_enabled)}_k{chroma_similarity:.3f}_"
+                 f"b{chroma_blend:.3f}_m{music_key}_{music_db:.1f}")
+    nocap = work / f"nocap_wm_{cache_key}.mp4"
     if nocap.exists():
         print("compose: cached")
         return nocap
@@ -492,13 +505,14 @@ def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio, pip_y=PI
         inputs += ["-i", str(bg)]
         fc_parts.append(
             f"{vin}split[b0][b1];"
-            f"[b0]trim=0:{hook_end},setpts=PTS-STARTPTS,chromakey={key_hex}:0.10:0.02,despill=type=green[fg];"
+            f"[b0]trim=0:{hook_end},setpts=PTS-STARTPTS,"
+            f"chromakey={key_hex}:{chroma_similarity}:{chroma_blend},despill=type=green[fg];"
             f"[{idx}:v]trim=0:{hook_end},setpts=PTS-STARTPTS[bgt];"
             f"[bgt][fg]overlay=x=0:y=0:shortest=1[hook];"
             f"[b1]trim={hook_end},setpts=PTS-STARTPTS[rest];"
             f"[hook][rest]concat=n=2:v=1:a=0[v0]")
         vin, idx = "[v0]", idx + 1
-    if segs and sup is not None:
+    if pip_enabled and segs and sup is not None:
         mask = work / "pipmask.png"
         if not mask.exists():
             run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"color=c=white:s={PIP_W}x{PIP_H}", "-vf",
@@ -514,12 +528,23 @@ def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio, pip_y=PI
         vin, idx = "[v1]", idx + 2
     inputs += ["-i", str(audio)]
     aidx = idx
+    audio_map = f"{aidx}:a"
+    if music is not None:
+        inputs += ["-stream_loop", "-1", "-i", str(music)]
+        midx = aidx + 1
+        delay_ms = max(0, int(round(hook_end * 1000)))
+        body_dur = max(0.1, dur - hook_end)
+        fc_parts.append(
+            f"[{midx}:a]atrim=0:{body_dur},asetpts=PTS-STARTPTS,volume={music_db}dB,"
+            f"adelay={delay_ms}:all=1[music];"
+            f"[{aidx}:a][music]amix=inputs=2:duration=first:normalize=0[aout]")
+        audio_map = "[aout]"
     fontfile = watermark_font()
     fc_parts.append(f"{vin}drawtext=text='syntheticperformer':fontfile='{fontfile}'"
                     f":fontcolor=white@0.5:fontsize=34:x=44:y=h-78[vout]")
     print("compose: rendering base (no captions) ...")
     run(["ffmpeg", "-v", "error", *inputs, "-filter_complex", ";".join(fc_parts),
-         "-map", "[vout]", "-map", f"{aidx}:a", "-c:v", "libx264", "-crf", "19", "-preset", "medium",
+         "-map", "[vout]", "-map", audio_map, "-c:v", "libx264", "-crf", "19", "-preset", "medium",
          "-r", "24", "-c:a", "aac", "-b:a", "192k", "-t", str(dur), "-movflags", "+faststart", "-y", str(nocap)])
     return nocap
 
@@ -571,16 +596,189 @@ def render_captions_dynamic(nocap: Path, out: Path, template: str, windows, work
          "-c:a", "copy", "-movflags", "+faststart", "-y", str(out)])
 
 
-def prepare_composition(job_id: str, work: Path, progress=lambda stage: None):
+def trim_media(source: Path, dest: Path, start_s: float, end_s: float, dur: float):
+    """Trim a media file and return (path, new_duration)."""
+    if start_s <= 0 and end_s <= 0:
+        return source, dur
+    new_dur = dur - start_s - end_s
+    if new_dur < 1.0:
+        raise AutoEditError(
+            f"trim removes the whole video ({dur:.2f}s source, {start_s:.2f}s + {end_s:.2f}s trim)")
+    if not dest.exists():
+        run(["ffmpeg", "-v", "error", "-ss", str(start_s), "-i", str(source),
+             "-t", str(new_dur), "-map", "0:v:0", "-map", "0:a?",
+             "-c:v", "libx264", "-crf", "19", "-preset", "medium",
+             "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-y", str(dest)])
+    return dest, new_dur
+
+
+def shifted_segments(segs, start_s, new_dur):
+    shifted = []
+    for a, b in segs:
+        a2, b2 = max(0.0, a - start_s), min(new_dur, b - start_s)
+        if b2 - a2 > 0.25:
+            shifted.append((round(a2, 2), round(b2, 2)))
+    return shifted
+
+
+def probe_media(path: Path):
+    r = run(["ffprobe", "-v", "error", "-show_streams", "-show_format",
+             "-of", "json", str(path)])
+    return json.loads(r.stdout)
+
+
+def audio_levels(path: Path):
+    """Return ffmpeg volumedetect levels, or None when they cannot be parsed."""
+    import re
+    r = subprocess.run(
+        ["ffmpeg", "-v", "info", "-i", str(path), "-vn", "-af", "volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace")
+    text = (r.stderr or "") + (r.stdout or "")
+    mean = re.search(r"mean_volume:\s*(-?[\d.]+) dB", text)
+    peak = re.search(r"max_volume:\s*(-?[\d.]+) dB", text)
+    if not mean or not peak:
+        return None
+    return {"mean_db": float(mean.group(1)), "peak_db": float(peak.group(1))}
+
+
+def green_spill_ratio(path: Path, hook_end: float):
+    """Sample the keyed hook and measure strong-green pixels."""
+    if hook_end <= 0:
+        return None
+    import cv2
+    import numpy as np
+    cap = cv2.VideoCapture(str(path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 24
+    ratios = []
+    for t in np.linspace(0.2, max(0.2, hook_end - 0.1), num=min(8, max(2, int(hook_end * 2)))):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(t * fps))
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        b, g, r = cv2.split(frame.astype(np.float32))
+        ratios.append(float(((g > 70) & (g > r * 1.25) & (g > b * 1.15)).mean()))
+    cap.release()
+    return max(ratios) if ratios else None
+
+
+def pip_difference_ratio(output: Path, base: Path, segs, pip_y: int):
+    """Check that a requested PIP made a visible change in its target region."""
+    if not segs:
+        return None
+    import cv2
+    import numpy as np
+    t = (segs[0][0] + segs[0][1]) / 2
+
+    def frame_at(path):
+        cap = cv2.VideoCapture(str(path))
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+        ok, frame = cap.read()
+        cap.release()
+        return frame if ok else None
+
+    a, b = frame_at(output), frame_at(base)
+    if a is None or b is None or a.shape != b.shape:
+        return None
+    h, w = a.shape[:2]
+    x1, x2 = int(PIP_X / 1080 * w), int((PIP_X + PIP_W) / 1080 * w)
+    y1, y2 = int(pip_y / 1920 * h), int((pip_y + PIP_H) / 1920 * h)
+    return float(np.abs(a[y1:y2, x1:x2].astype(np.float32)
+                        - b[y1:y2, x1:x2].astype(np.float32)).mean())
+
+
+def run_quality_checks(output: Path, base: Path, expected_dur: float, buckets,
+                       windows, segs, pip_y: int, hook_end: float, repairs):
+    from autoedit_qc import build_qc_report, caption_face_overlap_metrics
+
+    checks = []
+    try:
+        media = probe_media(output)
+        streams = media.get("streams", [])
+        video = next((s for s in streams if s.get("codec_type") == "video"), None)
+        audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        portrait = bool(video and int(video.get("width", 0)) == 1080 and int(video.get("height", 0)) == 1920)
+        checks.append({"id": "portrait_video", "status": "pass" if portrait else "fail",
+                       "message": "Video is 1080×1920" if portrait else "Video is not 1080×1920"})
+        checks.append({"id": "audio_stream", "status": "pass" if audio else "fail",
+                       "message": "Audio stream is present" if audio else "The finished video has no audio"})
+        actual_dur = float(media.get("format", {}).get("duration", 0.0))
+        dur_ok = abs(actual_dur - expected_dur) <= max(0.6, expected_dur * 0.01)
+        checks.append({"id": "duration", "status": "pass" if dur_ok else "fail",
+                       "message": (f"Duration matches ({actual_dur:.2f}s)" if dur_ok else
+                                   f"Duration mismatch: expected {expected_dur:.2f}s, got {actual_dur:.2f}s"),
+                       "value": actual_dur})
+    except Exception as exc:
+        checks.append({"id": "media_probe", "status": "fail",
+                       "message": f"Could not inspect the finished file: {exc}"})
+
+    try:
+        levels = audio_levels(output)
+    except Exception:
+        levels = None
+    level_ok = bool(levels and -23.0 <= levels["mean_db"] <= -10.0
+                    and -8.0 <= levels["peak_db"] <= -0.1)
+    checks.append({"id": "audio_levels", "status": "pass" if level_ok else "fail",
+                   "message": (f"Voice level is usable ({levels['mean_db']:.1f} dB mean, "
+                               f"{levels['peak_db']:.1f} dB peak)" if levels else
+                               "Could not measure the finished audio level") if level_ok else
+                              (f"Audio needs review ({levels['mean_db']:.1f} dB mean, "
+                               f"{levels['peak_db']:.1f} dB peak)" if levels else
+                               "Could not measure the finished audio level"),
+                   "value": levels})
+
+    if repairs["captions_enabled"]:
+        overlap = caption_face_overlap_metrics(buckets, windows)
+        overlap_ok = overlap["worst_vertical_px"] <= 40.0
+        checks.append({"id": "caption_face_clearance", "status": "pass" if overlap_ok else "fail",
+                       "message": ("Captions stay clear of detected faces" if overlap_ok else
+                                   f"Captions overlap a detected face by up to "
+                                   f"{overlap['worst_vertical_px']:.0f}px"),
+                       "value": overlap})
+    else:
+        checks.append({"id": "captions", "status": "pass",
+                       "message": "Captions were intentionally disabled"})
+
+    try:
+        spill = green_spill_ratio(output, hook_end)
+        spill_ok = spill is None or spill <= 0.02
+        spill_message = ("Green-screen hook is clean" if spill_ok else
+                         f"Green spill remains in about {spill * 100:.1f}% of the keyed hook")
+    except Exception as exc:
+        spill, spill_ok = None, False
+        spill_message = f"Could not verify the green-screen hook: {exc}"
+    checks.append({"id": "green_key", "status": "pass" if spill_ok else "fail",
+                   "message": spill_message, "value": spill})
+
+    if repairs["pip_enabled"] and segs:
+        try:
+            diff = pip_difference_ratio(output, base, segs, pip_y)
+            pip_ok = diff is not None and diff >= 5.0
+            pip_message = ("Support footage is visible" if pip_ok else
+                           "Support footage was requested but was not visibly detected")
+        except Exception as exc:
+            diff, pip_ok = None, False
+            pip_message = f"Could not verify the support footage: {exc}"
+        checks.append({"id": "support_footage", "status": "pass" if pip_ok else "fail",
+                       "message": pip_message,
+                       "value": diff})
+    else:
+        checks.append({"id": "support_footage", "status": "pass",
+                       "message": "Support footage was unavailable or intentionally disabled"})
+    return build_qc_report(checks)
+
+
+def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, repairs=None):
     """Everything up to (and including) the uncaptioned composed video.
     Returns (nocap_path, dur, segs, auto_offset, pip_y, chin, base_path).
     `base_path` is returned too (in addition to the documented 6 fields)
     because the caption-placement stage's occupancy scan needs the raw
     downloaded video, not the composed one — dropping it would change
     what build_occupancy() scans on an uncached run."""
+    from autoedit_qc import normalize_repairs
+    repairs = normalize_repairs(repairs)
     work.mkdir(parents=True, exist_ok=True)
     progress("download")
-    base, sup = fetch_job_files(job_id, work)
+    base, sup, music = fetch_job_files(job_id, work, repairs["music_filename"])
     dur = probe_duration(base)
     scan_file = work / "scan.json"
     s = json.loads(scan_file.read_text()) if scan_file.exists() else {}
@@ -602,18 +800,38 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None):
     progress("audio")
     audio = enhance_audio(base, work)
     progress("compose")
-    nocap = compose(base, sup, work, dur, hook_end, key_hex, segs, audio, pip_y)
-    return nocap, dur, segs, auto_offset, pip_y, chin, base
+    nocap = compose(
+        base, sup, work, dur, hook_end, key_hex, segs, audio, pip_y,
+        pip_enabled=repairs["pip_enabled"],
+        chroma_similarity=repairs["chroma_similarity"],
+        chroma_blend=repairs["chroma_blend"],
+        music=music, music_db=repairs["music_db"],
+    )
+    start_s, end_s = repairs["trim_start_s"], repairs["trim_end_s"]
+    trim_key = f"s{start_s:.2f}_e{end_s:.2f}"
+    nocap, trimmed_dur = trim_media(nocap, work / f"nocap_trim_{trim_key}.mp4",
+                                    start_s, end_s, dur)
+    base, _ = trim_media(base, work / f"base_trim_{trim_key}.mp4",
+                         start_s, end_s, dur)
+    segs = shifted_segments(segs, start_s, trimmed_dur)
+    return nocap, trimmed_dur, segs, auto_offset, pip_y, chin, base
 
 
 def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
                  placement: str = "dynamic", offset: float | None = None,
-                 progress=lambda stage: None) -> Path:
+                 progress=lambda stage: None, repairs=None) -> Path:
     """The whole pass. `progress` gets called with a stage-name string."""
-    nocap, dur, segs, auto_offset, pip_y, chin, base = prepare_composition(job_id, work, progress)
-    progress("captions")
-    if placement == "dynamic" and offset is None:
-        occ_file = work / "occupancy.json"
+    from autoedit_qc import normalize_repairs
+    repairs = normalize_repairs(repairs)
+    nocap, dur, segs, auto_offset, pip_y, chin, base = prepare_composition(
+        job_id, work, progress, repairs=repairs)
+    buckets = []
+    windows = []
+    if repairs["captions_enabled"]:
+        progress("captions")
+    if repairs["captions_enabled"] and placement == "dynamic" and offset is None:
+        occ_file = work / (f"occupancy_s{repairs['trim_start_s']:.2f}_"
+                           f"e{repairs['trim_end_s']:.2f}.json")
         if occ_file.exists():
             buckets = json.loads(occ_file.read_text())
             print("occupancy: cached")
@@ -622,6 +840,26 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
         occ_file.write_text(json.dumps(buckets))
         windows = plan_caption_windows(buckets, chin, segs, pip_y, dur)
         render_captions_dynamic(nocap, out, template, windows, work)
-    else:
+    elif repairs["captions_enabled"]:
+        buckets = build_occupancy(base, dur)
+        chosen_offset = offset if offset is not None else auto_offset
+        windows = [(0.0, dur, chosen_offset)]
         render_captions(nocap, out, template, offset if offset is not None else auto_offset)
+    else:
+        out.unlink(missing_ok=True)
+        shutil.copy2(nocap, out)
+
+    if repairs["captions_enabled"] and not buckets:
+        buckets = build_occupancy(base, dur)
+    if not windows:
+        windows = [(0.0, dur, 0.0)]
+    scan = json.loads((work / "scan.json").read_text()) if (work / "scan.json").exists() else {}
+    hook_end = max(0.0, float(scan.get("hook_end", 0.0)) - repairs["trim_start_s"])
+    progress("quality-check")
+    report = run_quality_checks(out, base, dur, buckets, windows, segs, pip_y,
+                                hook_end, repairs)
+    (work / "qc_report.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"quality: {report['verdict']}"
+          + (f" — {'; '.join(report['reasons'])}" if report["reasons"] else ""))
     return out

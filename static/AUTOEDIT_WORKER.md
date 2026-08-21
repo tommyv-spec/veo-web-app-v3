@@ -3,10 +3,17 @@
 ## What it is
 
 The local half of "auto-edit". Auto-edit turns a finished video job into a
-posted-ready video: it downloads the job's export plus its 16:9 b-roll support
-track, keys the green-screen hook, drops a rounded PIP of the b-roll, cleans
-the voice, and burns word-by-word karaoke captions that dodge faces, the PIP
-and the busiest part of the frame.
+finished video without needing CapCut for the normal path. It downloads the
+job's export plus its 16:9 support track, keys the green-screen hook, drops a
+rounded PIP of the support footage, cleans the voice, and burns word-by-word
+karaoke captions that dodge faces, the PIP and the busiest part of the frame.
+
+Each finish ends with one clear verdict:
+
+- `READY` — download and publish it.
+- `NEEDS_MANUAL_EDIT` — download it for CapCut and use the listed reasons as
+  the finish checklist. The render is still kept; a quality warning does not
+  throw away a usable file.
 
 **The server never renders any of that.** Render has 1 CPU / 2 GB and no
 OpenCV, no whisper, no browser. When you press auto-edit in the UI the server
@@ -93,17 +100,34 @@ worker after 5 minutes of silence.
 [worker] a1b2c3 audio
 [worker] a1b2c3 compose
 [worker] a1b2c3 captions
+[worker] a1b2c3 quality-check
+[worker] a1b2c3 verdict READY
 [worker] DONE ... -> C:\Users\you\.kaveno\autoedit\<job-id>\result_a1b2c3.mp4
 ```
 
-Those six stage names are also what the UI shows, because each one is posted
+Those stage names are also what the UI shows, because each one is posted
 to the server as it starts.
+
+## Repair controls
+
+The platform's **Repair controls** panel lets the operator rerun without
+leaving the job:
+
+- trim the start and end;
+- set a fixed caption height, or keep smart placement;
+- turn support footage or captions off;
+- tune green-screen strength and edge softness;
+- add one of the job's uploaded audio files as music and set its level.
+
+A manual caption height changes placement to `constant` automatically. Only a
+run that is still queued can be cancelled. Once the worker has claimed it, let
+it finish or stop the local worker.
 
 ## Work directories
 
 Everything lands in `~/.kaveno/autoedit/<job-id>/` — the downloaded tracks, the
 green-screen scan, the layout numbers, the enhanced audio, the composed video,
-and the final `result_<id>.mp4`.
+the quality report (`qc_report.json`), and the final `result_<id>.mp4`.
 
 **The directory is a cache, on purpose.** A second run of the same job reuses
 the download, the scan (`scan: cached`), the layout and the face-occupancy map,

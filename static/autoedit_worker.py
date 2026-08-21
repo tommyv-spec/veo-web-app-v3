@@ -13,6 +13,7 @@ no worker is polling.
 Runbook: code/static/AUTOEDIT_WORKER.md
 """
 import argparse
+import json
 import sys
 import threading
 import time
@@ -82,15 +83,25 @@ def handle(run, token):
         try:
             run_autoedit(job_id, work, out, template=run["template"],
                          placement=run["placement"], offset=run["offset"],
-                         progress=progress)
+                         progress=progress, repairs=run.get("repairs"))
+            report_path = work / "qc_report.json"
+            qc_report = (report_path.read_text(encoding="utf-8")
+                         if report_path.exists() else json.dumps({
+                             "schema_version": 1,
+                             "verdict": "NEEDS_MANUAL_EDIT",
+                             "reasons": ["The worker did not create a quality report"],
+                             "checks": [],
+                         }))
             # Stop the heartbeat BEFORE any terminal call: /progress sets the
             # run back to "running", so a late ping would undo /complete.
             stop.set()
             with open(out, "rb") as f:
                 api("POST", f"/api/autoedit/{rid}/complete", token,
                     timeout=UPLOAD_TIMEOUT,
-                    files={"video": (out.name, f, "video/mp4")})
-            print(f"[worker] DONE {rid} -> {out}")
+                    files={"video": (out.name, f, "video/mp4")},
+                    data={"qc_report": qc_report})
+            verdict = json.loads(qc_report).get("verdict", "NEEDS_MANUAL_EDIT")
+            print(f"[worker] DONE {rid} verdict={verdict} -> {out}")
         except Exception:
             # AutoEditError derives from RuntimeError, so it lands here. The
             # pipeline must never raise SystemExit — that would bypass this
