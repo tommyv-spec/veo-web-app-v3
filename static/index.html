@@ -15729,7 +15729,13 @@ Ambient: same kitchen room tone, soft pour sound.
                             const _d = new Date(Date.UTC(+_tm[1], +_tm[2]-1, +_tm[3], +_tm[4], +_tm[5], +_tm[6]));
                             _lbl = _d.toLocaleString([], {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit'});
                         }
-                        content.insertAdjacentHTML('beforeend', `<div class="export-group-header" style="margin:14px 0 6px;font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.5px;border-top:1px solid rgba(255,255,255,0.10);padding-top:8px;">📦 Export ${_lbl}</div>`);
+                        // v928 — an auto-edit result has no timestamp segment in its
+                        // name, so it lands in the empty-key group and the date
+                        // fallback made the header read "Export export". Give that
+                        // group its own plain label instead.
+                        let _hdr = `📦 Export ${_lbl}`;
+                        if (!_tm && filename.startsWith('autoedit_')) _hdr = '✂️ Auto-Edit';
+                        content.insertAdjacentHTML('beforeend', `<div class="export-group-header" style="margin:14px 0 6px;font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.5px;border-top:1px solid rgba(255,255,255,0.10);padding-top:8px;">${_hdr}</div>`);
                     }
 
                     if (filename.startsWith('final_export_')) {
