@@ -16899,3 +16899,91 @@ Recorded so it is not rediscovered as a surprise:
 
 *(True at first ship, superseded the same day by the `v934_addressee` check above. Kept verbatim rather than edited because `check_masters_vs_main.py` blocks canon deletions on sight — correctly, for a file three sessions edit — and because when a status stopped being true is worth knowing.)*
 
+---
+
+## v936 — IMAGE VARIANT QC, SHADOW MODE: the machine scores, the operator still picks (2026-08-21)
+
+**What it is.** Every AI variant on an image node gets scored by a local scorer, and the score is stored on the node so the review UI can show it. **Nothing about the pick changes.** The operator still chooses the variant, exactly as before (v886.3). The only new thing is a record of what the machine WOULD have chosen, so the two can be compared over a real sample before the machine is ever trusted to choose anything.
+
+That is what "shadow mode" means here: the scorer runs beside the real decision and never inside it.
+
+**Where it runs, and why not on Render.** The scorer is `code/image_qc.py` and it runs on the operator's Windows box. Render's instance is 1 CPU / 2GB and cannot hold OpenCV plus onnxruntime, and `GEMINI_API_KEY` already lives on the local box (the decode pipeline uses it). So the scorer talks to the server over the normal API: fetch the batch's nodes, download each variant, score it, `POST` one report per node. The server diff is deliberately tiny — one column, one endpoint, one `to_dict` field, one log line.
+
+**Nothing in the scorer may abort a batch.** Every stage answers "no answer" (`None`, `[]`, a `call_failed` reason) and the funnel carries on with the stages that did work. A dead judge, a missing face model or a 503 degrades the report; it does not lose the run.
+
+### The funnel, in order
+
+Per node, on that node's variants:
+
+1. **Integrity gates** (`analyze_integrity`, cv2, free, deterministic) — decode the bytes, then measure short side, grayscale standard deviation and Laplacian variance. `ok: false` with a reason (`undecodable` / `low_resolution` / `blank_frame` / `extreme_blur`) means the render is broken; it is excluded from judging and ranked last. The measured numbers are ALWAYS stored next to the verdict, so the thresholds can later be re-set from real data instead of guessed again.
+2. **Face gate** (`face_similarity`, InsightFace, OPTIONAL) — cosine similarity between the avatar reference portrait and the best face in the candidate. If the wheel is not installed the stage simply does not run and `'face'` joins `skipped_checks`. `None` means "no answer", never "no match".
+3. **Gemini judge** (`judge_variant`, model `gemini-3.6-flash`) on the survivors — **the build's own image prompt IS the rubric**. Every element the prompt names (subject, prop, pose, wardrobe, setting, text) is a checkable row, and two compliance rows are ALWAYS added regardless of what the prompt says: the §8 medical-authority bans (`COMPLIANCE_BANS`) and the v808 no-minors ban (`MINOR_BAN`). The reply is parsed tolerantly and trimmed hard — `JUDGE_MAX_LIST_ITEMS = 10`, `JUDGE_MAX_STRING_CHARS = 200`, four list fields, so a chatty model cannot push a report past the server's size cap.
+4. **Pairwise on the top 2** (`pairwise_top2`) — the two best candidates are compared by the model in BOTH orders. Only a verdict that survives the swap counts, because VLM judges have measurable first-position bias. Inconsistent = no winner, and the checklist order stands.
+5. **Ranking** (`rank_variants`) — deterministic, best first, six axes each a full tie-break of the one before it: integrity ok · judge verdict `pass` · face at or above the floor · judge `overall` descending · `face_sim` descending (missing reads as `0.0` HERE ONLY, as a tie-break between variants already past axis 3) · `variant_id` ascending. Axis 6 is what makes the order TOTAL — the same batch never ranks two ways, so an agreement number stays comparable across runs.
+6. **Report** (`compose_report`) — `recommended_variant_id` is set ONLY when the top-ranked variant is genuinely healthy on all three of integrity, judge-passed and face floor. Otherwise it is `null`, which is a real answer meaning "none of these is good enough" — deliberately NOT "the least bad one", because this report never chooses and a recommendation the machine does not believe would poison the agreement number.
+
+### The report shape (stored in `image_nodes.qc_json`)
+
+```json
+{
+  "version": 1,
+  "generated_at": "2026-08-21T14:00:00Z",
+  "recommended_variant_id": 123,
+  "skipped_checks": ["face", "fetch:1"],
+  "pairwise_reason": "consistent",
+  "variants": {
+    "123": {"integrity": {"ok": true, "reasons": [],
+                          "metrics": {"short_side": 576, "gray_std": 49.2, "lap_var": 312.5}},
+            "face_sim": 0.71,
+            "judge": {"overall": 8, "verdict": "pass", "element_misses": [],
+                      "artifacts": [], "compliance": [], "reasons": []},
+            "rank": 1},
+    "124": {"integrity": {"ok": false, "reasons": ["blank_frame"],
+                          "metrics": {"short_side": 576, "gray_std": 0.7, "lap_var": 1.6}},
+            "face_sim": null, "judge": null, "rank": 4}
+  }
+}
+```
+
+Variant keys are STRINGS (they are JSON object keys), so a reader looks up `qc.variants[String(v.id)]`. `recommended_variant_id` is stored as a plain int.
+
+### Server-side lifecycle
+
+- **Stored** by `POST /api/images/nodes/{id}/qc` (`image_platform.py` ~:3576). It validates, in order: the node exists and belongs to the caller · the node is NOT `queued`/`generating` (→ **409**, "rescore after it lands" — a node mid-render is about to replace its variants, so a report scored now would be stale on arrival) · `version` is exactly `1` (→ 422) · `variants` is an object if present (→ 422) · `recommended_variant_id` is an int or a digit string, and belongs to THIS node (→ 422; a JSON `true` is rejected on purpose, since `bool` is an `int` subclass and would otherwise resolve to variant 1) · the serialized report is at most **64,000 bytes** (→ 413). Latest scoring wins — a rescore overwrites.
+- **Served** in `ImageNode.to_dict()` as the `qc` field, through `_safe_qc` (~:946). Corrupt JSON, or valid JSON that is not a dict, degrades to `None` and WARNs. It never raises, because the sidebar poll calls `to_dict` on every node every 2 seconds and one bad report must not 500 the whole list.
+- **Cleared** by `_clear_qc(node)` (~:976) on EVERY path that invalidates the variants or the prompt. A report describes SPECIFIC variants scored against a SPECIFIC prompt; keep it past either and it badges dead ids in the UI and manufactures false disagreements in the metric. The paths: regenerate and the second regenerate path (variants deleted, node re-queued) · the orphan-cleanup pass, both when a generated node loses all its variants and when the chosen one was among the deleted · manual-variant replacement (anchored on the DELETION, not on the chosen-pick guard — every manual variant there dies whether or not it was chosen) · single-variant deletion, on the owning node regardless of whether the deleted row was the chosen one · **prompt rewrite** (v891.3), where the old renders AND the rubric they were judged under both stop existing.
+
+### The agreement metric — and how to read it honestly
+
+Two ways to read it, and they answer different questions.
+
+- **Per pick, live:** `choose_variant` logs one line AFTER the commit, so it records a stored fact and not an intent — `[qc-shadow] node <id> operator=<picked> qc=<recommended> agree=<bool>`. Read it with `python code/render_logs.py --text qc-shadow`. **This log line IS the feature's output, not removable scaffolding.**
+- **Aggregated:** `python code/image_qc.py --batch <id> --report` prints `agreement_stats`: `scored` (nodes carrying a report at all) · `comparable` (both sides named a variant — only these can agree or disagree) · `agree` · `no_recommendation` · `agreement_pct`.
+
+Three honest caveats are built into those numbers on purpose:
+
+1. **`no_recommendation` is NOT a disagreement.** The operator picked and the report said "none of these is good enough". The machine declined to answer; counting a decline as a wrong answer would slowly libel the judge.
+2. **`agreement_pct` is `null` when nothing is comparable.** A 0% claimed off zero samples reads as "the judge is useless" when the fact is "the judge has not been tested".
+3. **`pairwise_reason` separates a tie from an outage** — `consistent` (both orders named the same image) · `disagreed` (both orders answered and differed) · `call_failed` (at least one order produced no verdict at all). A disagreement and a dead API produce the same OUTCOME (the checklist order stands) but are not the same FACT. In the same spirit, **`fetch:N` in `skipped_checks` separates a download outage from a rejection**: N candidates could not be downloaded, so the report says on its face that it did not see them. If EVERY variant fails to download, no report is posted at all — otherwise a network outage would be permanently stored as `recommended_variant_id: null` and counted as "the machine declined".
+
+### The two thresholds, and how much to trust them
+
+- **`RANK_FACE_SIM_FLOOR = 0.25`** — deliberately a LOW bar. It is there to catch "this is a different person", not "this is slightly off". AI renders drift with lighting and angle, and a strict floor would demote good variants for that drift, which is exactly the failure that makes a shadow report unusable. The comparison is `>=`, so at-floor counts as above, and a `face_sim` of `None` is NEUTRAL — it never fails a variant.
+- **`INTEGRITY_BLUR_LAPLACIAN_VAR = 40.0` is UNCALIBRATED.** It was chosen to mean "catastrophic blur only" and has NOT been measured against real variants from this corpus. **Calibration is owed before anyone trusts an `extreme_blur` rejection** — and it is cheap, because `analyze_integrity` stores `lap_var` on every variant it ever scores, so the accumulated reports are themselves the dataset. The same applies, more weakly, to `INTEGRITY_MIN_SHORT_SIDE = 256` and `INTEGRITY_BLANK_STD = 8.0`, which are less exposed because their failure modes are unambiguous.
+
+### How it is triggered
+
+`python code/send_to_platform.py ... --review` runs the scorer automatically at the review stop, so scores are already there when the operator opens the grid. Flags: `--no-qc` skips scoring, `--rescore` redoes nodes that already carry a report (by default they are skipped). **QC can never block a send** — a missing dependency, a scorer failure, an auth failure, even a Ctrl-C during scoring, all print a one-line note and let the send continue to its resume line.
+
+Exit codes match `send_to_platform.py` on purpose, so a caller driving both CLIs reads ONE vocabulary: **0** every report accepted (a 409 deferral still counts as 0 — deferral is part of the contract) · **1** at least one node failed · **2** bad arguments · **3** auth.
+
+### Graduation criteria — auto-pick is NOT enabled by v936
+
+Auto-pick stays behind an explicit per-run opt-in and **v886.3 stays the default forever**. The target to reach before auto-pick is even considered: **≥80% agreement over ≥50 comparable nodes**. Note "comparable" — the `scored` count is not the denominator, and neither is the total node count.
+
+### Explicitly out of scope
+
+Recorded so they are not assumed to exist: **clips QC** (Whisper line-match, lip-sync, first-frame-vs-storyboard — a later plan that reuses this report shape and endpoint pattern) · **auto-pick** (above) · **a personal taste model** trained on the (chosen, rejected-sibling) pairs already accumulating in `image_variants` (shadow mode adds the judge's opinion as one more feature for it) · **a regenerate-on-fail loop** piping judge failure reasons back into a new prompt.
+
+**Status.** Scorer + server storage + review hookup shipped `207b6ce..4ddf660` in `code/`, 162 tests green, face gate operational (insightface 1.0.1, `buffalo_l`). The review-UI badges and the deploy are not done yet. Plan + task list: `docs/superpowers/plans/2026-08-21-image-variant-qc-shadow-mode.md`.
+
