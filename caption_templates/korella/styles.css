@@ -1,0 +1,25 @@
+@font-face {
+    font-family: 'Montserrat';
+    src: url('Montserrat-ExtraBold.ttf') format('truetype');
+}
+
+.word {
+    font-family: Montserrat, CustomFont, sans-serif;
+    font-size: 26px;
+    font-weight: 800;
+    color: white;
+    padding: 5px 7px;
+    text-shadow:
+        -2px -2px 3px #000,
+         2px -2px 3px #000,
+        -2px  2px 3px #000,
+         2px  2px 3px #000,
+         0px  4px 8px rgba(0,0,0,0.45);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.word-being-narrated {
+    background-color: #F57C0A;
+    border-radius: 8px;
+}
