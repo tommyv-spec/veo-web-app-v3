@@ -2979,6 +2979,68 @@
             .ob-toggle-tab { writing-mode: horizontal-tb; right: 50%; top: auto; bottom: 0;
                 transform: translateX(50%); border-radius: 8px 8px 0 0; padding: 6px 16px; }
         }
+    
+        /* v938.4 — Automatic Finish card.
+           The page styles EVERY <label> as uppercase, letter-spaced and with a
+           bottom margin. That is right for the form-heavy tabs and wrong here:
+           it turned this card's two controls into shouting, mis-spaced columns.
+           Scope the neutralisation to the card instead of fighting it inline. */
+        .autoedit-card label {
+            text-transform: none;
+            letter-spacing: normal;
+            margin-bottom: 0;
+            font-weight: 400;
+            color: var(--text-secondary);
+            font-size: 11px;
+        }
+        .autoedit-card .autoedit-controls {
+            display: flex; flex-wrap: wrap; align-items: center;
+            gap: 8px 16px; margin-top: 8px;
+        }
+        .autoedit-card .autoedit-controls label { white-space: nowrap; }
+        /* Repair controls stack their caption above the input; the global rule
+           puts them side by side, which squeezed every field. */
+        .autoedit-card .autoedit-repairs label {
+            display: flex; flex-direction: column; align-items: stretch; gap: 3px;
+        }
+        /* NO space before .autoedit-toggles: both classes sit on the SAME
+           element, and a descendant combinator never matches an element
+           against itself — with the space this rule matched nothing and the
+           two toggles stacked their caption above a full-width checkbox. */
+        .autoedit-card .autoedit-repairs.autoedit-toggles label {
+            flex-direction: row; align-items: center; gap: 6px;
+        }
+        /* var(--bg-card) is never defined anywhere in this file. An
+           unresolvable var() makes the whole declaration invalid at computed
+           value time, so this used to wipe the background AND the arrow image
+           the global select rule paints, leaving a transparent rectangle. */
+        .autoedit-card select, .autoedit-card input[type="number"] {
+            padding: 4px 6px; font-size: 11px; background: var(--bg-input);
+            color: var(--text-primary); border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+        }
+        .autoedit-card select { appearance: auto; }
+        /* The page styles every input as a full-width text box (width:100%,
+           padding:10px 14px). On a checkbox that produced a stretched, padded
+           slab instead of a tick. */
+        .autoedit-card input[type="checkbox"] {
+            flex: none; width: 13px; height: 13px; padding: 0;
+            border: none; background: none; accent-color: var(--accent);
+        }
+        .autoedit-card .autoedit-progress {
+            height: 6px; border-radius: 3px; background: var(--border-color);
+            overflow: hidden; margin-top: 6px;
+        }
+        .autoedit-card .autoedit-progress > div {
+            height: 100%; background: var(--success); transition: width .6s ease;
+        }
+        /* Sits BEFORE the filename: the h3 ellipsis-clips its overflow, so a
+           trailing badge is the first thing to disappear on a long name. */
+        .export-latest-badge {
+            display: inline-block; margin-right: 8px; padding: 1px 6px;
+            border-radius: 10px; background: rgba(255,255,255,0.22);
+            font-size: 10px; font-weight: 700; letter-spacing: .4px;
+        }
     </style>
 </head>
 <body>
@@ -15503,13 +15565,36 @@ Ambient: same kitchen room tone, soft pour sound.
             return String(state || '');
         }
 
-        function _autoEditPercent(state, stage) {
+        // v938.5 — roughly how long each stage takes, in seconds, on the
+        // server. Only the ratios matter; they exist so the bar can creep
+        // WITHIN a stage. 'captions' does three whole-video passes (face
+        // detection, speech-to-text, subtitle burn) and is most of a ~12
+        // minute render, which is why a stage-index bar sat at one value for
+        // 6-8 minutes and read as broken.
+        const _AUTOEDIT_STAGE_SECS = {
+            download: 45, scan: 40, layout: 60, audio: 60,
+            compose: 90, captions: 400, 'quality-check': 30,
+        };
+        let _autoEditStageSince = { key: null, at: 0 };
+
+        function _autoEditPercent(state, stage, jobId) {
             if (state === 'queued') return 3;
             const i = _AUTOEDIT_STAGES.indexOf(stage);
-            if (i < 0) return 8;
-            // report the stage as IN PROGRESS, not finished — sitting at 100%
-            // while it still works is worse than no bar at all
-            return Math.round(((i + 0.5) / _AUTOEDIT_STAGES.length) * 100);
+            // Before the first stage is reported. Must stay BELOW the
+            // download band or the bar jumps backwards when work starts.
+            if (i < 0) return 3;
+
+            const key = `${jobId}:${stage}`;
+            if (_autoEditStageSince.key !== key) _autoEditStageSince = { key: key, at: Date.now() };
+            const secsInStage = (Date.now() - _autoEditStageSince.at) / 1000;
+
+            const floor = i / _AUTOEDIT_STAGES.length;
+            const ceil = (i + 1) / _AUTOEDIT_STAGES.length;
+            const expected = _AUTOEDIT_STAGE_SECS[stage] || 60;
+            // Capped at 0.92 of the band so the bar creeps but can NEVER
+            // cross into a stage that has not started. Honest, not decorative.
+            const within = Math.min(0.92, secsInStage / expected);
+            return Math.round((floor + (ceil - floor) * within) * 100);
         }
 
         function _autoEditElapsed(createdAt) {
@@ -15536,6 +15621,9 @@ Ambient: same kitchen room tone, soft pour sound.
         // which Automatic Finish is the current one. Older results look
         // identical otherwise and the operator cannot tell them apart.
         let _autoEditLatestFile = null;
+        // v938.5 — remembers that a run WAS live, so the list can be refreshed
+        // exactly once when it finishes.
+        let _autoEditWasLive = null;
 
         async function _autoEditGetStatus(jobId) {
             // 404 = never run for this job. That is normal, not an error.
@@ -15545,10 +15633,16 @@ Ambient: same kitchen room tone, soft pour sound.
                 // hand back a cached poll either.
                 const r = await fetch(`${API}/jobs/${jobId}/autoedit-status?_=${Date.now()}`,
                                       { cache: 'no-store' });
-                if (!r.ok) return null;
+                if (r.status === 404) return null;      // genuinely never run
+                // v938.5 — anything else (502 while the server redeploys, a
+                // dropped connection) is TRANSIENT. Returning null for those
+                // made the card decide the run did not exist, repaint as the
+                // idle button and cancel its own timer, so a single blip
+                // ended a 12-minute render's progress permanently.
+                if (!r.ok) return { transient: true };
                 return await r.json();
             } catch (e) {
-                return null;
+                return { transient: true };
             }
         }
 
@@ -15571,6 +15665,20 @@ Ambient: same kitchen room tone, soft pour sound.
                 const tpl = await _autoEditGetTemplates();
                 if (!tpl) return;                        // old server → no card, exports still render
                 const status = await _autoEditGetStatus(jobId);
+                // v938.5 — a transient failure must not repaint anything. Keep
+                // the card exactly as it is and try again on the next tick.
+                if (status && status.transient) {
+                    if (selectedJobId === jobId && _autoEditTimerJob === jobId) {
+                        _autoEditStopPoll();
+                        _autoEditTimerJob = jobId;
+                        _autoEditTimer = setTimeout(() => {
+                            _autoEditTimer = null;
+                            if (selectedJobId !== jobId) { _autoEditTimerJob = null; return; }
+                            renderAutoEditCard(jobId);
+                        }, 5000);
+                    }
+                    return;
+                }
                 _autoEditLatestFile = (status && status.result_filename) || null;
                 const musicFiles = await _autoEditGetMusicOutputs(jobId);
                 if (selectedJobId !== jobId) return;     // operator switched jobs mid-fetch
@@ -15594,6 +15702,10 @@ Ambient: same kitchen room tone, soft pour sound.
                     const el = old && old.querySelector(selector);
                     return el ? el.checked : fallback;
                 };
+                // v938.5 — the card is rebuilt every 5s while a run is live,
+                // which slammed Repair controls shut in the operator's face
+                // each tick. Carry the open state across the repaint.
+                const wasOpen = !!(old && old.querySelector('details') && old.querySelector('details').open);
                 const saved = (status && status.repairs) || {};
                 const pickedTrimStart = oldValue('.autoedit-trim-start', String(saved.trim_start_s ?? 0));
                 const pickedTrimEnd = oldValue('.autoedit-trim-end', String(saved.trim_end_s ?? 0));
@@ -15623,7 +15735,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 let body = '';
                 if (live) {
                     const stage = _autoEditStageLabel(status.stage);
-                    const pct = _autoEditPercent(state, status.stage);
+                    const pct = _autoEditPercent(state, status.stage, jobId);
                     const elapsed = _autoEditElapsed(status.created_at);
                     const stepNo = _AUTOEDIT_STAGES.indexOf(status.stage) + 1;
                     const stepTxt = stepNo > 0 ? `step ${stepNo} of ${_AUTOEDIT_STAGES.length}` : '';
@@ -15691,14 +15803,14 @@ Ambient: same kitchen room tone, soft pour sound.
                         <div class="autoedit-controls">
                             <label>
                                 Caption style
-                                <select class="autoedit-template" style="padding:4px 6px;font-size:11px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:var(--radius-sm);">${options}</select>
+                                <select class="autoedit-template">${options}</select>
                             </label>
                             <label style="cursor:pointer;">
                                 <input type="checkbox" class="autoedit-smart"${pickedSmart ? ' checked' : ''} style="cursor:pointer;">
                                 Smart captions <span style="opacity:.7">(never cover faces or the action)</span>
                             </label>
                         </div>
-                        <details style="margin-top:8px;font-size:11px;color:var(--text-secondary);">
+                        <details${wasOpen ? ' open' : ''} style="margin-top:8px;font-size:11px;color:var(--text-secondary);">
                             <summary style="cursor:pointer;">Repair controls</summary>
                             <div class="autoedit-repairs" style="margin-top:7px;display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;">
                                 <label>trim start (s)<input class="autoedit-trim-start" type="number" min="0" step="0.1" value="${_autoEditAttr(pickedTrimStart)}" style="width:100%;"></label>
@@ -15723,6 +15835,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 if (live) {
                     _autoEditStopPoll();
                     _autoEditTimerJob = jobId;
+                    _autoEditWasLive = jobId;
                     _autoEditTimer = setTimeout(() => {
                         _autoEditTimer = null;
                         if (selectedJobId !== jobId) { _autoEditTimerJob = null; return; }
@@ -15730,6 +15843,14 @@ Ambient: same kitchen room tone, soft pour sound.
                     }, 5000);
                 } else {
                     _autoEditStopPoll();
+                    // v938.5 — a finished render produced NO row in the list
+                    // until a job switch or reload: nothing on the auto-edit
+                    // path ever refreshed it. Refresh once, on the live->done
+                    // edge only, so an idle repaint does not loop.
+                    if (_autoEditWasLive === jobId) {
+                        _autoEditWasLive = null;
+                        loadExistingExports(jobId);
+                    }
                 }
             } catch (e) {
                 // Never let this break the export list underneath it.
@@ -15875,6 +15996,14 @@ Ambient: same kitchen room tone, soft pour sound.
                 });
                 
                 if (exportFiles.length === 0) return;
+
+                // v938.5 — which auto-edit result is the current one, decided
+                // from the ALREADY-SORTED list rather than from a status
+                // response. The old badge compared against a variable written
+                // by a different, slower request, so it was a coin flip on
+                // first paint and always absent while a run was in flight
+                // (result_filename is null until the run completes).
+                const _newestAutoEdit = exportFiles.find(f => f.startsWith('autoedit_'));
                 
                 // Ensure exports section exists
                 const section = ensureExportsSection(jobId);
@@ -15983,12 +16112,16 @@ Ambient: same kitchen room tone, soft pour sound.
                         content.insertAdjacentHTML('beforeend', cardHtml);
                     } else if (filename.startsWith('autoedit_')) {
                         // v928 — finished auto-edit result. autoedit_<job8>_<template>_<id6>.mp4
-                        const _aeTpl = (filename.match(/^autoedit_[^_]+_(.+)_[^_]+\.mp4$/) || [])[1] || '';
+                        // v938.5 — the dated form must be tried FIRST: the old
+                        // greedy pattern swallowed the timestamp and printed
+                        // "style korella_20260821_180156".
+                        const _aeTpl = (filename.match(/^autoedit_[^_]+_(.+?)_\d{8}_\d{6}_[^_]+\.mp4$/)
+                                     || filename.match(/^autoedit_[^_]+_(.+)_[^_]+\.mp4$/) || [])[1] || '';
                         const cardHtml = `
                             <div class="export-complete" data-filename="${filename}" style="background:linear-gradient(90deg, #f59e0b 0%, #d97706 100%);padding:10px 16px;border-radius:var(--radius-md);margin-bottom:8px;">
                                 <div style="display:flex;align-items:center;justify-content:space-between;width:100%;flex-wrap:wrap;gap:8px;">
                                     <div style="flex:1;min-width:0;">
-                                        <h3 style="margin:0;font-size:13px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Automatic Finish · ${filename}${filename === _autoEditLatestFile ? '<span class="export-latest-badge">LATEST</span>' : ''}</h3>
+                                        <h3 style="margin:0;font-size:13px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${filename === _newestAutoEdit ? '<span class="export-latest-badge">LATEST</span>' : ''}Automatic Finish · ${filename}</h3>
                                         <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">No CapCut when checks pass${_aeTpl ? ` • style ${_aeTpl}` : ''}</p>
                                     </div>
                                     <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
@@ -17424,49 +17557,6 @@ Ambient: same kitchen room tone, soft pour sound.
                     </div>
                 </div>
                 <style>.voice-spinner{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
-        /* v938.4 — Automatic Finish card.
-           The page styles EVERY <label> as uppercase, letter-spaced and with a
-           bottom margin. That is right for the form-heavy tabs and wrong here:
-           it turned this card's two controls into shouting, mis-spaced columns.
-           Scope the neutralisation to the card instead of fighting it inline. */
-        .autoedit-card label {
-            text-transform: none;
-            letter-spacing: normal;
-            margin-bottom: 0;
-            font-weight: 400;
-            color: var(--text-secondary);
-            font-size: 11px;
-        }
-        .autoedit-card .autoedit-controls {
-            display: flex; flex-wrap: wrap; align-items: center;
-            gap: 8px 16px; margin-top: 8px;
-        }
-        .autoedit-card .autoedit-controls label { white-space: nowrap; }
-        /* Repair controls stack their caption above the input; the global rule
-           puts them side by side, which squeezed every field. */
-        .autoedit-card .autoedit-repairs label {
-            display: flex; flex-direction: column; align-items: stretch; gap: 3px;
-        }
-        .autoedit-card .autoedit-repairs .autoedit-toggles label {
-            flex-direction: row; align-items: center; gap: 6px;
-        }
-        .autoedit-card select, .autoedit-card input[type="number"] {
-            padding: 4px 6px; font-size: 11px; background: var(--bg-card);
-            color: var(--text-primary); border: 1px solid var(--border-color);
-            border-radius: var(--radius-sm);
-        }
-        .autoedit-card .autoedit-progress {
-            height: 6px; border-radius: 3px; background: var(--border-color);
-            overflow: hidden; margin-top: 6px;
-        }
-        .autoedit-card .autoedit-progress > div {
-            height: 100%; background: var(--success); transition: width .6s ease;
-        }
-        .export-latest-badge {
-            display: inline-block; margin-left: 8px; padding: 1px 6px;
-            border-radius: 10px; background: rgba(255,255,255,0.22);
-            font-size: 10px; font-weight: 700; letter-spacing: .4px;
-        }
 </style>
             `;
             if (exportsContent) {
