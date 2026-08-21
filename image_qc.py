@@ -738,6 +738,26 @@ def _above_face_floor(face_sim: Optional[float]) -> bool:
     return face_sim is None or face_sim >= RANK_FACE_SIM_FLOOR
 
 
+def _healthy_axes(report: Dict[str, Any]) -> Tuple[int, int, int]:
+    """(integrity ok, judge passed, face at/above floor) — rank orders on
+    these three IN ORDER; a recommendation requires all three.
+
+    ONE reading of health, for the same reason `_above_face_floor` is one
+    reading of the floor. When the ranker and the recommendation each read the
+    judge in their own dialect they drift: the ranker's truthiness test passed
+    a `judge = {}` straight through to a strict `judge["verdict"]` in the
+    report composer, which raised KeyError on a variant that had ranked
+    perfectly happily — a caller bug turned into an aborted batch, in the one
+    module whose whole promise is that nothing aborts a batch. Sharing this
+    helper also makes "recommended implies rank-1 on the first three axes"
+    true by construction rather than by two functions agreeing on purpose.
+    """
+    judge = report.get("judge")
+    return (1 if report["integrity"]["ok"] else 0,
+            1 if (judge and judge.get("verdict") == "pass") else 0,
+            1 if _above_face_floor(report.get("face_sim")) else 0)
+
+
 def rank_variants(variant_reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Deterministic ordering, best first, with a dense 1-based `rank` added.
 
@@ -766,15 +786,21 @@ def rank_variants(variant_reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     face_sim None): that variant is exactly what a dead judge plus an absent
     face model plus a failed download produce, and the ranker is the last
     stage that could turn a degraded report into a lost batch.
+
+    `variant_id` must be an INT on every report. Axis 6 compares them, and
+    Python refuses to order a mix of int and str — a batch carrying both would
+    TypeError out of the sort. The server tolerates digit-string ids, so the
+    CLI that builds these reports (Task 7) coerces before ranking.
     """
     def key(report: Dict[str, Any]) -> Tuple[Any, ...]:
+        integrity_ok, verdict_pass, face_ok = _healthy_axes(report)
         judge = report.get("judge")
         face_sim = report.get("face_sim")
-        integrity_ok = 1 if report["integrity"]["ok"] else 0
-        verdict_pass = 1 if (judge and judge["verdict"] == "pass") else 0
-        face_ok = 1 if _above_face_floor(face_sim) else 0
-        # -1 sorts an unjudged variant below a real 0, which is right: a 0 is
-        # a measurement, a missing judge is not.
+        # Strict reads INSIDE a non-None judge are safe: `parse_judge_reply`
+        # builds a fresh whitelist of exactly the six contract keys and always
+        # sets both `verdict` and `overall`, so a judge dict that exists has
+        # them. -1 sorts an unjudged variant below a real 0, which is right:
+        # a 0 is a measurement, a missing judge is not.
         overall = judge["overall"] if judge else -1
         return (-integrity_ok, -verdict_pass, -face_ok, -overall,
                 -(face_sim if face_sim is not None else 0.0),
@@ -818,16 +844,21 @@ def compose_report(ranked: List[Dict[str, Any]], skipped: List[str],
     PAIRWISE_CALL_FAILED, or None when no pair was compared.
     """
     recommended: Optional[int] = None
-    if ranked:
-        top = ranked[0]
-        judge = top.get("judge")
-        healthy = (top["integrity"]["ok"]
-                   and judge is not None and judge["verdict"] == "pass"
-                   and _above_face_floor(top.get("face_sim")))
-        if healthy:
-            # int() not the raw value: the server rejects a non-plain-int
-            # recommended_variant_id (image_platform.py:3610).
-            recommended = int(top["variant_id"])
+    if ranked and all(_healthy_axes(ranked[0])):
+        # int() not the raw value: the server rejects a non-plain-int
+        # recommended_variant_id (image_platform.py:3610), and a variant_id
+        # that arrived as a numpy integer is not one.
+        recommended = int(ranked[0]["variant_id"])
+
+    ids = [report["variant_id"] for report in ranked]
+    if len(set(ids)) != len(ids):
+        # Two rows for one id collapse into one entry in the map below, so the
+        # report would quietly describe fewer variants than were judged.
+        # Logged, never raised: nothing in this module may abort a batch, and
+        # a report that is short one row still beats no report at all.
+        print(f"[qc] duplicate variant ids in this node's ranking "
+              f"{_ascii(ids)} - the report keeps the best-ranked row for each",
+              flush=True)
     return {
         "version": 1,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -836,8 +867,13 @@ def compose_report(ranked: List[Dict[str, Any]], skipped: List[str],
         "pairwise_reason": pairwise_reason,
         # JSON object keys are strings on the wire anyway; making that explicit
         # here means the dict a test reads is the dict the server receives.
+        #
+        # Built from REVERSED(ranked) because a dict comprehension is
+        # last-write-wins: iterating best-first would let a duplicate id's
+        # WORSE row overwrite its better one, which is the wrong survivor to
+        # keep in a report about which variant to prefer.
         "variants": {str(report["variant_id"]):
                      {field: report.get(field)
                       for field in _REPORT_VARIANT_FIELDS}
-                     for report in ranked},
+                     for report in reversed(ranked)},
     }

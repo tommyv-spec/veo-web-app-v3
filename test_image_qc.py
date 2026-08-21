@@ -838,6 +838,16 @@ def test_rank_face_exactly_at_the_floor_is_above_it():
     assert ranked[0]["variant_id"] == 1
 
 
+def test_rank_face_sim_breaks_a_tie_on_equal_judge_scores():
+    """Axis 5. Both variants are above the floor and equally judged, so the
+    first four axes are exhausted and the face score is what decides — without
+    it the batch would fall through to the variant_id tiebreak and return
+    [1, 2], which is why this is a real assertion and not decoration."""
+    ranked = rank_variants([_v(1, face=0.3, overall=7),
+                            _v(2, face=0.9, overall=7)])
+    assert [r["variant_id"] for r in ranked] == [2, 1]
+
+
 def test_rank_is_deterministic_on_equal_scores():
     # equal on every axis -> variant_id ascending as the final tiebreak
     ranked = rank_variants([_v(9), _v(3), _v(5)])
@@ -874,6 +884,28 @@ def test_rank_and_compose_tolerate_an_absent_face_sim_key():
     assert rep["recommended_variant_id"] == 1
 
 
+def test_rank_and_compose_survive_an_empty_judge_dict():
+    """A caller bug — judge set to {} instead of None — used to rank happily
+    (falsy, so it sank like an unjudged variant) and then raise KeyError on a
+    strict judge['verdict'] inside compose_report. Both sides read the judge
+    through _healthy_axes now, so an empty dict means the same thing to both:
+    not a pass. Nothing in this module may abort a batch."""
+    empty_judge = _v(1)
+    empty_judge["judge"] = {}
+
+    # It has to be the TOP row to bite: compose_report only reads ranked[0],
+    # so a batch where something healthier outranks it never touches the
+    # empty dict at all.
+    alone = compose_report(rank_variants([empty_judge]), skipped=[])
+    assert alone["recommended_variant_id"] is None
+    assert alone["variants"]["1"]["rank"] == 1
+
+    # ...and it still sinks below a genuinely judged pass.
+    ranked = rank_variants([empty_judge, _v(2, overall=4)])
+    assert [r["variant_id"] for r in ranked] == [2, 1]
+    assert compose_report(ranked, skipped=[])["recommended_variant_id"] == 2
+
+
 def test_rank_does_not_mutate_its_input():
     """rank_variants returns fresh per-variant dicts, so the caller's
     accumulated funnel output is never edited under it."""
@@ -895,7 +927,10 @@ def test_compose_report_no_recommendation_when_top_fails():
 
 
 def test_compose_report_happy_path():
-    ranked = rank_variants([_v(4, overall=8), _v(7, overall=5)])
+    # skipped=['face'] and face_sim=None together: the fixture says the face
+    # gate never ran, so no variant may carry a face score it could not have.
+    ranked = rank_variants([_v(4, face=None, overall=8),
+                            _v(7, face=None, overall=5)])
     rep = compose_report(ranked, skipped=["face"], pairwise_reason="consistent")
     assert rep["recommended_variant_id"] == 4
     assert rep["skipped_checks"] == ["face"]
@@ -926,10 +961,33 @@ def test_compose_report_of_an_empty_batch_is_valid():
 
 
 def test_compose_report_recommendation_is_a_plain_int():
-    """Server contract (image_platform.py): recommended_variant_id must be a
-    plain int — a numpy scalar or a bool would be rejected at POST."""
-    rep = compose_report(rank_variants([_v(4, overall=8)]), skipped=[])
+    """Server contract (image_platform.py:3610): recommended_variant_id must
+    be a plain int. numpy.int64 is the realistic offender — it survives every
+    other step of the funnel unnoticed, and only int() converts it, so this
+    fails the moment that coercion is dropped."""
+    rep = compose_report(rank_variants([_v(np.int64(4), overall=8)]), skipped=[])
     assert type(rep["recommended_variant_id"]) is int
+    assert rep["recommended_variant_id"] == 4
+    assert set(rep["variants"]) == {"4"}
+
+
+def test_compose_report_duplicate_ids_keep_the_best_row(capsys):
+    """Two rows for one id collapse into one entry (a dict comprehension is
+    last-write-wins), so the map is built from reversed(ranked) and the BEST
+    row survives. Loudly logged, never raised — a report short one row still
+    beats an aborted batch."""
+    ranked = rank_variants([_v(1, overall=9), _v(1, overall=2)])
+    rep = compose_report(ranked, skipped=[])
+    assert set(rep["variants"]) == {"1"}
+    assert rep["variants"]["1"]["rank"] == 1
+    assert rep["variants"]["1"]["judge"]["overall"] == 9
+    out = capsys.readouterr().out
+    assert "duplicate variant ids" in out and out.isascii()
+
+
+def test_compose_report_unique_ids_log_nothing(capsys):
+    compose_report(rank_variants([_v(1), _v(2)]), skipped=[])
+    assert "duplicate" not in capsys.readouterr().out
 
 
 def test_compose_report_round_trips_through_json():
