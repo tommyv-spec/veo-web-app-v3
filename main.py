@@ -10481,7 +10481,21 @@ def _requeue_local_exports_on_shutdown() -> int:
 # server rendering without waiting for a deploy. The worker path is untouched
 # by it — turning this off just returns auto-edit to queue-only.
 def _autoedit_server_enabled() -> bool:
-    return (os.environ.get("AUTOEDIT_SERVER_EXECUTOR") or "1").strip().lower() \
+    # v938.3 — DEFAULT OFF, and this is a measurement, not a preference.
+    #
+    # Rendering on this box does not fit in 2GB. With the web app already at
+    # ~1560MB used / 2048MB, a render pushed it over and the platform SIGTERMed
+    # the container roughly every 11 minutes (17:08:51, 17:31:29, 17:43:00 on
+    # 2026-08-21 — no gunicorn WORKER TIMEOUT, so it was the memory limit, not
+    # a stuck worker). Every restart killed the render in flight, the run went
+    # stale, another container reclaimed it, and it burned all 3 attempts. One
+    # render did finish (12 min) — in a lucky window between restarts.
+    #
+    # So the server executor traded the whole platform's stability for a
+    # feature. It stays available for a bigger instance or a dedicated worker
+    # service: set AUTOEDIT_SERVER_EXECUTOR=1 there. On this box the local
+    # worker (code/static/autoedit_worker.py --watch) is the supported path.
+    return (os.environ.get("AUTOEDIT_SERVER_EXECUTOR") or "0").strip().lower() \
         not in ("0", "false", "no", "off")
 
 
