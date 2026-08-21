@@ -23597,15 +23597,30 @@ Ambient: same kitchen room tone, soft pour sound.
                 let orderedVariants = node.variants;
                 try {
                     const qc = node.qc;
-                    if (qc && typeof qc === 'object' && qc.variants && typeof qc.variants === 'object') {
+                    if (qc && typeof qc === 'object' && qc.variants && typeof qc.variants === 'object'
+                            && Array.isArray(node.variants)) {
                         qcVariants = qc.variants;
                         qcRecommendedId = (qc.recommended_variant_id != null) ? qc.recommended_variant_id : null;
-                        // Sort a COPY. node.variants is shared state read elsewhere;
-                        // an unscored variant sinks to the bottom (rank 99).
+                        // Sort a COPY. node.variants is shared state read elsewhere.
+                        // Nothing server-side validates `rank`, so a missing or
+                        // non-numeric one becomes Infinity and that variant sinks
+                        // below every real rank (a literal 99 did not — a real rank
+                        // of 99+ sorted underneath the unscored ones).
+                        const rankOf = (v) => {
+                            const raw = (qcVariants[String(v.id)] || {}).rank;
+                            // Number(null), Number(''), Number('  ') and Number(false)
+                            // are all 0, which would send a MISSING rank to the top
+                            // spot. Demand a real number or a non-blank numeric string.
+                            const usable = typeof raw === 'number'
+                                || (typeof raw === 'string' && raw.trim() !== '');
+                            const r = usable ? Number(raw) : NaN;
+                            return Number.isFinite(r) ? r : Infinity;
+                        };
+                        // Compare, never subtract: Infinity - Infinity is NaN, and a
+                        // comparator that returns NaN leaves the order up to the engine.
                         orderedVariants = [...node.variants].sort((a, b) => {
-                            const ra = (qcVariants[String(a.id)] || {}).rank;
-                            const rb = (qcVariants[String(b.id)] || {}).rank;
-                            return (ra == null ? 99 : ra) - (rb == null ? 99 : rb);
+                            const ra = rankOf(a), rb = rankOf(b);
+                            return ra === rb ? 0 : (ra < rb ? -1 : 1);
                         });
                         const bits = [qcRecommendedId == null ? 'qc: no variant recommended' : 'qc: ranked'];
                         if (Array.isArray(qc.skipped_checks) && qc.skipped_checks.length) {
@@ -23650,7 +23665,14 @@ Ambient: same kitchen room tone, soft pour sound.
                             tip = parts.join(' - ');
                         }
                         const cls = failed ? ' qc-fail' : (isPick ? ' qc-pick' : '');
-                        return `<div class="variant-badge-qc${cls}" title="${imgEscape(tip)}">${isPick ? '★ ' : ''}${score}</div>`;
+                        // Escape the score too, not just the title. `judge.overall` is
+                        // stored verbatim — the server validates only the envelope
+                        // (version / variants-is-a-dict / recommended id / size), never
+                        // the per-variant interior — so it reaches innerHTML as-is.
+                        // Safe against imgEscape's falsy-to-empty behavior (imgEscape(0)
+                        // returns '', a trap elsewhere in this file): `score` is always a
+                        // non-empty STRING here, "0/10" or the dash, never a bare 0.
+                        return `<div class="variant-badge-qc${cls}" title="${imgEscape(tip)}">${isPick ? '★ ' : ''}${imgEscape(score)}</div>`;
                     } catch (e) {
                         return '';
                     }
