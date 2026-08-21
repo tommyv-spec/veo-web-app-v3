@@ -1,18 +1,82 @@
-"""v936 — image variant QC, shadow mode.
+"""v936.4a — image variant QC, shadow mode.
 
 Runs LOCALLY (operator box), never on Render. Scores every AI variant of the
 nodes in a batch and POSTs a per-node report to /api/images/nodes/{id}/qc.
-NEVER chooses a variant (v886.3): the operator keeps the pick; this only
-records what the machine would have picked so agreement can be measured.
 
-Funnel per node (built across Tasks 3-7; stage 4 redesigned by v936.1):
+v886.3 IS THE FRAME AND IT NEVER RELAXES: the operator makes every pick, this
+module chooses nothing, and QC can never block a send. Everything below is a
+recorded opinion — what the machine WOULD have picked, so agreement with what
+the operator actually chose can be measured.
+
+Funnel per node (built across Tasks 3-7; stage 3's verdict rebuilt by v936.4):
   1. integrity gates  (cv2, free)
   2. face gate        (InsightFace, optional)
   3. Gemini judge     (checklist, prompt-as-rubric) on survivors
   4. second opinion   (re-judge the top 2 healthy variants independently;
-                       recommend ONLY when the same one wins twice)
+                       still run, but telemetry only since v936.4)
   5. continuity       (v936.3, free: how well each variant continues the
                        APPROVED previous frame in its own video)
+
+THE VERDICT IS STRUCTURAL (v936.4), and it is the fact to carry away from this
+file. A variant FAILS if and only if one of the HARD lists comes back
+non-empty:
+
+    compliance, text_errors, identity_errors, hero_action_errors,
+    corruption_errors
+
+Every other list the judge fills in — element_misses, artifacts, text_notes,
+reasons — is a WARNING: true, useful, recorded, and never able to fail a
+variant in either direction. The model's own free-form pass/fail word is
+parsed and stored as `model_verdict`, and it DECIDES NOTHING. It is kept only
+so drift between what the model SAYS and what the contract COMPUTES stays
+visible.
+
+Why the model's word was taken out of that chain: a backtest over 119
+historical nodes / 495 variants, scored against the variants the operator
+ACTUALLY chose, found the old rule — which honoured the model's free-form
+verdict — rejected the operator's own pick 44.5% of the time, and 33.3% on
+current-era August work with zero compliance involvement. Those rejections
+were factually accurate and severity-blind ("linen shorts instead of cream
+trousers", "missing gold pendant at the woman's throat"). Replaying the same
+sample under the structural verdict took current-era disagreement to 11.8%.
+In that same sample the judge correctly caught four misspelled hero brand
+labels — so it is reliable about WHAT it sees and cannot weigh HOW MUCH it
+matters, and the weighing therefore belongs to the buckets, not to it.
+Evidence: `docs/experiments/v936-judge-backtest-2026-08-21/`.
+
+THE HERO REQUIREMENT is the principle that keeps that loosening honest. THE
+BUILD declares what is load-bearing, in the node's own `action_note`, and a
+declared ACTION, OBJECT or STATE that the image does not deliver is a hard
+failure (v936.4a widened the reading from action alone; the SPEC's hero
+product counts as declared too). An UNDECLARED missing element stays a
+warning however important it looks, and the rubric tells the model in as many
+words not to widen the requirement to reach it. That boundary IS the design —
+without it this bucket becomes the free-form verdict again. A node with no
+declaration is told to leave `hero_action_errors` empty and never to guess a
+hero action out of the SPEC prose.
+
+RECOMMENDING IS GATED SEPARATELY, and more tightly than failing.
+`recommended_variant_id` needs the top-ranked variant to be healthy AND the
+node's confidence to be in `CONF_RECOMMENDABLE = (sole, continuity)` — the
+two states where something OUTSIDE the judge's own opinion vouched for the
+pick: there was nothing to compare against (`sole`), or a frame the operator
+had ALREADY approved separated a pair the judge could not (`continuity`).
+v936.4 dropped `repeat_stable` (ex-`confirmed`) out of that tuple: it agreed
+with the operator 4 times out of 8 in the same backtest, and its evidence is
+the same model re-reading itself at temperature 0 — which measures whether
+the answer REPEATS, not whether it is right. The state is still produced and
+still stored, as telemetry.
+
+`systemic_miss` (v936.4) is one fact about the NODE: every variant the judge
+actually read hard-failed. That is not "the operator will pick the least bad
+one", it is "regenerate this node" — the prompt or the reference is wrong,
+not the sampling. It is information and nothing else: it neither forces nor
+blocks a recommendation.
+
+How the funnel got its shape. Each paragraph below is the reasoning of ITS
+revision, kept because the measurement is the argument. Where a later
+revision overrode one, the contract above wins — v936.1's "unless the answer
+repeats" is the one clause that got overridden (see CONF_RECOMMENDABLE).
 
 v936.1 — what changed and why. A controlled experiment over 13 production
 nodes / 56 variants found the shipped judge's WINNER was substantially noise:
