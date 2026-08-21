@@ -16907,7 +16907,104 @@ Recorded so it is not rediscovered as a surprise:
 
 That is what "shadow mode" means here: the scorer runs beside the real decision and never inside it.
 
-### The 2026-08-21 revision (v936.1) — REVISED THE SAME DAY IT SHIPPED. Read this before the funnel below.
+### The 2026-08-21 revision (v936.4) — the pass/fail decision becomes STRUCTURAL. Read this FIRST.
+
+Four point revisions landed after v936.1 — v936.2, v936.3 and v936.4 the same day, v936.4a overnight. They are POINT REVISIONS of this rule, not new rules: same section, same v-number, same `version: 1` contract with the server. **Where anything below this block disagrees with it, this block wins.**
+
+**The evidence they all rest on.** A blind backtest re-ran the judge over **119 nodes / 495 AI variants / 41 batches the operator had ALREADY picked from** (`2026-04-23` .. `2026-08-18`, sampled from 3,064 eligible nodes — a node qualifies when it has a chosen variant and ≥2 AI variants — stratified at ≤3 nodes per batch). The judge never saw the operator's pick; nothing was POSTed. Harness, worklist, generated report and all 120 per-node results are committed at **`docs/experiments/v936-judge-backtest-2026-08-21/`**. Read that README's limitations before quoting any number from here: **the operator's pick is a PREFERENCE, not a correctness label**; judging is stochastic even at temperature 0; and **the face gate never ran** (historical builds have no avatar reference), so identity drift is invisible in these numbers.
+
+**The headline finding, and the reason v936.4 exists: the judge FAILED the variant the operator actually chose on 53 of 119 nodes = 44.5%.** By era: **Apr-May 85.3%** (25 of those 29 are §8 medical-authority hits — stethoscope, lab coat, exam room — on builds made BEFORE that ban existed), **June 30.0%**, **July 26.7%**, **August 33.3% with ZERO compliance involvement**. The compliance mass is the judge correctly auditing old work against today's rules. The August third is not.
+
+**What those August rejections said, verbatim:** "Man is wearing linen shorts instead of cream trousers" · "Missing gold pendant on layered chains at woman's throat" · "Lower third includes man's legs instead of empty wall". Every one is TRUE. Not one is a reason to throw a render away. **In the same sample the judge caught four misspelled hero-product brand labels in shipped or queued work** — `AORELLA` (node 5083), `AOKELLA` (5080), `IORELLA` (1530), `iorella` (1531).
+
+So the one-sentence diagnosis: **the judge is reliable about WHAT it sees and cannot weigh HOW MUCH it matters.** v936.2 and v936.4 are both that sentence applied.
+
+#### Point revision .2 (v936.2) — rendered text splits into two severities
+
+v936.1's blanket rendered-text hard fail was re-scored on a live batch and **recommended nothing on 13 of 13 nodes**. One rule was firing equally on a misspelled hero brand (`AOKELLA` where the bottle must read KORELLA) and on the scribble-glyph body lines of a background recipe book whose heading was perfectly legible. **A check that fails everything measures nothing.**
+
+- **`text_errors` keeps the un-overridable fail and is NARROWED** to three cases: a brand or product **NAME** rendered wrong by even one character · any string the **SPEC explicitly quotes** rendered differently · **garble on the hero product** that a viewer scrolling at normal speed would notice at a glance.
+- **`text_notes` is new and INERT** — cosmetic prop filler, decorative lettering, fine print too small to read at feed speed. It never enters the verdict in either direction.
+- **One routing question decides between them**, and it is asked in the prompt in exactly these words: *would a scrolling viewer notice this and think the ad looks wrong?* Yes → `text_errors`. No → `text_notes`.
+- The soft bucket also states, out loud, that **AI renders routinely produce unreadable filler text on props and this is expected**. "Do not report background scribble" read as advice and lost to the character-by-character instruction above it; the same thing written as a fact about the world is what the model actually weighs.
+
+#### Point revision .3 (v936.3) — continuity: rank against the frame the operator already approved
+
+The judge scores each variant ALONE against its own prompt, which is the wrong question for a batch: **these images are shots in ONE video**, and the persona, wardrobe, setting and product have to carry across them. Over 13 production nodes the second opinion left **8 of them `tied`** — and the ties are real, the judge genuinely cannot separate near-identical renders (pushed to try, a re-run picked a different winner on all 13 nodes, r=-0.06).
+
+Continuity asks a better-posed question with a real answer: not "which is prettier" but **"which one actually continues from this approved frame"**.
+
+- **The anchor** is the chosen variant of the node's `chain` parent (`_chain_parent_id` reads `parents[].kind == "chain"` — `character` and `product` edges are UPLOADS and are ignored, since comparing against the avatar is what the face gate already does). That frame is one the **operator has already approved**, so it is EVIDENCE and not another opinion — which is the whole reason a continuity win is allowed to carry a recommendation.
+- **Two free signals per candidate**, both cv2/InsightFace and neither a model call: `face_sim` (ArcFace cosine against the anchor) and `color_distance` (8×8×8 HSV histogram, Bhattacharyya, 0.0 identical → 1.0 disjoint).
+- **Fetched and embedded ONCE per batch** (`_ContinuityAnchors`). In the measured batch 8 of 13 nodes chain off ONE parent, so a naive version would re-download the same ~2 MB PNG and re-detect its face eight times. Negative results are cached too — a parent with no chosen variant yet is an ordinary state, not an error.
+- **RANKING ONLY, never a gate.** A wardrobe or lighting difference does not make a render broken, only worse for the sequence. The continuity axes sit BELOW the three health axes and BELOW the judge's score, and no continuity reading can rescue a variant that failed them.
+- **A missing signal is NEUTRAL, per axis.** `None` means "no answer", never "no match" — a b-roll prop shot with no face is still ordered on colour. In the ranker this takes a mechanism rather than a sentinel: an axis is switched OFF for a whole tie group unless EVERY member of that group carries that number, because any stand-in value (0.0, +inf) would rank the unmeasured variant AGAINST the measured ones instead of abstaining.
+- **New recommendable confidence `continuity`**, at `CONTINUITY_MARGIN = 0.05`: the judge tied, but one candidate leads by at least the margin on ONE axis **and is not WORSE on the other**. A split decision (better face, worse setting) REFUSES — two signals disagreeing is precisely the state this stage exists to decline.
+- **The caveat, recorded because it decides where the axis sits.** A global colour histogram cannot separate "different room" from "the subject fills more of the frame": a person growing from 10% to 50% of an otherwise identical frame measures 0.23 → 0.54. Within ONE node that confound is weak (every variant renders the same prompt at roughly the same framing), which is the only comparison this number is ever used for — and it is why colour sits below face and both sit below the judge.
+- **0.05 is a starting point, not a calibrated threshold.** Two renders of the same setting differ by ~0.001 on the colour axis (so the bar is ~50× the render-noise floor) while a genuinely different room scores ~1.0. It has NOT been fitted against operator picks. Every per-variant number is stored in the report so it can be re-derived from data rather than re-guessed, and raising it makes the stage quieter (more `tied`), never wronger.
+
+#### Point revision .4 (v936.4) — the verdict is COMPUTED, not asked
+
+Peer review (Codex, 2026-08-21) found the fail policy had never been enforced. `parse_judge_reply` computed `verdict = fail if (compliance or text_errors or MODEL_SAID_FAIL)` — the model's own free-form word was still in the chain, **so no amount of rubric softening could stop a wardrobe nitpick hard-failing an image.** v936.2's careful prompt wording was documentation, not a mechanism.
+
+**The rule now: `verdict` is `fail` if and only if a HARD list is non-empty.** Nothing else can fail a variant.
+
+| bucket | field | fails a variant? |
+|---|---|---|
+| HARD | `compliance` | **yes** — §8 medical authority, v808 minors |
+| HARD | `text_errors` | **yes** — wrong hero brand name, misrendered SPEC-quoted text |
+| HARD | `identity_errors` *(new)* | **yes** — not the person the SPEC establishes (a different apparent age bracket, gender, or plainly another person; hairstyling, makeup, expression and camera angle are NOT identity) |
+| HARD | `hero_action_errors` *(new)* | **yes** — the build's DECLARED hero action, object or state is not delivered (all three since v936.4a, below) |
+| HARD | `corruption_errors` *(new)* | **yes** — anatomy or geometry a viewer would call broken (extra/missing finger or limb, fused or melted parts, a collapsed face, impossible geometry) |
+| warning | `element_misses` | never |
+| warning | `artifacts` | never — it keeps its name because the UI is plumbed to it, but it lost its teeth; catastrophic cases route to `corruption_errors` and the rubric says so |
+| warning | `text_notes` | never |
+| warning | `reasons` | never |
+
+`_JUDGE_HARD_FAIL_FIELDS` and `_JUDGE_WARNING_FIELDS` **partition** `_JUDGE_LIST_FIELDS`, and a test asserts the partition rather than the contents — a field in neither would be silently unchecked and untrimmed. The verdict is read from the CLEANED lists, so trimming can never trim a variant into a pass. The score is left exactly as the model reported it: rewriting it would hide what the judge actually thought.
+
+**The model's own word is kept as `model_verdict` and decides nothing.** Stored, normalised (stripped, lowercased, capped) so drift between what the model says and what the contract computes stays visible; `null` rather than `""` when it said nothing, so "did not answer" stays tellable apart from "answered pass".
+
+**The HERO REQUIREMENT, and the principle behind it.** `score_node` reads the node's `action_note` (already carried by `ImageNode.to_dict`, `image_platform.py:1208`) and `build_judge_prompt` threads it in as a fenced HERO REQUIREMENT block. **The principle: THE BUILD declares what is load-bearing.** So a failure to deliver THAT is a hard failure, while every other missing or altered element stays a warning — concretely, "garlic on the palm instead of the hand web" FAILS a build whose `action_note` declares the hand-web placement, and "linen shorts instead of cream trousers" is a warning on every build. **With no `action_note` the model is told out loud to leave `hero_action_errors` EMPTY and never to guess a hero action out of the SPEC prose** — an invented requirement would fail exactly the way the old free-form verdict did.
+
+**`repeat_stable` (was `confirmed`) is demoted.** Renamed because the old name claimed more than the state measures — pass 2 keeping pass 1's order is REPEATABILITY at temperature 0, not correctness. It agreed with the operator **4 times out of 8** in the backtest, so it is REMOVED from `CONF_RECOMMENDABLE`, which is now **`(sole, continuity)`**. It is still produced and still stored, as telemetry.
+
+**`systemic_miss` is new, at report level:** every variant the judge actually LOOKED AT hard-failed. That is not "the operator will pick the least bad one", it is "regenerate this node" — the prompt or the reference is wrong, not the sampling. It is INFORMATION and nothing else (v886.3): it neither forces nor blocks a recommendation, it can only be true off variants that were judged (so a dead judge or a download outage leaves it `false` rather than libelling the renders), and `score_node` prints one line asking for the regenerate. Under the OLD rule this state hit **33 of 119 nodes = 27.7%** of the backtest, which is roughly how much of that 44.5% was the judge failing an entire node rather than choosing badly within it.
+
+#### What v936.4 measured, and what it did NOT fix
+
+Replaying the backtest under the new verdict:
+
+| measure | old rule | v936.4 |
+|---|---|---|
+| the operator's own pick FAILED, overall | 44.5% | **37.0%** |
+| the operator's own pick FAILED, August-era | 33.3% | **11.8%** |
+| same, with compliance stripped out (rules that did not exist when those builds were made) | 15.4% | **8.7%** |
+| top-2 containment (the operator's pick inside the judge's top two) | 57.1% | 45.4% |
+
+Top-2 containment going DOWN is mechanical, not a regression in judgement: more variants now pass, so more of them compete inside the same compressed 5-7 score band, and a shortlist of two out of a healthier field holds the operator's pick less often. Read it as a warning about the shortlist reading, not about the verdict.
+
+**Picking is still not viable, and the graduation bar is unchanged and unmet.** Exact agreement was **8 of 22 = 36.4%** where the report committed at all; **4 of 8 = 50%** inside the old `confirmed` bucket (which is why that bucket lost its recommendation); top-2 containment 57.1%, flat across four months.
+
+**The hero gate is aimed right and was reading too narrowly. 114 of 119 nodes declared an `action_note`.** It fired on **5.2% of the variants the operator chose** versus **10.5% of the ones they rejected** — the correct asymmetry, so it is separating signal rather than firing at random, and it is not over-firing. But it **MISSED 2 of the 3 hero-level absences it had a declaration for**: node 4995 ("cut garlic half on table is missing") and node 3318 ("controlled hand gesture is absent") both landed in `element_misses` and PASSED. **The cause was the wording, not the design** — it asked whether the declared ACTION was being performed, and both misses were a declared OBJECT or a declared STATE that was never in frame to be acted on. Node 1530 was the third: the Korella bottle absent from the frame entirely, 7/10, passed.
+
+#### Point revision .4a (v936.4a) — the hero requirement reads object and state, not only action
+
+Fixed **inside the existing bucket**, with no sixth category. The HERO REQUIREMENT now names **three** things, each a hard failure on its own:
+
+- **(a)** the declared **ACTION** is not happening;
+- **(b)** an **OBJECT** the requirement names is absent from the frame, or the wrong object stands in for it;
+- **(c)** the declared **STATE** — a position, a contact, an arrangement, who is holding what and where — does not hold in the image.
+
+**The SPEC's hero PRODUCT counts as declared for this check**, which covers node 1530 through the declaration rather than through a new bucket. The block header changed with it: the fenced text is now "the declared action, the objects it names and the state it describes". With no `action_note` the model is still told to leave the list EMPTY — now for "no hero action, object or state".
+
+**What does NOT move is the boundary, and the rubric states it twice on purpose.** Only what the requirement NAMES can hard-fail; an undeclared missing prop stays a warning in `element_misses`, "however important it looks to you — do not widen the requirement to cover it". **That boundary IS the design.** It is the only thing keeping this bucket from becoming the free-form verdict again — the one that failed the operator's own pick 44.5% of the time.
+
+**What no test can assert here, said out loud rather than implied:** the rendered-prompt tests pin the wording and the `score_node` tests pin each routing's consequence end to end (a declared object absence and a declared state miss both hard-fail; an undeclared prop absence stays a warning WITH the declaration present; a build with no `action_note` cannot hero-fail at all) — but **no test can assert where the MODEL files a finding.** Only the next re-score answers that.
+
+**A sixth hard-fail bucket was considered and REFUSED, and the refusal is the same reasoning that produced the 44.5% problem when it was ignored.** The two feared uncovered classes — a cropped-out head, and an absent hero product on a node whose declaration does not name it — each measured **1 in 478 variants**. Adding a bucket for a 1-in-478 event buys back a fraction of a percent of recall and costs it right back in false hard fails across every node, which is exactly how a blanket rule (v936.1's text check) came to recommend nothing on 13 of 13 nodes. **A new hard-fail bucket must be earned by measured frequency, not by imagining the failure** — and v936.4a is what that looks like in practice: the gap was closed by widening an existing bucket's wording, not by minting a category.
+
+### The 2026-08-21 revision (v936.1) — REVISED THE SAME DAY IT SHIPPED. Kept as history; v936.2-v936.4 above supersede it wherever they disagree.
 
 The first version trusted the judge to say which variant was **best**. It cannot. A controlled experiment over **13 production nodes / 56 variants** re-ran the identical judge on the identical bytes at temperature 0, and the top variant **MOVED on 8 of those 13 nodes**. Scores reproduce only loosely (pearson r=0.69) and sit squashed into a 5-7 band, so a single point of noise decides the ranking — which made `recommended_variant_id` close to a coin flip.
 
@@ -16929,29 +17026,35 @@ Per node, on that node's variants:
 
 1. **Integrity gates** (`analyze_integrity`, cv2, free, deterministic) — decode the bytes, then measure short side, grayscale standard deviation and Laplacian variance. `ok: false` with a reason (`undecodable` / `low_resolution` / `blank_frame` / `extreme_blur`) means the render is broken; it is excluded from judging and ranked last. The measured numbers are ALWAYS stored next to the verdict, so the thresholds can later be re-set from real data instead of guessed again.
 2. **Face gate** (`face_similarity`, InsightFace, OPTIONAL) — cosine similarity between the avatar reference portrait and the best face in the candidate. If the wheel is not installed the stage simply does not run and `'face'` joins `skipped_checks`. `None` means "no answer", never "no match".
-3. **Gemini judge** (`judge_variant`, model `gemini-3.6-flash`) on the survivors — **the build's own image prompt IS the rubric**. Every element the prompt names (subject, prop, pose, wardrobe, setting, text) is a checkable row, and two compliance rows are ALWAYS added regardless of what the prompt says: the §8 medical-authority bans (`COMPLIANCE_BANS`) and the v808 no-minors ban (`MINOR_BAN`). The reply is parsed tolerantly and trimmed hard — `JUDGE_MAX_LIST_ITEMS = 10`, `JUDGE_MAX_STRING_CHARS = 200`, **five** list fields (`element_misses`, `artifacts`, `compliance`, `text_errors`, `reasons`), so a chatty model cannot push a report past the server's size cap. `text_errors` is v936.1's seventh reply key and forces a fail the model may not override — see the section below.
-4. **Second opinion on the top 2** (v936.1, `classify_confidence`, replacing the retired pairwise stage) — the two best HEALTHY variants are judged AGAIN, independently, same rubric and same bytes. One word comes out, and it decides whether the report is allowed to recommend anything at all. The six answers, **in the order they are decided** — the order is part of the contract:
+3. **Gemini judge** (`judge_variant`, model `gemini-3.6-flash`) on the survivors — **the build's own image prompt IS the rubric**. Every element the prompt names (subject, prop, pose, wardrobe, setting, text) is a checkable row, and two compliance rows are ALWAYS added regardless of what the prompt says: the §8 medical-authority bans (`COMPLIANCE_BANS`) and the v808 no-minors ban (`MINOR_BAN`). When the node carries an `action_note`, it is fenced in as a HERO REQUIREMENT block (v936.4) — the ONE missing-element case that is allowed to hard-fail. The reply is parsed tolerantly and trimmed hard — `JUDGE_MAX_LIST_ITEMS = 10`, `JUDGE_MAX_STRING_CHARS = 200`, **nine** list fields (`element_misses`, `artifacts`, `text_notes`, `reasons`, `compliance`, `text_errors`, `identity_errors`, `hero_action_errors`, `corruption_errors`), so a chatty model cannot push a report past the server's size cap. **Five of those nine are HARD lists and the verdict is computed from them alone** (v936.4) — see the table in the v936.4 block above.
+4. **Second opinion on the top 2** (v936.1, `classify_confidence`, replacing the retired pairwise stage) — the two best HEALTHY variants are judged AGAIN, independently, same rubric and same bytes. One word comes out, and it decides whether the report is allowed to recommend anything at all. The seven answers, **in the order they are decided** — the order is part of the contract:
 
    | confidence | what happened | recommends |
    |---|---|---|
    | `none_healthy` | there was no candidate at all | nothing |
    | `sole` | only one healthy variant existed, so there was never a comparison to get wrong. The health gate already vouched for it. Costs **zero** extra calls | that one |
    | `tied` (pass 1) | pass 1 did not SEPARATE the top two. Decided BEFORE pass 2 is even read, which is what lets the caller skip both calls | nothing |
-   | `unverified` | a pass-2 call produced no answer. Kept distinct from `tied` on purpose: an outage is not the judge contradicting itself, and merging the two would slowly libel it | nothing |
-   | `second_rejected` | pass 2's VERDICT did not clear the very variant we were about to recommend — a compliance hit or a defect caught only on the re-read. The test is INVERTED (`!= "pass"`, not `== "fail"`): only an exact `pass` clears it, because an unreadable verdict is not evidence of a pass, and that is the same reading `_healthy_axes` already applies to pass 1. **Outranks the score comparison**, because verdicts reproduce and scores do not | nothing |
-   | `confirmed` | the same variant scored strictly higher in BOTH passes, and pass 2 did not fail it. The only state that earns a recommendation off a comparison | that one |
+   | `continuity` (v936.3) | ...UNLESS the top-ranked one is the **best continuity match** against the approved previous frame, by `CONTINUITY_MARGIN` on one axis and not worse on the other. Recommendable off pass 1 alone, exactly like `sole`, because the evidence is not a second judge call — it is a frame the OPERATOR already chose. The common case: 8 of 13 production nodes tie on pass 1 | that one |
+   | `unverified` | a pass-2 call produced no answer. Kept distinct from `tied` on purpose: an outage is not the judge contradicting itself, and merging the two would slowly libel it. **Not upgradeable by continuity** — recommending off it would let a 503 produce a recommendation | nothing |
+   | `second_rejected` | pass 2's VERDICT did not clear the very variant we were about to recommend — a compliance hit or a defect caught only on the re-read. The test is INVERTED (`!= "pass"`, not `== "fail"`): only an exact `pass` clears it, because an unreadable verdict is not evidence of a pass, and that is the same reading `_healthy_axes` already applies to pass 1. **Outranks the score comparison**, because verdicts reproduce and scores do not. **Not upgradeable by continuity** — a good colour match on a variant carrying a v808 hit is not a reason to ship it | nothing |
+   | `repeat_stable` (was `confirmed`) | the same variant scored strictly higher in BOTH passes, and pass 2 did not fail it. The strongest state the judge can earn ON ITS OWN — and since v936.4 that is explicitly NOT enough, because the judge agreeing with itself at temperature 0 is repeatability, not correctness (4/8 against the operator in the 119-node backtest). Produced and stored as telemetry | **nothing** |
+   | `tied` (pass 2) → `continuity` | pass 2 flipped the order or scored them equal — unless the top one is the best continuity match there too. The judge contradicting ITSELF says nothing about an independent signal, and by this cell the variant has additionally survived pass 2's verdict | nothing, or that one on a continuity win |
 
-   `classify_confidence` is **A-oriented**: `compose_report` recommends `ranked[0]`, so "confirmed" has to mean "the top-ranked variant is confirmed" and nothing else. If the caller ever breaks its contract and hands the pair in the wrong order, the answer falls back to `tied`, which recommends nothing.
+   `classify_confidence` is **A-oriented**: `compose_report` recommends `ranked[0]`, so `repeat_stable` has to mean "the top-ranked variant repeated" and nothing else. If the caller ever breaks its contract and hands the pair in the wrong order, the answer falls back to `tied`, which recommends nothing.
 
    **Cost is V + 2 calls per node** (V pass-1 judgements plus 2 second opinions) — exactly what the retired pairwise stage cost. Two branches spend **V + 0**: fewer than two healthy variants (nothing to compare), and a pass-1 tie (if pass 1 did not separate the pair, nothing pass 2 could say would move the answer). The squashed 5-7 band makes an equal top pair common rather than rare, so that skip is real money and not a micro-optimisation.
-5. **Ranking** (`rank_variants`) — deterministic, best first, six axes each a full tie-break of the one before it: integrity ok · judge verdict `pass` · face at or above the floor · judge `overall` descending · `face_sim` descending (missing reads as `0.0` HERE ONLY, as a tie-break between variants already past axis 3) · `variant_id` ascending. Axis 6 is what makes the order TOTAL — the same batch never ranks two ways, so an agreement number stays comparable across runs.
+**4b. Continuity** (v936.3, `continuity_signals` + `continuity_favors`, free — no model call) — measure each variant against the **approved chosen frame of the node's `chain` parent**: `face_sim` (ArcFace) and `color_distance` (HSV histogram, Bhattacharyya). The anchor is fetched and face-detected ONCE per batch. Feeds two things and nothing else: two ranking axes, and the `continuity` confidence when the judge tied. It is **never a gate** — see the v936.3 sub-block above.
+5. **Ranking** (`rank_variants`) — deterministic, best first, **eight** axes each a full tie-break of the one before it: integrity ok · judge verdict `pass` · face at or above the floor · judge `overall` descending · **continuity `face_sim` descending** (v936.3) · **continuity `color_distance` ascending** (v936.3) · avatar `face_sim` descending (missing reads as `0.0` HERE ONLY, as a tie-break between variants already past axis 3) · `variant_id` ascending. Axis 8 is what makes the order TOTAL — the same batch never ranks two ways, so an agreement number stays comparable across runs. **Where the two continuity axes SIT is the design:** below the three health axes and below the judge's score, because "does this follow the last frame" is a different question from "is this a good render" and must never rescue a broken one — and above the two arbitrary tie-breakers, because the avatar face gate has already passed and `variant_id` is a coin flip, which is what those tied nodes are decided by otherwise.
 6. **Report** (`compose_report`) — `recommended_variant_id` now needs **BOTH** gates to pass, and they answer different questions:
    * the **health gate** (unchanged) — is the top-ranked variant any good? Integrity ok, judged and passed, at or above the face floor when a face was actually measured. An unjudged top variant can never be recommended: a dead judge degrades the report, it does not promote whatever survived the free gates.
-   * the **confidence gate** (v936.1) — do we believe it BEAT the runner-up? Only `confirmed` or `sole` qualifies (`CONF_RECOMMENDABLE`). `tied`, `unverified`, `second_rejected` and `none_healthy` all recommend NOTHING. This is the gate the first version did not have, and its absence is why the recommendation was close to a coin flip. Health was never the thing in doubt; WHICH healthy variant won was.
+   * the **confidence gate** (v936.1, tightened by v936.4) — did something OUTSIDE THE JUDGE'S OWN OPINION vouch for the pick? Only **`sole` or `continuity`** qualifies (`CONF_RECOMMENDABLE`): either there was nothing to compare against, or a frame the operator had already approved separated a pair the judge could not. `repeat_stable`, `tied`, `unverified`, `second_rejected` and `none_healthy` all recommend NOTHING. This is the gate the first version did not have, and its absence is why the recommendation was close to a coin flip. Health was never the thing in doubt; WHICH healthy variant won was.
+   * **`systemic_miss`** (v936.4) — one fact about the NODE, alongside the recommendation and independent of it: every variant the judge actually READ hard-failed. It neither forces nor blocks anything (v886.3); it says "regenerate this node" rather than "pick the least bad of four".
 
    `null` is a real answer, not a failure — "we cannot separate these" is what the measurement says is true about half the time. Deliberately NOT "the least bad one" and NOT "whatever ranked first", because this report never chooses and a recommendation the machine does not believe would poison the agreement number.
 
-### Rendered text is its own hard fail (v936.1)
+### Rendered text is its own hard fail (v936.1, split by severity in v936.2)
+
+**Read the v936.2 sub-block above first — it NARROWS everything in this section.** What follows is why the check exists at all; the severity split is what makes it usable.
 
 **The finding.** A bottle label rendered **"AORELLA"** instead of the brand **"KORELLA"**. The judge SAW it, scored it **6/10**, said **pass**, and ranked it **2nd** — because the rubric's anti-nitpick wording ("ignore interpretation rather than error") let a misspelled BRAND NAME through as minor garbled text. A misspelled hero product is build-killing, so the weighing is what got removed.
 
@@ -16959,22 +17062,27 @@ Four parts, all in the prompt and the parser:
 
 - **`text_errors` is a seventh reply key**, whitelisted and capped exactly like its siblings (10 items × 200 chars), so it cannot grow the report past the server's cap.
 - **A non-empty `text_errors` forces `verdict: "fail"` in `parse_judge_reply`, and the model cannot override it** — the same treatment `compliance` already had for §8 / v808. The SCORE is left exactly as the judge reported it: rewriting it would hide what the judge actually thought, which is the thing worth knowing.
-- **The prompt asks the text question BEFORE the leave-alone clause** (a model reads these in order), and that clause now carves text out of itself: rendered text is always in scope, even when the SPEC does not quote the exact string. If the SPEC names a brand, the label must match it character for character; if it names none, the text must still be real, correctly spelled words.
-- **Every rendered-text defect routes to `text_errors`, and `artifacts` is explicitly forbidden to hold one.** `artifacts` used to invite "garbled or misspelled rendered text" while sitting OUTSIDE the forced-fail chain, so the identical AORELLA finding parsed back to a PASS purely on where the model chose to file it. Two homes for one defect left the routing to the model's judgement, which is exactly what this design removes everywhere else.
+- **The prompt asks the text question BEFORE the leave-alone clause** (a model reads these in order), and that clause now carves text out of itself: rendered text on the HERO PRODUCT is always in scope, even when the SPEC does not quote the exact string. If the SPEC names a brand, the label must match it character for character. **v936.2 added the other half of that sentence: lettering on BACKGROUND props is explicitly NOT held to that bar and goes to `text_notes`.**
+- **Every rendered-text defect routes to `text_errors` or `text_notes`, and `artifacts` is explicitly forbidden to hold either.** `artifacts` used to invite "garbled or misspelled rendered text" while sitting OUTSIDE the forced-fail chain, so the identical AORELLA finding parsed back to a PASS purely on where the model chose to file it. Two homes for one defect left the routing to the model's judgement, which is exactly what this design removes everywhere else.
 
-### The honest caveat — what `confirmed` does and does not prove
+### The honest caveat — what `repeat_stable` does and does not prove
 
-**Read this before trusting the confidence gate. Two runs of the same model cancel run-to-run NOISE; they are blind to reproducible BIAS.** At temperature 0 the only difference between two answers is the model's own instability, so a second opinion catches exactly the coin-flip half of the problem. It cannot catch anything the model gets wrong the same way every time.
+**Read this before trusting any state the JUDGE earns on its own. Two runs of the same model cancel run-to-run NOISE; they are blind to reproducible BIAS.** At temperature 0 the only difference between two answers is the model's own instability, so a second opinion catches exactly the coin-flip half of the problem. It cannot catch anything the model gets wrong the same way every time.
 
 **The AORELLA miss is the proof: it reproduced 3/3.** The model saw the misspelled label every single time and passed it every single time. A second opinion would have cheerfully "confirmed" it.
 
-So **`confirmed` means "the same variant won a second independent read". That is evidence of REPRODUCIBILITY, not of CORRECTNESS.** Reproducible bias is fixed where AORELLA was fixed — in the rubric and the forced-fail chain — never by asking twice.
+So **`repeat_stable` means "the same variant won a second independent read". That is evidence of REPRODUCIBILITY, not of CORRECTNESS.** Reproducible bias is fixed where AORELLA was fixed — in the rubric and the structured hard-fail lists — never by asking twice.
 
-**The operational risk, recorded before anyone leans on this gate.** Its whole strength rides on provider-side nondeterminism that nobody here controls. Today roughly **40%** of scored nodes come back `confirmed`. If Google makes inference more deterministic, that rate drifts toward 100%, every node "confirms", and the gate goes inert — silently, with no error and no failing test. **So the `confirmed` rate is itself a health signal and should be watched.** A rate climbing toward 100% means the check has stopped checking, not that the renders got better.
+**This is the argument v936.4 acted on.** The state was measured against the operator's own picks at **4 of 8** in the 119-node backtest, so it was removed from `CONF_RECOMMENDABLE` entirely. `continuity` survives the same cull precisely because its evidence is NOT the model re-reading itself: it compares against a frame a human already approved.
 
-### Known gap, deliberately left open
+**The operational risk, recorded because it still governs the telemetry.** The state's whole strength rides on provider-side nondeterminism that nobody here controls. Roughly **40%** of scored nodes came back in it. If Google makes inference more deterministic, that rate drifts toward 100%, every node repeats, and the signal goes inert — silently, with no error and no failing test. **So the `repeat_stable` rate is itself a health signal and should be watched.** A rate climbing toward 100% means the check has stopped checking, not that the renders got better.
 
-**`confirmed` requires no minimum score MARGIN.** The winner has to score strictly higher in both passes, but 7-vs-6 counts the same as 9-vs-4 — and the same measurement says a difference of ±1 point is enough to flip a ranking, so a one-point "confirmed" is thinner evidence than it looks. The margin is being RECORDED for later analysis rather than gated on, because the right threshold is unknown and guessing it would suppress nearly every recommendation inside the squashed 5-7 band. Written down so it stays a known gap rather than becoming a discovered surprise.
+### Known gaps, deliberately left open
+
+- **`repeat_stable` requires no minimum score MARGIN.** The winner has to score strictly higher in both passes, but 7-vs-6 counts the same as 9-vs-4 — and the same measurement says ±1 point is enough to flip a ranking, so a one-point repeat is thinner evidence than it looks. The margin is RECORDED for later analysis rather than gated on, because the right threshold is unknown and guessing it would suppress nearly every recommendation inside the squashed 5-7 band. Since v936.4 the state recommends nothing anyway, so this gap now costs telemetry accuracy rather than picks.
+- **`CONTINUITY_MARGIN = 0.05` is a starting point, not a calibration.** It has not been fitted against operator picks on this corpus. Every per-variant `face_sim` and `color_distance` is stored in the report so it can be re-derived from data.
+- **The hero-action gate's routing is unproven against the model.** v936.4a widened the wording to action + object + state, and the tests pin the wording and every routing's consequence — but nothing can test where the MODEL chooses to file a finding. Only the next re-score answers that.
+- **`INTEGRITY_BLUR_LAPLACIAN_VAR = 40.0` is uncalibrated** — see "The two thresholds" below.
 
 ### The report shape (stored in `image_nodes.qc_json`)
 
@@ -16984,30 +17092,42 @@ So **`confirmed` means "the same variant won a second independent read". That is
   "generated_at": "2026-08-21T14:00:00Z",
   "recommended_variant_id": 123,
   "skipped_checks": ["face", "fetch:1"],
-  "confidence": "confirmed",
+  "confidence": "continuity",
+  "continuity_anchor": {"parent_node_id": 5073, "variant_id": 9912},
+  "systemic_miss": false,
   "variants": {
     "123": {"integrity": {"ok": true, "reasons": [],
                           "metrics": {"short_side": 576, "gray_std": 49.2, "lap_var": 312.5}},
             "face_sim": 0.71,
-            "judge": {"overall": 8, "verdict": "pass", "element_misses": [],
-                      "artifacts": [], "compliance": [], "text_errors": [], "reasons": []},
+            "judge": {"overall": 8, "verdict": "pass", "model_verdict": "pass",
+                      "element_misses": [], "artifacts": [], "text_notes": [],
+                      "reasons": [], "compliance": [], "text_errors": [],
+                      "identity_errors": [], "hero_action_errors": [],
+                      "corruption_errors": []},
             "verify": {"overall": 8, "verdict": "pass"},
+            "continuity": {"face_sim": 0.82, "color_distance": 0.0413,
+                           "parent_variant_id": 9912},
             "rank": 1},
     "124": {"integrity": {"ok": false, "reasons": ["blank_frame"],
                           "metrics": {"short_side": 576, "gray_std": 0.7, "lap_var": 1.6}},
-            "face_sim": null, "judge": null, "verify": null, "rank": 4}
+            "face_sim": null, "judge": null, "verify": null,
+            "continuity": null, "rank": 4}
   }
 }
 ```
 
 Variant keys are STRINGS (they are JSON object keys), so a reader looks up `qc.variants[String(v.id)]`. `recommended_variant_id` is stored as a plain int.
 
-**What v936.1 changed in this shape, and why no server deploy was needed.** `version` **STAYS 1**. The server stores the blob wholesale and validates only four things — the version, the shape of `variants`, the recommendation id, and the size (`image_platform.py` ~:3600-3623) — so a new top-level key rides through untouched and additive fields need no deploy.
+**Why none of this needed a server deploy.** `version` **STAYS 1**. The server stores the blob wholesale and validates only four things — the version, the shape of `variants`, the recommendation id, and the size (`image_platform.py` ~:3600-3623) — so every field added by v936.1 through v936.4 is ADDITIVE and rides through untouched.
 
-- **`confidence`** (new, top level) — one of the six words in funnel step 4. It is what makes a `null` recommendation readable: "I could not separate them" and "none of these was good enough" are different facts and now say so.
-- **`verify`** (new, per variant) — `{"overall", "verdict"}` from the second opinion, and ONLY the two rows that were actually re-judged carry a real one. Every row carries the KEY (`compose_report` reads it with `.get`), so `null` means "no usable second read for this row" and covers two cases: the row was never in the re-judged top two, or its second call produced nothing. `confidence: "unverified"` is what tells those apart.
+- **`confidence`** (v936.1, top level) — one of the seven words in funnel step 4. It is what makes a `null` recommendation readable: "I could not separate them" and "none of these was good enough" are different facts and now say so.
+- **`verify`** (v936.1, per variant) — `{"overall", "verdict"}` from the second opinion, and ONLY the two rows that were actually re-judged carry a real one. Every row carries the KEY (`compose_report` reads it with `.get`), so `null` means "no usable second read for this row" and covers two cases: the row was never in the re-judged top two, or its second call produced nothing. `confidence: "unverified"` is what tells those apart.
 - **`pairwise_reason` is GONE.** It had no reader anywhere — verified by grep across the repo before removing it, not assumed.
-- **`text_errors`** joins the judge dict as a fifth list field, present (usually empty) on every judged variant.
+- **`continuity`** (v936.3, per variant) — `{"face_sim", "color_distance", "parent_variant_id"}` against the approved previous frame. `null` on every row of a node with no chain parent, which is most of them. `parent_variant_id` is carried per row on purpose: **a good match against the WRONG previous frame is worse than no match at all**, and without the id nobody can tell the two apart later.
+- **`continuity_anchor`** (v936.3, top level) — `{"parent_node_id", "variant_id"}`, the single approved frame every `continuity` block was measured against, or `null` when the node has no chain parent, the parent has no chosen variant yet, or its image would not download. Top level because it is one fact about the NODE, and because a reader has to be able to check WHAT the comparison was against.
+- **`systemic_miss`** (v936.4, top level) — `true` when every JUDGED variant hard-failed. Regeneration signal; forces and blocks nothing.
+- **`model_verdict`** (v936.4, inside `judge`) — what the model itself said, normalised, or `null` when it said nothing. **Telemetry only; it decides nothing.** Keeping it is what makes drift between the model's opinion and the computed contract visible.
+- **The judge dict now carries nine list fields**: warnings `element_misses` / `artifacts` / `text_notes` (v936.2) / `reasons`, and hard lists `compliance` / `text_errors` / `identity_errors` (v936.4) / `hero_action_errors` (v936.4) / `corruption_errors` (v936.4). All present, usually empty, on every judged variant. **`verdict` is computed from the five hard lists alone.**
 
 ### Server-side lifecycle
 
@@ -17020,12 +17140,14 @@ Variant keys are STRINGS (they are JSON object keys), so a reader looks up `qc.v
 Two ways to read it, and they answer different questions.
 
 - **Per pick, live:** `choose_variant` logs one line AFTER the commit, so it records a stored fact and not an intent — `[qc-shadow] node <id> operator=<picked> qc=<recommended> agree=<bool>`. Read it with `python code/render_logs.py --text qc-shadow`. **This log line IS the feature's output, not removable scaffolding.**
-- **Aggregated:** `python code/image_qc.py --batch <id> --report` prints `agreement_stats`. **v936.1 split the buckets**, because a single blended number could not validate the redesign — it mixed nodes that verified something with nodes that verified nothing:
+- **Aggregated:** `python code/image_qc.py --batch <id> --report` prints `agreement_stats`. **v936.1 split the buckets** (a single blended number could not validate the redesign — it mixed nodes that verified something with nodes that verified nothing), **and v936.4 re-cut them again when `repeat_stable` stopped being recommendable**:
   - `scored` — nodes carrying a report at all. Tells "nothing has been scored yet" apart from "scored, never comparable".
-  - `comparable` — both sides named a variant AND the report's confidence explains why. It is `confirmed + sole` by construction, and it is the headline denominator.
-  - `confirmed` / `confirmed_agree` — **read this bucket first.** It is the only one that validates the second-opinion stage.
+  - `comparable` / `agree` — both sides named a variant AND the report's confidence explains why. `comparable` is **`sole + continuity`** by construction (it is built FROM `CONF_RECOMMENDABLE`, not hand-listed, so a state added there and forgotten here would be a loud KeyError rather than a silent miscount), and it is the headline denominator.
   - `sole` / `sole_agree` — one healthy candidate, so **ZERO verification was bought**. The operator will nearly always pick the only thing on offer, so folding these into a headline inflates the very number that is supposed to prove the stage works.
-  - `legacy` / `legacy_agree` — a recommendation this metric cannot attribute to a verified state: a pre-v936.1 report (no `confidence` key at all), or one whose recommendation contradicts its own confidence (hand-edited or corrupt; our producer's gate forbids it). **EXCLUDED from the headline percentage** — those picks came from the coin-flip judge v936.1 replaced, and counting them would measure the OLD stage and be read as evidence for the new one.
+  - `continuity` / `continuity_agree` (v936.3) — **read this bucket first.** It is the only one where anything was actually verified: the judge tied, and a frame the operator had already approved separated the pair. This is a pick the JUDGE never made.
+  - `legacy` / `legacy_agree` — a recommendation this metric cannot attribute to a CURRENTLY recommendable state: a pre-v936.1 report (no `confidence` key at all), **a pre-v936.4 report carrying `confirmed`**, a `repeat_stable` recommendation written before the demotion, or one whose recommendation contradicts its own confidence (hand-edited or corrupt; our producer's gate forbids it). **EXCLUDED from the headline percentage** — those picks came from stages that have since been demoted, and counting them would measure an old stage and be read as evidence for the current one.
+  - `repeat_stable` (v936.4) — its own counter: the judge repeated itself and the report declined anyway. It is the number that shows what the demotion COST, and it is the OPPOSITE of `tied` (which means the judge could not separate the pair at all).
+  - `systemic_miss` (v936.4) — nodes where every judged variant hard-failed. Counted even when the operator never chose, because it is a fact about the RENDERS: it says "regenerate", not "the judge was wrong".
   - `tied` — the report declined because the judge could not separate the top two (`tied`), could not finish the second look (`unverified`), or FAILED its own winner on the re-read (`second_rejected`).
   - `no_recommendation` — the report declined because none of the renders was worth naming (`none_healthy`), plus pre-v936.1 reports that recommended nothing.
   - `agreement_pct` — `agree / comparable`, or `null`.
@@ -17049,9 +17171,13 @@ Exit codes match `send_to_platform.py` on purpose, so a caller driving both CLIs
 
 ### Graduation criteria — auto-pick is NOT enabled by v936
 
-Auto-pick stays behind an explicit per-run opt-in and **v886.3 stays the default forever**. The target to reach before auto-pick is even considered: **≥80% agreement inside the `confirmed` bucket, over ≥50 `confirmed` nodes** — read `confirmed_agree / confirmed`.
+Auto-pick stays behind an explicit per-run opt-in and **v886.3 stays the default forever**. **The bar itself has never moved: ≥80% agreement over ≥50 verified nodes.** What keeps changing is which bucket is allowed to supply that denominator.
 
-**v936.1 narrowed that denominator, and the narrowing matters.** It used to read "≥50 comparable nodes", but `comparable` is now `confirmed + sole`, and **a `sole` node bought zero verification**: there was one healthy candidate and the operator will nearly always pick the only thing on offer. Graduating on the blended number would graduate auto-pick partly on nodes where nothing was ever checked. `scored` is not the denominator, the total node count is not the denominator, and — changed here — neither is `comparable`.
+**v936.1 narrowed it from `comparable` to `confirmed`.** It used to read "≥50 comparable nodes", but `comparable` is `confirmed + sole`, and **a `sole` node buys zero verification**: there was one healthy candidate and the operator will nearly always pick the only thing on offer. Graduating on the blended number would graduate auto-pick partly on nodes where nothing was ever checked.
+
+**v936.4 narrowed it again, to `continuity`** — read `continuity_agree / continuity`. `confirmed` (now `repeat_stable`) can no longer supply it, because it is no longer a recommendable state at all: its evidence is the same model re-reading itself, and it agreed with the operator **4 of 8** in the 119-node backtest. `continuity` is the only bucket whose evidence comes from OUTSIDE the model — a frame the operator approved by hand.
+
+**The bar is UNMET and the gap is not close.** In the backtest the report committed on 22 of 119 nodes and named the operator's variant **8 times = 36.4%**; inside the old `confirmed` bucket it was 4 of 8 = 50%; top-2 containment was 57.1% (45.4% under v936.4). None of `scored`, the total node count, `comparable`, or `sole` is the denominator.
 
 ### Explicitly out of scope
 
@@ -17060,4 +17186,12 @@ Recorded so they are not assumed to exist: **clips QC** (Whisper line-match, lip
 **Status (2026-08-21, v936.1).** The v936.0 scorer + server storage + review hookup shipped `207b6ce..4ddf660` in `code/`; face gate operational (insightface 1.0.1, `buffalo_l`). The v936.1 redesign then shipped as `b62e707` (second opinion replaces pairwise; text is a hard fail) · `bd802a0` (docstring) · `d7a9fd1` (review-UI badges show confidence) · `1dbd0c5` (review fixes: pass 2's verdict is honoured, one home for text defects) · `9918ddf` (UI labels `second_rejected`). `python -m pytest code/test_image_qc.py` → **210 passed**.
 
 **Deploy state at the time of writing: `b62e707..d7a9fd1` are on `origin/main`, which auto-deploys; `1dbd0c5` and `9918ddf` are NOT pushed.** The scorer runs on the operator's box, so only the UI half of that gap shows in production — the live badges show `confirmed` / `tied` but do not yet label `second_rejected`. Plan + task list: `docs/superpowers/plans/2026-08-21-image-variant-qc-shadow-mode.md`.
+
+*(Superseded the same day. The whole v936.1 stack — `46f2209`, `759702a`, `1dbd0c5`, `751e09b`, `9918ddf` — is on `origin/main` and live; the deploy-gap sentence above is history, kept because when a status stopped being true is worth knowing.)*
+
+**Status (2026-08-22, v936.4a — current).** The point revisions shipped in `code/` as `46f2209` (v936.2, text severity split) · `759702a` (v936.3, continuity) · `88ecc45` (v936.4, structural verdict + `identity_errors` / `hero_action_errors` / `corruption_errors` + `model_verdict` telemetry + `repeat_stable` demotion + `systemic_miss`) · `e33f2bc` (v936.4a, the hero requirement reads object and state). `python -m pytest code/test_image_qc.py` → **339 passed** (was 332 at v936.4, 288 before it). **All server-additive — no deploy was needed for any of them**, because `image_platform.py` validates only version / `variants` / `recommended_variant_id` / size, so `systemic_miss`, `model_verdict`, `continuity` and `continuity_anchor` ride through untouched.
+
+**Evidence:** `docs/experiments/v936-judge-backtest-2026-08-21/` (README, `backtest_report.md`, `backtest.py`, `worklist.json`, `results.jsonl` — 119 nodes / 495 variants / 41 batches). **The committed `backtest_report.md` is the OLD-rule run**: the 44.5% headline, the field breakdown, the 36.4% exact agreement, the 57.1% top-2 containment and the 27.7% blackout rate all come from it and are reproducible from `results.jsonl`. **The v936.4 replay numbers (37.0% / 11.8% / 8.7% / 45.4%) and the hero-gate measurements (5.2% vs 10.5%, 2-of-3 missed, 1-in-478) are recorded in the `88ecc45` and `e33f2bc` commit messages, NOT in that report** — re-run `backtest.py` under the current code to reproduce them.
+
+**Still true, and not changed by any of this: v886.3 — the operator makes every pick, QC chooses nothing, and QC can never block a send.**
 

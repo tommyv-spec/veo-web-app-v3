@@ -16,6 +16,11 @@
         "what": "the v936.0 funnel prose: the both-orders pairwise stage, 'four list fields', the health-only recommendation gate, the pairwise_reason report key and its agreement caveat, the merged no_recommendation caveat, the 'comparable' graduation bar, and the first status line",
         "superseded_by": "the v936.1 amendment in this checkout (code commits b62e707, bd802a0, d7a9fd1, 1dbd0c5, 9918ddf; 2026-08-21)",
         "why": "13 lines that describe a funnel the code no longer runs. Pairwise was RETIRED from the funnel after measuring 50% self-contradiction over 10 production nodes / 20 calls, and is replaced by a second-opinion pass with a confidence gate; the judge grew a fifth list field (text_errors) as a seventh reply key; recommended_variant_id is now confidence-gated; pairwise_reason was dropped (grep-verified: no reader anywhere); agreement_stats split into confirmed/sole/legacy buckets, which also narrowed the graduation denominator from 'comparable' to 'confirmed'. Keeping the old lines would have canon describe two contradictory funnels. Rule coverage unchanged: v936 is still one section with one heading, and check_rule_index.py stays PASS at 178 defined."
+      },
+      {
+        "what": "the v936.1 funnel prose: 'five list fields', the six-answer confidence table with `confirmed` as the only comparison-earned recommendation, the six-axis ranking, the `confirmed or sole` confidence gate, the `confirmed` caveat and known-gap headings, the report-shape JSON and its v936.1 field list, the `confirmed`/`comparable` agreement buckets, and the `confirmed` graduation denominator",
+        "superseded_by": "the v936.2 / v936.3 / v936.4 / v936.4a amendments in this checkout (code commits 46f2209, 759702a, 88ecc45, e33f2bc; 2026-08-21/22)",
+        "why": "32 lines that describe a funnel and a report shape the code no longer produces. Measured over 119 nodes / 495 variants (docs/experiments/v936-judge-backtest-2026-08-21/), the old rule failed the variant the operator actually chose 44.5% of the time, because parse_judge_reply computed `verdict = fail if (compliance or text_errors or MODEL_SAID_FAIL)` and the model's free-form word could hard-fail a wardrobe difference. v936.4 makes the verdict STRUCTURAL — fail iff one of five named hard lists is non-empty (compliance, text_errors, and the new identity_errors / hero_action_errors / corruption_errors), with element_misses / artifacts / text_notes / reasons demoted to warnings and the model's word kept as `model_verdict` telemetry. v936.2 split rendered text into failing `text_errors` and inert `text_notes` after the blanket rule recommended nothing on 13 of 13 nodes. v936.3 added the continuity stage (face_sim + color_distance against the chain parent's operator-APPROVED frame), two ranking axes, `continuity_anchor`, per-variant `continuity` and the recommendable `continuity` confidence. v936.4 also renamed `confirmed` to `repeat_stable` and REMOVED it from CONF_RECOMMENDABLE (4/8 operator agreement; a second read by the same model measures repeatability, not correctness), so the agreement buckets and the graduation denominator both had to be re-cut, and added report-level `systemic_miss`. Keeping the old lines would have canon name a `confirmed` state the code no longer produces and a five-field judge dict that is now nine. Rule coverage unchanged: v936 is still one section with one `## ` heading (the new sub-headings are prose-first so they mint no phantom rule), and check_rule_index.py stays PASS."
       }
     ],
     "retired_line_sha256_16": [
@@ -101,7 +106,39 @@
       "bd1b6101c7f44f2e",
       "d3509a5a1b98be78",
       "d845fd55f4c41197",
-      "fea1646800696566"
+      "fea1646800696566",
+      "ba722180168df058",
+      "751f918b640b43c2",
+      "d4ea9f1e19cc75b6",
+      "2cbddbc86168e561",
+      "2690d3461d542af8",
+      "9bcce6c2f5088698",
+      "55d351065668b850",
+      "5ee63d23b0e8feac",
+      "5456d133995324e2",
+      "f679b1d5431e115d",
+      "b29cd149bc8d2476",
+      "d1a322993d807725",
+      "e2509ed100191cde",
+      "7d0466c2f54ea87a",
+      "f84edc8d0bc2deb6",
+      "9ee0437746e637a3",
+      "af6043249b9ccabf",
+      "a0fbfa89b7786cc7",
+      "516b01dee8751af7",
+      "15c26fa923b705ef",
+      "388751b500a55062",
+      "99d78b2d5df60267",
+      "a812e0c8bd30bbf9",
+      "fbd9794a9b619c8f",
+      "470077f304af7edd",
+      "fe414e71ff3c3199",
+      "4b93c6db83eee06a",
+      "e24cc84023445e95",
+      "bb4b40770881ff95",
+      "45432736df57df1e",
+      "c0d2223c0f8c3992",
+      "9b4cb43e6e3af61b"
     ]
   }
 }
