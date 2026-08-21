@@ -15752,7 +15752,7 @@ Ambient: same kitchen room tone, soft pour sound.
                         <div style="margin-top:6px;font-size:11px;color:var(--text-secondary);">
                             ${state === 'queued'
                                 ? 'Starts within about a minute. Your own PC picks it up sooner if the auto-edit worker is running.'
-                                : 'Usually about 12 minutes on the server, or 3-4 minutes when your PC is doing it.'}
+                                : 'Captions are the slow part — 20-30 minutes on the server, or 3-4 minutes when your PC is doing it.'}
                         </div>
                         ${state === 'queued' ? `<button class="btn btn-secondary btn-sm" style="margin-top:6px;" onclick="cancelAutoEdit('${_autoEditAttr(jobId)}','${_autoEditAttr(status.autoedit_id)}')">Cancel</button>` : ''}`;
                 } else if (state === 'done' && status.result_filename) {
@@ -15854,7 +15854,20 @@ Ambient: same kitchen room tone, soft pour sound.
                 }
             } catch (e) {
                 // Never let this break the export list underneath it.
-                console.log('[AutoEdit/v928] card render skipped:', e);
+                console.error('[AutoEdit/v928] card render failed:', e);
+                // v938.7 — and never let it kill the refresh loop either. The
+                // loop only re-armed at the end of a SUCCESSFUL repaint, so a
+                // single throw anywhere above stopped the clock and the bar
+                // for the rest of the render, with nothing on screen saying so.
+                if (_autoEditWasLive === jobId && selectedJobId === jobId) {
+                    _autoEditStopPoll();
+                    _autoEditTimerJob = jobId;
+                    _autoEditTimer = setTimeout(() => {
+                        _autoEditTimer = null;
+                        if (selectedJobId !== jobId) { _autoEditTimerJob = null; return; }
+                        renderAutoEditCard(jobId);
+                    }, 5000);
+                }
             }
         }
 
