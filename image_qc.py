@@ -1220,11 +1220,13 @@ def fit_report(report: Dict[str, Any],
     upstream is still holding, so an in-place trim would edit live funnel
     state, and on a rerun the operator's own accumulated data.
 
-    What gets trimmed: the judge's four free-text lists, progressively (3
-    items each, then none). What NEVER gets trimmed: verdicts, scores, ranks,
-    integrity metrics and the recommendation — those are the report. A
-    trimmed report says less about WHY; it still says what the machine would
-    have picked, which is the number Task 10 reads.
+    What gets trimmed: the judge's five free-text lists (`_JUDGE_LIST_FIELDS`,
+    which v936.1 grew by `text_errors`), progressively — 3 items each, then
+    none. What NEVER gets trimmed: verdicts, scores, ranks, integrity metrics,
+    the confidence call, the per-variant `verify` evidence behind it, and the
+    recommendation — those are the report. A trimmed report says less about
+    WHY; it still says what the machine would have picked and whether that
+    pick reproduced, which are the numbers Task 10 reads.
 
     Never raises on a degraded report (judge None, metrics None, no variants
     map at all) and never raises on an unfittable one: it returns the best
