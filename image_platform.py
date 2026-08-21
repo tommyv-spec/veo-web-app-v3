@@ -292,6 +292,9 @@ def run_image_platform_migrations():
          "ALTER TABLE image_nodes ADD COLUMN pair_role VARCHAR(20)"),
         ("image_nodes", "paired_with_image_node_id",
          "ALTER TABLE image_nodes ADD COLUMN paired_with_image_node_id INTEGER"),
+        # v936: image-QC shadow-mode report (written by code/image_qc.py)
+        ("image_nodes", "qc_json",
+         "ALTER TABLE image_nodes ADD COLUMN qc_json TEXT"),
         # v701: when Flow rejects start_frame for content-policy reasons,
         # the worker stamps error_code=CONTENT_POLICY_VIOLATION and the
         # rejected frame's R2 key gets stashed here so the frontend can
@@ -457,6 +460,9 @@ def run_image_platform_migrations():
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS pair_role VARCHAR(20)"),
         ("image_nodes", "paired_with_image_node_id",
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS paired_with_image_node_id INTEGER"),
+        # v936: image-QC shadow-mode report — see SQLite migration above.
+        ("image_nodes", "qc_json",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS qc_json TEXT"),
         # v701: see SQLite migration above for the rationale.
         ("clips", "replacement_start_frame",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS replacement_start_frame VARCHAR(512)"),
@@ -935,6 +941,20 @@ def _storage_delete(rel_path: str):
 #   failed     — last generation attempt failed (see error_message)
 
 
+def _safe_qc(raw):
+    """v936: decode ImageNode.qc_json for to_dict, never raising.
+
+    A corrupt report must not 500 the sidebar poll — GET /api/images/nodes
+    calls to_dict on every node every 2s. Bad JSON degrades to None.
+    """
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
 class ImageNode(Base):
     """A single image-generation request in the graph.
 
@@ -1034,6 +1054,13 @@ class ImageNode(Base):
     # ingredient names (v509 fallback). JSON array of Ingredients Name
     # strings when present.
     cast_json = Column(Text, nullable=True)
+
+    # v936 (image QC shadow mode): JSON report written by code/image_qc.py
+    # (runs on the operator's box, POSTs via /nodes/{id}/qc). Holds per-variant
+    # integrity/face/judge scores + recommended_variant_id. NULL = never scored.
+    # The operator's pick stays chosen_variant_id (v886.3) — this column only
+    # records what the machine WOULD have picked, so agreement can be measured.
+    qc_json = Column(Text, nullable=True)
 
     # v698A: image role discriminator. NULL = standard image (rendered as a
     # visible scene clip, default for all pre-v698A images). 'voiceover_anchor'
@@ -1162,6 +1189,8 @@ class ImageNode(Base):
             "narrative_lens": self.narrative_lens,
             # v681 — per-image cast (decoded list of Ingredients Name strings).
             "cast": (json.loads(self.cast_json) if self.cast_json else None),
+            # v936 — machine QC report (shadow mode; NULL until scored).
+            "qc": _safe_qc(self.qc_json),
             # v698A — image role discriminator (was previously missing from
             # to_dict output; UI couldn't distinguish voiceover_anchor images
             # from standard images).
