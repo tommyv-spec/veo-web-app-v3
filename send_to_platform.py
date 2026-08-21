@@ -769,6 +769,43 @@ def cmd_list_uploads(client, as_json):
     return EXIT_OK
 
 
+def _run_shadow_qc(batch_id, args):
+    """v936 shadow-mode QC: score the batch's variants so the review UI shows
+    ranked candidates with badges. NEVER chooses a variant (v886.3) — purely
+    additive; the operator still picks. Degrades to a skip message on any
+    missing dependency or scorer failure: QC must never block sending."""
+    # Messages stay ASCII on purpose: this runs BEFORE the resume-command
+    # print, so a UnicodeEncodeError here would cost the operator that line.
+    try:
+        # lazy: pulls cv2/numpy; this file stays stdlib-only. A broken cv2
+        # install does not always raise ImportError (Windows DLL load), hence
+        # the second, wider net.
+        import image_qc
+    except ImportError as e:
+        print(f"qc: scoring skipped (missing dependency: {e.name}) - "
+              f"review continues without scores", flush=True)
+        return
+    except Exception as e:
+        print(f"qc: scoring skipped ({e.__class__.__name__}) - "
+              f"review continues without scores", flush=True)
+        return
+    qc_args = ["--batch", str(batch_id), "--json", "--base-url", args.url]
+    if args.subject:
+        qc_args += ["--avatar-node", str(args.subject)]
+    try:
+        rc = image_qc.main(qc_args)
+        if rc == EXIT_AUTH:
+            print("qc: auth failed - scores not stored (sending unaffected)", flush=True)
+        elif rc != EXIT_OK:
+            print(f"qc: scoring finished with failures (exit {rc}) - "
+                  f"scores may be partial; review continues", flush=True)
+    except SystemExit as e:  # argparse inside image_qc may sys.exit
+        print(f"qc: scoring aborted (exit {e.code}) - review continues", flush=True)
+    except Exception as e:
+        print(f"qc: scoring skipped ({e.__class__.__name__}) - "
+              f"review continues without scores", flush=True)
+
+
 def poll_images(client, batch_id, args, report):
     """Poll batch nodes until every generated node is ready+chosen.
     Auto-chooses variant 1 of each ready node (server then auto-queues draft
@@ -807,6 +844,8 @@ def poll_images(client, batch_id, args, report):
         if ready_unchosen:
             if args.review:
                 report["awaiting_review"] = [n["id"] for n in ready_unchosen]
+                if not args.no_qc:
+                    _run_shadow_qc(batch_id, args)
                 print(f"  --review: {len(ready_unchosen)} nodes ready — pick variants in the UI, "
                       f"then rerun with --resume-batch {batch_id}")
                 return False
@@ -1054,6 +1093,8 @@ def main(argv=None):
     p.add_argument("--url", default=os.environ.get("KAVENO_URL", DEFAULT_URL))
     p.add_argument("--token", default=os.environ.get("KAVENO_API_TOKEN", ""))
     p.add_argument("--review", action="store_true", help="stop before variant auto-choice")
+    p.add_argument("--no-qc", action="store_true",
+                   help="skip the v936 shadow-mode QC scoring at the --review stop")
     p.add_argument("--auto-choose", action="store_true", dest="auto_choose",
                    help="pick variant 1 automatically (default is STOP and let the operator choose in the UI)")
     p.add_argument("--promote", action="store_true",

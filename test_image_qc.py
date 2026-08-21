@@ -1550,3 +1550,125 @@ def test_main_report_json_prints_the_agreement_dict(monkeypatch, capsys):
     assert main(["--batch", "b-1", "--report", "--json"]) == EXIT_OK
     out = json.loads(capsys.readouterr().out.strip())
     assert out["agree"] == 1 and out["comparable"] == 1
+
+
+# --- v936 Task 8: the send_to_platform side of shadow QC -------------------
+# These live here (not in a send_to_platform test file) because what they
+# protect is the QC seam: send_to_platform must gain the scorer WITHOUT
+# gaining its heavy dependencies, and must survive the scorer failing.
+
+def test_send_to_platform_still_imports_without_cv2_or_numpy():
+    """Module-scope purity pin. send_to_platform is a stdlib-only CLI; the
+    v936 QC hook imports image_qc (and therefore cv2/numpy) LAZILY, inside
+    the function. A box with no cv2 must lose QC, never lose SENDING.
+    Run in a subprocess so the already-imported cv2/numpy in THIS process
+    cannot mask a module-scope import that sneaked in."""
+    import subprocess
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    code_dir = _Path(__file__).resolve().parent
+    probe = (
+        "import sys\n"
+        "sys.modules['cv2'] = None\n"
+        "sys.modules['numpy'] = None\n"
+        "import send_to_platform\n"
+        "print('stdlib-clean')\n"
+    )
+    res = subprocess.run([_sys.executable, "-c", probe], cwd=str(code_dir),
+                         capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    assert "stdlib-clean" in res.stdout
+
+
+def _stp():
+    import sys as _sys
+    from pathlib import Path as _Path
+    code_dir = str(_Path(__file__).resolve().parent)
+    if code_dir not in _sys.path:
+        _sys.path.insert(0, code_dir)
+    import send_to_platform
+    return send_to_platform
+
+
+def _qc_args(**over):
+    import argparse
+    base = {"url": "https://example.test", "subject": None, "no_qc": False}
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def test_send_to_platform_has_the_no_qc_flag():
+    """--no-qc is the operator's off switch for shadow QC."""
+    import subprocess
+    import sys as _sys
+    from pathlib import Path as _Path
+    code_dir = _Path(_stp().__file__).resolve().parent
+    res = subprocess.run([_sys.executable, "send_to_platform.py", "--help"],
+                         cwd=str(code_dir), capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    assert "--no-qc" in res.stdout
+
+
+@pytest.mark.parametrize("scorer, expect", [
+    (lambda argv: EXIT_OK, ""),
+    (lambda argv: EXIT_AUTH, "auth failed"),
+    (lambda argv: EXIT_FAILED, "finished with failures"),
+])
+def test_shadow_qc_never_raises_on_any_exit_code(monkeypatch, capsys,
+                                                 scorer, expect):
+    """Every scorer exit code returns normally, so the caller still reaches
+    its resume-command print."""
+    stp = _stp()
+    monkeypatch.setitem(__import__("sys").modules, "image_qc",
+                        _module_with_main(scorer))
+    assert stp._run_shadow_qc("b-1", _qc_args()) is None
+    assert expect in capsys.readouterr().out
+
+
+def _module_with_main(fn):
+    import types
+    m = types.ModuleType("image_qc")
+    m.main = fn
+    return m
+
+
+def test_shadow_qc_swallows_a_raising_scorer(monkeypatch, capsys):
+    """A crashing scorer must not become a failed send."""
+    stp = _stp()
+
+    def boom(argv):
+        raise RuntimeError("network down")
+    monkeypatch.setitem(__import__("sys").modules, "image_qc",
+                        _module_with_main(boom))
+    assert stp._run_shadow_qc("b-1", _qc_args()) is None
+    assert "RuntimeError" in capsys.readouterr().out
+
+
+def test_shadow_qc_swallows_a_sys_exit_from_argparse(monkeypatch, capsys):
+    stp = _stp()
+
+    def bail(argv):
+        raise SystemExit(EXIT_USAGE)
+    monkeypatch.setitem(__import__("sys").modules, "image_qc",
+                        _module_with_main(bail))
+    assert stp._run_shadow_qc("b-1", _qc_args()) is None
+    assert "aborted" in capsys.readouterr().out
+
+
+def test_shadow_qc_passes_the_batch_the_avatar_and_the_base_url(monkeypatch):
+    """--json is passed so the machine-readable summary line lands in the
+    output; the avatar node is only passed when one was resolved."""
+    stp = _stp()
+    seen = []
+    monkeypatch.setitem(__import__("sys").modules, "image_qc",
+                        _module_with_main(lambda argv: seen.append(list(argv)) or EXIT_OK))
+
+    stp._run_shadow_qc(777, _qc_args(subject=4970))
+    assert seen[-1] == ["--batch", "777", "--json",
+                        "--base-url", "https://example.test",
+                        "--avatar-node", "4970"]
+
+    stp._run_shadow_qc(778, _qc_args(subject=None))
+    assert "--avatar-node" not in seen[-1]
+    assert seen[-1][:3] == ["--batch", "778", "--json"]
