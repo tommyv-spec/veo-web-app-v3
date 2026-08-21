@@ -5,20 +5,40 @@ nodes in a batch and POSTs a per-node report to /api/images/nodes/{id}/qc.
 NEVER chooses a variant (v886.3): the operator keeps the pick; this only
 records what the machine would have picked so agreement can be measured.
 
-Funnel per node (built across Tasks 3-7):
+Funnel per node (built across Tasks 3-7; stage 4 redesigned by v936.1):
   1. integrity gates  (cv2, free)
   2. face gate        (InsightFace, optional)
   3. Gemini judge     (checklist, prompt-as-rubric) on survivors
-  4. pairwise top-2   (both orders; inconsistent = keep checklist order)
+  4. second opinion   (re-judge the top 2 healthy variants independently;
+                       recommend ONLY when the same one wins twice)
+
+v936.1 — what changed and why. A controlled experiment over 13 production
+nodes / 56 variants found the shipped judge's WINNER was substantially noise:
+re-running the identical judge on the identical bytes at temperature 0 moved
+the top variant on 8 of 13 nodes, because scores reproduce only loosely
+(pearson r=0.69) and sit compressed in a 5-7 band, so a point of noise decides
+the ranking. Gross defects, by contrast, reproduce cleanly (a six-finger hand
+3/3, a misspelled label 3/3). The judge is therefore trusted about "this one
+is broken" and no longer trusted about "this one is best" unless the answer
+repeats. The retired pairwise stage bought nothing measurable: across 10 nodes
+/ 20 calls, half contradicted themselves under the order swap. The second
+opinion costs the SAME 2 calls per node.
+
+Rendered text became its own hard fail in the same pass: a bottle labelled
+"AORELLA" instead of the brand "KORELLA" was scored 6/10 PASS and ranked 2nd,
+because the rubric's anti-nitpick wording let a misspelled BRAND NAME through
+as "minor garbled text". A misspelled hero product is build-killing, so
+`text_errors` now forces a fail the model cannot override.
 
 Nothing in here may abort a batch. Every stage answers "no answer" (None, [],
-a 'call_failed' reason) and lets the funnel carry on with the stages that did
-work — a dead judge, an absent face model or a 503 degrades the report, it
-does not lose the run.
+a 'call_failed' reason, an 'unverified' confidence) and lets the funnel carry
+on with the stages that did work — a dead judge, an absent face model or a 503
+degrades the report, it does not lose the run.
 
 File layout:
   SHARED PLUMBING -> INTEGRITY -> JUDGE (pure, then API) ->
-  PAIRWISE (pure, then API) -> FACE -> RANK & REPORT -> CLI (pure, then I/O)
+  SECOND OPINION (pure) -> PAIRWISE (retired, pure then API) ->
+  FACE -> RANK & REPORT -> CLI (pure, then I/O)
 
 RANK & REPORT sits above the CLI because it is the stage that reads every
 other stage's output shape at once; reading it after the stages it consumes
@@ -286,17 +306,18 @@ MINOR_BAN = ("any child, teen, baby, or minor anywhere in frame (v808) — judge
 JUDGE_SCHEMA_HINT = (
     'Reply ONLY with JSON: {"overall": 0-10, "verdict": "pass"|"fail", '
     '"element_misses": [strings], "artifacts": [strings], '
-    '"compliance": [strings], "reasons": [strings]}'
+    '"compliance": [strings], "text_errors": [strings], "reasons": [strings]}'
 )
 
 # The list-valued fields, normalised to lists of strings on every reply so
 # callers never have to type-check what the model returned.
-_JUDGE_LIST_FIELDS = ("element_misses", "artifacts", "compliance", "reasons")
+_JUDGE_LIST_FIELDS = ("element_misses", "artifacts", "compliance",
+                      "text_errors", "reasons")
 
 # The report is size-capped server-side at 64,000 bytes
 # (image_platform.py:3622). The parser is where a chatty model stops being
 # unbounded, so every reply is trimmed to a known worst case before it can
-# reach a report: 4 fields x 10 entries x 200 chars ~= 8 KB per variant.
+# reach a report: 5 fields x 10 entries x 200 chars ~= 10 KB per variant.
 JUDGE_MAX_LIST_ITEMS = 10
 JUDGE_MAX_STRING_CHARS = 200
 
@@ -310,6 +331,14 @@ def build_judge_prompt(spec: str) -> str:
     young-looking adult as a v808 hit, which makes the shadow report measure
     the judge's mood instead of the render. The spec itself is delivered by
     `_fenced_spec` as data, not as orders.
+
+    v936.1 — rendered text is the ONE check the materiality bar does not
+    govern, because the bar demonstrably swallowed a build-killer: a bottle
+    labelled "AORELLA" instead of the brand "KORELLA" scored 6/10 PASS and
+    ranked 2nd, filed as "minor garbled text". So the text check is asked
+    separately, asked BEFORE the leave-alone clause (a model reads these in
+    order), and the clause carves text out of itself explicitly. A wrong
+    brand name is never a nitpick.
     """
     return (
         "You are a strict production QC judge for an AI-generated ad image.\n"
@@ -325,16 +354,28 @@ def build_judge_prompt(spec: str) -> str:
         "3. compliance: report if the image shows " + COMPLIANCE_BANS + ", or "
         + MINOR_BAN + ". Report only what is clearly and unambiguously "
         "visible; if you are unsure, do not report it.\n"
-        "4. overall: 0-10 for how well the image fulfils the SPEC (10 = every "
+        "4. text_errors: read every piece of text visible in the image "
+        "(product label, packaging, brand name, signage, on-screen overlay) "
+        "character by character. Report any word that is misspelled, garbled, "
+        "or different from what the SPEC says it should say. A brand or "
+        "product name that is wrong by even one character is always a defect, "
+        "never a minor issue - report it here regardless of how small it "
+        "looks.\n"
+        "5. overall: 0-10 for how well the image fulfils the SPEC (10 = every "
         "element present, clean, subject not cropped or obstructed).\n"
         "Ignore interpretation rather than error: exact colour shade, crop or "
         "lens choice within the described framing, lighting mood, and any "
-        "detail the SPEC does not name. List an element only if a viewer "
-        "comparing SPEC to image would call it a mistake. An empty "
-        "element_misses list is a normal, expected answer.\n"
-        "verdict is 'fail' if there is ANY compliance hit, ANY artifact that "
-        "a viewer would notice at feed speed, or a missing element that "
-        "changes the shot's meaning. Otherwise 'pass'.\n"
+        "detail the SPEC does not name. RENDERED TEXT IS THE EXCEPTION and is "
+        "always in scope, even when the SPEC does not quote the exact string: "
+        "if the SPEC names a brand or product, the label must match it "
+        "character for character; if the SPEC does not name it, the text must "
+        "still be real, correctly spelled words rather than garbled glyphs. "
+        "Otherwise, list an element only if a viewer comparing SPEC to image "
+        "would call it a mistake. An empty element_misses list is a normal, "
+        "expected answer.\n"
+        "verdict is 'fail' if there is ANY compliance hit, ANY text error, "
+        "ANY artifact that a viewer would notice at feed speed, or a missing "
+        "element that changes the shot's meaning. Otherwise 'pass'.\n"
         + JUDGE_SCHEMA_HINT
     )
 
@@ -361,16 +402,17 @@ def parse_judge_reply(raw: Any) -> Optional[Dict[str, Any]]:
     abort a whole batch run.
 
     Normalisation (extraction itself is `_json_object`):
-      * the result is a FRESH whitelisted dict of exactly the six contract
+      * the result is a FRESH whitelisted dict of exactly the seven contract
         keys — an unknown key a chatty model invents never rides along into
         the size-capped report;
-      * the four list fields always come back as bounded lists of bounded
+      * the five list fields always come back as bounded lists of bounded
         strings (a bare scalar is wrapped, not iterated character by
         character);
       * `overall` is coerced then CLAMPED to 0-10 — the model is not trusted
         to respect its own scale;
-      * `verdict` is RECOMPUTED, never trusted: any compliance hit is 'fail',
-        whatever the model said (§8 / v808 can never be talked into a pass).
+      * `verdict` is RECOMPUTED, never trusted: any compliance hit and any
+        text error are 'fail', whatever the model said (§8 / v808 and a
+        misspelled brand name can never be talked into a pass).
     """
     obj = _json_object(raw)
     if obj is None or "overall" not in obj:
@@ -396,10 +438,18 @@ def parse_judge_reply(raw: Any) -> Optional[Dict[str, Any]]:
     # own word is matched case- and whitespace-insensitively: a reply that
     # shouts "FAIL" has detected a real problem, and comparing against the
     # literal lowercase "fail" would fail OPEN and ship the broken variant.
-    # `compliance` is read from the CLEANED list — trimming it must never trim
-    # a variant into a pass, and a non-empty list stays non-empty under a cap.
+    # `compliance` and `text_errors` are read from the CLEANED lists —
+    # trimming must never trim a variant into a pass, and a non-empty list
+    # stays non-empty under a cap.
+    #
+    # v936.1: text_errors joins compliance as non-overridable. The model that
+    # shipped AORELLA reported the misspelling AND said "pass" in the same
+    # breath, scoring it 6/10 — it saw the defect and weighed it as minor. The
+    # weighing is what is removed here; the score is left exactly as reported,
+    # because rewriting it would hide what the judge actually thought.
     said_fail = str(obj.get("verdict", "")).strip().lower() == "fail"
-    out["verdict"] = "fail" if (out["compliance"] or said_fail) else "pass"
+    out["verdict"] = ("fail" if (out["compliance"] or out["text_errors"]
+                                 or said_fail) else "pass")
     return out
 
 
@@ -473,7 +523,109 @@ def judge_variant(client: Any, image_bytes: bytes, image_prompt: str,
 
 
 # ══════════════════════════════════════════════════════════════════════
-# PAIRWISE (pure) — the tie-break between the top 2 candidates
+# SECOND OPINION (pure) — does the pass-1 winner win TWICE? (v936.1)
+#
+# Measured on 13 production nodes / 56 variants: re-running the identical
+# judge on the identical bytes at temperature 0 moved the top variant on 8
+# of 13. Scores reproduce loosely (pearson r=0.69) but sit compressed in a
+# 5-7 band, so plus-or-minus one point of noise decides the ranking — which
+# made `recommended_variant_id` close to a coin flip.
+#
+# What DOES reproduce is gross defects: a six-finger hand was caught 3/3, a
+# misspelled product label 3/3. So the judge is trustworthy about "this one
+# is broken" and unreliable about "this one is best", and the funnel is now
+# built on the half that holds. This stage does not re-rank; it asks whether
+# the ranking's top two separate at all, and refuses to recommend when they
+# do not. Refusing is the product: a null recommendation is honest, a
+# confident coin flip is not.
+# ══════════════════════════════════════════════════════════════════════
+
+CONF_SOLE = "sole"                  # one healthy variant; nothing to compare
+CONF_CONFIRMED = "confirmed"        # pass 2 kept pass 1's order
+CONF_TIED = "tied"                  # pass 2 flipped it, or scored them equal
+CONF_UNVERIFIED = "unverified"      # a pass-2 call produced no answer
+CONF_NONE_HEALTHY = "none_healthy"  # nothing was worth recommending
+
+# The ONLY two states that may carry a recommendation. Kept as a constant so
+# `compose_report`'s gate and any future reader agree by construction rather
+# than by two places listing the same two strings on purpose.
+CONF_RECOMMENDABLE = (CONF_CONFIRMED, CONF_SOLE)
+
+
+def _judge_overall(judge: Optional[Dict[str, Any]]) -> int:
+    """The judge's score, or -1 when there is no usable one.
+
+    Mirrors `rank_variants` axis 4 deliberately: a missing or unreadable
+    score sorts below a real 0, because a 0 is a measurement and a missing
+    answer is not. Never raises — a caller bug (judge set to {}) must not
+    abort a batch, and two unscoreable judges comparing EQUAL lands on
+    `tied`, which is the answer that recommends nothing.
+    """
+    try:
+        return int(judge["overall"])                     # type: ignore[index]
+    except (TypeError, KeyError, ValueError, OverflowError):
+        return -1
+
+
+def classify_confidence(first_a: Optional[Dict[str, Any]],
+                        first_b: Optional[Dict[str, Any]],
+                        second_a: Optional[Dict[str, Any]],
+                        second_b: Optional[Dict[str, Any]]) -> str:
+    """Four judge dicts in, one confidence word out. Pure.
+
+    `first_*` are pass 1's judgements of the ranking's top two healthy
+    variants, in rank order; `second_*` are the independent second opinion of
+    the same two images. Any of them may be None: `judge_variant` returns
+    None when every attempt failed, and there simply may not BE a second
+    candidate.
+
+    The five answers, in the order they are decided:
+      sole         — no second candidate existed. Recommend A; the healthy
+                     gate already vouched for it and there was never a
+                     comparison to get wrong. Costs zero extra calls.
+      confirmed    — A scored strictly higher in BOTH passes. The only state
+                     that earns a recommendation off a comparison.
+      tied         — pass 2 flipped the order, or either pass scored them
+                     equal. Recommend NOTHING.
+      unverified   — a pass-2 call produced no answer. Recommend NOTHING, and
+                     stay distinct from `tied`: an outage is not the judge
+                     contradicting itself, and merging the two would slowly
+                     libel it. Same distinction the retired
+                     PAIRWISE_CALL_FAILED drew.
+      none_healthy — there was no candidate at all.
+
+    This function is A-ORIENTED, and that is the load-bearing detail.
+    `compose_report` recommends `ranked[0]`, which IS A, so "confirmed" has
+    to mean "A is confirmed" and nothing else. The caller's contract is to
+    pass the top two in rank order, and since both are healthy the ranker
+    ordered them on `overall` — so A leading pass 1 is guaranteed in-contract.
+    If B leads it anyway the contract was broken, and the answer must be the
+    safe one: `tied` recommends nothing, where returning "confirmed" would
+    vouch for a winner the report would not actually name.
+    """
+    if first_a is None:
+        return CONF_NONE_HEALTHY
+    if first_b is None:
+        return CONF_SOLE
+    if second_a is None or second_b is None:
+        return CONF_UNVERIFIED
+    led_pass_1 = _judge_overall(first_a) > _judge_overall(first_b)
+    led_pass_2 = _judge_overall(second_a) > _judge_overall(second_b)
+    return CONF_CONFIRMED if (led_pass_1 and led_pass_2) else CONF_TIED
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PAIRWISE (pure) — RETIRED FROM THE FUNNEL 2026-08-21
+#
+# Measured 50% self-contradiction across 10 production nodes (20 calls, half
+# returned "disagreed"): the stage spent 2 calls per node re-discovering a
+# position bias we already knew about, and produced a usable verdict only
+# half the time. Replaced by the second-opinion pass above, which costs the
+# SAME 2 calls and asks a question that reproduces.
+#
+# Kept, not deleted: the code and its tests document a measurement, and the
+# both-orders swap is the right shape for any future comparison stage.
+# Nothing in the funnel calls any of it.
 # ══════════════════════════════════════════════════════════════════════
 
 PAIRWISE_SCHEMA_HINT = 'Reply ONLY with JSON: {"winner": 1 or 2}'
@@ -487,7 +639,11 @@ PAIRWISE_CALL_FAILED = "call_failed"  # at least one order produced no verdict
 
 
 def build_pairwise_prompt(spec: str) -> str:
-    """Ask one question about two images. The SPEC is fenced as DATA by
+    """RETIRED FROM THE FUNNEL 2026-08-21 — measured 50% self-contradiction
+    across 10 production nodes (20 calls, half returned "disagreed"); replaced
+    by the second-opinion pass.
+
+    Ask one question about two images. The SPEC is fenced as DATA by
     `_fenced_spec` for the same reason as in the judge prompt: it is operator
     prose that reaches the model verbatim and must never read as orders."""
     return (
@@ -504,7 +660,11 @@ def build_pairwise_prompt(spec: str) -> str:
 
 
 def _parse_winner(raw: Any) -> Optional[int]:
-    """Tolerant extraction of {"winner": 1|2}. Two answers only — 1, 2, or
+    """RETIRED FROM THE FUNNEL 2026-08-21 — measured 50% self-contradiction
+    across 10 production nodes (20 calls, half returned "disagreed"); replaced
+    by the second-opinion pass.
+
+    Tolerant extraction of {"winner": 1|2}. Two answers only — 1, 2, or
     None. Anything else (a 3, a 0, a JSON `true`, prose, a fence with junk
     inside) is a confused model, and a confused order counts as no verdict."""
     obj = _json_object(raw)
@@ -522,7 +682,11 @@ def _parse_winner(raw: Any) -> Optional[int]:
 
 def decide_pairwise(winner_order1: Optional[str],
                     winner_order2: Optional[str]) -> Optional[str]:
-    """Both-orders pairwise: only a verdict that survives the swap counts.
+    """RETIRED FROM THE FUNNEL 2026-08-21 — measured 50% self-contradiction
+    across 10 production nodes (20 calls, half returned "disagreed"); replaced
+    by the second-opinion pass.
+
+    Both-orders pairwise: only a verdict that survives the swap counts.
     (VLM judges have measurable first-position bias; inconsistent = tie.)"""
     if winner_order1 is not None and winner_order1 == winner_order2:
         return winner_order1
@@ -532,7 +696,12 @@ def decide_pairwise(winner_order1: Optional[str],
 def classify_pairwise(winner_order1: Optional[str], winner_order2: Optional[str],
                       order1_failed: bool, order2_failed: bool
                       ) -> Tuple[Optional[str], str]:
-    """(winner, reason). The winner is `decide_pairwise`; the reason says WHY
+    """RETIRED FROM THE FUNNEL 2026-08-21 — measured 50% self-contradiction
+    across 10 production nodes (20 calls, half returned "disagreed"); replaced
+    by the second-opinion pass, which keeps this reason/outage distinction as
+    CONF_TIED vs CONF_UNVERIFIED.
+
+    (winner, reason). The winner is `decide_pairwise`; the reason says WHY
     there is no winner, which is what stops Task 10 from scoring an outage as
     a disagreement. A failed order is recorded by the caller rather than
     inferred from a missing name, so a future "the model answered, honestly,
@@ -546,12 +715,17 @@ def classify_pairwise(winner_order1: Optional[str], winner_order2: Optional[str]
 
 
 # ══════════════════════════════════════════════════════════════════════
-# PAIRWISE (API)
+# PAIRWISE (API) — RETIRED FROM THE FUNNEL 2026-08-21 (see the pure section
+# above for the measurement). Nothing calls this.
 # ══════════════════════════════════════════════════════════════════════
 
 def pairwise_top2(client: Any, spec: str, a_bytes: bytes, b_bytes: bytes
                   ) -> Tuple[Optional[str], str]:
-    """Ask which of two candidates better fulfils the spec, in BOTH orders.
+    """RETIRED FROM THE FUNNEL 2026-08-21 — measured 50% self-contradiction
+    across 10 production nodes (20 calls, half returned "disagreed"); replaced
+    by the second-opinion pass. `score_node` no longer calls this.
+
+    Ask which of two candidates better fulfils the spec, in BOTH orders.
 
     Returns (winner, reason): winner is 'A' | 'B' relative to the caller's
     order, or None; reason is 'consistent' | 'disagreed' | 'call_failed'.
@@ -839,30 +1013,50 @@ def rank_variants(variant_reports: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 # stage that did not run may leave its key ABSENT rather than set to None
 # (the skipped_checks=['face'] path), and a missing optional answer must
 # report as null, not raise KeyError halfway through composing a report.
-_REPORT_VARIANT_FIELDS = ("integrity", "face_sim", "judge", "rank")
+#
+# v936.1 adds `verify`: what the second-opinion pass scored this variant.
+# Only the top two healthy rows carry one, so on every other row the `.get`
+# yields None — which reads in the stored report as "never re-judged", the
+# fact a later auditor needs.
+_REPORT_VARIANT_FIELDS = ("integrity", "face_sim", "judge", "verify", "rank")
 
 
 def compose_report(ranked: List[Dict[str, Any]], skipped: List[str],
-                   pairwise_reason: Optional[str] = None) -> Dict[str, Any]:
+                   confidence: Optional[str] = None) -> Dict[str, Any]:
     """One node's shadow report, ready to POST.
 
-    `recommended_variant_id` is None unless the TOP-ranked variant is
-    genuinely healthy: integrity ok, judged and passed, and at or above the
-    face floor when a face was actually measured. None is a real answer here —
-    "every candidate looks bad" — and it is deliberately not "the least bad
-    one", because this report never chooses (v886.3) and a recommendation the
-    machine does not believe would poison the agreement number Task 10 reads.
+    `recommended_variant_id` needs BOTH gates to pass, and they answer
+    different questions:
 
-    An unjudged top variant cannot be recommended either: a dead judge
-    degrades the report, it does not promote whatever survived the free gates.
+      * the health gate (unchanged) — is the top-ranked variant any good?
+        Integrity ok, judged and passed, at or above the face floor when a
+        face was actually measured. An unjudged top variant cannot be
+        recommended: a dead judge degrades the report, it does not promote
+        whatever survived the free gates.
+      * the confidence gate (v936.1) — do we believe it BEAT the runner-up?
+        Only CONF_RECOMMENDABLE (`confirmed` or `sole`) qualifies. This is
+        the gate the shipped judge did not have, and its absence is why
+        `recommended_variant_id` was close to a coin flip: re-running the
+        identical judge on the identical bytes moved the top variant on 8 of
+        13 production nodes. Health was never the thing in doubt; WHICH
+        healthy variant won was.
+
+    `confidence` defaults to None — no second opinion, no recommendation — so
+    a caller that skips the stage cannot silently restore the old behaviour.
+
+    None is a real answer here, not a failure: "we cannot separate these" is
+    exactly what the measurement says is true half the time. It is
+    deliberately not "the least bad one" and not "the one that happened to
+    rank first", because this report never chooses (v886.3) and a
+    recommendation the machine does not believe would poison the agreement
+    number Task 10 reads.
 
     `skipped` names the stages that did not run at all ('face', 'judge') so a
-    None recommendation can be told apart from a gate that never fired, and
-    `pairwise_reason` is one of PAIRWISE_CONSISTENT / PAIRWISE_DISAGREED /
-    PAIRWISE_CALL_FAILED, or None when no pair was compared.
+    None recommendation can be told apart from a gate that never fired.
     """
     recommended: Optional[int] = None
-    if ranked and all(_healthy_axes(ranked[0])):
+    if (confidence in CONF_RECOMMENDABLE
+            and ranked and all(_healthy_axes(ranked[0]))):
         # int() not the raw value: the server rejects a non-plain-int
         # recommended_variant_id (image_platform.py:3610), and a variant_id
         # that arrived as a numpy integer is not one.
@@ -878,11 +1072,16 @@ def compose_report(ranked: List[Dict[str, Any]], skipped: List[str],
               f"{_ascii(ids)} - the report keeps the best-ranked row for each",
               flush=True)
     return {
+        # STAYS 1. The server hard-rejects anything else
+        # (image_platform.py:3600) and this change ships without a server
+        # deploy, so every field here is ADDITIVE: `confidence` and the
+        # per-variant `verify` are new keys the server passes through
+        # untouched, and the dropped `pairwise_reason` had no reader at all.
         "version": 1,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "recommended_variant_id": recommended,
         "skipped_checks": list(skipped),
-        "pairwise_reason": pairwise_reason,
+        "confidence": confidence,
         # JSON object keys are strings on the wire anyway; making that explicit
         # here means the dict a test reads is the dict the server receives.
         #
@@ -908,28 +1107,42 @@ def agreement_stats(nodes: Iterable[Any]) -> Dict[str, Any]:
     only way to learn whether it COULD be trusted is to compare it after the
     fact against the operator's own pick.
 
-    Four counts, and the distinctions between them are the measurement:
+    Five counts, and the distinctions between them are the measurement:
       * scored             — nodes carrying a report at all. Tells "nothing has
                              been scored yet" apart from "scored, never
                              comparable".
       * comparable         — BOTH sides named a variant. Only these can agree
-                             or disagree.
+                             or disagree. Since v936.1 only a `confirmed` or
+                             `sole` node can name one, so this counts the
+                             nodes the judge actually COMMITTED to.
       * agree              — of those, the same variant.
-      * no_recommendation  — the operator picked, the report said "none of
-                             these is good enough". NOT a disagreement: the
-                             machine declined to answer, and counting a decline
-                             as a wrong answer would slowly libel the judge.
+      * tied               — the report said "I looked twice and could not
+                             separate the top two" (CONF_TIED) or "I could not
+                             complete the second look" (CONF_UNVERIFIED).
+      * no_recommendation  — the report said "none of these is good enough"
+                             (CONF_NONE_HEALTHY), plus legacy reports written
+                             before v936.1, which carry no `confidence` key
+                             and cannot be sorted more finely than this.
+
+    Splitting `tied` out of `no_recommendation` is the honesty fix. They are
+    two different silences: `tied` is a statement about the JUDGE (it could
+    not tell them apart), `no_recommendation` is a statement about the
+    RENDERS (none was worth naming). Both are declines rather than wrong
+    answers — counting a decline as a disagreement would slowly libel the
+    judge — but merging them hid the finding that motivated v936.1.
 
     `agreement_pct` is None when nothing is comparable — a 0% agreement
     claimed off zero samples reads as "the judge is useless" when the fact is
-    "the judge has not been tested".
+    "the judge has not been tested". Note the percentage is now computed over
+    a SMALLER, more honest denominator: a batch where the judge committed
+    once and tied three times is 100% of one, not 25% of four.
 
     Ids are compared as INTS: the server accepts a digit-string
     recommended_variant_id (image_platform.py:3610), so a report written by a
     tolerant producer can carry '5' where the node carries 5, and a string
     comparison would score a real agreement as a disagreement.
     """
-    scored = comparable = agree = no_recommendation = 0
+    scored = comparable = agree = tied = no_recommendation = 0
     for node in nodes or []:
         if not isinstance(node, dict):
             continue
@@ -941,7 +1154,13 @@ def agreement_stats(nodes: Iterable[Any]) -> Dict[str, Any]:
         if not chosen:
             continue
         if not rec:
-            no_recommendation += 1
+            # An ABSENT confidence key is a pre-v936.1 report, not a claim of
+            # tiedness — it falls to no_recommendation, which is where those
+            # reports have always been counted.
+            if qc.get("confidence") in (CONF_TIED, CONF_UNVERIFIED):
+                tied += 1
+            else:
+                no_recommendation += 1
             continue
         try:
             same = int(chosen) == int(rec)
@@ -956,6 +1175,7 @@ def agreement_stats(nodes: Iterable[Any]) -> Dict[str, Any]:
         "scored": scored,
         "comparable": comparable,
         "agree": agree,
+        "tied": tied,
         "no_recommendation": no_recommendation,
         "agreement_pct": (round(100.0 * agree / comparable, 1)
                           if comparable else None),
@@ -1040,7 +1260,7 @@ def _has_qc_report(node: Dict[str, Any]) -> bool:
     """True when this node already carries a v936 report.
 
     `qc` is ImageNode.to_dict's decoded qc_json (image_platform.py:1219) and
-    every report `compose_report` writes carries "version" (image_qc.py:881),
+    every report `compose_report` writes carries "version" (image_qc.py:1080),
     so that key — not mere truthiness — is the marker. An empty dict, a null,
     or some shape the server grows later is NOT a report and must not be
     allowed to block scoring.
@@ -1098,7 +1318,13 @@ def pick_scorable_nodes(nodes: Sequence[Any],
 
 def apply_pairwise(ranked: List[Dict[str, Any]],
                    winner: Optional[str]) -> List[Dict[str, Any]]:
-    """Fold the pairwise verdict back into the ranking.
+    """RETIRED FROM THE FUNNEL 2026-08-21 — measured 50% self-contradiction
+    across 10 production nodes (20 calls, half returned "disagreed"); replaced
+    by the second-opinion pass, which does not re-rank at all: it confirms the
+    ranking's winner or refuses to recommend one. `score_node` no longer calls
+    this.
+
+    Fold the pairwise verdict back into the ranking.
 
     `pairwise_top2` compares the two best variants in BOTH orders, and only a
     verdict that survives the swap counts. When that verdict names B — the
@@ -1442,8 +1668,14 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
         says on its face that it could not see N of the candidates.
 
     Memory: every scored variant's bytes are held for the length of the node,
-    because the pairwise stage needs the top two side by side after ranking.
-    That is 4-6 PNGs at ~2 MB — deliberately not engineered around.
+    because the second-opinion stage re-judges the top two after ranking and
+    cannot know which two those are until the ranking exists. That is 4-6 PNGs
+    at ~2 MB — deliberately not engineered around.
+
+    Call budget per node is V + 2 (V pass-1 judgements, plus 2 second
+    opinions), which is exactly what the retired pairwise stage cost. A node
+    with fewer than 2 healthy variants spends V flat: there is nothing to
+    compare.
     """
     node_id = node.get("id")
     prompt = (node.get("prompt") or "").strip()
@@ -1503,19 +1735,52 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
         skipped.append(f"fetch:{fetch_failures}")
 
     ranked = rank_variants(reports)
-    pairwise_reason: Optional[str] = None
     # A variant healthy on all three axes sorts above one that is not, so the
     # healthy variants are exactly the head of `ranked` — the top two here ARE
-    # ranked[0] and ranked[1], which is what makes apply_pairwise's top-2 swap
-    # the right fold.
+    # ranked[0] and ranked[1], which is what lets the second opinion re-judge
+    # exactly the pair the recommendation is about.
     healthy = [row for row in ranked if all(_healthy_axes(row))]
+
+    # v936.1 SECOND OPINION, in place of the retired pairwise stage. Same
+    # budget (2 calls), different question: pairwise asked "which is better?"
+    # and contradicted itself half the time; this asks "does pass 1's winner
+    # win again?", which is the question the measurement says reproduces.
+    first_a = healthy[0]["judge"] if healthy else None
+    first_b = healthy[1]["judge"] if len(healthy) >= 2 else None
+    second_a = second_b = None
     if judge_on and len(healthy) >= 2:
-        a_bytes = variant_bytes.get(healthy[0]["variant_id"])
-        b_bytes = variant_bytes.get(healthy[1]["variant_id"])
-        if a_bytes and b_bytes:
-            winner, pairwise_reason = pairwise_top2(client, prompt, a_bytes, b_bytes)
-            ranked = apply_pairwise(ranked, winner)
-    return compose_report(ranked, skipped, pairwise_reason)
+        seconds: List[Optional[Dict[str, Any]]] = []
+        for row in healthy[:2]:
+            img = variant_bytes.get(row["variant_id"])
+            # An independent call on the same bytes with the same rubric. The
+            # judge runs at temperature 0, so any difference between the two
+            # answers is the model's own instability — which is exactly the
+            # thing being measured.
+            #
+            # `judge_variant`'s default retry ladder is kept deliberately,
+            # where the retired pairwise stage had none. Pass 1 retries, so an
+            # unretried pass 2 would fail more often than the pass it is
+            # checking, and every 503 would land as `unverified` and silently
+            # suppress a recommendation the node had earned. Retries only fire
+            # on a transient error, so the normal-path budget is still exactly
+            # one call per variant.
+            again = judge_variant(client, img, prompt) if img else None
+            seconds.append(again)
+            # These rows ARE the ranked rows (rank_variants returned fresh
+            # dicts and `healthy` holds references to them), so writing here
+            # is what puts `verify` into the report. Written on BOTH outcomes:
+            # a null on a top-2 row says the second call was made and produced
+            # nothing, which is not the same as never having been asked.
+            row["verify"] = (None if again is None else
+                             {"overall": again["overall"],
+                              "verdict": again["verdict"]})
+        second_a, second_b = seconds
+
+    confidence = classify_confidence(first_a, first_b, second_a, second_b)
+    if confidence in (CONF_TIED, CONF_UNVERIFIED):
+        print(f"[qc] node {node_id}: top 2 did not separate ({confidence}) - "
+              f"no recommendation", flush=True)
+    return compose_report(ranked, skipped, confidence)
 
 
 def post_report(session: Any, base: str, node_id: int,
@@ -1612,10 +1877,13 @@ def _run_batch(session: Any, base: str, args: Any) -> int:
         outcome = classify_post(status)
         if outcome == POST_ACCEPTED:
             posted += 1
+            # .get on `confidence`: a hand-built report (a stub, a caller
+            # composing its own) must not turn this log line into the one
+            # thing that aborts a batch.
             print(f"[qc] node {node_id}: "
                   f"recommended={report['recommended_variant_id']} "
                   f"skipped={report['skipped_checks']} "
-                  f"pairwise={report['pairwise_reason']}", flush=True)
+                  f"confidence={report.get('confidence')}", flush=True)
         elif outcome == POST_DEFERRED:
             deferred += 1
             print(f"[qc] node {node_id}: still rendering, rescore later (409)",
@@ -1659,8 +1927,14 @@ def _run_report(session: Any, base: str, args: Any) -> int:
     scope = f"batch {args.batch}" if args.batch else f"last {args.since_days} days"
     pct = "n/a" if stats["agreement_pct"] is None else f"{stats['agreement_pct']}%"
     print(f"[qc] {scope}: {stats['scored']} scored node(s)", flush=True)
+    # All five counters, because the three silences mean different things and
+    # the operator reads this line to decide whether to trust the judge:
+    # agreement is measured only over nodes it committed to, ties say it
+    # looked twice and could not separate the top two, and none-good says the
+    # renders were the problem.
     print(f"shadow agreement: {stats['agree']}/{stats['comparable']} ({pct}) "
-          f"| qc-said-none-good: {stats['no_recommendation']}", flush=True)
+          f"| tied-or-unverified: {stats['tied']} "
+          f"| none-good: {stats['no_recommendation']}", flush=True)
     return EXIT_OK
 
 

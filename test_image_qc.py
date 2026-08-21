@@ -13,6 +13,9 @@ from image_qc import (analyze_integrity, build_judge_prompt, parse_judge_reply,
                       build_pairwise_prompt, _parse_winner,
                       PAIRWISE_CONSISTENT, PAIRWISE_DISAGREED,
                       PAIRWISE_CALL_FAILED,
+                      classify_confidence, CONF_SOLE, CONF_CONFIRMED,
+                      CONF_TIED, CONF_UNVERIFIED, CONF_NONE_HEALTHY,
+                      CONF_RECOMMENDABLE,
                       face_similarity, load_embedder, InsightFaceEmbedder,
                       rank_variants, compose_report, RANK_FACE_SIM_FLOOR,
                       agreement_stats, fit_report, pick_scorable_nodes,
@@ -337,11 +340,11 @@ def test_parse_judge_reply_verdict_downgrade_is_case_insensitive():
 def test_parse_judge_reply_strict_out_whitelist_and_caps():
     """The report is size-capped at 64,000 bytes (image_platform.py:3622), so
     the parser is the boundary where a chatty model stops being unbounded:
-    exactly the six contract keys, each list capped, each string truncated."""
+    exactly the seven contract keys, each list capped, each string truncated."""
     assert (JUDGE_MAX_LIST_ITEMS, JUDGE_MAX_STRING_CHARS) == (10, 200)
     raw = json.dumps({
         "overall": 5, "verdict": "pass",
-        "element_misses": [], "compliance": [],
+        "element_misses": [], "compliance": [], "text_errors": [],
         "artifacts": ["a%d" % i for i in range(11)],
         "reasons": ["x" * 500],
         "analysis": "y" * 2000,          # unknown keys must not ride along
@@ -349,7 +352,7 @@ def test_parse_judge_reply_strict_out_whitelist_and_caps():
     })
     r = parse_judge_reply(raw)
     assert set(r) == {"overall", "verdict", "element_misses", "artifacts",
-                      "compliance", "reasons"}
+                      "compliance", "text_errors", "reasons"}
     assert len(r["artifacts"]) == JUDGE_MAX_LIST_ITEMS
     assert r["artifacts"][0] == "a0"     # the cap keeps the FIRST entries
     assert len(r["reasons"][0]) == JUDGE_MAX_STRING_CHARS
@@ -364,6 +367,85 @@ def test_parse_judge_reply_capped_compliance_still_fails():
     r = parse_judge_reply(raw)
     assert r["verdict"] == "fail"
     assert len(r["compliance"]) == JUDGE_MAX_LIST_ITEMS
+
+
+# ── v936.1 Change B: rendered text is its own hard fail ────────────────────
+# Measured miss: a bottle labelled "AORELLA" instead of the brand "KORELLA"
+# scored 6/10 PASS and ranked 2nd, because the leave-alone clause let a
+# misspelled BRAND NAME through as "minor garbled text". A misspelled hero
+# product is build-killing, so it stops being a judgement call.
+
+
+def test_judge_prompt_asks_for_text_errors_above_the_leave_alone_clause():
+    """Order is the point: the model reads the checks in sequence, so the
+    text check has to land BEFORE the clause telling it to ignore anything
+    the SPEC does not name — otherwise the clause is what it remembers."""
+    p = build_judge_prompt("A woman holds a KORELLA saffron bottle.")
+    low = p.lower()
+    assert "text_errors" in low
+    assert low.index("text_errors") < low.index("ignore interpretation")
+    assert "character by character" in low
+    # the schema hint has to advertise the key or the model never emits it
+    assert p.count("text_errors") >= 2
+
+
+def test_judge_prompt_exempts_rendered_text_from_the_leave_alone_clause():
+    """The leave-alone clause says to ignore 'any detail the SPEC does not
+    name'. That is exactly what let AORELLA through, so text is carved out of
+    it explicitly: named or not, the label still has to be real words."""
+    low = build_judge_prompt("A woman holds a saffron bottle.").lower()
+    assert "wrong by even one character" in low
+    tail = low[low.index("ignore interpretation"):]
+    assert "rendered text" in tail          # the carve-out sits in the clause
+    assert "garbled glyphs" in tail
+
+
+def test_parse_judge_reply_text_errors_force_a_fail_over_the_models_pass():
+    """The AORELLA case end to end: the model says 6/10 pass and reports the
+    misspelling anyway. The recompute is not overridable — a wrong brand name
+    can never be talked into a pass."""
+    raw = json.dumps({"overall": 6, "verdict": "pass", "element_misses": [],
+                      "artifacts": [], "compliance": [], "reasons": [],
+                      "text_errors": ['bottle label reads "AORELLA", '
+                                      'SPEC says "KORELLA"']})
+    r = parse_judge_reply(raw)
+    assert r["verdict"] == "fail"
+    assert r["overall"] == 6      # the score is reported, not rewritten
+    assert len(r["text_errors"]) == 1
+
+
+def test_parse_judge_reply_text_errors_are_capped_like_their_siblings():
+    """Same 10-item / 200-char caps as the other list fields, and the cap must
+    never trim a variant into a pass — a non-empty list stays non-empty."""
+    raw = json.dumps({"overall": 9, "verdict": "pass", "element_misses": [],
+                      "artifacts": [], "compliance": [], "reasons": [],
+                      "text_errors": ["e" * 500] + ["hit %d" % i
+                                                    for i in range(25)]})
+    r = parse_judge_reply(raw)
+    assert len(r["text_errors"]) == JUDGE_MAX_LIST_ITEMS
+    assert len(r["text_errors"][0]) == JUDGE_MAX_STRING_CHARS
+    assert r["verdict"] == "fail"
+
+
+def test_parse_judge_reply_absent_text_errors_defaults_to_empty():
+    """An older model reply, or one with nothing to report, must not fail: an
+    absent key is an empty list, and an empty list is a pass."""
+    raw = ('{"overall": 8, "verdict": "pass", "element_misses": [], '
+           '"artifacts": [], "compliance": [], "reasons": []}')
+    r = parse_judge_reply(raw)
+    assert r["text_errors"] == []
+    assert r["verdict"] == "pass"
+
+
+def test_parse_judge_reply_scalar_text_error_is_wrapped_not_exploded():
+    """A model answering with a bare string means ONE finding, not one per
+    character — the same tolerance every other list field gets."""
+    raw = json.dumps({"overall": 7, "verdict": "pass", "element_misses": [],
+                      "artifacts": [], "compliance": [], "reasons": [],
+                      "text_errors": "AORELLA"})
+    r = parse_judge_reply(raw)
+    assert r["text_errors"] == ["AORELLA"]
+    assert r["verdict"] == "fail"
 
 
 def test_mime_for_sniffs_magic_bytes():
@@ -792,6 +874,103 @@ def test_load_embedder_returns_the_embedder_when_available(monkeypatch):
     assert load_embedder() is sentinel
 
 
+# ══════════════════════════════════════════════════════════════════════
+# SECOND OPINION (pure) — classify_confidence, the v936.1 replacement for
+# the pairwise stage. Measured: re-running the identical judge on the
+# identical bytes at temperature 0 moved the top variant on 8 of 13
+# production nodes, so a pass-1 winner that does not reproduce is noise.
+# ══════════════════════════════════════════════════════════════════════
+
+def _judged(overall, verdict="pass"):
+    """A judge dict in the shape parse_judge_reply actually returns."""
+    return {"overall": overall, "verdict": verdict, "element_misses": [],
+            "artifacts": [], "compliance": [], "text_errors": [],
+            "reasons": []}
+
+
+def test_confidence_none_healthy_when_there_is_no_first_candidate():
+    """Zero healthy variants: there is no winner to confirm and nothing to
+    recommend. Distinct from 'tied' — nothing was comparable in the first
+    place, which is a report about the RENDERS, not about the judge."""
+    assert classify_confidence(None, None, None, None) == CONF_NONE_HEALTHY
+    # incoherent input (a runner-up with no leader) is still no leader
+    assert classify_confidence(None, _judged(9), None, None) == CONF_NONE_HEALTHY
+
+
+def test_confidence_sole_when_only_one_candidate_was_healthy():
+    """One healthy variant costs ZERO extra calls — there is no second
+    opinion to buy, because there is nothing to compare it against. It is
+    still recommendable: the healthy gate already vouched for it."""
+    assert classify_confidence(_judged(8), None, None, None) == CONF_SOLE
+    assert CONF_SOLE in CONF_RECOMMENDABLE
+
+
+def test_confidence_confirmed_when_pass_two_preserves_the_order():
+    """The only state that earns a recommendation off a comparison: the same
+    variant scores strictly higher in BOTH independent passes."""
+    assert classify_confidence(_judged(9), _judged(6),
+                               _judged(8), _judged(5)) == CONF_CONFIRMED
+    # the margin does not have to match, only the direction
+    assert classify_confidence(_judged(9), _judged(8),
+                               _judged(4), _judged(3)) == CONF_CONFIRMED
+
+
+def test_confidence_tied_when_pass_two_flips_the_order():
+    """The measured failure mode: pass 1 says A, pass 2 says B, on identical
+    bytes at temperature 0. Neither reading is trustworthy, so no
+    recommendation is the honest answer."""
+    assert classify_confidence(_judged(9), _judged(6),
+                               _judged(5), _judged(7)) == CONF_TIED
+
+
+def test_confidence_tied_when_either_pass_scores_them_equal():
+    """Scores sit compressed in a 5-7 band, so an equal pair is the normal
+    case, not an edge case — and an equal pair has not separated anything."""
+    assert classify_confidence(_judged(7), _judged(7),
+                               _judged(9), _judged(4)) == CONF_TIED   # pass 1
+    assert classify_confidence(_judged(9), _judged(4),
+                               _judged(7), _judged(7)) == CONF_TIED   # pass 2
+    assert classify_confidence(_judged(6), _judged(6),
+                               _judged(6), _judged(6)) == CONF_TIED   # both
+
+
+def test_confidence_unverified_when_a_second_pass_call_failed():
+    """judge_variant returns None when every attempt failed. That is an
+    OUTAGE, not a disagreement — counting it as a tie would slowly libel the
+    judge, which is the same distinction PAIRWISE_CALL_FAILED drew."""
+    a, b = _judged(9), _judged(6)
+    assert classify_confidence(a, b, None, _judged(5)) == CONF_UNVERIFIED
+    assert classify_confidence(a, b, _judged(8), None) == CONF_UNVERIFIED
+    assert classify_confidence(a, b, None, None) == CONF_UNVERIFIED
+
+
+def test_confidence_tied_when_the_runner_up_led_pass_one():
+    """Out-of-contract input: the caller is supposed to pass the ranking's
+    top two in order, so A leading pass 1 is a precondition. If B leads it
+    anyway, the answer must be the SAFE one — compose_report recommends
+    ranked[0], so confirming a winner it would not recommend is the one bug
+    this function must not have."""
+    assert classify_confidence(_judged(4), _judged(9),
+                               _judged(3), _judged(8)) == CONF_TIED
+
+
+def test_confidence_survives_a_degraded_judge_dict():
+    """Nothing in this module may abort a batch, including on a caller bug
+    (judge set to {} rather than None). Unscoreable compares as equal, which
+    lands on 'tied' — the answer that recommends nothing."""
+    assert classify_confidence({}, {}, {}, {}) == CONF_TIED
+    assert classify_confidence(_judged(9), _judged(6),
+                               {}, _judged("junk")) == CONF_TIED
+
+
+def test_only_confirmed_and_sole_are_recommendable():
+    """The whole point of Change C: three of the five states must never
+    produce a recommended_variant_id."""
+    assert set(CONF_RECOMMENDABLE) == {CONF_CONFIRMED, CONF_SOLE}
+    for refused in (CONF_TIED, CONF_UNVERIFIED, CONF_NONE_HEALTHY):
+        assert refused not in CONF_RECOMMENDABLE
+
+
 # --- RANK & REPORT ---------------------------------------------------------
 
 
@@ -807,7 +986,7 @@ def _v(vid, ok=True, reasons=None, face=0.6, overall=7, verdict="pass"):
         "judge": None if overall is None else
                  {"overall": overall, "verdict": verdict,
                   "element_misses": [], "artifacts": [], "compliance": [],
-                  "reasons": []},
+                  "text_errors": [], "reasons": []},
     }
 
 
@@ -885,7 +1064,7 @@ def test_rank_and_compose_tolerate_an_absent_face_sim_key():
     del no_face["face_sim"]
     ranked = rank_variants([no_face, _v(2, face=0.7, overall=6)])
     assert [r["variant_id"] for r in ranked] == [1, 2]
-    rep = compose_report(ranked, skipped=["face"])
+    rep = compose_report(ranked, skipped=["face"], confidence=CONF_CONFIRMED)
     assert rep["variants"]["1"]["face_sim"] is None
     assert rep["recommended_variant_id"] == 1
 
@@ -902,14 +1081,16 @@ def test_rank_and_compose_survive_an_empty_judge_dict():
     # It has to be the TOP row to bite: compose_report only reads ranked[0],
     # so a batch where something healthier outranks it never touches the
     # empty dict at all.
-    alone = compose_report(rank_variants([empty_judge]), skipped=[])
+    alone = compose_report(rank_variants([empty_judge]), skipped=[],
+                           confidence=CONF_SOLE)
     assert alone["recommended_variant_id"] is None
     assert alone["variants"]["1"]["rank"] == 1
 
     # ...and it still sinks below a genuinely judged pass.
     ranked = rank_variants([empty_judge, _v(2, overall=4)])
     assert [r["variant_id"] for r in ranked] == [2, 1]
-    assert compose_report(ranked, skipped=[])["recommended_variant_id"] == 2
+    assert compose_report(ranked, skipped=[], confidence=CONF_SOLE
+                          )["recommended_variant_id"] == 2
 
 
 def test_rank_does_not_mutate_its_input():
@@ -927,7 +1108,7 @@ def test_rank_of_nothing_is_nothing():
 def test_compose_report_no_recommendation_when_top_fails():
     ranked = rank_variants([_v(1, overall=2, verdict="fail"),
                             _v(2, ok=False, reasons=["blank_frame"], overall=None)])
-    rep = compose_report(ranked, skipped=[])
+    rep = compose_report(ranked, skipped=[], confidence=CONF_NONE_HEALTHY)
     assert rep["recommended_variant_id"] is None
     assert rep["version"] == 1
 
@@ -937,10 +1118,11 @@ def test_compose_report_happy_path():
     # gate never ran, so no variant may carry a face score it could not have.
     ranked = rank_variants([_v(4, face=None, overall=8),
                             _v(7, face=None, overall=5)])
-    rep = compose_report(ranked, skipped=["face"], pairwise_reason="consistent")
+    rep = compose_report(ranked, skipped=["face"], confidence=CONF_CONFIRMED)
     assert rep["recommended_variant_id"] == 4
     assert rep["skipped_checks"] == ["face"]
-    assert rep["pairwise_reason"] == "consistent"
+    assert rep["confidence"] == CONF_CONFIRMED
+    assert "pairwise_reason" not in rep
     assert set(rep["variants"].keys()) == {"4", "7"}
     assert rep["variants"]["4"]["rank"] == 1
     assert len(json.dumps(rep)) < 64_000
@@ -949,7 +1131,7 @@ def test_compose_report_happy_path():
 def test_compose_report_face_floor_blocks_recommendation():
     # top-ranked variant is below the face floor -> no recommendation
     ranked = rank_variants([_v(1, face=0.05, overall=9)])
-    rep = compose_report(ranked, skipped=[])
+    rep = compose_report(ranked, skipped=[], confidence=CONF_SOLE)
     assert rep["recommended_variant_id"] is None
 
 
@@ -957,13 +1139,16 @@ def test_compose_report_no_recommendation_without_a_judge():
     """A dead judge degrades the report; it never silently promotes an
     unjudged variant into a recommendation."""
     ranked = rank_variants([_v(1, overall=None)])
-    assert compose_report(ranked, skipped=["judge"])["recommended_variant_id"] is None
+    assert compose_report(ranked, skipped=["judge"],
+                          confidence=CONF_SOLE)["recommended_variant_id"] is None
 
 
 def test_compose_report_of_an_empty_batch_is_valid():
-    rep = compose_report([], skipped=["face", "judge"])
+    rep = compose_report([], skipped=["face", "judge"],
+                         confidence=CONF_NONE_HEALTHY)
     assert rep["recommended_variant_id"] is None
     assert rep["variants"] == {}
+    assert rep["confidence"] == CONF_NONE_HEALTHY
 
 
 def test_compose_report_recommendation_is_a_plain_int():
@@ -971,10 +1156,67 @@ def test_compose_report_recommendation_is_a_plain_int():
     be a plain int. numpy.int64 is the realistic offender — it survives every
     other step of the funnel unnoticed, and only int() converts it, so this
     fails the moment that coercion is dropped."""
-    rep = compose_report(rank_variants([_v(np.int64(4), overall=8)]), skipped=[])
+    rep = compose_report(rank_variants([_v(np.int64(4), overall=8)]),
+                         skipped=[], confidence=CONF_SOLE)
     assert type(rep["recommended_variant_id"]) is int
     assert rep["recommended_variant_id"] == 4
     assert set(rep["variants"]) == {"4"}
+
+
+# ── v936.1 Change C: only a reproducible winner may be recommended ─────────
+
+
+def test_compose_report_refuses_to_recommend_on_an_unconfident_verdict():
+    """The measured problem, closed: a top variant can be perfectly healthy
+    and still not be recommendable, because 'healthy' was never the thing in
+    doubt — WHICH healthy one won was. Three states must return None even
+    though ranked[0] passes every axis."""
+    ranked = rank_variants([_v(1, overall=9), _v(2, overall=8)])
+    # the top row passes every health axis — health is NOT what is refusing
+    assert all(image_qc._healthy_axes(ranked[0]))
+    for refused in (CONF_TIED, CONF_UNVERIFIED, CONF_NONE_HEALTHY):
+        rep = compose_report(ranked, skipped=[], confidence=refused)
+        assert rep["recommended_variant_id"] is None, refused
+        assert rep["confidence"] == refused
+    # ...and the same ranking DOES recommend once the winner reproduces
+    assert compose_report(ranked, skipped=[], confidence=CONF_CONFIRMED
+                          )["recommended_variant_id"] == 1
+
+
+def test_compose_report_without_a_confidence_recommends_nothing():
+    """The default is the safe one. A caller that never ran a second opinion
+    has not earned a recommendation, so an omitted argument cannot silently
+    restore the coin-flip behaviour this rule replaced."""
+    ranked = rank_variants([_v(1, overall=9)])
+    rep = compose_report(ranked, skipped=[])
+    assert rep["recommended_variant_id"] is None
+    assert rep["confidence"] is None
+
+
+def test_compose_report_carries_the_second_opinion_per_variant():
+    """Auditable: the two verified rows carry what pass 2 actually said, and
+    every other row carries null — so a stored report shows on its face which
+    variants were re-judged and which were not."""
+    top, second, rest = _v(1, overall=9), _v(2, overall=8), _v(3, overall=4)
+    top["verify"] = {"overall": 8, "verdict": "pass"}
+    second["verify"] = {"overall": 5, "verdict": "pass"}
+    rep = compose_report(rank_variants([top, second, rest]), skipped=[],
+                         confidence=CONF_CONFIRMED)
+    assert rep["variants"]["1"]["verify"] == {"overall": 8, "verdict": "pass"}
+    assert rep["variants"]["2"]["verify"] == {"overall": 5, "verdict": "pass"}
+    assert rep["variants"]["3"]["verify"] is None      # never re-judged
+    assert json.loads(json.dumps(rep))["variants"]["1"]["verify"]["overall"] == 8
+
+
+def test_compose_report_keeps_version_1_for_the_server():
+    """image_platform.py:3600 hard-rejects anything but version 1, and this
+    change ships without a server deploy — so every field added here is
+    ADDITIVE and the version stays put."""
+    rep = compose_report(rank_variants([_v(1)]), skipped=[],
+                         confidence=CONF_SOLE)
+    assert rep["version"] == 1
+    assert {"recommended_variant_id", "skipped_checks", "variants",
+            "confidence"} <= set(rep)
 
 
 def test_compose_report_duplicate_ids_keep_the_best_row(capsys):
@@ -1001,11 +1243,11 @@ def test_compose_report_round_trips_through_json():
     survive a dumps/loads — including the degraded variant's None metrics."""
     ranked = rank_variants([_v(1, overall=8),
                             _v(2, ok=False, reasons=["undecodable"], overall=None)])
-    rep = compose_report(ranked, skipped=[], pairwise_reason=PAIRWISE_DISAGREED)
+    rep = compose_report(ranked, skipped=[], confidence=CONF_UNVERIFIED)
     back = json.loads(json.dumps(rep))
     assert back["variants"]["2"]["rank"] == 2
     assert back["variants"]["2"]["integrity"]["metrics"] is None
-    assert back["pairwise_reason"] == PAIRWISE_DISAGREED
+    assert back["confidence"] == CONF_UNVERIFIED
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1025,6 +1267,64 @@ def test_agreement_stats():
     assert s["comparable"] == 2
     assert s["agree"] == 1
     assert s["no_recommendation"] == 1
+
+
+# ── v936.1 Change C: the metric stops flattering itself ────────────────────
+
+
+def test_agreement_stats_counts_tied_apart_from_none_healthy():
+    """Two different silences, and merging them is what made the old number
+    dishonest. 'tied' = the judge looked twice and could not separate the top
+    two. 'none_healthy' = nothing was worth recommending at all. One is a
+    statement about the JUDGE, the other about the RENDERS."""
+    s = agreement_stats([
+        {"chosen_variant_id": 1, "qc": {"recommended_variant_id": None,
+                                        "confidence": CONF_TIED}},
+        {"chosen_variant_id": 2, "qc": {"recommended_variant_id": None,
+                                        "confidence": CONF_UNVERIFIED}},
+        {"chosen_variant_id": 3, "qc": {"recommended_variant_id": None,
+                                        "confidence": CONF_NONE_HEALTHY}},
+        {"chosen_variant_id": 4, "qc": {"recommended_variant_id": 4,
+                                        "confidence": CONF_CONFIRMED}},
+    ])
+    assert s["tied"] == 2                 # tied + unverified
+    assert s["no_recommendation"] == 1    # none_healthy only
+    assert s["comparable"] == 1 and s["agree"] == 1
+    assert s["scored"] == 4
+
+
+def test_agreement_stats_comparable_only_counts_confident_nodes():
+    """Only 'confirmed' and 'sole' can carry a recommendation, so the
+    agreement percentage is now computed over the nodes the judge actually
+    committed to — which is the point of the redesign. A 4-node batch where
+    the judge committed once is 100% of one, not 25% of four."""
+    s = agreement_stats([
+        {"chosen_variant_id": 9, "qc": {"recommended_variant_id": 9,
+                                        "confidence": CONF_SOLE}},
+        {"chosen_variant_id": 8, "qc": {"recommended_variant_id": None,
+                                        "confidence": CONF_TIED}},
+        {"chosen_variant_id": 7, "qc": {"recommended_variant_id": None,
+                                        "confidence": CONF_TIED}},
+        {"chosen_variant_id": 6, "qc": {"recommended_variant_id": None,
+                                        "confidence": CONF_TIED}},
+    ])
+    assert s["comparable"] == 1 and s["agree"] == 1
+    assert s["agreement_pct"] == 100.0
+    assert s["tied"] == 3
+
+
+def test_agreement_stats_legacy_reports_without_confidence_stay_readable():
+    """Reports written before v936.1 carry no `confidence` key at all. They
+    must not crash the metric and must not be counted as ties — an absent
+    key is not a claim of tiedness."""
+    s = agreement_stats([
+        {"chosen_variant_id": 1, "qc": {"recommended_variant_id": None}},
+        {"chosen_variant_id": 2, "qc": {"recommended_variant_id": 2,
+                                        "pairwise_reason": "consistent"}},
+    ])
+    assert s["tied"] == 0
+    assert s["no_recommendation"] == 1
+    assert s["comparable"] == 1 and s["agree"] == 1
 
 
 def test_agreement_stats_counts_scored_and_percent():
@@ -1055,10 +1355,14 @@ def test_agreement_stats_tolerates_digit_strings_and_junk():
 # ---- fit_report -----------------------------------------------------------
 
 def _judge(n_items, text, compliance=()):
+    # text_errors is a v936.1 list field, so it counts toward the trim ladder
+    # exactly like its four siblings — the fixture has to carry it or the
+    # budget tests would measure a report shape the producer no longer writes.
     return {"overall": 8, "verdict": "pass",
             "element_misses": [text] * n_items,
             "artifacts": [text] * n_items,
             "compliance": list(compliance),
+            "text_errors": [],
             "reasons": [text] * n_items}
 
 
@@ -1068,13 +1372,17 @@ def _report(n_variants, text, n_items=10, compliance=()):
         "generated_at": "2026-08-21T00:00:00Z",
         "recommended_variant_id": 1,
         "skipped_checks": [],
-        "pairwise_reason": None,
+        "confidence": CONF_CONFIRMED,
         "variants": {
             str(i): {"integrity": {"ok": True, "reasons": [],
                                    "metrics": {"short_side": 1024,
                                                "gray_std": 51.5, "lap_var": 900.0}},
                      "face_sim": 0.71,
                      "judge": _judge(n_items, text, compliance),
+                     # only the top two are ever re-judged, so every other row
+                     # carries a null here — the real producer's shape
+                     "verify": ({"overall": 7, "verdict": "pass"}
+                                if i <= 2 else None),
                      "rank": i}
             for i in range(1, n_variants + 1)},
     }
@@ -1105,6 +1413,21 @@ def test_fit_report_drops_lists_entirely_when_three_items_still_overflow():
     out = fit_report(rep)
     assert _size(out) <= FIT_REPORT_BUDGET
     assert out["variants"]["1"]["judge"]["reasons"] == []
+
+
+def test_fit_report_trims_text_errors_like_its_four_siblings():
+    """v936.1 added a fifth list field, so it has to join the trim ladder —
+    otherwise a node where every variant misspells the label carries 10 x 200
+    chars x V of untrimmable text straight into a 413."""
+    rep = _report(20, "x" * JUDGE_MAX_STRING_CHARS)
+    for entry in rep["variants"].values():
+        entry["judge"]["text_errors"] = ["y" * JUDGE_MAX_STRING_CHARS] * 10
+    assert _size(rep) > FIT_REPORT_BUDGET
+    out = fit_report(rep)
+    assert _size(out) <= FIT_REPORT_BUDGET
+    assert len(out["variants"]["1"]["judge"]["text_errors"]) <= 3
+    # the verdict the text errors forced is NOT trimmed away with them
+    assert out["variants"]["1"]["judge"]["verdict"] == "pass"
 
 
 def test_fit_report_budgets_on_json_bytes_not_item_counts():
@@ -1140,6 +1463,12 @@ def test_fit_report_keeps_verdicts_scores_and_ranks():
     assert entry["judge"]["overall"] == 8
     assert entry["judge"]["verdict"] == "pass"
     assert out["recommended_variant_id"] == 1
+    # v936.1: the confidence call and the second-opinion evidence behind it
+    # are never trimmed. A trimmed report says less about WHY a variant was
+    # judged that way; it must still say WHETHER the winner reproduced,
+    # because that is the field the recommendation now hangs on.
+    assert out["confidence"] == CONF_CONFIRMED
+    assert out["variants"]["1"]["verify"] == {"overall": 7, "verdict": "pass"}
     assert out["version"] == 1
 
 
@@ -1394,6 +1723,139 @@ def test_score_node_says_nothing_about_fetching_when_every_download_worked():
     assert report["skipped_checks"] == ["face", "judge"]
 
 
+# ---- v936.1 Change A: the second-opinion pass replaces pairwise -----------
+# Budget is the constraint that made this a like-for-like swap: pairwise
+# spent 2 calls per node re-discovering a position bias we already knew
+# about. The second opinion spends the same 2 calls asking the only question
+# that reproduces — "does this winner win twice?"
+
+
+def _reply(overall, verdict="pass", **extra):
+    """One judge reply as the model would send it, over the wire as JSON."""
+    body = {"overall": overall, "verdict": verdict, "element_misses": [],
+            "artifacts": [], "compliance": [], "text_errors": [],
+            "reasons": []}
+    body.update(extra)
+    return json.dumps(body)
+
+
+def _judging_node(nid=42, n=3):
+    node = _ai_node(nid, n)
+    node["prompt"] = "a woman holds a KORELLA saffron bottle, sunlit kitchen"
+    return node
+
+
+def _score(client, n=3):
+    return score_node(_StubSession(), "https://k.com", client, None, None,
+                      _judging_node(n=n))
+
+
+def test_score_node_spends_exactly_v_plus_two_calls():
+    """The arithmetic that makes this swap free: V judge calls plus 2 second
+    opinions, which is what the retired pairwise stage cost. If this ever
+    reads V + 4 the redesign has silently doubled the Gemini bill."""
+    client = _ScriptedClient([_reply(9), _reply(8), _reply(4),    # pass 1 (V=3)
+                              _reply(7), _reply(5)])              # pass 2 (top 2)
+    report = _score(client)
+    assert len(client.calls) == 5
+    assert report["confidence"] == CONF_CONFIRMED
+    assert report["recommended_variant_id"] == 1
+
+
+def test_score_node_stores_the_second_opinion_on_the_top_two_only():
+    """Auditable after the fact: the report says what pass 2 scored, so a
+    later reader can check the confidence call instead of trusting it."""
+    client = _ScriptedClient([_reply(9), _reply(8), _reply(4),
+                              _reply(7), _reply(5)])
+    v = _score(client)["variants"]
+    assert v["1"]["verify"] == {"overall": 7, "verdict": "pass"}
+    assert v["2"]["verify"] == {"overall": 5, "verdict": "pass"}
+    assert v["3"]["verify"] is None      # rank 3 was never re-judged
+
+
+def test_score_node_refuses_to_recommend_when_pass_two_flips_the_winner():
+    """The headline finding: re-running the identical judge on the identical
+    bytes moved the top variant on 8 of 13 production nodes. A flip now
+    yields no recommendation instead of a confident coin flip."""
+    client = _ScriptedClient([_reply(9), _reply(8),      # pass 1: 1 beats 2
+                              _reply(4), _reply(6)])     # pass 2: 2 beats 1
+    report = _score(client, n=2)
+    assert report["confidence"] == CONF_TIED
+    assert report["recommended_variant_id"] is None
+    assert len(client.calls) == 4         # still V + 2
+
+
+def test_score_node_refuses_to_recommend_when_the_scores_are_equal():
+    """Scores sit compressed in a 5-7 band, so 'both an 8' is the common
+    case. Equal has not separated anything, and the variant_id tiebreak that
+    would otherwise decide it is not evidence."""
+    client = _ScriptedClient([_reply(8), _reply(8), _reply(7), _reply(7)])
+    report = _score(client, n=2)
+    assert report["confidence"] == CONF_TIED
+    assert report["recommended_variant_id"] is None
+
+
+def test_score_node_degrades_to_unverified_when_a_second_call_dies(monkeypatch):
+    """A dead pass-2 call must degrade the NODE, never abort it — the one
+    promise this module cannot break. The report still lands, carrying an
+    honest 'we could not check this' instead of a recommendation."""
+    monkeypatch.setattr(image_qc.time, "sleep", lambda *_a, **_k: None)
+    client = _ScriptedClient([_reply(9), _reply(8),
+                              RuntimeError("401 UNAUTHENTICATED"),  # pass 2, v1
+                              _reply(5)])                           # pass 2, v2
+    report = _score(client, n=2)
+    assert report is not None
+    assert report["confidence"] == CONF_UNVERIFIED
+    assert report["recommended_variant_id"] is None
+    assert report["variants"]["1"]["verify"] is None   # the call that died
+    assert report["variants"]["2"]["verify"] == {"overall": 5, "verdict": "pass"}
+
+
+def test_score_node_a_single_healthy_variant_is_sole_and_costs_no_extra_call():
+    """Nothing to compare against, so there is no second opinion to buy. The
+    healthy gate already vouched for it, so it stays recommendable — and the
+    node costs V calls flat, exactly as the pairwise stage did."""
+    client = _ScriptedClient([_reply(9), _reply(3, verdict="fail")])
+    report = _score(client, n=2)
+    assert report["confidence"] == CONF_SOLE
+    assert report["recommended_variant_id"] == 1
+    assert len(client.calls) == 2         # V + 0
+
+
+def test_score_node_none_healthy_recommends_nothing():
+    client = _ScriptedClient([_reply(3, verdict="fail"),
+                              _reply(2, verdict="fail")])
+    report = _score(client, n=2)
+    assert report["confidence"] == CONF_NONE_HEALTHY
+    assert report["recommended_variant_id"] is None
+    assert len(client.calls) == 2
+
+
+def test_score_node_a_misspelled_brand_name_loses_the_recommendation():
+    """The verified production miss, end to end. A bottle labelled AORELLA
+    scored 6/10 PASS and ranked 2nd under the old rubric. Now text_errors
+    forces the verdict to fail, which drops it out of the healthy set — so
+    the clean runner-up is what the report recommends instead."""
+    client = _ScriptedClient([
+        _reply(6, text_errors=['label reads "AORELLA", SPEC says "KORELLA"']),
+        _reply(5),
+    ])
+    report = _score(client, n=2)
+    assert report["variants"]["1"]["judge"]["verdict"] == "fail"
+    assert report["confidence"] == CONF_SOLE
+    assert report["recommended_variant_id"] == 2
+
+
+def test_score_node_never_calls_the_retired_pairwise_stage(monkeypatch):
+    """Change D is a funnel change, not just a comment. pairwise_top2 stays
+    in the file (and stays tested), but the funnel must not reach it."""
+    def _boom(*_a, **_k):
+        raise AssertionError("pairwise_top2 is retired from the funnel")
+    monkeypatch.setattr(image_qc, "pairwise_top2", _boom)
+    client = _ScriptedClient([_reply(9), _reply(8), _reply(7), _reply(6)])
+    assert _score(client, n=2)["confidence"] == CONF_CONFIRMED
+
+
 # ---- _run_batch counter + exit-code mapping (stub session) ----------------
 
 def _batch_args(**over):
@@ -1500,6 +1962,47 @@ def test_run_batch_honours_limit_nodes(monkeypatch, _no_models):
     session = _StubSession()
     _run_batch(session, "https://k.com", _batch_args(limit_nodes=2))
     assert len(session.posts) == 2
+
+
+# ---- --report prints the honest breakdown (v936.1 Change C) ---------------
+
+
+def test_run_report_prints_tied_apart_from_none_good(monkeypatch, capsys):
+    """The operator reads this line to decide whether the judge is worth
+    trusting. Folding ties into 'none good' would hide the redesign's whole
+    finding — that the judge often cannot separate the top two."""
+    _stub_nodes(monkeypatch, [
+        {"chosen_variant_id": 1, "qc": {"recommended_variant_id": 1,
+                                        "confidence": CONF_CONFIRMED}},
+        {"chosen_variant_id": 2, "qc": {"recommended_variant_id": None,
+                                        "confidence": CONF_TIED}},
+        {"chosen_variant_id": 3, "qc": {"recommended_variant_id": None,
+                                        "confidence": CONF_NONE_HEALTHY}},
+    ])
+    assert image_qc._run_report(_StubSession(), "https://k.com",
+                                _batch_args(report=True)) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "3 scored node(s)" in out
+    assert "1/1 (100.0%)" in out
+    assert "tied-or-unverified: 1" in out
+    assert "none-good: 1" in out
+
+
+def test_run_report_json_carries_every_counter(monkeypatch, capsys):
+    """--json is what a script reads, so the new counter has to be in the
+    payload and not only in the prose line."""
+    _stub_nodes(monkeypatch, [
+        {"chosen_variant_id": 2, "qc": {"recommended_variant_id": None,
+                                        "confidence": CONF_UNVERIFIED}},
+    ])
+    image_qc._run_report(_StubSession(), "https://k.com",
+                         _batch_args(report=True, json=True))
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["tied"] == 1
+    assert payload["no_recommendation"] == 0
+    assert payload["agreement_pct"] is None
+    assert set(payload) == {"scored", "comparable", "agree", "tied",
+                            "no_recommendation", "agreement_pct"}
 
 
 # ---- argparse validation + auth exit code ---------------------------------
@@ -1836,7 +2339,7 @@ def test_run_batch_reports_the_already_scored_count(monkeypatch, _no_models,
     monkeypatch.setattr(image_qc, "score_node",
                         lambda *a, **k: {"recommended_variant_id": 10,
                                          "skipped_checks": [],
-                                         "pairwise_reason": "x",
+                                         "confidence": CONF_CONFIRMED,
                                          "variants": {}})
     monkeypatch.setattr(image_qc, "post_report", lambda *a, **k: (200, ""))
     assert main(["--batch", "b-1"]) == EXIT_OK
