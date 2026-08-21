@@ -748,6 +748,14 @@ async def lifespan(app: FastAPI):
           f"{AUTOEDIT_SERVER_GRACE_S}s local-worker grace, "
           f"gate at {AUTOEDIT_MIN_AVAIL_MB}MB avail)", flush=True)
 
+    # v938.8 — sweep abandoned render scratch. The work dir now lives on the
+    # PERSISTENT disk so a deploy can resume instead of redoing the whole
+    # render — which also means nothing deletes it by itself any more. Each
+    # one holds a ~150MB source video plus intermediates, and a failed run
+    # keeps its dir on purpose for diagnosis, so without this the disk fills
+    # and takes the platform down with it.
+    await _asyncio.to_thread(_sweep_old_autoedit_work)
+
     # v872 — idle recycle backstop (see _idle_memory_watchdog).
     _mem_watchdog_task = _asyncio.create_task(_idle_memory_watchdog())
     print(f"[App][Mem/v872] idle memory watchdog started "
@@ -10825,11 +10833,65 @@ def _fail_autoedit_run(autoedit_id: str, error: str):
 
 
 def _autoedit_work_dir(job_id: str) -> Path:
-    """Scratch space for one render. The system temp dir, never the repo: the
-    pipeline drops a ~150MB source video plus intermediates in here and the
-    repo checkout is not the place for that."""
+    """Scratch space for one render — on the PERSISTENT DISK when there is one.
+
+    v938.8 — this used to be the system temp dir, which a deploy wipes. The
+    pipeline caches every stage in here (the downloaded source, scan.json, the
+    layout, the cleaned audio, the composed video, the transcript), so putting
+    it on the disk that survives a restart turns a redeploy from "redo all 22
+    minutes" into "carry on from the last finished stage". That, plus the
+    shutdown handover, is what lets a render survive a deploy the way an
+    export does.
+
+    Falls back to temp when no persistent disk is mounted (local dev), where
+    losing the cache costs nothing.
+    """
+    try:
+        from config import config
+        root = Path(getattr(config, "outputs_dir", None) or "").parent
+        if root and root.exists():
+            return root / "autoedit_work" / job_id
+    except Exception:
+        pass
     import tempfile
     return Path(tempfile.gettempdir()) / "autoedit" / job_id
+
+
+AUTOEDIT_WORK_KEEP_HOURS = int(os.environ.get("AUTOEDIT_WORK_KEEP_HOURS", "48"))
+
+
+def _sweep_old_autoedit_work(keep_hours: int = None) -> int:
+    """Delete render scratch nobody is coming back for.
+
+    Only touches directories whose newest file is older than the window, so a
+    render that is mid-flight or was just handed over by a deploy is never
+    swept out from under itself.
+    """
+    import shutil as _sh, time as _t
+    keep = (keep_hours if keep_hours is not None else AUTOEDIT_WORK_KEEP_HOURS) * 3600
+    root = _autoedit_work_dir("_probe_").parent
+    if not root.exists():
+        return 0
+    now, freed, n = _t.time(), 0, 0
+    for d in root.iterdir():
+        if not d.is_dir():
+            continue
+        try:
+            files = [f for f in d.rglob("*") if f.is_file()]
+            if not files:
+                newest, size = d.stat().st_mtime, 0
+            else:
+                newest = max(f.stat().st_mtime for f in files)
+                size = sum(f.stat().st_size for f in files)
+            if now - newest > keep:
+                _sh.rmtree(d, ignore_errors=True)
+                freed += size
+                n += 1
+        except Exception as e:
+            print(f"[AutoEdit/server] sweep skipped {d.name}: {e}", flush=True)
+    if n:
+        print(f"[AutoEdit/server] swept {n} stale work dir(s), freed {freed/1e6:.0f}MB", flush=True)
+    return n
 
 
 def _run_autoedit_blocking(claim: dict, work: Path) -> Path:
@@ -11047,9 +11109,15 @@ def _requeue_local_autoedits_on_shutdown() -> int:
                 run.state = "queued"
                 run.heartbeat_at = None
                 run.stage = None
+                # v938.8 — a deploy is not a failure, so it must not spend one
+                # of the three attempts. Without this, three deploys during a
+                # long render exhaust the retry budget and the run is marked
+                # failed even though nothing ever went wrong with it.
+                run.attempts = max(0, (run.attempts or 1) - 1)
                 n += 1
                 print(f"[AutoEdit/server] HANDOVER run={run.id[:8]} job={run.job_id[:8]} "
-                      f"— shutting down, re-queued", flush=True)
+                      f"— shutting down, re-queued (attempt refunded, now {run.attempts})",
+                      flush=True)
             _db.commit()
         except Exception as _qe:
             try:
