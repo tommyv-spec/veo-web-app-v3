@@ -15490,11 +15490,34 @@ Ambient: same kitchen room tone, soft pour sound.
             return map[stage] || (stage ? String(stage) : '');
         }
 
+        // v938 — the stages the pipeline reports, in the order they happen.
+        // Used to draw a real progress bar: with no bar the operator cannot
+        // tell a working render from a stuck one.
+        const _AUTOEDIT_STAGES = ['download', 'scan', 'layout', 'audio', 'compose',
+                                  'captions', 'quality-check'];
+
         function _autoEditStateLabel(state) {
-            if (state === 'queued') return 'waiting for your PC to pick it up';
-            if (state === 'claimed') return 'your PC picked it up';
+            if (state === 'queued') return 'waiting to start';
+            if (state === 'claimed') return 'starting';
             if (state === 'running') return 'working on it';
             return String(state || '');
+        }
+
+        function _autoEditPercent(state, stage) {
+            if (state === 'queued') return 3;
+            const i = _AUTOEDIT_STAGES.indexOf(stage);
+            if (i < 0) return 8;
+            // report the stage as IN PROGRESS, not finished — sitting at 100%
+            // while it still works is worse than no bar at all
+            return Math.round(((i + 0.5) / _AUTOEDIT_STAGES.length) * 100);
+        }
+
+        function _autoEditElapsed(createdAt) {
+            if (!createdAt) return '';
+            const started = Date.parse(createdAt.endsWith('Z') ? createdAt : createdAt + 'Z');
+            if (isNaN(started)) return '';
+            const s = Math.max(0, Math.round((Date.now() - started) / 1000));
+            return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
         }
 
         async function _autoEditGetTemplates() {
@@ -15590,12 +15613,24 @@ Ambient: same kitchen room tone, soft pour sound.
                 let body = '';
                 if (live) {
                     const stage = _autoEditStageLabel(status.stage);
+                    const pct = _autoEditPercent(state, status.stage);
+                    const elapsed = _autoEditElapsed(status.created_at);
+                    const stepNo = _AUTOEDIT_STAGES.indexOf(status.stage) + 1;
+                    const stepTxt = stepNo > 0 ? `step ${stepNo} of ${_AUTOEDIT_STAGES.length}` : '';
                     body = `
-                        <div style="margin-top:8px;font-size:12px;color:var(--text-primary);">
-                            ⏳ ${escapeHtml(_autoEditStateLabel(state))}${stage ? ` — ${escapeHtml(stage)}` : ''}
+                        <div style="margin-top:8px;display:flex;align-items:baseline;gap:8px;font-size:12px;color:var(--text-primary);">
+                            <span>⏳ ${escapeHtml(stage || _autoEditStateLabel(state))}</span>
+                            <span style="margin-left:auto;font-size:11px;color:var(--text-secondary);">
+                                ${escapeHtml(stepTxt)}${stepTxt && elapsed ? ' · ' : ''}${escapeHtml(elapsed)}
+                            </span>
                         </div>
-                        <div style="margin-top:4px;font-size:11px;color:var(--text-secondary);">
-                            Your PC does the rendering. Keep <code>autoedit_worker.py --watch</code> running or this waits forever.
+                        <div style="margin-top:6px;height:6px;border-radius:3px;background:var(--border-color);overflow:hidden;">
+                            <div style="height:100%;width:${pct}%;background:var(--success);transition:width .6s ease;"></div>
+                        </div>
+                        <div style="margin-top:6px;font-size:11px;color:var(--text-secondary);">
+                            ${state === 'queued'
+                                ? 'Starts within about a minute. Your own PC picks it up sooner if the auto-edit worker is running.'
+                                : 'Usually about 12 minutes on the server, or 3-4 minutes when your PC is doing it.'}
                         </div>
                         ${state === 'queued' ? `<button class="btn btn-secondary btn-sm" style="margin-top:6px;" onclick="cancelAutoEdit('${_autoEditAttr(jobId)}','${_autoEditAttr(status.autoedit_id)}')">Cancel</button>` : ''}`;
                 } else if (state === 'done' && status.result_filename) {
