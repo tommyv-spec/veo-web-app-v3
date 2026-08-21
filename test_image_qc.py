@@ -1640,18 +1640,20 @@ def test_shadow_qc_never_raises_on_a_failing_exit_code(monkeypatch, capsys,
 
 
 def test_shadow_qc_stays_quiet_on_a_clean_run(monkeypatch, capsys):
-    """A clean run announces itself and says nothing else. Pins that no
-    failure wording leaks onto the happy path, where a bare 'no exception'
-    assert would pass no matter what got printed."""
+    """A clean run says the announce line and NOTHING else.
+
+    An allowlist, not a list of forbidden phrases: the output is exactly one
+    line and that line is the announce. A denylist only ever catches the
+    failure wording somebody thought to enumerate, so the next message added
+    to the happy path would slip through it unnoticed."""
     stp = _stp()
     monkeypatch.setitem(__import__("sys").modules, "image_qc",
                         _module_with_main(lambda argv: EXIT_OK))
     assert stp._run_shadow_qc("b-1", _qc_args()) is None
-    out = capsys.readouterr().out
-    assert "shadow only" in out          # the announce line ran
-    for noise in ("auth failed", "finished with failures", "scoring skipped",
-                  "scoring stopped", "face gate skipped"):
-        assert noise not in out
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert len(lines) == 1, lines
+    assert lines[0].startswith("qc: scoring batch b-1 variants")
+    assert "shadow only" in lines[0]
 
 
 def test_shadow_qc_announces_before_it_calls_the_scorer(monkeypatch, capsys):
@@ -1697,6 +1699,64 @@ def test_shadow_qc_survives_both_base_exceptions(monkeypatch, capsys, blow_up):
                         _module_with_main(blow_up))
     assert stp._run_shadow_qc("b-1", _qc_args()) is None
     assert "scoring stopped" in capsys.readouterr().out
+
+
+class _ReviewStopClient:
+    """The smallest client poll_images will accept: one generated node that is
+    ready and unchosen, which is exactly the state that triggers the --review
+    stop."""
+    base = "https://example.test"
+
+    def get(self, path, params=None):
+        return {"nodes": [{"id": 1, "kind": "generated", "status": "ready",
+                           "variants": [{"id": 10}],
+                           "chosen_variant_id": None}]}
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_review_stop_survives_an_interrupted_qc_run_end_to_end(
+        monkeypatch, capsys, interrupt):
+    """THE pin for the whole hookup, through the real poll_images rather than
+    _run_shadow_qc alone.
+
+    KeyboardInterrupt and SystemExit are BaseException. If a later edit ever
+    re-narrows the except clause back to `Exception`, they escape QC, tear
+    through poll_images, and the operator loses the --resume-batch line that
+    tells them how to get back to the batch they just paid to render — the
+    send dies at exit 130 with its work stranded. Asserting on
+    _run_shadow_qc's own return cannot catch that regression, because the
+    thing being protected is the caller's next statement.
+    """
+    stp = _stp()
+
+    def blow_up(argv):
+        raise interrupt()
+    monkeypatch.setitem(__import__("sys").modules, "image_qc",
+                        _module_with_main(blow_up))
+    args = _qc_args(review=True, timeout_min=45, stall_min=10, poll_interval=15)
+    report = {}
+
+    assert stp.poll_images(_ReviewStopClient(), "batch-42", args, report) is False
+    out = capsys.readouterr().out
+    assert "scoring stopped" in out                      # QC gave up, alone
+    assert "--resume-batch batch-42" in out              # the line that matters
+    assert report["awaiting_review"] == [1]              # and the report is intact
+
+
+def test_review_stop_skips_qc_entirely_under_no_qc(monkeypatch, capsys):
+    """--no-qc is a full bypass: not even the announce line."""
+    stp = _stp()
+
+    def never(argv):
+        raise AssertionError("--no-qc must not reach the scorer")
+    monkeypatch.setitem(__import__("sys").modules, "image_qc",
+                        _module_with_main(never))
+    args = _qc_args(review=True, no_qc=True, timeout_min=45, stall_min=10,
+                    poll_interval=15)
+    assert stp.poll_images(_ReviewStopClient(), "batch-42", args, {}) is False
+    out = capsys.readouterr().out
+    assert "qc:" not in out
+    assert "--resume-batch batch-42" in out
 
 
 def test_shadow_qc_warns_when_resuming_without_an_avatar(monkeypatch, capsys):

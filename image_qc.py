@@ -53,7 +53,7 @@ import os
 import re
 import sys
 import time
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import cv2
@@ -1049,7 +1049,7 @@ def _has_qc_report(node: Dict[str, Any]) -> bool:
     return isinstance(qc, dict) and "version" in qc
 
 
-def pick_scorable_nodes(nodes: Iterable[Any],
+def pick_scorable_nodes(nodes: Sequence[Any],
                         skip_scored: bool = True) -> List[Dict[str, Any]]:
     """The nodes in a batch worth scoring, using ImageNode.to_dict's own field
     names (`status`, `kind`, `variants` — image_platform.py:1180).
@@ -1062,6 +1062,10 @@ def pick_scorable_nodes(nodes: Iterable[Any],
     qc_json whenever a node's variants are replaced (image_platform.py:730,
     3358, 3414, 3809), so a re-rendered node has no report and re-qualifies on
     its own. `--rescore` passes False to force the whole batch again.
+
+    `nodes` is a Sequence, not an Iterable: _run_batch runs this filter TWICE
+    over the same nodes to size the skip, and a one-shot generator would come
+    back empty on the second pass and report a negative count.
 
     Four filters, each for a different reason:
       * status == 'ready'  — a queued/generating node is about to REPLACE its
