@@ -96,4 +96,8 @@ metaphone>=0.6,<1
 
 # v938 — face detection for auto-edit caption placement. The headless build
 # has no GUI/GTK deps, which is what makes it safe on a server.
-opencv-python-headless>=4.8.0
+# Pinned below 5: OpenCV 5 dropped cv2.CascadeClassifier from the default
+# build, which is the face detector the caption placement depends on. An
+# unpinned >=4.8 installed 5.0.0.93 on Render and every render died at the
+# layout stage while 4.12 kept working locally.
+opencv-python-headless>=4.8.0,<5

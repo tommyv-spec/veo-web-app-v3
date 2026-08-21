@@ -198,6 +198,13 @@ def detect_layout(base, dur, segs):
     PIP below the captions, clamp everything to platform safe zones.
     Returns (caption_offset_for_pycaps, pip_y_px)."""
     import cv2
+    if not hasattr(cv2, "CascadeClassifier"):
+        # OpenCV 5 dropped this from the default build; requirements pin <5.
+        # Say so plainly — the raw AttributeError reads like a code bug.
+        raise AutoEditError(
+            f"This OpenCV build ({getattr(cv2, '__version__', '?')}) has no CascadeClassifier, "
+            "so faces cannot be detected and captions could cover one. "
+            "Install opencv-python-headless<5.")
     cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     cap = cv2.VideoCapture(str(base))
     fps = cap.get(cv2.CAP_PROP_FPS) or 24
