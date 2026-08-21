@@ -23674,7 +23674,33 @@ Ambient: same kitchen room tone, soft pour sound.
                             const ra = rankOf(a), rb = rankOf(b);
                             return ra === rb ? 0 : (ra < rb ? -1 : 1);
                         });
-                        const bits = [qcRecommendedId == null ? 'qc: no variant recommended' : 'qc: ranked'];
+                        // v936.1 — the hint now tells the confidence story instead
+                        // of "ranked / not ranked". The scorer sets
+                        // recommended_variant_id ONLY on `confirmed` or `sole`, so
+                        // "ranked" alone no longer describes what happened: a node
+                        // can be fully ranked and still recommend nothing because
+                        // the second opinion flipped (`tied`) or never answered
+                        // (`unverified`). Those two now say so, so the operator
+                        // knows the missing star means "you pick", not "all bad".
+                        const CONF_HINTS = {
+                            confirmed:    'qc: ranked (checked twice)',
+                            sole:         'qc: only one usable variant',
+                            tied:         'qc: too close to call - you pick',
+                            unverified:   'qc: second check failed - you pick',
+                            none_healthy: 'qc: no variant recommended',
+                        };
+                        // Reports written before v936.1 carry NO `confidence` key
+                        // (and a hand-built one can carry an explicit null), so an
+                        // unusable value falls back to the exact v936 wording
+                        // rather than printing itself. The result is type-checked
+                        // too: a garbage confidence of 'constructor'/'toString'
+                        // would otherwise pull a truthy FUNCTION off the object
+                        // literal's prototype chain and stringify it into the hint.
+                        const rawConf = qc.confidence;
+                        const confLookup = (typeof rawConf === 'string') ? CONF_HINTS[rawConf] : null;
+                        const confHint = (typeof confLookup === 'string') ? confLookup : null;
+                        const bits = [confHint
+                            || (qcRecommendedId == null ? 'qc: no variant recommended' : 'qc: ranked')];
                         if (Array.isArray(qc.skipped_checks) && qc.skipped_checks.length) {
                             bits.push('skipped: ' + qc.skipped_checks.join(', '));
                         }
@@ -23698,16 +23724,43 @@ Ambient: same kitchen room tone, soft pour sound.
                         const judge = (q.judge && typeof q.judge === 'object') ? q.judge : null;
                         // String-compare: the payload already mixes types (variants
                         // keyed by string, recommended_variant_id an int).
+                        // v936.1 — the star still just follows recommended_variant_id,
+                        // but that id now MEANS more: the scorer only sets it when a
+                        // second, independent judging pass picked the same winner
+                        // (`confirmed`) or there was only one healthy variant
+                        // (`sole`). A star is therefore "checked twice, same winner".
+                        // Do not loosen this back to "top of the ranking" — an
+                        // unstarred node is deliberately saying the top two did not
+                        // separate, which is the whole point of v936.1.
                         const isPick = (qcRecommendedId != null && String(qcRecommendedId) === String(v.id));
                         const failed = !!((integrity && integrity.ok === false) || (judge && judge.verdict === 'fail'));
                         const score = (judge && judge.overall != null) ? (judge.overall + '/10') : '–';
                         const strs = (x) => Array.isArray(x) ? x.filter(s => typeof s === 'string' && s) : [];
                         const reasons = [
                             ...strs(integrity && integrity.reasons),
+                            // v936.1 — `text_errors` is garbled or misspelled text
+                            // rendered INTO the image (the check that caught a
+                            // bottle label reading "AORELLA" instead of KORELLA).
+                            // It forces a fail the model cannot override, so it is
+                            // read whenever it is present, not only under a 'fail'
+                            // verdict. Pre-v936.1 reports have no such key and
+                            // strs(undefined) is [], so they are unaffected.
+                            ...strs(judge && judge.text_errors),
                             ...((judge && judge.verdict === 'fail')
                                 ? [...strs(judge.artifacts), ...strs(judge.element_misses), ...strs(judge.compliance)]
                                 : [])
                         ];
+                        // v936.1 — the second opinion's own score, present only on
+                        // the top two variants of a re-judged node. An explicit
+                        // null means "asked, no answer came back", which is not the
+                        // same as never asked, but neither has a number to show, so
+                        // both simply add nothing to the tooltip.
+                        const verify = (q.verify && typeof q.verify === 'object') ? q.verify : null;
+                        const verifyBits = verify ? [
+                            (verify.overall != null) ? (verify.overall + '/10') : '',
+                            (typeof verify.verdict === 'string') ? verify.verdict : ''
+                        ].filter(s => s !== '') : [];
+                        const secondLook = verifyBits.length ? ('2nd look: ' + verifyBits.join(' ')) : '';
                         let tip = reasons.join('; ');
                         if (!tip) {
                             const parts = [(judge && judge.overall != null) ? ('QC ' + score) : 'QC: judge did not run'];
@@ -23716,6 +23769,9 @@ Ambient: same kitchen room tone, soft pour sound.
                             if (integrity || judge) parts.push(failed ? 'flagged' : 'passed');
                             tip = parts.join(' - ');
                         }
+                        // Appended to BOTH branches: a re-judged variant carries its
+                        // second score whether or not it also has reasons to show.
+                        if (secondLook) tip = tip ? (tip + ' · ' + secondLook) : secondLook;
                         const cls = failed ? ' qc-fail' : (isPick ? ' qc-pick' : '');
                         // Escape the score too, not just the title. `judge.overall` is
                         // stored verbatim — the server validates only the envelope
