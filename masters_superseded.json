@@ -11,6 +11,11 @@
         "what": "pre-amendment v736b trend-hijack catalog gate and its worked sandbox entries",
         "superseded_by": "the TREND GRAMMAR declaration amendment in this checkout",
         "why": "the amendment says so in place: 'the old trend-hijack tag (v736b) ... for new work, use the amended TREND GRAMMAR declaration instead' and 'a catalog tag alone proves nothing'. Rule coverage is unchanged (v614 29/29, v621 20/20 headings both sides)."
+      },
+      {
+        "what": "the v936.0 funnel prose: the both-orders pairwise stage, 'four list fields', the health-only recommendation gate, the pairwise_reason report key and its agreement caveat, the merged no_recommendation caveat, the 'comparable' graduation bar, and the first status line",
+        "superseded_by": "the v936.1 amendment in this checkout (code commits b62e707, bd802a0, d7a9fd1, 1dbd0c5, 9918ddf; 2026-08-21)",
+        "why": "13 lines that describe a funnel the code no longer runs. Pairwise was RETIRED from the funnel after measuring 50% self-contradiction over 10 production nodes / 20 calls, and is replaced by a second-opinion pass with a confidence gate; the judge grew a fifth list field (text_errors) as a seventh reply key; recommended_variant_id is now confidence-gated; pairwise_reason was dropped (grep-verified: no reader anywhere); agreement_stats split into confirmed/sole/legacy buckets, which also narrowed the graduation denominator from 'comparable' to 'confirmed'. Keeping the old lines would have canon describe two contradictory funnels. Rule coverage unchanged: v936 is still one section with one heading, and check_rule_index.py stays PASS at 178 defined."
       }
     ],
     "retired_line_sha256_16": [
@@ -83,7 +88,20 @@
       "f8a50cafd59a57cc",
       "f9a75a1750fad242",
       "fa79e3cedc6d72f9",
-      "fdbe670cc6b410b9"
+      "fdbe670cc6b410b9",
+      "03c89471b4810ce3",
+      "10e7879d921ba9bc",
+      "62f205546904cc7c",
+      "695f05a0a1c5bfee",
+      "78a269fd4f762cfd",
+      "8319455714f30698",
+      "a71cc65f72c416ee",
+      "ae1b7319de12d219",
+      "b5db14ee5f2c79b2",
+      "bd1b6101c7f44f2e",
+      "d3509a5a1b98be78",
+      "d845fd55f4c41197",
+      "fea1646800696566"
     ]
   }
 }

@@ -16907,9 +16907,21 @@ Recorded so it is not rediscovered as a surprise:
 
 That is what "shadow mode" means here: the scorer runs beside the real decision and never inside it.
 
+### The 2026-08-21 revision (v936.1) — REVISED THE SAME DAY IT SHIPPED. Read this before the funnel below.
+
+The first version trusted the judge to say which variant was **best**. It cannot. A controlled experiment over **13 production nodes / 56 variants** re-ran the identical judge on the identical bytes at temperature 0, and the top variant **MOVED on 8 of those 13 nodes**. Scores reproduce only loosely (pearson r=0.69) and sit squashed into a 5-7 band, so a single point of noise decides the ranking — which made `recommended_variant_id` close to a coin flip.
+
+What DOES reproduce is gross damage: a six-finger hand was caught 3/3, a misspelled product label 3/3. So the redesign keeps the half that holds and drops the half that does not. **The judge is trusted about "this one is broken", and no longer trusted about "this one is best" unless the answer repeats.**
+
+Three changes, all in `code/image_qc.py`:
+
+1. **The both-orders pairwise stage is RETIRED from the funnel.** Measured across **10 production nodes / 20 calls, half came back `disagreed`** — the two orders contradicted each other. It spent 2 calls per node re-discovering a first-position bias we already knew about, and produced a usable verdict only half the time. The functions and their tests are KEPT in the file, marked retired, with the measurement written into their docstrings; nothing in the funnel calls any of them.
+2. **A second-opinion pass replaces it, for exactly the same 2 calls.** The top two healthy variants are judged again, independently. The question changes from "which of these is better?" (which did not reproduce) to "does pass 1's winner win again?" (which does), and `recommended_variant_id` is now gated on the answer.
+3. **Rendered text became its own hard fail**, driven by a real production miss — see "Rendered text is its own hard fail" below.
+
 **Where it runs, and why not on Render.** The scorer is `code/image_qc.py` and it runs on the operator's Windows box. Render's instance is 1 CPU / 2GB and cannot hold OpenCV plus onnxruntime, and `GEMINI_API_KEY` already lives on the local box (the decode pipeline uses it). So the scorer talks to the server over the normal API: fetch the batch's nodes, download each variant, score it, `POST` one report per node. The server diff is deliberately tiny — one column, one endpoint, one `to_dict` field, one log line.
 
-**Nothing in the scorer may abort a batch.** Every stage answers "no answer" (`None`, `[]`, a `call_failed` reason) and the funnel carries on with the stages that did work. A dead judge, a missing face model or a 503 degrades the report; it does not lose the run.
+**Nothing in the scorer may abort a batch.** Every stage answers "no answer" (`None`, `[]`, a `call_failed` reason, an `unverified` confidence) and the funnel carries on with the stages that did work. A dead judge, a missing face model or a 503 degrades the report; it does not lose the run.
 
 ### The funnel, in order
 
@@ -16917,10 +16929,52 @@ Per node, on that node's variants:
 
 1. **Integrity gates** (`analyze_integrity`, cv2, free, deterministic) — decode the bytes, then measure short side, grayscale standard deviation and Laplacian variance. `ok: false` with a reason (`undecodable` / `low_resolution` / `blank_frame` / `extreme_blur`) means the render is broken; it is excluded from judging and ranked last. The measured numbers are ALWAYS stored next to the verdict, so the thresholds can later be re-set from real data instead of guessed again.
 2. **Face gate** (`face_similarity`, InsightFace, OPTIONAL) — cosine similarity between the avatar reference portrait and the best face in the candidate. If the wheel is not installed the stage simply does not run and `'face'` joins `skipped_checks`. `None` means "no answer", never "no match".
-3. **Gemini judge** (`judge_variant`, model `gemini-3.6-flash`) on the survivors — **the build's own image prompt IS the rubric**. Every element the prompt names (subject, prop, pose, wardrobe, setting, text) is a checkable row, and two compliance rows are ALWAYS added regardless of what the prompt says: the §8 medical-authority bans (`COMPLIANCE_BANS`) and the v808 no-minors ban (`MINOR_BAN`). The reply is parsed tolerantly and trimmed hard — `JUDGE_MAX_LIST_ITEMS = 10`, `JUDGE_MAX_STRING_CHARS = 200`, four list fields, so a chatty model cannot push a report past the server's size cap.
-4. **Pairwise on the top 2** (`pairwise_top2`) — the two best candidates are compared by the model in BOTH orders. Only a verdict that survives the swap counts, because VLM judges have measurable first-position bias. Inconsistent = no winner, and the checklist order stands.
+3. **Gemini judge** (`judge_variant`, model `gemini-3.6-flash`) on the survivors — **the build's own image prompt IS the rubric**. Every element the prompt names (subject, prop, pose, wardrobe, setting, text) is a checkable row, and two compliance rows are ALWAYS added regardless of what the prompt says: the §8 medical-authority bans (`COMPLIANCE_BANS`) and the v808 no-minors ban (`MINOR_BAN`). The reply is parsed tolerantly and trimmed hard — `JUDGE_MAX_LIST_ITEMS = 10`, `JUDGE_MAX_STRING_CHARS = 200`, **five** list fields (`element_misses`, `artifacts`, `compliance`, `text_errors`, `reasons`), so a chatty model cannot push a report past the server's size cap. `text_errors` is v936.1's seventh reply key and forces a fail the model may not override — see the section below.
+4. **Second opinion on the top 2** (v936.1, `classify_confidence`, replacing the retired pairwise stage) — the two best HEALTHY variants are judged AGAIN, independently, same rubric and same bytes. One word comes out, and it decides whether the report is allowed to recommend anything at all. The six answers, **in the order they are decided** — the order is part of the contract:
+
+   | confidence | what happened | recommends |
+   |---|---|---|
+   | `none_healthy` | there was no candidate at all | nothing |
+   | `sole` | only one healthy variant existed, so there was never a comparison to get wrong. The health gate already vouched for it. Costs **zero** extra calls | that one |
+   | `tied` (pass 1) | pass 1 did not SEPARATE the top two. Decided BEFORE pass 2 is even read, which is what lets the caller skip both calls | nothing |
+   | `unverified` | a pass-2 call produced no answer. Kept distinct from `tied` on purpose: an outage is not the judge contradicting itself, and merging the two would slowly libel it | nothing |
+   | `second_rejected` | pass 2's VERDICT failed the very variant we were about to recommend — a compliance hit or a defect caught only on the re-read. **Outranks the score comparison**, because verdicts reproduce and scores do not | nothing |
+   | `confirmed` | the same variant scored strictly higher in BOTH passes, and pass 2 did not fail it. The only state that earns a recommendation off a comparison | that one |
+
+   `classify_confidence` is **A-oriented**: `compose_report` recommends `ranked[0]`, so "confirmed" has to mean "the top-ranked variant is confirmed" and nothing else. If the caller ever breaks its contract and hands the pair in the wrong order, the answer falls back to `tied`, which recommends nothing.
+
+   **Cost is V + 2 calls per node** (V pass-1 judgements plus 2 second opinions) — exactly what the retired pairwise stage cost. Two branches spend **V + 0**: fewer than two healthy variants (nothing to compare), and a pass-1 tie (if pass 1 did not separate the pair, nothing pass 2 could say would move the answer). The squashed 5-7 band makes an equal top pair common rather than rare, so that skip is real money and not a micro-optimisation.
 5. **Ranking** (`rank_variants`) — deterministic, best first, six axes each a full tie-break of the one before it: integrity ok · judge verdict `pass` · face at or above the floor · judge `overall` descending · `face_sim` descending (missing reads as `0.0` HERE ONLY, as a tie-break between variants already past axis 3) · `variant_id` ascending. Axis 6 is what makes the order TOTAL — the same batch never ranks two ways, so an agreement number stays comparable across runs.
-6. **Report** (`compose_report`) — `recommended_variant_id` is set ONLY when the top-ranked variant is genuinely healthy on all three of integrity, judge-passed and face floor. Otherwise it is `null`, which is a real answer meaning "none of these is good enough" — deliberately NOT "the least bad one", because this report never chooses and a recommendation the machine does not believe would poison the agreement number.
+6. **Report** (`compose_report`) — `recommended_variant_id` now needs **BOTH** gates to pass, and they answer different questions:
+   * the **health gate** (unchanged) — is the top-ranked variant any good? Integrity ok, judged and passed, at or above the face floor when a face was actually measured. An unjudged top variant can never be recommended: a dead judge degrades the report, it does not promote whatever survived the free gates.
+   * the **confidence gate** (v936.1) — do we believe it BEAT the runner-up? Only `confirmed` or `sole` qualifies (`CONF_RECOMMENDABLE`). `tied`, `unverified`, `second_rejected` and `none_healthy` all recommend NOTHING. This is the gate the first version did not have, and its absence is why the recommendation was close to a coin flip. Health was never the thing in doubt; WHICH healthy variant won was.
+
+   `null` is a real answer, not a failure — "we cannot separate these" is what the measurement says is true about half the time. Deliberately NOT "the least bad one" and NOT "whatever ranked first", because this report never chooses and a recommendation the machine does not believe would poison the agreement number.
+
+### Rendered text is its own hard fail (v936.1)
+
+**The finding.** A bottle label rendered **"AORELLA"** instead of the brand **"KORELLA"**. The judge SAW it, scored it **6/10**, said **pass**, and ranked it **2nd** — because the rubric's anti-nitpick wording ("ignore interpretation rather than error") let a misspelled BRAND NAME through as minor garbled text. A misspelled hero product is build-killing, so the weighing is what got removed.
+
+Four parts, all in the prompt and the parser:
+
+- **`text_errors` is a seventh reply key**, whitelisted and capped exactly like its siblings (10 items × 200 chars), so it cannot grow the report past the server's cap.
+- **A non-empty `text_errors` forces `verdict: "fail"` in `parse_judge_reply`, and the model cannot override it** — the same treatment `compliance` already had for §8 / v808. The SCORE is left exactly as the judge reported it: rewriting it would hide what the judge actually thought, which is the thing worth knowing.
+- **The prompt asks the text question BEFORE the leave-alone clause** (a model reads these in order), and that clause now carves text out of itself: rendered text is always in scope, even when the SPEC does not quote the exact string. If the SPEC names a brand, the label must match it character for character; if it names none, the text must still be real, correctly spelled words.
+- **Every rendered-text defect routes to `text_errors`, and `artifacts` is explicitly forbidden to hold one.** `artifacts` used to invite "garbled or misspelled rendered text" while sitting OUTSIDE the forced-fail chain, so the identical AORELLA finding parsed back to a PASS purely on where the model chose to file it. Two homes for one defect left the routing to the model's judgement, which is exactly what this design removes everywhere else.
+
+### The honest caveat — what `confirmed` does and does not prove
+
+**Read this before trusting the confidence gate. Two runs of the same model cancel run-to-run NOISE; they are blind to reproducible BIAS.** At temperature 0 the only difference between two answers is the model's own instability, so a second opinion catches exactly the coin-flip half of the problem. It cannot catch anything the model gets wrong the same way every time.
+
+**The AORELLA miss is the proof: it reproduced 3/3.** The model saw the misspelled label every single time and passed it every single time. A second opinion would have cheerfully "confirmed" it.
+
+So **`confirmed` means "the same variant won a second independent read". That is evidence of REPRODUCIBILITY, not of CORRECTNESS.** Reproducible bias is fixed where AORELLA was fixed — in the rubric and the forced-fail chain — never by asking twice.
+
+**The operational risk, recorded before anyone leans on this gate.** Its whole strength rides on provider-side nondeterminism that nobody here controls. Today roughly **40%** of scored nodes come back `confirmed`. If Google makes inference more deterministic, that rate drifts toward 100%, every node "confirms", and the gate goes inert — silently, with no error and no failing test. **So the `confirmed` rate is itself a health signal and should be watched.** A rate climbing toward 100% means the check has stopped checking, not that the renders got better.
+
+### Known gap, deliberately left open
+
+**`confirmed` requires no minimum score MARGIN.** The winner has to score strictly higher in both passes, but 7-vs-6 counts the same as 9-vs-4 — and the same measurement says a difference of ±1 point is enough to flip a ranking, so a one-point "confirmed" is thinner evidence than it looks. The margin is being RECORDED for later analysis rather than gated on, because the right threshold is unknown and guessing it would suppress nearly every recommendation inside the squashed 5-7 band. Written down so it stays a known gap rather than becoming a discovered surprise.
 
 ### The report shape (stored in `image_nodes.qc_json`)
 
@@ -16930,22 +16984,30 @@ Per node, on that node's variants:
   "generated_at": "2026-08-21T14:00:00Z",
   "recommended_variant_id": 123,
   "skipped_checks": ["face", "fetch:1"],
-  "pairwise_reason": "consistent",
+  "confidence": "confirmed",
   "variants": {
     "123": {"integrity": {"ok": true, "reasons": [],
                           "metrics": {"short_side": 576, "gray_std": 49.2, "lap_var": 312.5}},
             "face_sim": 0.71,
             "judge": {"overall": 8, "verdict": "pass", "element_misses": [],
-                      "artifacts": [], "compliance": [], "reasons": []},
+                      "artifacts": [], "compliance": [], "text_errors": [], "reasons": []},
+            "verify": {"overall": 8, "verdict": "pass"},
             "rank": 1},
     "124": {"integrity": {"ok": false, "reasons": ["blank_frame"],
                           "metrics": {"short_side": 576, "gray_std": 0.7, "lap_var": 1.6}},
-            "face_sim": null, "judge": null, "rank": 4}
+            "face_sim": null, "judge": null, "verify": null, "rank": 4}
   }
 }
 ```
 
 Variant keys are STRINGS (they are JSON object keys), so a reader looks up `qc.variants[String(v.id)]`. `recommended_variant_id` is stored as a plain int.
+
+**What v936.1 changed in this shape, and why no server deploy was needed.** `version` **STAYS 1**. The server stores the blob wholesale and validates only four things — the version, the shape of `variants`, the recommendation id, and the size (`image_platform.py` ~:3600-3623) — so a new top-level key rides through untouched and additive fields need no deploy.
+
+- **`confidence`** (new, top level) — one of the six words in funnel step 4. It is what makes a `null` recommendation readable: "I could not separate them" and "none of these was good enough" are different facts and now say so.
+- **`verify`** (new, per variant) — `{"overall", "verdict"}` from the second opinion, and ONLY the two rows that were actually re-judged carry a real one. Every row carries the KEY (`compose_report` reads it with `.get`), so `null` means "no usable second read for this row" and covers two cases: the row was never in the re-judged top two, or its second call produced nothing. `confidence: "unverified"` is what tells those apart.
+- **`pairwise_reason` is GONE.** It had no reader anywhere — verified by grep across the repo before removing it, not assumed.
+- **`text_errors`** joins the judge dict as a fifth list field, present (usually empty) on every judged variant.
 
 ### Server-side lifecycle
 
@@ -16958,13 +17020,21 @@ Variant keys are STRINGS (they are JSON object keys), so a reader looks up `qc.v
 Two ways to read it, and they answer different questions.
 
 - **Per pick, live:** `choose_variant` logs one line AFTER the commit, so it records a stored fact and not an intent — `[qc-shadow] node <id> operator=<picked> qc=<recommended> agree=<bool>`. Read it with `python code/render_logs.py --text qc-shadow`. **This log line IS the feature's output, not removable scaffolding.**
-- **Aggregated:** `python code/image_qc.py --batch <id> --report` prints `agreement_stats`: `scored` (nodes carrying a report at all) · `comparable` (both sides named a variant — only these can agree or disagree) · `agree` · `no_recommendation` · `agreement_pct`.
+- **Aggregated:** `python code/image_qc.py --batch <id> --report` prints `agreement_stats`. **v936.1 split the buckets**, because a single blended number could not validate the redesign — it mixed nodes that verified something with nodes that verified nothing:
+  - `scored` — nodes carrying a report at all. Tells "nothing has been scored yet" apart from "scored, never comparable".
+  - `comparable` — both sides named a variant AND the report's confidence explains why. It is `confirmed + sole` by construction, and it is the headline denominator.
+  - `confirmed` / `confirmed_agree` — **read this bucket first.** It is the only one that validates the second-opinion stage.
+  - `sole` / `sole_agree` — one healthy candidate, so **ZERO verification was bought**. The operator will nearly always pick the only thing on offer, so folding these into a headline inflates the very number that is supposed to prove the stage works.
+  - `legacy` / `legacy_agree` — a recommendation this metric cannot attribute to a verified state: a pre-v936.1 report (no `confidence` key at all), or one whose recommendation contradicts its own confidence (hand-edited or corrupt; our producer's gate forbids it). **EXCLUDED from the headline percentage** — those picks came from the coin-flip judge v936.1 replaced, and counting them would measure the OLD stage and be read as evidence for the new one.
+  - `tied` — the report declined because the judge could not separate the top two (`tied`), could not finish the second look (`unverified`), or FAILED its own winner on the re-read (`second_rejected`).
+  - `no_recommendation` — the report declined because none of the renders was worth naming (`none_healthy`), plus pre-v936.1 reports that recommended nothing.
+  - `agreement_pct` — `agree / comparable`, or `null`.
 
 Three honest caveats are built into those numbers on purpose:
 
-1. **`no_recommendation` is NOT a disagreement.** The operator picked and the report said "none of these is good enough". The machine declined to answer; counting a decline as a wrong answer would slowly libel the judge.
-2. **`agreement_pct` is `null` when nothing is comparable.** A 0% claimed off zero samples reads as "the judge is useless" when the fact is "the judge has not been tested".
-3. **`pairwise_reason` separates a tie from an outage** — `consistent` (both orders named the same image) · `disagreed` (both orders answered and differed) · `call_failed` (at least one order produced no verdict at all). A disagreement and a dead API produce the same OUTCOME (the checklist order stands) but are not the same FACT. In the same spirit, **`fetch:N` in `skipped_checks` separates a download outage from a rejection**: N candidates could not be downloaded, so the report says on its face that it did not see them. If EVERY variant fails to download, no report is posted at all — otherwise a network outage would be permanently stored as `recommended_variant_id: null` and counted as "the machine declined".
+1. **Neither `tied` nor `no_recommendation` is a disagreement, and they are not the same silence either.** The operator picked; the machine declined, and counting a decline as a wrong answer would slowly libel the judge. But `tied` is a statement about the **JUDGE** (it could not tell the top two apart) and `no_recommendation` is a statement about the **RENDERS** (none was worth naming). The first version merged them, which is precisely what hid the finding that motivated v936.1.
+2. **`agreement_pct` is `null` when nothing is comparable.** A 0% claimed off zero samples reads as "the judge is useless" when the fact is "the judge has not been tested". Note the denominator is now SMALLER and more honest: a batch where the judge committed once and tied three times is 100% of one, not 25% of four.
+3. **`fetch:N` in `skipped_checks` separates a download outage from a rejection**: N candidates could not be downloaded, so the report says on its face that it did not see them. If EVERY variant fails to download, no report is posted at all — otherwise a network outage would be permanently stored as `recommended_variant_id: null` and counted as "the machine declined".
 
 ### The two thresholds, and how much to trust them
 
@@ -16979,11 +17049,15 @@ Exit codes match `send_to_platform.py` on purpose, so a caller driving both CLIs
 
 ### Graduation criteria — auto-pick is NOT enabled by v936
 
-Auto-pick stays behind an explicit per-run opt-in and **v886.3 stays the default forever**. The target to reach before auto-pick is even considered: **≥80% agreement over ≥50 comparable nodes**. Note "comparable" — the `scored` count is not the denominator, and neither is the total node count.
+Auto-pick stays behind an explicit per-run opt-in and **v886.3 stays the default forever**. The target to reach before auto-pick is even considered: **≥80% agreement inside the `confirmed` bucket, over ≥50 `confirmed` nodes** — read `confirmed_agree / confirmed`.
+
+**v936.1 narrowed that denominator, and the narrowing matters.** It used to read "≥50 comparable nodes", but `comparable` is now `confirmed + sole`, and **a `sole` node bought zero verification**: there was one healthy candidate and the operator will nearly always pick the only thing on offer. Graduating on the blended number would graduate auto-pick partly on nodes where nothing was ever checked. `scored` is not the denominator, the total node count is not the denominator, and — changed here — neither is `comparable`.
 
 ### Explicitly out of scope
 
 Recorded so they are not assumed to exist: **clips QC** (Whisper line-match, lip-sync, first-frame-vs-storyboard — a later plan that reuses this report shape and endpoint pattern) · **auto-pick** (above) · **a personal taste model** trained on the (chosen, rejected-sibling) pairs already accumulating in `image_variants` (shadow mode adds the judge's opinion as one more feature for it) · **a regenerate-on-fail loop** piping judge failure reasons back into a new prompt.
 
-**Status.** Scorer + server storage + review hookup shipped `207b6ce..4ddf660` in `code/`, 162 tests green, face gate operational (insightface 1.0.1, `buffalo_l`). The review-UI badges and the deploy are not done yet. Plan + task list: `docs/superpowers/plans/2026-08-21-image-variant-qc-shadow-mode.md`.
+**Status (2026-08-21, v936.1).** The v936.0 scorer + server storage + review hookup shipped `207b6ce..4ddf660` in `code/`; face gate operational (insightface 1.0.1, `buffalo_l`). The v936.1 redesign then shipped as `b62e707` (second opinion replaces pairwise; text is a hard fail) · `bd802a0` (docstring) · `d7a9fd1` (review-UI badges show confidence) · `1dbd0c5` (review fixes: pass 2's verdict is honoured, one home for text defects) · `9918ddf` (UI labels `second_rejected`). `python -m pytest code/test_image_qc.py` → **210 passed**.
+
+**Deploy state at the time of writing: `b62e707..d7a9fd1` are on `origin/main`, which auto-deploys; `1dbd0c5` and `9918ddf` are NOT pushed.** The scorer runs on the operator's box, so only the UI half of that gap shows in production — the live badges show `confirmed` / `tied` but do not yet label `second_rejected`. Plan + task list: `docs/superpowers/plans/2026-08-21-image-variant-qc-shadow-mode.md`.
 
