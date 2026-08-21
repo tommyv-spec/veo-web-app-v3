@@ -3648,15 +3648,24 @@ def test_judge_prompt_hero_block_defangs_a_fence_inside_the_note():
     assert "new orders" in p
 
 
-def test_judge_prompt_makes_the_hero_miss_the_one_hard_element_failure():
+def test_judge_prompt_keeps_the_undeclared_element_a_warning():
     """The principled line: the build declares what is load-bearing, and
     everything undeclared stays a warning. Both halves are in the sentence,
-    so the model cannot promote a prop miss by feel."""
+    so the model cannot promote a prop miss by feel.
+
+    THE test that must not soften. Widening what a declaration covers
+    (v936.4a) is only safe while the OTHER side of the boundary holds — the
+    moment an undeclared prop can hard-fail, this bucket has become the
+    free-form verdict that failed the operator's own pick 44.5% of the
+    time."""
     low = build_judge_prompt("a spec", "she presses the saffron into his "
                                        "hand web").lower()
     hero = low[low.index("7. hero_action_errors"):]
     assert "element_misses" in hero
     assert "warning" in hero
+    # said as an instruction, not only as a definition
+    assert "does not name" in hero
+    assert "do not widen the requirement" in hero
 
 
 def test_judge_prompt_ignores_a_blank_action_note():
@@ -3901,3 +3910,158 @@ def test_agreement_stats_counts_systemic_miss_nodes():
     # counted even when the operator never chose, because it is a fact about
     # the RENDERS; a non-bool value is not a claim and never counts
     assert s["systemic_miss"] == 2
+
+
+# ══════════════════════════════════════════════════════════════════════
+# v936.4a — the hero requirement reads OBJECT and STATE, not only ACTION
+#
+# The v936.4 re-score: current-era fail rate on the operator's own picks
+# fell 33.3% -> 11.8%, and the whole-sample rate 15.4% -> 8.7% with
+# compliance stripped out. `hero_action_errors` fired on 5.2% of chosen
+# variants against 10.5% of rejected ones — aimed right, not over-firing.
+#
+# But it MISSED 2 of the 3 hero-level absences it had a declaration for.
+# Node 4995 ("cut garlic half on table is missing") and node 3318
+# ("controlled hand gesture is absent") both landed in element_misses and
+# passed. The wording asked whether the declared ACTION was being performed;
+# both misses were a declared OBJECT or STATE that was never in frame to be
+# acted on. Node 1530 was the third: the Korella bottle absent entirely,
+# 7/10, passed.
+#
+# The fix is inside the existing bucket — no sixth category, because both
+# gaps flagged at implementation time measured 1-in-478. What must NOT move
+# is the boundary: only what the requirement NAMES can hard-fail.
+#
+# READ THIS BEFORE TRUSTING THE score_node TESTS BELOW. The thing v936.4a
+# actually changes is where the MODEL files a finding, and no test here can
+# assert that — the scripted client files wherever the test tells it to. So
+# the tests split the claim in two: the rendered-prompt tests pin the wording
+# that does the work (they fail against the v936.4 string), and the
+# score_node tests pin the CONSEQUENCE of each routing end to end. Whether
+# the model routes node 4995 correctly is answered by the next re-score, not
+# in here.
+# ══════════════════════════════════════════════════════════════════════
+
+
+def test_judge_prompt_hero_requirement_covers_action_object_and_state():
+    """All three, named in the rubric, because the model files by the words
+    it is given: 'is the action happening' did not reach 'the thing the
+    action needs is not in the frame'."""
+    low = build_judge_prompt("a spec", "she presses the cut garlic half into "
+                                       "the web of his hand").lower()
+    hero = low[low.index("7. hero_action_errors"):low.index("8. corruption")]
+    assert "action" in hero
+    assert "object" in hero
+    assert "state" in hero
+    # the two measured misses, in the rubric's own words
+    assert "absent from the frame" in hero          # node 4995 shape
+    assert "does not hold in the image" in hero     # node 3318 shape
+    # each is independently sufficient, not a conjunction to satisfy
+    assert "each one is a hard failure on its own" in hero
+
+
+def test_judge_prompt_hero_requirement_covers_the_spec_named_hero_product():
+    """Node 1530: the Korella bottle absent entirely, 7/10, passed. Covered
+    by widening what counts as DECLARED, not by a new bucket."""
+    low = build_judge_prompt("A woman holds a KORELLA saffron bottle.",
+                             "she twists the cap off").lower()
+    hero = low[low.index("7. hero_action_errors"):low.index("8. corruption")]
+    assert "hero product" in hero
+    assert "named brand or product" in hero
+    assert "absent from the frame" in hero
+
+
+def test_judge_prompt_hero_widening_did_not_leak_into_the_no_note_branch():
+    """A build with no declaration must be untouched by v936.4a: still an
+    empty list, still an explicit ban on guessing one."""
+    low = build_judge_prompt("A woman holds a KORELLA saffron bottle.").lower()
+    hero = low[low.index("7. hero_action_errors"):low.index("8. corruption")]
+    assert "empty" in hero
+    assert "never guess" in hero
+    # none of the widened triggers may appear where nothing was declared
+    for leaked in ("absent from the frame", "does not hold in the image",
+                   "hero product"):
+        assert leaked not in hero, leaked
+
+
+def _hero_node(note, n=2):
+    node = _judging_node(n=n)
+    node["action_note"] = note
+    return node
+
+
+def test_score_node_a_declared_object_absence_fails_that_variant():
+    """Node 4995, end to end: the action_note names the cut garlic half, and
+    it is not in the frame. Under v936.4 this filed as an element_miss and
+    passed; it is now a hard failure, so the clean runner-up is what the
+    report is about."""
+    node = _hero_node("she presses the cut garlic half into the web of his hand")
+    client = _ScriptedClient([
+        _reply(7, hero_action_errors=["the cut garlic half on the table is "
+                                      "missing from the frame"]),
+        _reply(6),
+    ])
+    report = score_node(_StubSession(), "https://k.com", client, None, None, node)
+    assert report["variants"]["1"]["judge"]["verdict"] == "fail"
+    assert report["variants"]["2"]["judge"]["verdict"] == "pass"
+    assert report["recommended_variant_id"] == 2
+    assert report["systemic_miss"] is False
+
+
+def test_score_node_a_declared_state_not_holding_fails_that_variant():
+    """Node 3318, end to end: the declared state is a controlled hand
+    gesture, and the render does not hold it. Everything is present; the
+    ARRANGEMENT is what failed, which is the second thing the old wording
+    could not see."""
+    node = _hero_node("his hand stays flat and controlled on the counter")
+    client = _ScriptedClient([
+        _reply(8, hero_action_errors=["the controlled hand gesture is absent; "
+                                      "the hand hangs at his side"]),
+        _reply(5),
+    ])
+    report = score_node(_StubSession(), "https://k.com", client, None, None, node)
+    assert report["variants"]["1"]["judge"]["verdict"] == "fail"
+    assert report["recommended_variant_id"] == 2
+
+
+def test_score_node_an_undeclared_prop_absence_stays_a_warning():
+    """THE negative test, and the one that keeps v936.4a honest.
+
+    Same node, same declaration, a DIFFERENT prop missing — one the
+    action_note never names. It stays an element_miss, the variant stays
+    healthy, and the report still recommends it. If this ever flips, the
+    widening has eaten the boundary and the bucket is the free-form verdict
+    again."""
+    node = _hero_node("she presses the cut garlic half into the web of his hand")
+    client = _ScriptedClient([
+        _reply(8, element_misses=["the linen napkin the SPEC describes is "
+                                  "missing from the counter"]),
+        _reply(5),
+        _reply(8, element_misses=["the linen napkin the SPEC describes is "
+                                  "missing from the counter"]),
+        _reply(5),
+    ])
+    report = score_node(_StubSession(), "https://k.com", client, None, None, node)
+    assert report["variants"]["1"]["judge"]["verdict"] == "pass"
+    assert report["variants"]["1"]["judge"]["hero_action_errors"] == []
+    assert len(report["variants"]["1"]["judge"]["element_misses"]) == 1
+    assert report["variants"]["1"]["rank"] == 1
+    assert report["systemic_miss"] is False
+
+
+def test_score_node_an_undeclared_build_cannot_hero_fail_at_all():
+    """The other half of the boundary: no declaration, no hero failure. A
+    missing prop on a build that declared nothing is a warning, whatever it
+    is."""
+    node = _hero_node(None)
+    client = _ScriptedClient([
+        _reply(8, element_misses=["the brass scale is missing entirely"]),
+        _reply(5),
+        _reply(8, element_misses=["the brass scale is missing entirely"]),
+        _reply(5),
+    ])
+    report = score_node(_StubSession(), "https://k.com", client, None, None, node)
+    assert report["variants"]["1"]["judge"]["verdict"] == "pass"
+    assert report["variants"]["1"]["judge"]["hero_action_errors"] == []
+    for call in client.calls:
+        assert "HERO REQUIREMENT" not in call["contents"][1].text
