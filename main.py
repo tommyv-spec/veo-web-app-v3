@@ -10573,13 +10573,19 @@ def _claim_autoedit_for_server():
     Returns a plain dict (never a detached ORM row) or None when there is
     nothing to take.
     """
-    from models import get_db, AutoEditRun
+    from models import get_db, AutoEditRun, Job
     from autoedit_queue import is_claimable
 
     now = datetime.utcnow()
     grace_cutoff = now - timedelta(seconds=AUTOEDIT_SERVER_GRACE_S)
     with get_db() as _db:
         try:
+            # claimed/running are in the filter ON PURPOSE — that is the ONLY
+            # way a row abandoned by a hard kill (OOM / SIGKILL, where the
+            # shutdown hook never ran) ever gets picked up again. is_claimable
+            # below decides whether it has really been abandoned; there is no
+            # separate sweeper because this loop already reaches those rows.
+            #
             # skip_locked mirrors /api/autoedit/claim: without the row lock two
             # claimants reading at the same instant both pass is_claimable and
             # both commit, and one job gets rendered twice. Postgres honours it;
@@ -10593,9 +10599,11 @@ def _claim_autoedit_for_server():
                     continue  # already rendering right here
                 if not is_claimable(run.state, run.heartbeat_at, now):
                     continue
-                # The grace period only guards a FRESH queue entry. A
-                # claimed/running row only gets here after 5 minutes of silence,
-                # which already means whoever held it is gone.
+                # The grace period guards a FRESH queue entry ONLY — note the
+                # state test. A claimed/running row reaches this line only after
+                # STALE_AFTER (5 min) of silence, which already means whoever
+                # held it is gone; making it wait out the grace window too would
+                # be the "stuck for ever" bug this feature has hit twice.
                 if run.state == "queued" and (run.created_at or now) > grace_cutoff:
                     continue
                 if not run.user_id:
@@ -10607,11 +10615,16 @@ def _claim_autoedit_for_server():
                 _db.commit()
                 print(f"[AutoEdit/server] TEMP claimed {run.id[:8]} job={run.job_id[:8]} "
                       f"template={run.template} attempt={run.attempts}", flush=True)
+                job = _db.query(Job).filter(Job.id == run.job_id).first()
                 claim = {
                     "id": run.id, "job_id": run.job_id, "user_id": run.user_id,
                     "template": run.template, "placement": run.placement,
                     "offset": run.offset, "repair_json": run.repair_json,
                     "attempts": run.attempts,
+                    # Where this job's files already sit on THIS disk. The
+                    # render copies them from here instead of downloading them
+                    # back through our own public URL.
+                    "output_dir": job.output_dir if job else None,
                 }
                 # The token lookup comes AFTER the claim commit on purpose:
                 # minting one commits, and committing while we still held the
@@ -10805,13 +10818,34 @@ def _run_autoedit_blocking(claim: dict, work: Path) -> Path:
     except (TypeError, ValueError):
         repairs = {}
 
-    # The pipeline fetches the job's files over the public API and reads its
-    # token from the environment. Only one render runs per container
-    # (AUTOEDIT_MAX_CONCURRENT), so setting it around the call is safe, and the
-    # old value goes back either way.
-    prev = os.environ.get("KAVENO_API_TOKEN")
+    # Two environment hand-offs to the pipeline, both put back below whatever
+    # happens. Only one render runs per container (AUTOEDIT_MAX_CONCURRENT), so
+    # setting process-wide environment around the call is safe.
+    #
+    # KAVENO_API_TOKEN — the metadata calls (export-status, list-outputs) still
+    # go over the API, so the token is still needed.
+    #
+    # AUTOEDIT_LOCAL_OUTPUTS — the job's export is already on this disk, so
+    # autoedit_pipeline.download() copies it instead of pulling ~150MB back
+    # through our own public URL. Set ONLY when the directory is really here: a
+    # job whose files live only in R2 must fall through to the HTTP download,
+    # and the copy must never be aimed at a directory that is not there. In that
+    # case the variable is REMOVED rather than left alone, so one job's outputs
+    # directory can never leak into the next render.
+    before = {k: os.environ.get(k) for k in
+              ("KAVENO_API_TOKEN", "AUTOEDIT_LOCAL_OUTPUTS")}
+    out_dir = claim.get("output_dir")
+    local_outputs = str(out_dir) if out_dir and Path(out_dir).is_dir() else None
     if claim.get("api_token"):
         os.environ["KAVENO_API_TOKEN"] = claim["api_token"]
+    if local_outputs:
+        os.environ["AUTOEDIT_LOCAL_OUTPUTS"] = local_outputs
+        print(f"[AutoEdit/server] local outputs: {local_outputs} — the job's "
+              f"files are copied from disk, not downloaded", flush=True)
+    else:
+        os.environ.pop("AUTOEDIT_LOCAL_OUTPUTS", None)
+        print(f"[AutoEdit/server] no local outputs dir on this box "
+              f"({out_dir!r}) — falling back to the HTTP download", flush=True)
     try:
         return run_autoedit(
             claim["job_id"], work, out,
@@ -10821,10 +10855,11 @@ def _run_autoedit_blocking(claim: dict, work: Path) -> Path:
             repairs=repairs or None,
         )
     finally:
-        if prev is None:
-            os.environ.pop("KAVENO_API_TOKEN", None)
-        else:
-            os.environ["KAVENO_API_TOKEN"] = prev
+        for _k, _v in before.items():
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
 
 
 async def _finish_autoedit_from_path(claim: dict, out: Path, work: Path) -> dict:
