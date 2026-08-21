@@ -15532,6 +15532,11 @@ Ambient: same kitchen room tone, soft pour sound.
             return data;
         }
 
+        // v938.4 — the newest run's filename, so the downloads list can mark
+        // which Automatic Finish is the current one. Older results look
+        // identical otherwise and the operator cannot tell them apart.
+        let _autoEditLatestFile = null;
+
         async function _autoEditGetStatus(jobId) {
             // 404 = never run for this job. That is normal, not an error.
             try {
@@ -15566,6 +15571,7 @@ Ambient: same kitchen room tone, soft pour sound.
                 const tpl = await _autoEditGetTemplates();
                 if (!tpl) return;                        // old server → no card, exports still render
                 const status = await _autoEditGetStatus(jobId);
+                _autoEditLatestFile = (status && status.result_filename) || null;
                 const musicFiles = await _autoEditGetMusicOutputs(jobId);
                 if (selectedJobId !== jobId) return;     // operator switched jobs mid-fetch
 
@@ -15628,8 +15634,8 @@ Ambient: same kitchen room tone, soft pour sound.
                                 ${escapeHtml(stepTxt)}${stepTxt && elapsed ? ' · ' : ''}${escapeHtml(elapsed)}
                             </span>
                         </div>
-                        <div style="margin-top:6px;height:6px;border-radius:3px;background:var(--border-color);overflow:hidden;">
-                            <div style="height:100%;width:${pct}%;background:var(--success);transition:width .6s ease;"></div>
+                        <div class="autoedit-progress">
+                            <div style="width:${pct}%;"></div>
                         </div>
                         <div style="margin-top:6px;font-size:11px;color:var(--text-secondary);">
                             ${state === 'queued'
@@ -15682,19 +15688,19 @@ Ambient: same kitchen room tone, soft pour sound.
                             <h4 style="margin:0;font-size:13px;color:var(--text-primary);">Automatic Finish</h4>
                             <span style="font-size:11px;color:var(--text-secondary);">No CapCut when the checks pass</span>
                         </div>
-                        <div style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-                            <label style="font-size:11px;color:var(--text-secondary);display:flex;align-items:center;gap:5px;">
-                                caption style
+                        <div class="autoedit-controls">
+                            <label>
+                                Caption style
                                 <select class="autoedit-template" style="padding:4px 6px;font-size:11px;background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border-color);border-radius:var(--radius-sm);">${options}</select>
                             </label>
-                            <label style="font-size:11px;color:var(--text-secondary);display:flex;align-items:center;gap:5px;cursor:pointer;">
+                            <label style="cursor:pointer;">
                                 <input type="checkbox" class="autoedit-smart"${pickedSmart ? ' checked' : ''} style="cursor:pointer;">
-                                smart captions (never cover faces or the action)
+                                Smart captions <span style="opacity:.7">(never cover faces or the action)</span>
                             </label>
                         </div>
                         <details style="margin-top:8px;font-size:11px;color:var(--text-secondary);">
                             <summary style="cursor:pointer;">Repair controls</summary>
-                            <div style="margin-top:7px;display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:7px;">
+                            <div class="autoedit-repairs" style="margin-top:7px;display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:8px;">
                                 <label>trim start (s)<input class="autoedit-trim-start" type="number" min="0" step="0.1" value="${_autoEditAttr(pickedTrimStart)}" style="width:100%;"></label>
                                 <label>trim end (s)<input class="autoedit-trim-end" type="number" min="0" step="0.1" value="${_autoEditAttr(pickedTrimEnd)}" style="width:100%;"></label>
                                 <label>caption offset<input class="autoedit-offset" type="number" step="0.01" value="${_autoEditAttr(pickedOffset)}" placeholder="automatic" style="width:100%;"></label>
@@ -15703,7 +15709,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                 <label>music<select class="autoedit-music" style="width:100%;">${musicOptions}</select></label>
                                 <label>music volume (dB)<input class="autoedit-music-db" type="number" min="-40" max="-8" step="1" value="${_autoEditAttr(pickedMusicDb)}" style="width:100%;"></label>
                             </div>
-                            <div style="margin-top:7px;display:flex;gap:12px;flex-wrap:wrap;">
+                            <div class="autoedit-repairs autoedit-toggles" style="margin-top:8px;display:flex;gap:14px;flex-wrap:wrap;">
                                 <label><input type="checkbox" class="autoedit-pip"${pickedPip ? ' checked' : ''}> support footage</label>
                                 <label><input type="checkbox" class="autoedit-captions"${pickedCaptions ? ' checked' : ''}> burn captions</label>
                             </div>
@@ -15982,7 +15988,7 @@ Ambient: same kitchen room tone, soft pour sound.
                             <div class="export-complete" data-filename="${filename}" style="background:linear-gradient(90deg, #f59e0b 0%, #d97706 100%);padding:10px 16px;border-radius:var(--radius-md);margin-bottom:8px;">
                                 <div style="display:flex;align-items:center;justify-content:space-between;width:100%;flex-wrap:wrap;gap:8px;">
                                     <div style="flex:1;min-width:0;">
-                                        <h3 style="margin:0;font-size:13px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Automatic Finish · ${filename}</h3>
+                                        <h3 style="margin:0;font-size:13px;color:white;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Automatic Finish · ${filename}${filename === _autoEditLatestFile ? '<span class="export-latest-badge">LATEST</span>' : ''}</h3>
                                         <p style="margin:4px 0 0;font-size:11px;opacity:0.9;color:white;">No CapCut when checks pass${_aeTpl ? ` • style ${_aeTpl}` : ''}</p>
                                     </div>
                                     <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap;">
@@ -17417,7 +17423,51 @@ Ambient: same kitchen room tone, soft pour sound.
                         <span style="font-size:11px;color:rgba(255,255,255,0.7);">Voice conversion takes 30-60 seconds</span>
                     </div>
                 </div>
-                <style>.voice-spinner{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}</style>
+                <style>.voice-spinner{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+        /* v938.4 — Automatic Finish card.
+           The page styles EVERY <label> as uppercase, letter-spaced and with a
+           bottom margin. That is right for the form-heavy tabs and wrong here:
+           it turned this card's two controls into shouting, mis-spaced columns.
+           Scope the neutralisation to the card instead of fighting it inline. */
+        .autoedit-card label {
+            text-transform: none;
+            letter-spacing: normal;
+            margin-bottom: 0;
+            font-weight: 400;
+            color: var(--text-secondary);
+            font-size: 11px;
+        }
+        .autoedit-card .autoedit-controls {
+            display: flex; flex-wrap: wrap; align-items: center;
+            gap: 8px 16px; margin-top: 8px;
+        }
+        .autoedit-card .autoedit-controls label { white-space: nowrap; }
+        /* Repair controls stack their caption above the input; the global rule
+           puts them side by side, which squeezed every field. */
+        .autoedit-card .autoedit-repairs label {
+            display: flex; flex-direction: column; align-items: stretch; gap: 3px;
+        }
+        .autoedit-card .autoedit-repairs .autoedit-toggles label {
+            flex-direction: row; align-items: center; gap: 6px;
+        }
+        .autoedit-card select, .autoedit-card input[type="number"] {
+            padding: 4px 6px; font-size: 11px; background: var(--bg-card);
+            color: var(--text-primary); border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+        }
+        .autoedit-card .autoedit-progress {
+            height: 6px; border-radius: 3px; background: var(--border-color);
+            overflow: hidden; margin-top: 6px;
+        }
+        .autoedit-card .autoedit-progress > div {
+            height: 100%; background: var(--success); transition: width .6s ease;
+        }
+        .export-latest-badge {
+            display: inline-block; margin-left: 8px; padding: 1px 6px;
+            border-radius: 10px; background: rgba(255,255,255,0.22);
+            font-size: 10px; font-weight: 700; letter-spacing: .4px;
+        }
+</style>
             `;
             if (exportsContent) {
                 exportsContent.insertAdjacentHTML('afterbegin', progressHtml);
