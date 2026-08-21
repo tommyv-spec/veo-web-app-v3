@@ -265,6 +265,42 @@ def plan_caption_windows(buckets, chin, segs, pip_y, dur):
             return False              # never cover the insert
         return True
 
+    def _merge_y_intervals(faces):
+        """Union of face y-ranges (x-overlapping the caption's central zone only).
+        Near-duplicate face boxes from consecutive seconds must not be summed twice —
+        union, not sum, is what makes the pixel-overlap numbers below match measured
+        reality instead of double-counting the same face."""
+        ivals = sorted((fy0, fy1) for fx0, fy0, fx1, fy1 in faces if fx1 > 0.12 and fx0 < 0.88)
+        merged = []
+        for s, e in ivals:
+            if merged and s <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            else:
+                merged.append((s, e))
+        return merged
+
+    def face_overlap_px(c, b):
+        """Raw (unpadded) vertical overlap in pixels, on a 1920-tall frame, between the
+        candidate's band and every face in this bucket. Used only to RANK candidates
+        when nothing is fully legal -- valid()'s 0.015 safety margin stays the gate for
+        deciding whether a second is squeezed at all."""
+        y0, y1 = c - half, c + half
+        total = 0.0
+        for s, e in _merge_y_intervals(b["faces"]):
+            ov = min(y1, e) - max(y0, s)
+            if ov > 0:
+                total += ov
+        return total * 1920
+
+    def pip_overlap_px(c, b):
+        """Raw vertical overlap in pixels between the candidate's band and the PIP,
+        when the PIP is on screen; 0 otherwise. Same ranking role as face_overlap_px."""
+        if not pip_active(b["t"]):
+            return 0.0
+        y0, y1 = c - half, c + half
+        ov = min(y1, pip_band[1]) - max(y0, pip_band[0])
+        return max(0.0, ov) * 1920
+
     def action_score(c, b):
         y0, y1 = c - half, c + half
         rows = [m for i, m in enumerate(b["motion"]) if y1 > i / 10 and y0 < (i + 1) / 10]
@@ -284,7 +320,7 @@ def plan_caption_windows(buckets, chin, segs, pip_y, dur):
         """candidate stays valid for the next n buckets"""
         return all(valid(c, buckets[j]) for j in range(i, min(i + n, len(buckets))))
 
-    cur, plan = None, []
+    cur, plan, squeezed, heavy_squeezed = None, [], 0, 0
     for i, b in enumerate(buckets):
         options = [c for c in cands if valid(c, b)]
         best = next((c for c in cands if c in options and stable(c, i)), None)
@@ -295,7 +331,27 @@ def plan_caption_windows(buckets, chin, segs, pip_y, dur):
         elif options:
             choice = min(options, key=lambda c: (round(action_score(c, b), 3), cands.index(c)))
         else:
-            choice = cands[0]         # nothing fully legal: least-bad = below chin
+            # Squeeze: no candidate clears both the face(s) and the PIP + safe zones.
+            # Operator rule, verbatim: "never cover the main action or any face --
+            # never". Faces are the hard, unconditional priority; the PIP is our own
+            # inserted overlay, not a person, so it is the one allowed to give way.
+            # Graceful degradation ladder:
+            #   2. face-clear (zero measured face overlap) -- insert overlap accepted.
+            #      Prefer candidates in their normal priority order.
+            #   3. when even that is impossible, the candidate with the SMALLEST total
+            #      face overlap wins (pixels on a 1920-tall frame), tie-broken by
+            #      smaller insert overlap, then candidate order. This is what stops the
+            #      old blind "always cands[0]" pick from choosing the WORST-covering
+            #      option purely because it was first in the list.
+            face_clear = [c for c in cands if face_overlap_px(c, b) == 0]
+            if face_clear:
+                choice = face_clear[0]
+            else:
+                choice = min(cands, key=lambda c: (round(face_overlap_px(c, b), 1),
+                                                     round(pip_overlap_px(c, b), 1),
+                                                     cands.index(c)))
+                heavy_squeezed += 1
+            squeezed += 1
         plan.append(choice)
         cur = choice
     windows, start = [], 0.0
@@ -304,9 +360,84 @@ def plan_caption_windows(buckets, chin, segs, pip_y, dur):
             end = dur if i == len(plan) else float(i)
             windows.append((start, end, round(plan[i - 1] - 0.5, 3)))
             start = float(i)
+    windows = enforce_min_dwell(windows, buckets)
     switches = len(windows) - 1
     print(f"placement plan: {len(windows)} windows, {switches} moves -> "
           + " | ".join(f"{a:.0f}-{b:.0f}s@{0.5 + o:.2f}" for a, b, o in windows))
+    if squeezed:
+        print(f"placement: WARNING — {squeezed}s had no band clear of both face and insert "
+              f"({heavy_squeezed}s of those could not clear a face either; "
+              f"used the least-covering position)")
+    return windows
+
+
+def enforce_min_dwell(windows, buckets, min_dwell=2.0):
+    """Post-pass, pure function: no returned window may stand alone for less than
+    min_dwell seconds (a caption that hops for one second and hops right back off
+    again reads as broken -- the same flapping problem hysteresis exists to prevent,
+    just at the merged-window level instead of the per-second level).
+
+    A too-short window gets absorbed into whichever neighbour leaves the LOWER total
+    face overlap (pixels, 1920-tall frame) over that window's own seconds; a tie keeps
+    the earlier/left neighbour, so the caption simply stays where it already was.
+    Repeats until every window is >= min_dwell or only one window remains (both
+    conditions guarantee termination: each merge strictly shrinks the window count)."""
+    half = 0.075
+    by_t = {b["t"]: b for b in buckets}
+
+    def merged_y_intervals(faces):
+        ivals = sorted((fy0, fy1) for fx0, fy0, fx1, fy1 in faces if fx1 > 0.12 and fx0 < 0.88)
+        merged = []
+        for s, e in ivals:
+            if merged and s <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            else:
+                merged.append((s, e))
+        return merged
+
+    def face_px(offset, t):
+        b = by_t.get(t)
+        if b is None:
+            return 0.0
+        c = offset + 0.5
+        y0, y1 = c - half, c + half
+        total = 0.0
+        for s, e in merged_y_intervals(b["faces"]):
+            ov = min(y1, e) - max(y0, s)
+            if ov > 0:
+                total += ov
+        return total * 1920
+
+    windows = list(windows)
+    changed = True
+    while changed and len(windows) > 1:
+        changed = False
+        for i, (start, end, off) in enumerate(windows):
+            if end - start >= min_dwell:
+                continue
+            ts = [b["t"] for b in buckets if start <= b["t"] < end]
+            left = windows[i - 1] if i > 0 else None
+            right = windows[i + 1] if i < len(windows) - 1 else None
+            if left is None:
+                target_off = right[2]
+            elif right is None:
+                target_off = left[2]
+            else:
+                left_cost = sum(face_px(left[2], t) for t in ts)
+                right_cost = sum(face_px(right[2], t) for t in ts)
+                target_off = left[2] if left_cost <= right_cost else right[2]
+            windows[i] = (start, end, target_off)
+            coalesced = [windows[0]]
+            for w in windows[1:]:
+                ps, pe, po = coalesced[-1]
+                s, e, o = w
+                if o == po and abs(s - pe) < 1e-9:
+                    coalesced[-1] = (ps, e, po)
+                else:
+                    coalesced.append(w)
+            windows = coalesced
+            changed = True
+            break
     return windows
 
 
