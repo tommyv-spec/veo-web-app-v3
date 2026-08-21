@@ -597,8 +597,12 @@ class AutoEditRun(Base):
     # it an explicit safe column name avoids relying on each dialect's
     # auto-quoting to get this right.
     offset = Column("caption_offset", Float, nullable=True)  # manual override, else NULL
+    # v937 — repair controls stay in one extensible JSON contract.
+    repair_json = Column(Text, nullable=True)
     stage = Column(String(32), nullable=True)      # download|scan|layout|audio|compose|captions
     result_filename = Column(String(255), nullable=True)
+    qc_status = Column(String(24), nullable=True)  # READY|NEEDS_MANUAL_EDIT
+    qc_report_json = Column(Text, nullable=True)
     error = Column(Text, nullable=True)
     attempts = Column(Integer, default=0, nullable=False)
     claimed_by = Column(String(64), nullable=True)
@@ -608,10 +612,20 @@ class AutoEditRun(Base):
     finished_at = Column(DateTime, nullable=True)
 
     def to_dict(self):
+        try:
+            repairs = json.loads(self.repair_json) if self.repair_json else {}
+        except (TypeError, ValueError):
+            repairs = {}
+        try:
+            qc_report = json.loads(self.qc_report_json) if self.qc_report_json else None
+        except (TypeError, ValueError):
+            qc_report = None
         return {
             "autoedit_id": self.id, "job_id": self.job_id, "state": self.state,
             "template": self.template, "placement": self.placement, "offset": self.offset,
+            "repairs": repairs,
             "stage": self.stage, "result_filename": self.result_filename,
+            "qc_status": self.qc_status, "qc_report": qc_report,
             "error": self.error, "attempts": self.attempts,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
@@ -1205,6 +1219,13 @@ def _run_migrations_postgresql(engine):
         ("clips", "scene_index", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS scene_index INTEGER DEFAULT 0"),
         # v805 — Prompt B policy fallback (voice-only), shipped verbatim to the worker
         ("clips", "prompt_text_b", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS prompt_text_b TEXT"),
+        # v937 — no-CapCut-first repair settings + persistent QC verdict.
+        ("autoedit_runs", "repair_json",
+         "ALTER TABLE autoedit_runs ADD COLUMN IF NOT EXISTS repair_json TEXT"),
+        ("autoedit_runs", "qc_status",
+         "ALTER TABLE autoedit_runs ADD COLUMN IF NOT EXISTS qc_status VARCHAR(24)"),
+        ("autoedit_runs", "qc_report_json",
+         "ALTER TABLE autoedit_runs ADD COLUMN IF NOT EXISTS qc_report_json TEXT"),
         # User Worker Token table
         ("user_worker_tokens", "_create_table_", """
             CREATE TABLE IF NOT EXISTS user_worker_tokens (
@@ -1442,6 +1463,10 @@ def _run_migrations_sqlite(engine):
         # Storyboard/Scene mode fields
         ("clips", "clip_mode", "ALTER TABLE clips ADD COLUMN clip_mode TEXT DEFAULT 'fresh'"),  # v782 default fresh
         ("clips", "scene_index", "ALTER TABLE clips ADD COLUMN scene_index INTEGER DEFAULT 0"),
+        # v937 — no-CapCut-first repair settings + persistent QC verdict.
+        ("autoedit_runs", "repair_json", "ALTER TABLE autoedit_runs ADD COLUMN repair_json TEXT"),
+        ("autoedit_runs", "qc_status", "ALTER TABLE autoedit_runs ADD COLUMN qc_status TEXT"),
+        ("autoedit_runs", "qc_report_json", "ALTER TABLE autoedit_runs ADD COLUMN qc_report_json TEXT"),
         # Export / Voice Clone tracking
         ("jobs", "has_export", "ALTER TABLE jobs ADD COLUMN has_export INTEGER DEFAULT 0"),
         ("jobs", "has_voice_clone", "ALTER TABLE jobs ADD COLUMN has_voice_clone INTEGER DEFAULT 0"),
