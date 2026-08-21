@@ -420,12 +420,14 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
         s.update({"hook_end": hook_end, "key_hex": key_hex, "segs": segs})
     else:
         hook_end, key_hex, segs = s["hook_end"], s["key_hex"], [tuple(x) for x in s["segs"]]
+        print("scan: cached")
     if len(s.get("layout", [])) != 3:
         progress("layout")
         auto_offset, pip_y, chin = detect_layout(base, dur, segs)
         s["layout"] = [auto_offset, pip_y, chin]
     else:
         auto_offset, pip_y, chin = s["layout"]
+        print(f"layout: cached (offset {auto_offset:+.3f}, pip_y {pip_y}, chin {chin:.2f})")
     scan_file.write_text(json.dumps(s))
     progress("audio")
     audio = enhance_audio(base, work)
@@ -434,7 +436,11 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
     progress("captions")
     if placement == "dynamic" and offset is None:
         occ_file = work / "occupancy.json"
-        buckets = json.loads(occ_file.read_text()) if occ_file.exists() else build_occupancy(base, dur)
+        if occ_file.exists():
+            buckets = json.loads(occ_file.read_text())
+            print("occupancy: cached")
+        else:
+            buckets = build_occupancy(base, dur)
         occ_file.write_text(json.dumps(buckets))
         windows = plan_caption_windows(buckets, chin, segs, pip_y, dur)
         render_captions_dynamic(nocap, out, template, windows, work)
