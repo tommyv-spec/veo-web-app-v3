@@ -93,3 +93,7 @@ metaphone>=0.6,<1
 # quality jump vs Whisper-tiny. If rare-vocab edges still slip through,
 # next step is a manual MFCC-DTW implementation using torchaudio (already
 # installed) + dtw-python — pure pip, no system deps.
+
+# v938 — face detection for auto-edit caption placement. The headless build
+# has no GUI/GTK deps, which is what makes it safe on a server.
+opencv-python-headless>=4.8.0

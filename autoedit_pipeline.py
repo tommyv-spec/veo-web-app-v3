@@ -90,10 +90,29 @@ def api_get(path, token, stream=False):
     return r
 
 
+def local_outputs_dir():
+    """Where this job's files already sit on THIS machine, if they do.
+
+    When the render runs on the server, the source export is already on the
+    server's own disk. Set AUTOEDIT_LOCAL_OUTPUTS to that directory and we copy
+    it instead of pulling ~150MB back through our own public URL — which on a
+    1-CPU box costs real time and bandwidth for nothing.
+    """
+    d = os.environ.get("AUTOEDIT_LOCAL_OUTPUTS")
+    return Path(d) if d else None
+
+
 def download(path, token, dest: Path):
     if dest.exists() and dest.stat().st_size > 0:
         print(f"  cached: {dest.name}")
         return
+    src_dir = local_outputs_dir()
+    if src_dir:
+        local = src_dir / dest.name
+        if local.exists() and local.stat().st_size > 0:
+            shutil.copyfile(local, dest)
+            print(f"  local copy: {dest.name} ({dest.stat().st_size / 1e6:.1f} MB, no download)")
+            return
     r = api_get(path, token, stream=True)
     with open(dest, "wb") as f:
         for chunk in r.iter_content(1 << 20):
@@ -817,6 +836,40 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
     return nocap, trimmed_dur, segs, auto_offset, pip_y, chin, base
 
 
+def caption_engine() -> str:
+    """Which renderer draws the captions.
+
+    `libass` (default) draws them with ffmpeg, which the server already has —
+    that is what lets a render run on Render instead of needing a PC. `pycaps`
+    draws them through a headless Chromium: better animation, but ~300MB of RAM
+    and an install the 2GB server cannot spare. Set AUTOEDIT_CAPTION_ENGINE
+    =pycaps on a machine that has it (the local worker) to use the richer path.
+    """
+    return (os.environ.get("AUTOEDIT_CAPTION_ENGINE") or "libass").strip().lower()
+
+
+def _render_caption_pass(nocap: Path, out: Path, template: str, windows, work: Path, dur: float):
+    """One entry point for both caption renderers, so run_autoedit does not care."""
+    engine = caption_engine()
+    if engine == "pycaps":
+        if len({o for _, _, o in windows}) > 1:
+            render_captions_dynamic(nocap, out, template, windows, work)
+        else:
+            render_captions(nocap, out, template, windows[0][2] if windows else -0.05)
+        return
+    import autoedit_captions as _ac
+    if not _ac.supports(template):
+        # A pycaps-only style cannot be drawn by libass; say so rather than
+        # silently shipping a different look than the operator picked.
+        raise AutoEditError(
+            f"Caption style '{template}' needs the browser renderer. "
+            f"Styles available here: {', '.join(sorted(_ac.STYLES))}.")
+    audio = work / "audio_pol.wav"
+    if not audio.exists():
+        audio = work / "audio_enh.wav"
+    _ac.render(nocap, out, template, windows, audio, work)
+
+
 def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
                  placement: str = "dynamic", offset: float | None = None,
                  progress=lambda stage: None, repairs=None) -> Path:
@@ -839,12 +892,12 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
             buckets = build_occupancy(base, dur)
         occ_file.write_text(json.dumps(buckets))
         windows = plan_caption_windows(buckets, chin, segs, pip_y, dur)
-        render_captions_dynamic(nocap, out, template, windows, work)
+        _render_caption_pass(nocap, out, template, windows, work, dur)
     elif repairs["captions_enabled"]:
         buckets = build_occupancy(base, dur)
         chosen_offset = offset if offset is not None else auto_offset
         windows = [(0.0, dur, chosen_offset)]
-        render_captions(nocap, out, template, offset if offset is not None else auto_offset)
+        _render_caption_pass(nocap, out, template, windows, work, dur)
     else:
         out.unlink(missing_ok=True)
         shutil.copy2(nocap, out)
