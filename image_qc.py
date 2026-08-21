@@ -28,6 +28,17 @@ comes last for the same reason: it drives all of them.
 Usage:
   python code/image_qc.py --batch <batch-id> [--avatar-node <node-id>]
   python code/image_qc.py --batch <batch-id> --report
+  python code/image_qc.py --batch <batch-id> --json     # one summary line
+
+Exit codes. The 0/1/2/3 prefix matches send_to_platform.py:42-46 on purpose,
+so a caller driving both CLIs reads ONE vocabulary:
+  0 OK — every report the run produced was accepted. Nodes DEFERRED with a
+        409 ('still rendering, rescore later') keep this a 0: a deferral is
+        part of the contract, not a failure.
+  1 at least one node failed — a rejected POST, a transport error, or a node
+        whose scoring raised. The run still finished every other node.
+  2 usage — bad or missing arguments.
+  3 auth — no token found, or the server rejected the one we sent (401/403).
 
 Server contract (Task 2): reports carry version: 1, recommended_variant_id
 must be a plain int, reports stay under 64,000 bytes, POST returns 409 while
@@ -1084,6 +1095,51 @@ def apply_pairwise(ranked: List[Dict[str, Any]],
     return out
 
 
+# Exit codes — see the module docstring. Deliberately share the first four
+# numbers with send_to_platform.py:57-60 so a script driving both CLIs does
+# not have to remember which one 3 means.
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_USAGE = 2
+EXIT_AUTH = 3
+
+# What each POST status means to the run's tally. 409 is the one that has to
+# stay out of `failed`: the node started rendering again between the fetch and
+# the POST (image_platform.py:3597), so the report is stale rather than wrong,
+# and the next run rescores it. Counting that as a failure would make a normal
+# mid-render batch exit non-zero and stop the Task 8 hookup dead.
+POST_ACCEPTED = "posted"
+POST_DEFERRED = "deferred"
+POST_FAILED = "failed"
+
+
+def classify_post(status: int) -> str:
+    """One POST status -> which counter it belongs in. Pure, because the exit
+    code hangs off it and an off-by-one status here is a silent wrong answer
+    for every caller downstream."""
+    if status == 200:
+        return POST_ACCEPTED
+    if status == 409:
+        return POST_DEFERRED
+    return POST_FAILED
+
+
+def batch_exit_code(failed: int) -> int:
+    """A run is a success when nothing FAILED. Deferrals and nodes with
+    nothing to score do not spoil it — they are both normal states of a batch
+    that is still rendering."""
+    return EXIT_FAILED if failed else EXIT_OK
+
+
+def summary_dict(posted: int, deferred: int, failed: int, skipped: int,
+                 exit_code: int) -> Dict[str, int]:
+    """The one machine-readable line `--json` prints. Task 8 parses this
+    instead of the prose log, so the key set is a contract: adding a key is
+    safe, renaming one is not."""
+    return {"posted": posted, "deferred": deferred, "failed": failed,
+            "skipped": skipped, "exit": exit_code}
+
+
 class _RefFaceCache:
     """An embedder wrapper that detects the batch's reference portrait ONCE.
 
@@ -1127,53 +1183,108 @@ class _RefFaceCache:
 DEFAULT_BASE_URL = "https://kavenobuilder.com"
 
 
+class QCAuthError(RuntimeError):
+    """No usable token, or the server rejected the one we sent. Its own class
+    because it is the only failure that earns exit code 3, and because it is
+    settled: every remaining node in the batch would fail the same way, so the
+    run stops instead of collecting 40 identical 401s."""
+
+
 def _default_base_url() -> str:
-    """Env override first, then send_to_platform's own default, so the two
-    CLIs cannot end up pointed at different servers."""
+    """Which server to talk to.
+
+    KAVENO_BASE_URL is a ONE-SIDED override: send_to_platform does not read
+    it (it takes --url or its own DEFAULT_URL), so setting it points THIS CLI
+    somewhere the other one is not. That is deliberate — a QC run against a
+    local instance should not need the sending CLI reconfigured — but it means
+    the env var is for local work, and the shared default is what keeps the
+    two CLIs on the same server: `DEFAULT_URL` is imported from
+    send_to_platform rather than re-typed, so it cannot drift.
+    """
     val = os.environ.get("KAVENO_BASE_URL", "").strip()
     if val:
         return val.rstrip("/")
     try:
         from send_to_platform import DEFAULT_URL
         return str(DEFAULT_URL).rstrip("/")
-    except Exception:
+    except ImportError:
         return DEFAULT_BASE_URL
 
 
+# The env keys send_to_platform searches, in its order (send_to_platform.py:121).
+_TOKEN_ENV_KEYS = ("KAVENO_API_TOKEN", "VEO_TOKEN", "USER_WORKER_TOKEN")
+
+# The flow worker's own token file. Named in the error message below, so the
+# fallback has to actually read it — an error that lists a source nobody checks
+# sends the operator to look at a file that was never going to be used.
+_WORKER_ENV_PATH = os.path.join(os.path.expanduser("~"), "veo-worker", ".env")
+_SAVED_TOKEN_PATH = os.path.join(os.path.expanduser("~"), ".kaveno", "token")
+
+
+def _token_from_env_file(path: str) -> Optional[str]:
+    """A worker token out of a KEY=value .env file. Mirrors
+    send_to_platform._read_env_file_token."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                key, sep, val = line.strip().partition("=")
+                if sep and key.strip() in _TOKEN_ENV_KEYS:
+                    val = val.strip().strip("\"'")
+                    if val:
+                        return val
+    except OSError:
+        pass
+    return None
+
+
 def _resolve_token(cli_token: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    """Reuse send_to_platform's token search (--token > KAVENO_API_TOKEN >
-    VEO_TOKEN > USER_WORKER_TOKEN > ~/veo-worker/.env > ~/.kaveno/token) so
-    an operator who ran `send_to_platform.py set-token` never has to think
-    about this one. Mirrored only if that import fails."""
+    """Reuse send_to_platform's token search so an operator who ran
+    `send_to_platform.py set-token` never has to think about this one.
+
+    Order (send_to_platform.py:139-159): --token > KAVENO_API_TOKEN >
+    VEO_TOKEN > USER_WORKER_TOKEN > ~/veo-worker/.env > ~/.kaveno/token.
+
+    The fallback below runs only when the import itself fails (this file
+    copied somewhere without its sibling) and mirrors that order in FULL,
+    ~/veo-worker/.env included. A fallback that quietly skips one source is
+    worse than no fallback: the operator whose token lives in exactly that
+    file gets told 'no token found' while looking at their token.
+    """
     try:
         from send_to_platform import resolve_token
+    except ImportError as exc:
+        print(f"[qc] send_to_platform not importable ({_ascii(exc)}) - using "
+              f"the mirrored token search", flush=True)
+    else:
         return resolve_token(cli_token)
-    except Exception:
-        if cli_token:
-            return cli_token, "--token"
-        for key in ("KAVENO_API_TOKEN", "VEO_TOKEN", "USER_WORKER_TOKEN"):
-            val = os.environ.get(key, "").strip()
-            if val:
-                return val, f"env {key}"
-        try:
-            with open(os.path.join(os.path.expanduser("~"), ".kaveno", "token"),
-                      encoding="utf-8") as handle:
-                val = handle.read().strip()
-            if val:
-                return val, "~/.kaveno/token"
-        except OSError:
-            pass
-        return None, None
+
+    if cli_token:
+        return cli_token, "--token"
+    for key in _TOKEN_ENV_KEYS:
+        val = os.environ.get(key, "").strip()
+        if val:
+            return val, f"env {key}"
+    val = _token_from_env_file(_WORKER_ENV_PATH)
+    if val:
+        return val, "~/veo-worker/.env (flow worker token)"
+    try:
+        with open(_SAVED_TOKEN_PATH, encoding="utf-8") as handle:
+            val = handle.read().strip()
+        if val:
+            return val, "~/.kaveno/token"
+    except OSError:
+        pass
+    return None, None
 
 
 def _auth_session(token: Optional[str] = None) -> Any:
     """A requests.Session carrying the bearer every /api/images route wants.
-    Raises when there is no token: every call in this file needs one, and
-    failing here beats 40 identical 401s."""
+    Raises QCAuthError when there is no token: every call in this file needs
+    one, and failing here beats 40 identical 401s."""
     import requests
     resolved, how = _resolve_token(token)
     if not resolved:
-        raise RuntimeError(
+        raise QCAuthError(
             "no API token found (--token, KAVENO_API_TOKEN, VEO_TOKEN, "
             "USER_WORKER_TOKEN, ~/veo-worker/.env, ~/.kaveno/token). Mint one "
             "at https://kavenobuilder.com/static/my-worker.html, then save it "
@@ -1210,6 +1321,14 @@ def fetch_nodes(session: Any, base: str, batch_id: Optional[str] = None,
     if since_days is not None:
         params["since_days"] = since_days
     resp = session.get(_url(base, "/api/images/nodes"), params=params, timeout=180)
+    if resp.status_code in (401, 403):
+        # Told apart from every other HTTP failure because it is SETTLED: the
+        # token is wrong, so every node in the batch would fail identically.
+        # Exit 3, matching send_to_platform's auth code.
+        raise QCAuthError(
+            f"the server rejected our token ({resp.status_code}). Mint a new "
+            f"one at {base}/static/my-worker.html, then: python "
+            f"code/send_to_platform.py set-token <token>")
     resp.raise_for_status()
     payload = resp.json()
     if not isinstance(payload, dict):
@@ -1279,6 +1398,19 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
     that decoded cleanly. A broken render is never judged — a paid call to be
     told a blank frame is blank.
 
+    A DOWNLOAD failure is told apart from a QUALITY failure, because the
+    agreement metric cannot tell them apart on its own. A variant we could not
+    fetch lands as integrity 'fetch_failed', which sinks it in the ranking and
+    leaves the top variant unrecommendable — so a network outage would be
+    stored as `recommended_variant_id: null` and counted by agreement_stats as
+    "the machine declined", i.e. an outage permanently recorded as judgement.
+    Two guards:
+      * EVERY scorable variant failed to download -> return None. Nothing was
+        scored, so nothing is reported and the run's tally counts the node as
+        skipped rather than judged.
+      * SOME failed -> 'fetch:N' joins skipped_checks, so the stored report
+        says on its face that it could not see N of the candidates.
+
     Memory: every scored variant's bytes are held for the length of the node,
     because the pairwise stage needs the top two side by side after ranking.
     That is 4-6 PNGs at ~2 MB — deliberately not engineered around.
@@ -1295,6 +1427,7 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
 
     reports: List[Dict[str, Any]] = []
     variant_bytes: Dict[int, bytes] = {}
+    fetch_failures = 0
     for variant in (node.get("variants") or []):
         if not isinstance(variant, dict):
             continue
@@ -1311,6 +1444,7 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
 
         img = fetch_bytes(session, base, variant.get("image_url"))
         if img is None:
+            fetch_failures += 1
             reports.append({"variant_id": variant_id,
                             "integrity": {"ok": False, "reasons": ["fetch_failed"],
                                           "metrics": None},
@@ -1327,6 +1461,16 @@ def score_node(session: Any, base: str, client: Any, embedder: Any,
 
     if not reports:
         return None
+    if fetch_failures == len(reports):
+        # Not "every variant is bad" — "we saw none of them". Reporting that
+        # as a judgement is how a download outage becomes a permanent entry in
+        # the agreement metric. Loud, because a whole node going dark is
+        # usually the first sign the whole run is about to.
+        print(f"[qc] node {node_id}: ALL {fetch_failures} variant(s) failed to "
+              f"download - nothing scored, no report posted", flush=True)
+        return None
+    if fetch_failures:
+        skipped.append(f"fetch:{fetch_failures}")
 
     ranked = rank_variants(reports)
     pairwise_reason: Optional[str] = None
@@ -1364,6 +1508,10 @@ def _run_batch(session: Any, base: str, args: Any) -> int:
     grew, a variant list that is not a list, a native crash inside the face
     model) logs and the batch carries on. Degrade, never abort — that is the
     module's whole promise, and the CLI is where it is easiest to break.
+
+    The exit code is `batch_exit_code(failed)`: 0 while nothing failed, even
+    with every node deferred. Task 8 branches on it, so "all 12 POSTs were
+    rejected" must not look like a clean run.
     """
     nodes = fetch_nodes(session, base, batch_id=args.batch)
     scorable = pick_scorable_nodes(nodes)
@@ -1371,8 +1519,10 @@ def _run_batch(session: Any, base: str, args: Any) -> int:
         scorable = scorable[:args.limit_nodes]
     print(f"[qc] batch {args.batch}: {len(nodes)} nodes, "
           f"{len(scorable)} scorable", flush=True)
+
+    posted = deferred = failed = skipped_nodes = 0
     if not scorable:
-        return 0
+        return _finish_batch(args, posted, deferred, failed, skipped_nodes)
 
     try:
         client = _gemini_client()
@@ -1381,19 +1531,25 @@ def _run_batch(session: Any, base: str, args: Any) -> int:
               f"only, 'judge' reported in skipped_checks", flush=True)
         client = None
 
-    embedder = load_embedder()
+    # Probed ONLY when there is an avatar to compare against: load_embedder
+    # constructs InsightFace, which on a cold box downloads and unpacks the
+    # buffalo_l model pack. Paying that to then skip the face gate is a long
+    # wait for nothing.
+    embedder = load_embedder() if args.avatar_node else None
     ref_bytes = None
-    if embedder is not None and args.avatar_node:
+    if embedder is not None:
         ref_bytes = _chosen_variant_bytes(
             session, base, fetch_node(session, base, args.avatar_node))
-    if embedder is not None and not ref_bytes:
-        print("[qc] no reference face (pass --avatar-node <upload node id>) - "
-              "skipping the face gate", flush=True)
-    if embedder is not None and ref_bytes:
-        # ONE detection of the reference portrait for the whole batch.
-        embedder = _RefFaceCache(embedder, ref_bytes)
+        if ref_bytes:
+            # ONE detection of the reference portrait for the whole batch.
+            embedder = _RefFaceCache(embedder, ref_bytes)
+        else:
+            print(f"[qc] avatar node {args.avatar_node} gave no reference "
+                  f"image - skipping the face gate", flush=True)
+    elif not args.avatar_node:
+        print("[qc] no --avatar-node given - skipping the face gate",
+              flush=True)
 
-    posted = deferred = failed = 0
     for node in scorable:
         node_id = node.get("id")
         try:
@@ -1404,24 +1560,26 @@ def _run_batch(session: Any, base: str, args: Any) -> int:
             failed += 1
             continue
         if report is None:
-            print(f"[qc] node {node_id}: no AI variants to score", flush=True)
+            # Nothing was scored (no AI variants, or none of them downloaded).
+            # Counted apart from `failed`: no report exists to be rejected.
+            skipped_nodes += 1
+            print(f"[qc] node {node_id}: nothing to score, no report posted",
+                  flush=True)
             continue
 
         report = fit_report(report)
         status, detail = post_report(session, base, node_id, report)
-        if status == 200:
+        outcome = classify_post(status)
+        if outcome == POST_ACCEPTED:
             posted += 1
             print(f"[qc] node {node_id}: "
                   f"recommended={report['recommended_variant_id']} "
                   f"skipped={report['skipped_checks']} "
                   f"pairwise={report['pairwise_reason']}", flush=True)
-        elif status == 409:
-            # Not an error: the node started rendering again between the fetch
-            # and the POST. The next run rescores it, and the send_to_platform
-            # hookup rescores it after the render lands.
+        elif outcome == POST_DEFERRED:
             deferred += 1
-            print(f"[qc] node {node_id}: still rendering, rescore later "
-                  f"(409)", flush=True)
+            print(f"[qc] node {node_id}: still rendering, rescore later (409)",
+                  flush=True)
         elif status == 413:
             failed += 1
             print(f"[qc] node {node_id}: report REJECTED as too large at "
@@ -1432,11 +1590,22 @@ def _run_batch(session: Any, base: str, args: Any) -> int:
             print(f"[qc] node {node_id}: POST failed ({status}) {detail}",
                   flush=True)
 
+    return _finish_batch(args, posted, deferred, failed, skipped_nodes)
+
+
+def _finish_batch(args: Any, posted: int, deferred: int, failed: int,
+                  skipped: int) -> int:
+    """The run's last words + its exit code. One place, so the prose log, the
+    --json line and the code can never describe different runs."""
+    exit_code = batch_exit_code(failed)
     print(f"[qc] done: {posted} scored, {deferred} deferred (still rendering), "
-          f"{failed} failed", flush=True)
+          f"{failed} failed, {skipped} with nothing to score", flush=True)
     print("[qc] shadow mode (v886.3): nothing was chosen - the operator still "
           "picks every variant.", flush=True)
-    return 0
+    if getattr(args, "json", False):
+        print(json.dumps(summary_dict(posted, deferred, failed, skipped,
+                                      exit_code)), flush=True)
+    return exit_code
 
 
 def _run_report(session: Any, base: str, args: Any) -> int:
@@ -1444,20 +1613,62 @@ def _run_report(session: Any, base: str, args: Any) -> int:
     nodes = fetch_nodes(session, base, batch_id=args.batch,
                         since_days=None if args.batch else args.since_days)
     stats = agreement_stats(nodes)
+    if getattr(args, "json", False):
+        print(json.dumps(stats), flush=True)
+        return EXIT_OK
     scope = f"batch {args.batch}" if args.batch else f"last {args.since_days} days"
     pct = "n/a" if stats["agreement_pct"] is None else f"{stats['agreement_pct']}%"
     print(f"[qc] {scope}: {stats['scored']} scored node(s)", flush=True)
     print(f"shadow agreement: {stats['agree']}/{stats['comparable']} ({pct}) "
           f"| qc-said-none-good: {stats['no_recommendation']}", flush=True)
-    return 0
+    return EXIT_OK
+
+
+def _positive_int(raw: str) -> int:
+    """--limit-nodes 0 used to mean 'no limit', which reads as 'score nothing'
+    to anyone typing it. The flag now means what it says, and 0 is refused."""
+    try:
+        val = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a whole number")
+    if val < 1:
+        raise argparse.ArgumentTypeError(
+            f"--limit-nodes must be at least 1 (got {val}); omit it to score "
+            f"every node")
+    return val
+
+
+def _since_days(raw: str) -> int:
+    """Bounded client-side to the same 0..3650 the server accepts
+    (image_platform.py:2609), so a typo fails here with a readable message
+    instead of as a 422 after a round trip. 0 disables the window."""
+    try:
+        val = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{raw!r} is not a whole number")
+    if not 0 <= val <= 3650:
+        raise argparse.ArgumentTypeError(
+            f"--since-days must be between 0 and 3650 (got {val}); 0 means "
+            f"the full history")
+    return val
+
+
+_EPILOG = """exit codes:
+  0  ok (nodes deferred with a 409 still count as ok)
+  1  at least one node failed to score or to POST
+  2  usage error
+  3  auth - no token found, or the server rejected it
+"""
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="image_qc",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
         description="v936 image-variant QC, shadow mode. Scores every AI "
                     "variant in a batch and records what the machine WOULD "
-                    "have picked. Never chooses (v886.3).")
+                    "have picked. Never chooses (v886.3).",
+        epilog=_EPILOG)
     parser.add_argument("--batch", help="batch id to score (or to report on)")
     parser.add_argument("--avatar-node", type=int, default=None,
                         help="node id of the avatar UPLOAD; supplies the "
@@ -1468,27 +1679,39 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="API token; normally found automatically")
     parser.add_argument("--report", action="store_true",
                         help="print the operator-vs-machine agreement and exit")
-    parser.add_argument("--limit-nodes", type=int, default=0,
+    parser.add_argument("--json", action="store_true",
+                        help="print ONE machine-readable summary line "
+                             "(the run tally, or the agreement dict)")
+    parser.add_argument("--limit-nodes", type=_positive_int, default=0,
                         help="score at most N nodes (a cheap first run)")
-    parser.add_argument("--since-days", type=int, default=30,
-                        help="history window for --report without --batch")
+    parser.add_argument("--since-days", type=_since_days, default=30,
+                        help="history window for --report without --batch "
+                             "(0-3650; 0 = all)")
     args = parser.parse_args(argv)
 
     if not args.batch and not args.report:
+        # argparse.error exits 2 itself, which is this CLI's usage code.
         parser.error("--batch is required (or --report to read the agreement)")
 
     base = (args.base_url or _default_base_url()).rstrip("/")
     try:
         session = _auth_session(args.token)
-    except Exception as exc:
+    except QCAuthError as exc:
         print(f"[qc] {_ascii(exc)}", file=sys.stderr, flush=True)
-        return 2
+        return EXIT_AUTH
+    except Exception as exc:          # e.g. requests not installed
+        print(f"[qc] could not build a session: {_ascii(exc)}",
+              file=sys.stderr, flush=True)
+        return EXIT_FAILED
     try:
         return _run_report(session, base, args) if args.report \
             else _run_batch(session, base, args)
+    except QCAuthError as exc:
+        print(f"[qc] {_ascii(exc)}", file=sys.stderr, flush=True)
+        return EXIT_AUTH
     except Exception as exc:
         print(f"[qc] run failed: {_ascii(exc)}", file=sys.stderr, flush=True)
-        return 1
+        return EXIT_FAILED
 
 
 if __name__ == "__main__":

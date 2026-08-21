@@ -16,7 +16,11 @@ from image_qc import (analyze_integrity, build_judge_prompt, parse_judge_reply,
                       face_similarity, load_embedder, InsightFaceEmbedder,
                       rank_variants, compose_report, RANK_FACE_SIM_FLOOR,
                       agreement_stats, fit_report, pick_scorable_nodes,
-                      apply_pairwise, _RefFaceCache, FIT_REPORT_BUDGET)
+                      apply_pairwise, _RefFaceCache, FIT_REPORT_BUDGET,
+                      classify_post, batch_exit_code, summary_dict, _url,
+                      score_node, _run_batch, main, QCAuthError,
+                      POST_ACCEPTED, POST_DEFERRED, POST_FAILED,
+                      EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_AUTH)
 
 
 def _png(arr):
@@ -1267,3 +1271,282 @@ def test_ref_face_cache_caches_an_empty_reference_result_too():
     assert face_similarity(cached, ref, b"cand") is None
     # 1 reference call + 2 candidate calls: the empty reference was not redone
     assert inner.n == 3
+
+
+# ---- exit codes + the --json summary --------------------------------------
+
+def test_classify_post_maps_every_status_the_server_can_answer():
+    assert classify_post(200) == POST_ACCEPTED
+    assert classify_post(409) == POST_DEFERRED       # still rendering, not a fail
+    for status in (413, 422, 404, 500, -1):
+        assert classify_post(status) == POST_FAILED
+
+
+def test_batch_exit_code_only_fails_on_a_real_failure():
+    """A batch mid-render defers every node and that is a SUCCESSFUL run.
+    Only a rejected POST or a node that raised earns a non-zero code."""
+    assert batch_exit_code(0) == EXIT_OK
+    assert batch_exit_code(1) == EXIT_FAILED
+    assert batch_exit_code(12) == EXIT_FAILED
+
+
+def test_exit_codes_match_send_to_platform_s_vocabulary():
+    """send_to_platform.py:42-46 publishes 0 ok / 1 unknown / 2 parse /
+    3 auth. A caller driving both CLIs reads one vocabulary or neither."""
+    assert (EXIT_OK, EXIT_FAILED, EXIT_USAGE, EXIT_AUTH) == (0, 1, 2, 3)
+
+
+def test_summary_dict_key_set_is_the_task_8_contract():
+    s = summary_dict(3, 1, 2, 4, EXIT_FAILED)
+    assert s == {"posted": 3, "deferred": 1, "failed": 2, "skipped": 4, "exit": 1}
+    assert json.loads(json.dumps(s)) == s
+
+
+# ---- _url -----------------------------------------------------------------
+
+def test_url_joins_a_server_relative_variant_url():
+    """image_url arrives server-relative WITH its query already attached
+    (ImageVariant.to_dict) — the join must not eat or re-encode it."""
+    assert _url("https://k.com",
+                "/api/images/files/nodes/9/variant_1.png?v=41&cb=v891") == \
+        "https://k.com/api/images/files/nodes/9/variant_1.png?v=41&cb=v891"
+
+
+def test_url_tolerates_a_trailing_slash_and_a_missing_leading_slash():
+    assert _url("https://k.com/", "/api/images/nodes") == "https://k.com/api/images/nodes"
+    assert _url("https://k.com", "api/images/nodes") == "https://k.com/api/images/nodes"
+    assert _url("https://k.com/", "api/x") == "https://k.com/api/x"
+
+
+def test_url_passes_an_absolute_url_through_untouched():
+    """A future R2 direct link must not get the base glued onto its front."""
+    for absolute in ("https://r2.example/x.png", "http://localhost:8000/y.png"):
+        assert _url("https://k.com", absolute) == absolute
+
+
+# ---- fetch-failure taxonomy (stub session, no network) --------------------
+
+class _StubSession:
+    """Serves PNG bytes for variant urls, and 404s the ones named in `dead`."""
+
+    def __init__(self, dead=(), post_status=200):
+        self.dead = set(dead)
+        self.post_status = post_status
+        self.posts = []
+
+    def get(self, url, **kw):
+        for name in self.dead:
+            if name in url:
+                return _StubResponse(404)
+        return _StubResponse(200, content=_png(_blocks(seed=1)))
+
+    def post(self, url, json=None, **kw):
+        self.posts.append((url, json))
+        status = (self.post_status(url) if callable(self.post_status)
+                  else self.post_status)
+        return _StubResponse(status)
+
+
+class _StubResponse:
+    def __init__(self, status, content=b"", payload=None):
+        self.status_code, self.content, self._payload = status, content, payload
+        self.text = "stub"
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self._payload
+
+
+def _ai_node(nid=42, n=3):
+    return {"id": nid, "status": "ready", "kind": "generated",
+            "prompt": "", "chosen_variant_id": None,
+            "variants": [{"id": v, "source": "ai",
+                          "image_url": f"/api/images/files/n/variant_{v}.png"}
+                         for v in range(1, n + 1)]}
+
+
+def test_score_node_returns_none_when_every_variant_fails_to_download(capsys):
+    """A download outage must not be stored as a judgement. Every variant
+    landing as fetch_failed would make recommended_variant_id null, which
+    agreement_stats counts as 'the machine declined' — an outage recorded
+    forever as an opinion. Nothing was seen, so nothing is reported."""
+    session = _StubSession(dead=["variant_1", "variant_2", "variant_3"])
+    assert score_node(session, "https://k.com", None, None, None, _ai_node()) is None
+    assert "ALL 3 variant(s) failed to download" in capsys.readouterr().out
+
+
+def test_score_node_flags_partial_fetch_failures_in_skipped_checks():
+    """Some downloads failed: the report still stands, but it says on its face
+    that it could not SEE one candidate — 'couldn't look' is not 'looked and
+    rejected'."""
+    session = _StubSession(dead=["variant_2"])
+    report = score_node(session, "https://k.com", None, None, None, _ai_node())
+    assert "fetch:1" in report["skipped_checks"]
+    assert report["variants"]["2"]["integrity"]["reasons"] == ["fetch_failed"]
+    assert report["variants"]["1"]["integrity"]["ok"] is True
+
+
+def test_score_node_says_nothing_about_fetching_when_every_download_worked():
+    report = score_node(_StubSession(), "https://k.com", None, None, None, _ai_node())
+    assert report["skipped_checks"] == ["face", "judge"]
+
+
+# ---- _run_batch counter + exit-code mapping (stub session) ----------------
+
+def _batch_args(**over):
+    import argparse as _ap
+    base = {"batch": "b-1", "avatar_node": None, "limit_nodes": 0,
+            "json": False, "report": False, "since_days": 30}
+    base.update(over)
+    return _ap.Namespace(**base)
+
+
+@pytest.fixture
+def _no_models(monkeypatch):
+    """No Gemini, no InsightFace — the funnel degrades to integrity only, and
+    _run_batch's counters are what is under test."""
+    monkeypatch.setattr(image_qc, "_gemini_client",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no key")))
+    monkeypatch.setattr(image_qc, "load_embedder", lambda: None)
+
+
+def _stub_nodes(monkeypatch, nodes):
+    monkeypatch.setattr(image_qc, "fetch_nodes",
+                        lambda session, base, **kw: nodes)
+
+
+def test_run_batch_maps_post_statuses_onto_its_counters(monkeypatch, _no_models,
+                                                        capsys):
+    """200 -> posted, 409 -> deferred, 413 and everything else -> failed. This
+    mapping IS the exit code Task 8 branches on."""
+    nodes = [_ai_node(1, n=1), _ai_node(2, n=1), _ai_node(3, n=1),
+             _ai_node(4, n=1)]
+    for node in nodes:
+        node["prompt"] = "a woman"
+    _stub_nodes(monkeypatch, nodes)
+    by_node = {"/1/qc": 200, "/2/qc": 409, "/3/qc": 413, "/4/qc": 500}
+    session = _StubSession(
+        post_status=lambda url: next(v for k, v in by_node.items() if k in url))
+
+    code = _run_batch(session, "https://k.com", _batch_args(json=True))
+    assert code == EXIT_FAILED
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert summary == {"posted": 1, "deferred": 1, "failed": 2, "skipped": 0,
+                       "exit": 1}
+
+
+def test_run_batch_exits_zero_when_every_node_is_only_deferred(monkeypatch,
+                                                               _no_models, capsys):
+    """A batch caught mid-render defers everything. That is a healthy run and
+    must not read as a failure to whatever is driving this CLI."""
+    _stub_nodes(monkeypatch, [_ai_node(1, n=1), _ai_node(2, n=1)])
+    code = _run_batch(_StubSession(post_status=409), "https://k.com",
+                      _batch_args(json=True))
+    assert code == EXIT_OK
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1]) == {
+        "posted": 0, "deferred": 2, "failed": 0, "skipped": 0, "exit": 0}
+
+
+def test_run_batch_counts_an_unscoreable_node_as_skipped_not_failed(
+        monkeypatch, _no_models, capsys):
+    """Nothing downloaded, so there is no report to reject. `skipped` keeps it
+    out of the failure count AND out of the stored agreement metric."""
+    _stub_nodes(monkeypatch, [_ai_node(1, n=2)])
+    session = _StubSession(dead=["variant_1", "variant_2"])
+    code = _run_batch(session, "https://k.com", _batch_args(json=True))
+    assert code == EXIT_OK
+    assert session.posts == []          # nothing was reported
+    assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["skipped"] == 1
+
+
+def test_run_batch_survives_a_node_whose_scoring_raises(monkeypatch, _no_models,
+                                                        capsys):
+    """One exploding node is one failure, not a lost batch."""
+    _stub_nodes(monkeypatch, [_ai_node(1, n=1), _ai_node(2, n=1)])
+    real = image_qc.score_node
+
+    def boom(session, base, client, embedder, ref, node):
+        if node["id"] == 1:
+            raise RuntimeError("kaboom")
+        return real(session, base, client, embedder, ref, node)
+    monkeypatch.setattr(image_qc, "score_node", boom)
+
+    code = _run_batch(_StubSession(), "https://k.com", _batch_args(json=True))
+    assert code == EXIT_FAILED
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert (summary["failed"], summary["posted"]) == (1, 1)
+
+
+def test_run_batch_skips_the_face_model_without_an_avatar(monkeypatch, capsys):
+    """load_embedder constructs InsightFace, which on a cold box downloads the
+    buffalo_l pack. Paying that just to then skip the face gate is a long wait
+    for nothing."""
+    monkeypatch.setattr(image_qc, "_gemini_client",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no key")))
+    called = []
+    monkeypatch.setattr(image_qc, "load_embedder",
+                        lambda: called.append(1) or None)
+    _stub_nodes(monkeypatch, [_ai_node(1, n=1)])
+    _run_batch(_StubSession(), "https://k.com", _batch_args())
+    assert called == []
+    assert "no --avatar-node given" in capsys.readouterr().out
+
+
+def test_run_batch_honours_limit_nodes(monkeypatch, _no_models):
+    _stub_nodes(monkeypatch, [_ai_node(i, n=1) for i in range(1, 6)])
+    session = _StubSession()
+    _run_batch(session, "https://k.com", _batch_args(limit_nodes=2))
+    assert len(session.posts) == 2
+
+
+# ---- argparse validation + auth exit code ---------------------------------
+
+def test_main_rejects_a_missing_batch_with_the_usage_code():
+    with pytest.raises(SystemExit) as excinfo:
+        main([])
+    assert excinfo.value.code == EXIT_USAGE
+
+
+@pytest.mark.parametrize("argv", [
+    ["--batch", "b", "--limit-nodes", "0"],
+    ["--batch", "b", "--limit-nodes", "-3"],
+    ["--batch", "b", "--limit-nodes", "many"],
+    ["--batch", "b", "--report", "--since-days", "-1"],
+    ["--batch", "b", "--report", "--since-days", "9999"],
+])
+def test_main_validates_numeric_flags_client_side(argv):
+    """0..3650 is the server's own bound (image_platform.py:2609) and
+    --limit-nodes 0 reads as 'score nothing'. Both fail here with a readable
+    message instead of after a round trip."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(argv)
+    assert excinfo.value.code == EXIT_USAGE
+
+
+def test_main_returns_the_auth_code_when_no_token_is_found(monkeypatch, capsys):
+    monkeypatch.setattr(image_qc, "_resolve_token", lambda token: (None, None))
+    assert main(["--batch", "b-1"]) == EXIT_AUTH
+    assert "no API token found" in capsys.readouterr().err
+
+
+def test_main_returns_the_auth_code_when_the_server_rejects_the_token(
+        monkeypatch, capsys):
+    monkeypatch.setattr(image_qc, "_auth_session", lambda token: _StubSession())
+
+    def rejected(session, base, **kw):
+        raise QCAuthError("the server rejected our token (401)")
+    monkeypatch.setattr(image_qc, "fetch_nodes", rejected)
+    assert main(["--batch", "b-1"]) == EXIT_AUTH
+    assert "rejected our token" in capsys.readouterr().err
+
+
+def test_main_report_json_prints_the_agreement_dict(monkeypatch, capsys):
+    monkeypatch.setattr(image_qc, "_auth_session", lambda token: _StubSession())
+    _stub_nodes(monkeypatch, [{"chosen_variant_id": 5,
+                               "qc": {"recommended_variant_id": 5}}])
+    assert main(["--batch", "b-1", "--report", "--json"]) == EXIT_OK
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["agree"] == 1 and out["comparable"] == 1
