@@ -16592,6 +16592,70 @@ A 10-minute source at fps=2 native = ~1200 frames; the old habit under scale pre
 
 ---
 
+## v901 — AUTOMATED PUBLISHING: staged media, brokered posting, and why neither uses our own Meta app (2026-08-22)
+
+**The ask.** Post finished reels automatically, from one machine, to accounts that must stay unlinkable to each other and must survive each other's bans.
+
+Those requirements decide the architecture, so they come first.
+
+### Why a broker, and why not GitHub
+
+Every self-hosted scheduler — Postiz (~20k stars), Mixpost, and the rest — requires **you** to register the Meta app. That puts our Facebook developer profile back into the chain, which is the exact link the account separation was meant to avoid. What a broker sells is not code; it is **being someone else's customer**, and no repository can supply that.
+
+Posting through Blotato means **their** Meta app and **their** servers call Instagram. Two linking signals disappear at once: the developer identity, and the egress IP. Meta sees N accounts that each authorized a SaaS app used by thousands, rather than N accounts publishing from one residential connection.
+
+What it does NOT fix: content style, posting rhythm, and per-account metadata (emails, phone numbers). And every account on one broker is a single point of failure.
+
+**Anti-detect browsers and proxies are the wrong tool here for a technical reason, not a policy one: there is no browser in an API post, so there is no fingerprint to isolate.** They exist to make browser automation look human, and browser automation against Instagram is the dangerous route — official-API posting sits under 0.5% yearly suspension, browser bots at 15-30%.
+
+### The media problem, and the answer that was already in the repo
+
+Business Login for Instagram (the Page-less route) **cannot receive bytes** — `upload_type=resumable` is documented as Facebook-Login-only. So the video must sit at a URL the remote service can fetch **anonymously**. Blotato is the same: `mediaUrls` takes public URLs, and their docs say plainly *"No upload step needed."*
+
+The platform already produced exactly that URL and nobody had noticed. `/api/jobs/{id}/outputs/{name}` answers an authenticated request with a **302 to a presigned R2 link that carries its own signature and needs no auth**. Verified by fetching one anonymously: `206 video/mp4`, 122MB. So `--from-job` needs only the Kaveno token, and **the video is never downloaded** — ffprobe reads the presigned URL directly, so the spec check on a 122MB file costs a few KB of range requests.
+
+**`POST /api/media/stage` + `DELETE /api/media/stage/{stage_id}`** extend that to files the platform never produced. A user has a Kaveno account and no storage credentials; the platform owns the bucket and already presigns. Handing every user R2 keys, or pushing their video to a third-party file host, were the alternatives — neither is acceptable for a normal user.
+
+- Keys are **user-scoped and self-dating**: `media-staging/{user_id}/{epoch}-{stage_id}{ext}`. Scoped so a guessed `stage_id` from another user resolves to a key that is not theirs. Self-dating because **`list_objects` returns keys only, with no `LastModified`** — without the epoch there is no way to find stale objects short of a HEAD per key.
+- **Self-cleaning instead of a lifecycle rule.** A presigned URL expires; the OBJECT does not. Every stage request first sweeps the caller's own prefix and deletes anything past `MEDIA_STAGE_MAX_AGE_S` (86400s, matching the maximum `expires_in`, so nothing outlives the longest URL that could reach it). One list scoped to one user. The sweep never raises — a storage problem must not fail the upload the user asked for. A bucket lifecycle rule would live outside this repo, invisible to review, and needs credentials nobody here holds.
+- DELETE finds the key by listing the caller's prefix and matching `stage_id`, not by rebuilding it across all seven allowed extensions. One call instead of seven, and correct under the epoch format.
+- Keys written before 2026-08-22 have no epoch and cannot be dated; the sweep skips them rather than guessing.
+
+### Two traps in `code/main.py` that cost real bugs
+
+**There is no bare `time` and no bare `re` at module scope** — only `import time as _time_v872`; everything else is function-local. A global reference to either resolves at **call** time into a `NameError`. This shipped once (v901.1: a 500 on every DELETE) and was nearly shipped again in the sweep.
+
+`code/CLAUDE.md` already says py_compile is insufficient and to `import <module>`. **That is necessary and still not sufficient**: importing a module never executes a function body, so an undefined global inside an endpoint is invisible to it. **Verify an endpoint by CALLING it.** The v901.1 fix is verified by calling `unstage_media` with storage stubbed, for a valid and an invalid id.
+
+### Limits that differ per surface — checking the wrong table blocks valid work
+
+| | Instagram reel | Facebook Page reel |
+|---|---|---|
+| Duration | 3s – **15 min** | 3s – **90s** |
+| Frame rate | 23-60 fps | 24-60 fps |
+| Size | 300MB, 25Mbps | not published |
+| Resolution | ≤1920 horizontal px | ≥540x960 |
+
+One shared table wrongly blocked a real 96s export, which is a fine Instagram reel and an illegal Facebook one. `tools/publish_reel.py` keeps separate tables and checks each target against its own.
+
+**Hashtags: Meta documents 30; Blotato rejects an Instagram post above 5** (HTTP 422). The broker is the binding constraint on that route, and it cost one real failed post. The tool now takes the tightest cap across the chosen targets so it fails at `--dry-run`.
+
+**Meta's own sample (`fbsamples/reels_publishing_apis`) checks `video_status` per phase as well as `status_code`** — a container can carry a failed `uploading_phase`/`processing_phase` while `status_code` still reads `IN_PROGRESS`. Without that the poll spins to timeout and never reports the reason.
+
+### Trial reels
+
+A trial reel goes only to **non-followers** until it graduates, which makes it a real hook test: cold traffic judges it, not an audience that already follows. Supported on both routes, and the field names differ — Meta `trial_params: {graduation_strategy}`, Blotato `target.trial: {graduationStrategy}`; values `MANUAL` (you graduate it in the app) or `SS_PERFORMANCE` (Instagram graduates it on performance). Instagram-only: `--trial` against a Facebook target is an error, because silently ignoring it would publish a normal post **to followers** while the operator believed a cold-traffic test was running.
+
+### A presigned URL is a credential
+
+`output/publishing/log.jsonl` was recording the full presigned URL on the `--from-job` route. It carries `X-Amz-Signature` and is a bearer token for the object until it expires. Now redacted to the object path with the query stripped — enough to answer "which file was this", not enough to fetch it. Found in review; latent, because both logged runs to that point had used a local path.
+
+**Files**: `code/main.py` (the two endpoints) · `tools/publish_reel.py` + `tools/test_publish_reel.py` (70 tests) · `docs/meta-publishing-setup.md` (setup + the routes considered and rejected) · `wiki/meta/auto-publishing.md` (operational page).
+
+**Not built**: per-user rate limiting on `/api/media/stage` (callers are authenticated, so it is quota abuse rather than an open door) · caption editing on an already-published reel · any queue or scheduler; `--jitter` randomises within a run, cron still supplies the cadence.
+
+---
+
 ## v909 — EXTERNAL IMAGE REFERENCES ARE OPTIONAL, ROLE-BOUND, AND NEVER TRUNCATED
 
 **Protected function.** Keep the proven image-generation path unchanged while allowing a scene to use any helpful outside image as a narrow role plate. A fetched Pinterest candidate never becomes an input merely because it exists on disk.
