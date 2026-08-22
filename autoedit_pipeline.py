@@ -142,7 +142,7 @@ def download(path, token, dest: Path):
     print(f"  downloaded: {dest.name} ({dest.stat().st_size / 1e6:.1f} MB)")
 
 
-def fetch_job_files(job_id, work: Path, music_filename=None):
+def fetch_job_files(job_id, work: Path, music_filename=None, hook_bg_filename=None):
     from send_to_platform import resolve_token
     token, source = resolve_token(None)
     print(f"token: {source}")
@@ -158,6 +158,13 @@ def fetch_job_files(job_id, work: Path, music_filename=None):
     # nothing here ever looked for it — which is why the hook had no real
     # background to use and fell back to blurring a scrap of the 16:9 track.
     broll_fn = next((f for f in outs if f.startswith("final_broll_") and f.endswith(".mp4")), None)
+    # v938.16 — an explicit hook background wins over the auto-picked one, and
+    # may be a still image (see autoedit_qc.HOOK_BG_EXTENSIONS).
+    if hook_bg_filename:
+        if hook_bg_filename not in outs:
+            raise AutoEditError(
+                f"hook background is not in this job's outputs: {hook_bg_filename}")
+        broll_fn = hook_bg_filename
     music_fn = music_filename if music_filename in outs else None
     if music_filename and not music_fn:
         raise AutoEditError(f"music file is not in this job's outputs: {music_filename}")
@@ -697,11 +704,22 @@ def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio,
         # there is no full-frame b-roll to show, so we keep the original
         # behaviour: a blurred, cropped grab of a later insert as a backdrop.
         if hook_corner and broll is not None:
-            run(["ffmpeg", "-v", "error", "-t", str(hook_end + 0.2), "-i", str(broll),
-                 "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
-                        "tpad=stop_mode=clone:stop_duration=2,setsar=1",
-                 "-an", "-r", "24", "-y", str(bg)])
-            print(f"hook: full-frame b-roll + speaker at {hook_corner:.3f} flush bottom-left")
+            # The background may be a VIDEO (final_broll) or a STILL IMAGE — the
+            # operator's own 1f35eac2 edit used a still (the black-and-white
+            # interview frame) behind the corner speaker, and it reads the same.
+            # A still needs -loop 1 or ffmpeg emits a single frame and the hook
+            # freezes to one image for a fraction of a second, then goes black.
+            is_image = broll.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+            cmd = ["ffmpeg", "-v", "error"]
+            if is_image:
+                cmd += ["-loop", "1"]
+            cmd += ["-t", str(hook_end + 0.2), "-i", str(broll),
+                    "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
+                           "tpad=stop_mode=clone:stop_duration=2,setsar=1",
+                    "-an", "-r", "24", "-y", str(bg)]
+            run(cmd)
+            print(f"hook: full-frame {'still' if is_image else 'b-roll'} "
+                  f"+ speaker at {hook_corner:.3f} flush bottom-left")
         else:
             if hook_corner:
                 print("hook: no final_broll for this job — corner speaker over the blurred fallback")
@@ -801,8 +819,23 @@ def render_captions_dynamic(nocap: Path, out: Path, template: str, windows, work
     window (captions land identically because the input/transcript is identical)."""
     offsets = sorted({o for _, _, o in windows})
     passes = {}
+    # v938.16 — the pass name carries a fingerprint of the VIDEO it was burned
+    # over. It used to be offset+template only, so a rerun after ANY change to
+    # the composite (new hook layout, new audio, new keying) silently reused
+    # yesterday's captioned passes and threw the fresh composite away. Measured:
+    # a corner-layout render produced a correct nocap and then shipped the old
+    # full-size hook, because cap_pass_0_2_korella.mp4 already existed.
+    # Fourth instance of the same defect in this file — see enhance_audio and
+    # compose. Anything cached here must be named after everything baked into it.
+    src_key = file_fingerprint(nocap)
     for o in offsets:
-        p = work / f"cap_pass_{str(o).replace('-', 'm').replace('.', '_')}_{template}.mp4"
+        tag = str(o).replace('-', 'm').replace('.', '_')
+        p = work / f"cap_pass_{tag}_{template}_{src_key}.mp4"
+        for stale in work.glob(f"cap_pass_{tag}_{template}_*.mp4"):
+            if stale != p:
+                stale.unlink(missing_ok=True)
+        legacy = work / f"cap_pass_{tag}_{template}.mp4"   # pre-v938.16 name
+        legacy.unlink(missing_ok=True)
         if not p.exists():
             render_captions(nocap, p, template, o)
         passes[o] = p
@@ -1012,7 +1045,8 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
     repairs = normalize_repairs(repairs)
     work.mkdir(parents=True, exist_ok=True)
     progress("download")
-    base, sup, music, broll = fetch_job_files(job_id, work, repairs["music_filename"])
+    base, sup, music, broll = fetch_job_files(
+        job_id, work, repairs["music_filename"], repairs.get("hook_bg"))
     dur = probe_duration(base)
     scan_file = work / "scan.json"
     s = json.loads(scan_file.read_text()) if scan_file.exists() else {}

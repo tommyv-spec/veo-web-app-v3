@@ -1070,6 +1070,7 @@ def cmd_autoedit(client, args, report):
         "music_filename": args.music_output,
         "music_db": args.music_db,
         "hook_corner": args.hook_corner,
+        "hook_bg": args.hook_bg,
     }
     run = client.post(f"/api/jobs/{args.job_id}/autoedit", payload)
     autoedit_id = run.get("autoedit_id")
@@ -1201,6 +1202,10 @@ def main(argv=None):
                         "instead of the default full-size-over-blurred-backdrop. 0.43 matches "
                         "the decoded corpus and the operator's own CapCut edit. Omit to keep "
                         "today's layout.")
+    p.add_argument("--hook-bg", default=None, metavar="FILENAME",
+                   help="autoedit: what plays full-frame behind the corner speaker — a "
+                        "filename from this job's outputs. May be a STILL IMAGE (png/jpg) "
+                        "as well as a video. Omit and the job's final_broll_* is used.")
     p.add_argument("--status", action="store_true", dest="autoedit_status",
                    help="autoedit: show the newest run without starting another")
     p.add_argument("--download", metavar="DIR",

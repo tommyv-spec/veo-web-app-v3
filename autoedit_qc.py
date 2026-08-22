@@ -25,7 +25,15 @@ DEFAULT_REPAIRS = {
     # x[0..463] y[1097..1920] on 1080x1920. See
     # docs/experiments/autoedit-hook-composite-placement-2026-08-22.md
     "hook_corner": None,
+    # v938.16 — what plays full-frame behind the corner speaker. A filename from
+    # this job's own outputs. Omitted, the pipeline auto-picks final_broll_*.
+    # It may be a STILL IMAGE: the operator's own 1f35eac2 edit put a black-and-
+    # white interview frame behind the corner speaker, and it reads the same as
+    # a moving b-roll.
+    "hook_bg": None,
 }
+
+HOOK_BG_EXTENSIONS = {".mp4", ".mov", ".png", ".jpg", ".jpeg", ".webp"}
 
 MUSIC_EXTENSIONS = {".aac", ".m4a", ".mp3", ".mp4", ".wav"}
 
@@ -79,6 +87,16 @@ def normalize_repairs(value=None):
             raise ValueError("Hook corner size must be between 0.20 and 0.95 "
                              "(0.43 matches the decoded corpus and the operator's own edit)")
         out["hook_corner"] = hc
+
+    bg = out.get("hook_bg")
+    if bg in (None, ""):
+        out["hook_bg"] = None
+    else:
+        bg = str(bg).strip()
+        if Path(bg).name != bg or Path(bg).suffix.lower() not in HOOK_BG_EXTENSIONS:
+            raise ValueError("Hook background must be a plain output filename ending in "
+                             "mp4, mov, png, jpg, jpeg or webp")
+        out["hook_bg"] = bg
 
     out["pip_enabled"] = bool(out["pip_enabled"])
     out["captions_enabled"] = bool(out["captions_enabled"])
