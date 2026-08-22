@@ -1178,6 +1178,68 @@ def discard_candidates(clips: Sequence[Dict[str, Any]],
     return removable, protected
 
 
+# How much unused silence at the end still counts as "the model ran out of
+# room". Below this the render window really was the binding constraint;
+# above it, the model had time it chose not to use.
+STARVED_ROOM_S = 0.15
+
+
+def diagnose_cut(line: str, take: Dict[str, Any]) -> Dict[str, Any]:
+    """WHY was this take cut? Pure — reads only the stored QC evidence.
+
+    Three causes, and they need opposite fixes, which is the entire reason
+    this function exists:
+
+      under_bucketed  the clip rendered SHORTER than the v861/v884 table
+                      prescribes for its own line. Measured on 3 of 10 real
+                      cut clips (one rendered 4s against a table value of 8s).
+                      Fix: set the duration the table already asked for.
+      starved         correct bucket, but the speech was still going when the
+                      audio stopped. Fix: the next bucket up.
+      abandoned       correct bucket and unused silence left over — the model
+                      stopped early. Measured on 7 of 10, with 0.2-2.0s spare.
+                      A longer window CANNOT fix this; only a re-roll or a
+                      shorter line can.
+
+    Returns diagnosis None when the take was not cut at all.
+    """
+    from clip_duration import pick_clip_duration_for_line
+
+    if "tail_truncated" not in (take.get("hard") or []):
+        return {"diagnosis": None}
+
+    # Reports written before v939.6 have neither field. Absent is NOT zero:
+    # defaulting to 0.0 would read as "no silence left" and label every old
+    # report starved, which is how a repair pass would widen seven clips that
+    # already had time to spare. Refuse to guess and say so.
+    if take.get("tail_room_s") is None or take.get("audio_duration") is None:
+        return {"diagnosis": "unknown", "table_duration": None,
+                "rendered_duration": None, "unused_silence_s": None,
+                "tail_missing": take.get("tail_missing"),
+                "why": "report predates v939.6 - rescore the clip to diagnose it"}
+
+    table = int(pick_clip_duration_for_line(line or ""))
+    # The rendered mp4 is a shade over its bucket (a 4s render measures
+    # ~4.011s), so round rather than floor or the comparison is always off.
+    rendered = int(round(float(take.get("audio_duration") or 0.0)))
+    room = float(take.get("tail_room_s") or 0.0)
+
+    if rendered and rendered < table:
+        diagnosis = "under_bucketed"
+    elif room <= STARVED_ROOM_S:
+        diagnosis = "starved"
+    else:
+        diagnosis = "abandoned"
+
+    return {
+        "diagnosis": diagnosis,
+        "table_duration": table,
+        "rendered_duration": rendered,
+        "unused_silence_s": round(room, 3),
+        "tail_missing": take.get("tail_missing"),
+    }
+
+
 def request_redo(session: Any, base: str, clip_id: int,
                  reason: str) -> Tuple[bool, str]:
     """Send the clip back to be re-rendered. Never raises."""

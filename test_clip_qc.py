@@ -660,3 +660,48 @@ def test_the_report_carries_the_fields_the_diagnosis_needs():
     # Without these two, starved and abandoned are indistinguishable.
     assert take["tail_room_s"] == 1.103
     assert take["audio_duration"] == 4.011
+
+
+def _take(tail_missing=3, tail_room=1.0, coverage=0.6, duration=4.0):
+    return {"attempt": 1, "verdict": "FAIL", "hard": ["tail_truncated"],
+            "tail_missing": tail_missing, "tail_room_s": tail_room,
+            "coverage": coverage, "audio_duration": duration}
+
+
+def test_a_clip_rendered_shorter_than_the_table_is_under_bucketed():
+    # clip 14303: 17 words, table says 8s, it rendered at 4s.
+    d = q.diagnose_cut("this batch sells out fast, so follow me first or it will not let me send it.",
+                       _take(tail_missing=6, tail_room=0.48, duration=4.0))
+    assert d["diagnosis"] == "under_bucketed"
+    assert d["table_duration"] == 8
+    assert d["rendered_duration"] == 4
+
+
+def test_a_clip_that_ran_to_the_very_end_is_starved():
+    # Correct bucket, but the speech is still going when the audio stops.
+    d = q.diagnose_cut("i was just like you. then i found this young korean healer.",
+                       _take(tail_missing=2, tail_room=0.05, duration=6.0))
+    assert d["diagnosis"] == "starved"
+
+
+def test_a_clip_with_unused_silence_was_abandoned():
+    # clip 14274: correct 6s bucket, 2.04s of silence left, still lost 6 words.
+    d = q.diagnose_cut("before you drink it, twist open one saffron capsule and stir the red threads in.",
+                       _take(tail_missing=6, tail_room=2.04, duration=6.0))
+    assert d["diagnosis"] == "abandoned"
+    assert d["table_duration"] == d["rendered_duration"] == 6
+
+
+def test_a_clip_that_is_not_cut_has_no_diagnosis():
+    take = _take()
+    take["hard"] = ["line_missing"]
+    assert q.diagnose_cut("some line", take)["diagnosis"] is None
+
+
+def test_an_old_report_without_the_timing_fields_is_unknown_not_guessed():
+    # 128 reports were written before Task 1 added tail_room_s. Treating a
+    # missing field as 0.0 would label every one of them "starved" and widen
+    # clips that already had unused time.
+    old = {"attempt": 1, "hard": ["tail_truncated"], "tail_missing": 3,
+           "coverage": 0.6}          # no tail_room_s, no audio_duration
+    assert q.diagnose_cut("some line here", old)["diagnosis"] == "unknown"
