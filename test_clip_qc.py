@@ -783,3 +783,44 @@ def test_all_takes_cut_at_the_top_bucket_escalates_to_shorten_the_line():
                                    "rendered_duration": 10}, all_cut=True)
     assert plan["action"] == "shorten_the_line"
     assert "every take" in plan["why"]
+
+
+class _FakeResp:
+    def __init__(self, code, payload=None):
+        self.status_code = code
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+
+class _FakeSession:
+    def __init__(self, code=200, payload=None):
+        self.calls = []
+        self._resp = _FakeResp(code, payload)
+
+    def patch(self, url, json=None, timeout=None):
+        self.calls.append((url, json))
+        return self._resp
+
+
+def test_setting_the_duration_posts_the_right_field():
+    s = _FakeSession()
+    ok, why = q.set_clip_duration(s, "https://x", 42, 8)
+    assert ok is True
+    url, body = s.calls[0]
+    assert url.endswith("/api/clips/42")
+    assert body == {"veo_render_duration_s": 8}
+
+
+def test_a_generating_clip_reports_the_conflict_instead_of_raising():
+    s = _FakeSession(409, {"detail": "Clip 42 is currently GENERATING."})
+    ok, why = q.set_clip_duration(s, "https://x", 42, 8)
+    assert ok is False and "409" in why
+
+
+def test_an_illegal_duration_never_reaches_the_network():
+    s = _FakeSession()
+    ok, why = q.set_clip_duration(s, "https://x", 42, 7)
+    assert ok is False and "not a legal" in why
+    assert s.calls == []

@@ -1337,6 +1337,35 @@ def request_redo(session: Any, base: str, clip_id: int,
     return False, f"{resp.status_code} {detail}"
 
 
+def set_clip_duration(session: Any, base: str, clip_id: int,
+                      seconds: int) -> Tuple[bool, str]:
+    """PATCH the clip's render length. Never raises.
+
+    The value is checked here as well as server-side so an illegal bucket
+    fails locally with a readable message instead of a 422 after a round
+    trip. A 409 means the clip is GENERATING — expected, and a reason to try
+    again later rather than an error to escalate.
+    """
+    from clip_duration import ALLOWED_CLIP_DURATIONS_S
+    if int(seconds) not in ALLOWED_CLIP_DURATIONS_S:
+        return False, (f"{seconds}s is not a legal render length "
+                       f"{tuple(ALLOWED_CLIP_DURATIONS_S)}")
+    try:
+        resp = session.patch(_url(base, f"/api/clips/{clip_id}"),
+                             json={"veo_render_duration_s": int(seconds)},
+                             timeout=120)
+    except Exception as exc:
+        return False, f"error {exc}"
+    if resp.status_code == 200:
+        return True, f"duration set to {seconds}s"
+    detail = ""
+    try:
+        detail = str(resp.json().get("detail", ""))[:120]
+    except Exception:
+        pass
+    return False, f"{resp.status_code} {detail}"
+
+
 def mark_rejected(session: Any, base: str, clip_id: int) -> Tuple[bool, str]:
     """Mark the clip rejected without re-rendering."""
     try:
