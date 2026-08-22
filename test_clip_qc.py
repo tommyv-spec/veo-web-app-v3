@@ -824,3 +824,19 @@ def test_an_illegal_duration_never_reaches_the_network():
     ok, why = q.set_clip_duration(s, "https://x", 42, 7)
     assert ok is False and "not a legal" in why
     assert s.calls == []
+
+
+# --- attach_repair_plan -----------------------------------------------------
+
+def test_repair_rows_carry_the_diagnosis_and_the_action():
+    # The row the CLI prints and logs must say WHY, not just that it acted.
+    clip = _fail_clip()
+    clip["qc"]["line"] = "this batch sells out fast, so follow me first or it will not let me send it."
+    clip["qc"]["selected_at_scoring"] = 1
+    clip["qc"]["takes"][0].update({"tail_missing": 6, "tail_room_s": 0.48,
+                                   "audio_duration": 4.0, "coverage": 0.53})
+    rm, _ = q.discard_candidates([clip])
+    row = q.attach_repair_plan(rm[0], clip["qc"])
+    assert row["diagnosis"] == "under_bucketed"
+    assert row["repair"]["action"] == "widen_and_redo"
+    assert row["repair"]["new_duration"] == 8

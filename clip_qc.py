@@ -1319,6 +1319,20 @@ def plan_duration_repair(diag: Dict[str, Any],
                     f"longer render will not help - re-roll instead")}
 
 
+def attach_repair_plan(row: Dict[str, Any], qc: Dict[str, Any]) -> Dict[str, Any]:
+    """Enrich a discard row with WHY it was cut and what to do about it."""
+    takes = qc.get("takes") or []
+    cur = next((t for t in takes if t.get("attempt") == qc.get("selected_at_scoring")),
+               None) or (takes[0] if takes else {})
+    diag = diagnose_cut(qc.get("line") or "", cur)
+    every_take_cut = all_takes_cut(takes)
+    return {**row,
+            "diagnosis": diag.get("diagnosis"),
+            "diagnosis_detail": diag,
+            "all_takes_cut": every_take_cut,
+            "repair": plan_duration_repair(diag, all_cut=every_take_cut)}
+
+
 def request_redo(session: Any, base: str, clip_id: int,
                  reason: str) -> Tuple[bool, str]:
     """Send the clip back to be re-rendered. Never raises."""
@@ -1876,6 +1890,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="with --discard: also send back clips you already "
                              "APPROVED that turn out to be cut short. Only ever "
                              "applies to cut reasons, never to a paraphrase.")
+    parser.add_argument("--repair-duration", action="store_true",
+                        dest="repair_duration",
+                        help="with --discard --apply: when a clip was cut because "
+                             "its render window was too short, widen it before the "
+                             "redo instead of re-rolling into the same wall")
     parser.add_argument("--min-tail", type=int, default=DEFAULT_MIN_TAIL_TO_REMOVE,
                         dest="min_tail",
                         help="with --discard: how many final words must be missing "
@@ -1976,7 +1995,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                                  "job_id": clip.get("job_id") or job_id})
             rm, pr = discard_candidates(enriched, reasons, args.min_tail,
                                         args.include_approved_cuts)
-            removable.extend(rm)
+            # Look the clip's report back up so the row can carry WHY it was
+            # cut, not just that it was.
+            by_id = {c.get("id"): c.get("qc") for c in enriched}
+            removable.extend(attach_repair_plan(r, by_id.get(r["clip_id"]) or {})
+                             for r in rm)
             protected.extend(pr)
 
         print(f"\n=== CLIPS WHOSE RENDER DOES NOT SAY THE LINE ===")
@@ -2006,6 +2029,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                   f"{r['hard']}  coverage {r['coverage']}  tail_missing {r['tail_missing']}{mark}")
             print(f"      script: {r['line']}")
             print(f"      heard : {r['heard']}")
+            if r.get("diagnosis"):
+                rep = r.get("repair") or {}
+                print(f"      why   : {r['diagnosis']} - {rep.get('why')}")
+                action = rep.get("action")
+                if action == "widen_and_redo" and not args.repair_duration:
+                    print(f"      action: {action} at {rep['new_duration']}s "
+                          f"- NOT APPLIED, pass --repair-duration to widen it")
+                else:
+                    print(f"      action: {action}"
+                          + (f" at {rep['new_duration']}s" if rep.get("new_duration") else ""))
 
         if not args.apply:
             print(f"\n  DRY RUN - nothing changed. Re-run with --apply to "
@@ -2016,6 +2049,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         rows = []
         now = _now_iso()
         for r in capped:
+            widened = ""
+            rep = r.get("repair") or {}
+            if (args.repair_duration and not args.reject_only
+                    and rep.get("action") == "widen_and_redo"):
+                new_s = rep["new_duration"]
+                ok_d, why_d = set_clip_duration(session, base, r["clip_id"], new_s)
+                if not ok_d:
+                    # Do NOT redo at the old length: that spends a render to
+                    # reproduce a failure we already understand.
+                    print(f"    clip {r['clip_id']}: duration change failed "
+                          f"({why_d}) - skipped, not re-rendered", flush=True)
+                    failed += 1
+                    continue
+                widened = f" [widened to {new_s}s]"
             if args.reject_only:
                 ok, why = mark_rejected(session, base, r["clip_id"])
             else:
@@ -2023,7 +2070,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     session, base, r["clip_id"],
                     f"v939 clip QC: {', '.join(r['hard'])} - the render does not "
                     f"say the whole line")
-            print(f"    clip {r['clip_id']}: {why}", flush=True)
+            print(f"    clip {r['clip_id']}: {why}{widened}", flush=True)
             if ok:
                 done += 1
                 # Recorded as a MACHINE decision. Once we act, the operator's
@@ -2035,7 +2082,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "machine_reject" if args.reject_only else "machine_redo",
                              "hard": r["hard"], "line": r["line"],
                              "heard": r["heard"], "prospective": None,
-                             "keep_agreement": None})
+                             "keep_agreement": None,
+                             "diagnosis": r.get("diagnosis"),
+                             "repair": r.get("repair"),
+                             "widened_to": (rep.get("new_duration")
+                                            if widened else None)})
             else:
                 failed += 1
         ledger_append(rows)
