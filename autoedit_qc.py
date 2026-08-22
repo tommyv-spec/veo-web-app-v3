@@ -17,6 +17,14 @@ DEFAULT_REPAIRS = {
     "chroma_blend": 0.02,
     "music_filename": None,
     "music_db": -20.0,
+    # v938.15 — hook composite. None = today's layout (keyed speaker at full
+    # size over a blurred backdrop). A float = the corpus/CapCut layout: the
+    # b-roll fills the frame SHARP and the speaker is scaled to this fraction
+    # and anchored flush to the bottom-left corner, for the hook only.
+    # Measured reference: the operator's own CapCut project used 0.429, giving
+    # x[0..463] y[1097..1920] on 1080x1920. See
+    # docs/experiments/autoedit-hook-composite-placement-2026-08-22.md
+    "hook_corner": None,
 }
 
 MUSIC_EXTENSIONS = {".aac", ".m4a", ".mp3", ".mp4", ".wav"}
@@ -55,6 +63,22 @@ def normalize_repairs(value=None):
         raise ValueError("Green-key softness must be between 0.00 and 0.10")
     if not -40.0 <= out["music_db"] <= -8.0:
         raise ValueError("Music volume must be between -40 dB and -8 dB")
+
+    # v938.15 — hook corner scale. None keeps today's layout; a float switches
+    # to the measured corpus layout. Bounds are deliberately wide (the operator
+    # has shipped 0.429 and 0.895) but reject nonsense.
+    hc = out.get("hook_corner")
+    if hc in (None, ""):
+        out["hook_corner"] = None
+    else:
+        try:
+            hc = float(hc)
+        except (TypeError, ValueError):
+            raise ValueError("Hook corner size must be a number")
+        if not 0.20 <= hc <= 0.95:
+            raise ValueError("Hook corner size must be between 0.20 and 0.95 "
+                             "(0.43 matches the decoded corpus and the operator's own edit)")
+        out["hook_corner"] = hc
 
     out["pip_enabled"] = bool(out["pip_enabled"])
     out["captions_enabled"] = bool(out["captions_enabled"])

@@ -1069,6 +1069,7 @@ def cmd_autoedit(client, args, report):
         "chroma_blend": args.key_softness,
         "music_filename": args.music_output,
         "music_db": args.music_db,
+        "hook_corner": args.hook_corner,
     }
     run = client.post(f"/api/jobs/{args.job_id}/autoedit", payload)
     autoedit_id = run.get("autoedit_id")
@@ -1194,6 +1195,12 @@ def main(argv=None):
                    help="autoedit: music filename already present in the job outputs")
     p.add_argument("--music-db", type=float, default=-20.0,
                    help="autoedit: music volume; starts after the hook")
+    p.add_argument("--hook-corner", type=float, default=None, metavar="SCALE",
+                   help="autoedit: put the keyed hook speaker in the bottom-left corner at "
+                        "SCALE (0.20-0.95) with the full-frame b-roll sharp behind him, "
+                        "instead of the default full-size-over-blurred-backdrop. 0.43 matches "
+                        "the decoded corpus and the operator's own CapCut edit. Omit to keep "
+                        "today's layout.")
     p.add_argument("--status", action="store_true", dest="autoedit_status",
                    help="autoedit: show the newest run without starting another")
     p.add_argument("--download", metavar="DIR",

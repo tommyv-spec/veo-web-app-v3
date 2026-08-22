@@ -13163,6 +13163,7 @@ class AutoEditRequest(BaseModel):
     chroma_blend: float = 0.02
     music_filename: Optional[str] = None
     music_db: float = -20.0
+    hook_corner: Optional[float] = None
 
 
 @app.post("/api/jobs/{job_id}/autoedit")
@@ -13196,6 +13197,7 @@ async def queue_autoedit(
             "chroma_blend": req.chroma_blend,
             "music_filename": req.music_filename,
             "music_db": req.music_db,
+            "hook_corner": req.hook_corner,
         })
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

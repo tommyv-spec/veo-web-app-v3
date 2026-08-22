@@ -1,10 +1,17 @@
 """autoedit_pipeline.py — the CapCut auto-edit pass, as an importable module.
 
 Turns a completed platform job into a posted-ready video: downloads the job's
-final export + 16:9 b-roll "support track", keys the green-screen hook,
-overlays a rounded-corner PIP of the b-roll, enhances the voice, and burns
-word-by-word karaoke captions (via pycaps) whose placement dynamically avoids
-covering any face, the PIP, or the highest-motion zone.
+final export, its 16:9 b-roll "support track" and its full-frame `final_broll`,
+keys the green-screen hook, overlays a rounded-corner PIP of the b-roll,
+enhances the voice, and burns word-by-word karaoke captions (via pycaps) whose
+placement dynamically avoids covering any face, the PIP, or the highest-motion
+zone.
+
+Hook layout is selectable (v938.15). By default the keyed speaker is placed at
+full size over a blurred backdrop. With `hook_corner` set, the full-frame b-roll
+plays SHARP and the speaker shrinks into the bottom-left corner — the layout
+measured in 16 decoded videos and in the operator's own CapCut projects. See
+docs/experiments/autoedit-hook-composite-placement-2026-08-22.md.
 
 MUST stay importable on the Render server, where cv2 / faster_whisper / pycaps
 are NOT installed. Every one of those imports lives inside a function body —
@@ -145,19 +152,30 @@ def fetch_job_files(job_id, work: Path, music_filename=None):
     base_fn = st["result"]["filename"]
     outs = api_get(f"/api/jobs/{job_id}/list-outputs", token).json()["files"]
     sup_fn = next((f for f in outs if f.startswith("support_track_") and f.endswith(".mp4")), None)
+    # v938.15 — jobs also export `final_broll_<job>_<stamp>.mp4`: the b-roll as a
+    # FULL-FRAME 1080x1920 sharp video, not the 16:9 band. That is the file the
+    # operator composites behind the corner speaker in CapCut, and until now
+    # nothing here ever looked for it — which is why the hook had no real
+    # background to use and fell back to blurring a scrap of the 16:9 track.
+    broll_fn = next((f for f in outs if f.startswith("final_broll_") and f.endswith(".mp4")), None)
     music_fn = music_filename if music_filename in outs else None
     if music_filename and not music_fn:
         raise AutoEditError(f"music file is not in this job's outputs: {music_filename}")
     base, sup = work / base_fn, (work / sup_fn if sup_fn else None)
+    broll = work / broll_fn if broll_fn else None
     music = work / music_fn if music_fn else None
     download(f"/api/jobs/{job_id}/outputs/{base_fn}", token, base)
     if sup_fn:
         download(f"/api/jobs/{job_id}/outputs/{sup_fn}", token, sup)
     else:
         print("  no support track found — PIP stage will be skipped")
+    if broll_fn:
+        download(f"/api/jobs/{job_id}/outputs/{broll_fn}", token, broll)
+    else:
+        print("  no full-frame b-roll (final_broll_*) — hook-corner layout will blur a fallback")
     if music_fn:
         download(f"/api/jobs/{job_id}/outputs/{music_fn}", token, music)
-    return base, sup, music
+    return base, sup, music, broll
 
 
 def probe_duration(path):
@@ -641,7 +659,8 @@ def watermark_font():
 
 def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio,
             pip_y=PIP_Y, pip_enabled=True, chroma_similarity=0.10,
-            chroma_blend=0.02, music=None, music_db=-20.0):
+            chroma_blend=0.02, music=None, music_db=-20.0,
+            hook_corner=None, broll=None):
     # Every visual/audio repair setting is in the cache name. A re-run with a
     # stronger key or different music must never silently reuse the old video.
     #
@@ -655,28 +674,61 @@ def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio,
     # Fingerprinting the bytes (not the mtime) means an identical re-render
     # still hits the cache.
     music_key = music.stem[:24] if music else "none"
+    corner_key = "off" if not hook_corner else f"{hook_corner:.3f}"
     cache_key = (f"y{pip_y}_p{int(pip_enabled)}_k{chroma_similarity:.3f}_"
                  f"b{chroma_blend:.3f}_m{music_key}_{music_db:.1f}_"
-                 f"a{file_fingerprint(audio)}")
+                 f"a{file_fingerprint(audio)}_hc{corner_key}")
     nocap = work / f"nocap_wm_{cache_key}.mp4"
     if nocap.exists():
         print("compose: cached")
         return nocap
     inputs = ["-i", str(base)]
     fc_parts, vin, idx = [], "[0:v]", 1
+    corner_used = False
     if hook_end > 0 and key_hex:
         bg = work / "hookbg.mp4"
-        src = segs[3][0] if len(segs) >= 4 else (segs[-1][0] if segs else 0)
-        run(["ffmpeg", "-v", "error", "-ss", str(src), "-t", str(hook_end + 0.2), "-i", str(sup or base),
-             "-vf", "crop=608:1080,scale=1080:1920,gblur=sigma=18,eq=brightness=0.02:saturation=1.05,"
-                    "tpad=stop_mode=clone:stop_duration=2,setsar=1", "-an", "-r", "24", "-y", str(bg)])
+        # v938.15 — the hook background.
+        #
+        # With hook_corner set we want what the corpus and the operator's own
+        # CapCut edits do: the b-roll fills the frame SHARP and carries the
+        # meaning, while the keyed speaker shrinks into a corner. `final_broll`
+        # is already full-frame 1080x1920, so it is used as-is from its own
+        # start. Without it (older jobs export only the 16:9 support track)
+        # there is no full-frame b-roll to show, so we keep the original
+        # behaviour: a blurred, cropped grab of a later insert as a backdrop.
+        if hook_corner and broll is not None:
+            run(["ffmpeg", "-v", "error", "-t", str(hook_end + 0.2), "-i", str(broll),
+                 "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
+                        "tpad=stop_mode=clone:stop_duration=2,setsar=1",
+                 "-an", "-r", "24", "-y", str(bg)])
+            print(f"hook: full-frame b-roll + speaker at {hook_corner:.3f} flush bottom-left")
+        else:
+            if hook_corner:
+                print("hook: no final_broll for this job — corner speaker over the blurred fallback")
+            src = segs[3][0] if len(segs) >= 4 else (segs[-1][0] if segs else 0)
+            run(["ffmpeg", "-v", "error", "-ss", str(src), "-t", str(hook_end + 0.2), "-i", str(sup or base),
+                 "-vf", "crop=608:1080,scale=1080:1920,gblur=sigma=18,eq=brightness=0.02:saturation=1.05,"
+                        "tpad=stop_mode=clone:stop_duration=2,setsar=1", "-an", "-r", "24", "-y", str(bg)])
         inputs += ["-i", str(bg)]
+        if hook_corner:
+            # Flush to the bottom-left corner, which is how every measured
+            # source sits — bottom at exactly the frame edge, left at exactly 0,
+            # never floated with a margin. Measured reference: the decoded
+            # green-screen doctor reads 37.5%W x 29%H and the granny PiP
+            # 39%W x 33%H; a 0.43 clip scale lands the cut-out person right
+            # there, and 0.429 is what the operator's own CapCut edit used.
+            fg_chain = (f"chromakey={key_hex}:{chroma_similarity}:{chroma_blend},despill=type=green,"
+                        f"scale=iw*{hook_corner}:ih*{hook_corner}")
+            overlay = "overlay=x=0:y=H-h:shortest=1"
+            corner_used = True
+        else:
+            fg_chain = f"chromakey={key_hex}:{chroma_similarity}:{chroma_blend},despill=type=green"
+            overlay = "overlay=x=0:y=0:shortest=1"
         fc_parts.append(
             f"{vin}split[b0][b1];"
-            f"[b0]trim=0:{hook_end},setpts=PTS-STARTPTS,"
-            f"chromakey={key_hex}:{chroma_similarity}:{chroma_blend},despill=type=green[fg];"
+            f"[b0]trim=0:{hook_end},setpts=PTS-STARTPTS,{fg_chain}[fg];"
             f"[{idx}:v]trim=0:{hook_end},setpts=PTS-STARTPTS[bgt];"
-            f"[bgt][fg]overlay=x=0:y=0:shortest=1[hook];"
+            f"[bgt][fg]{overlay}[hook];"
             f"[b1]trim={hook_end},setpts=PTS-STARTPTS[rest];"
             f"[hook][rest]concat=n=2:v=1:a=0[v0]")
         vin, idx = "[v0]", idx + 1
@@ -708,8 +760,15 @@ def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio,
             f"[{aidx}:a][music]amix=inputs=2:duration=first:normalize=0[aout]")
         audio_map = "[aout]"
     fontfile = watermark_font()
+    # v938.15 — the disclosure watermark normally sits bottom-left, which is
+    # exactly where the corner speaker goes. §14.1 requires it to stay legible
+    # on every frame, so when the corner is in use it moves to the bottom-RIGHT
+    # for the whole video (one position all the way through — a watermark that
+    # jumps mid-video reads as a glitch). Several source decodes note the same
+    # collision and solve it the same way: move one of the two.
+    wm_x = "w-tw-44" if corner_used else "44"
     fc_parts.append(f"{vin}drawtext=text='syntheticperformer':fontfile='{fontfile}'"
-                    f":fontcolor=white@0.5:fontsize=34:x=44:y=h-78[vout]")
+                    f":fontcolor=white@0.5:fontsize=34:x={wm_x}:y=h-78[vout]")
     print("compose: rendering base (no captions) ...")
     run(["ffmpeg", "-v", "error", *inputs, "-filter_complex", ";".join(fc_parts),
          "-map", "[vout]", "-map", audio_map, "-c:v", "libx264", "-crf", "19", "-preset", "medium",
@@ -953,7 +1012,7 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
     repairs = normalize_repairs(repairs)
     work.mkdir(parents=True, exist_ok=True)
     progress("download")
-    base, sup, music = fetch_job_files(job_id, work, repairs["music_filename"])
+    base, sup, music, broll = fetch_job_files(job_id, work, repairs["music_filename"])
     dur = probe_duration(base)
     scan_file = work / "scan.json"
     s = json.loads(scan_file.read_text()) if scan_file.exists() else {}
@@ -981,6 +1040,7 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
         chroma_similarity=repairs["chroma_similarity"],
         chroma_blend=repairs["chroma_blend"],
         music=music, music_db=repairs["music_db"],
+        hook_corner=repairs.get("hook_corner"), broll=broll,
     )
     start_s, end_s = repairs["trim_start_s"], repairs["trim_end_s"]
     trim_key = f"s{start_s:.2f}_e{end_s:.2f}"
