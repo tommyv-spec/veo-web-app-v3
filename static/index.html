@@ -1084,6 +1084,22 @@
             border: 1px solid rgba(255, 255, 255, 0.18);
             z-index: 3;
         }
+        /* v939 — clip QC verdict on the clip card. Advisory: it never
+           changes what is selected, it only shows what the checker heard. */
+        .badge-clipqc { font-weight: 700; letter-spacing: .3px; }
+        .badge-clipqc.clipqc-pass {
+            background: rgba(34, 197, 94, 0.18); color: #16a34a;
+            border: 1px solid rgba(34, 197, 94, 0.45);
+        }
+        .badge-clipqc.clipqc-fail {
+            background: rgba(239, 68, 68, 0.18); color: #dc2626;
+            border: 1px solid rgba(239, 68, 68, 0.5);
+        }
+        .clipqc-detail {
+            font-size: 10px; line-height: 1.35; margin: 3px 0 0;
+            color: var(--text-muted); opacity: .9;
+        }
+        .clipqc-detail.clipqc-detail-fail { color: #dc2626; opacity: 1; }
         /* v936 — the scorer's own pick. */
         .img-variant .variant-badge-qc.qc-pick {
             background: rgba(34, 197, 94, 0.92); color: white;
@@ -11800,7 +11816,7 @@ Ambient: same kitchen room tone, soft pour sound.
             // failed — retry" banner forever).
             const t = clip._audioTwin || null;
             const twinKey = t ? `|t:${t.status}|${t.approval_status}|${t.output_filename||''}|${t.generation_attempt}|${t.error_code||''}` : '';
-            return `${clip.status}|${clip.approval_status}|${clip.output_filename||''}|${clip.generation_attempt}|${clip.selected_variant||1}|${clip.total_variants||0}|${clip.error_code||''}${twinKey}`;
+            return `${clip.status}|${clip.approval_status}|${clip.output_filename||''}|${clip.generation_attempt}|${clip.selected_variant||1}|${clip.total_variants||0}|${clip.error_code||''}${twinKey}|qc:${clip.qc?(clip.qc.verdict||'')+':'+(clip.qc.scored_at||''):''}`;
         }
         // Split keys: video key changes → full re-render needed; UI-only changes → patch in-place (preserve <video>)
         function getClipVideoKey(clip){
@@ -11813,7 +11829,7 @@ Ambient: same kitchen room tone, soft pour sound.
             // v701f — paired clips: include audio twin approval state.
             const t = clip._audioTwin || null;
             const twinKey = t ? `|t:${t.approval_status}|${t.selected_variant||1}|${t.total_variants||0}` : '';
-            return `${clip.approval_status}|${clip.selected_variant||1}|${clip.total_variants||0}${twinKey}`;
+            return `${clip.approval_status}|${clip.selected_variant||1}|${clip.total_variants||0}${twinKey}|qc:${clip.qc?(clip.qc.verdict||'')+':'+(clip.qc.scored_at||''):''}`;
         }
         // Surgical DOM patch: update badge, actions, variant nav WITHOUT destroying the <video> element
         function patchClipUI(card, clip, jobId){
@@ -12232,6 +12248,46 @@ Ambient: same kitchen room tone, soft pour sound.
             // Wrapped in a marker div so patchClipUI can find/refresh it on later polls.
             const _v815AutoRetryBadge = `<div class="v815-auto-retry-badge">${autoRetryBadgeHtml(c, jid)}</div>`;
 
+            // v939 — shadow-mode clip QC: did this take actually SAY its whole
+            // line? Written by code/clip_qc.py from the operator's box; the
+            // report chooses NOTHING (v886.3), it only shows its working so the
+            // operator can agree or disagree and the ledger can count it.
+            const _v939Qc = (c.qc && typeof c.qc === 'object' && c.qc.version === 1) ? c.qc : null;
+            let _v939Badge = '', _v939Detail = '';
+            if (_v939Qc) {
+                const _fail = _v939Qc.verdict === 'FAIL';
+                const _takes = Array.isArray(_v939Qc.takes) ? _v939Qc.takes : [];
+                const _cur = _takes.find(t => t.attempt === (c.selected_variant || 1)) || _takes[0] || {};
+                const _hard = Array.isArray(_cur.hard) ? _cur.hard : [];
+                // Plain words, not the internal reason codes. The operator is
+                // deciding in one second; 'tail_truncated' is our vocabulary.
+                const _why = {
+                    tail_truncated: 'cut off before the end of the line',
+                    line_missing: 'says something different from the script',
+                    no_speech: 'no speech heard'
+                };
+                const _label = _fail
+                    ? (_why[_hard[0]] || 'line incomplete')
+                    : 'says the full line';
+                _v939Badge = `<span class="badge badge-clipqc ${_fail ? 'clipqc-fail' : 'clipqc-pass'}"`
+                    + ` title="v939 clip QC (advisory, picks nothing) - ${escapeHtml(_label)}">`
+                    + `${_fail ? '⚠ line' : '✓ line'}</span>`;
+                const _bits = [];
+                if (_cur.coverage != null) _bits.push(`${Math.round(_cur.coverage * 100)}% of words heard`);
+                if (_cur.tail_missing) _bits.push(`last ${_cur.tail_missing} word(s) missing`);
+                if (Array.isArray(_cur.missing_words) && _cur.missing_words.length)
+                    _bits.push(`missing: ${_cur.missing_words.slice(0, 5).join(', ')}`);
+                // Only worth showing the recommendation when there was a choice.
+                if (_takes.length > 1 && _v939Qc.recommended_attempt != null
+                        && _v939Qc.recommended_attempt !== (c.selected_variant || 1))
+                    _bits.push(`would pick take ${_v939Qc.recommended_attempt}`);
+                if (_fail && _cur.heard) _bits.push(`heard: “${String(_cur.heard).slice(0, 120)}”`);
+                if (_bits.length) {
+                    _v939Detail = `<div class="clipqc-detail ${_fail ? 'clipqc-detail-fail' : ''}">`
+                        + escapeHtml(_bits.join(' · ')) + `</div>`;
+                }
+            }
+
             // v821 — reworded-line (Prompt B) display. When a clip carries a B
             // line, show BOTH lines, badge which variant actually rendered, and
             // highlight the spoken one. Renders nothing when there's no B line.
@@ -12269,7 +12325,7 @@ Ambient: same kitchen room tone, soft pour sound.
                    </div>`
                 : '';
 
-            return `<div class="clip-card ${rejected&&!redoQueued?'clip-rejected':''} ${approved?'clip-approved':''} ${generating?'clip-generating':''} ${redoQueued?'clip-redo_queued':''} ${pending||waitingApproval||preparing?'clip-pending':''} ${skipped?'clip-skipped':''}" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"><div class="clip-video-collapsed"><div class="clip-video">${vid}</div>${variantNav}<div class="clip-upload-own" style="margin-top:6px;text-align:center;">${uploadVideoCtl}</div></div><div class="clip-video-expanded">${expandedVid}</div><div class="clip-content"><div class="clip-header"><span class="clip-idx">#${c.clip_index+1}</span><span class="badge badge-${badgeClass}">${status.replace('_',' ')}</span>${_v698aPairedBadge}${_v821VariantBadge}${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="Copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}</div>${frameInfo}${_v815AutoRetryBadge}<div class="clip-text">${_v698aDisplayText}</div>${_v821AbLines}${_v853Ctl}<div class="clip-actions-collapsed">${acts}</div><div class="clip-actions-expanded">${expandedActs}</div></div></div>`;
+            return `<div class="clip-card ${rejected&&!redoQueued?'clip-rejected':''} ${approved?'clip-approved':''} ${generating?'clip-generating':''} ${redoQueued?'clip-redo_queued':''} ${pending||waitingApproval||preparing?'clip-pending':''} ${skipped?'clip-skipped':''}" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"><div class="clip-video-collapsed"><div class="clip-video">${vid}</div>${variantNav}<div class="clip-upload-own" style="margin-top:6px;text-align:center;">${uploadVideoCtl}</div></div><div class="clip-video-expanded">${expandedVid}</div><div class="clip-content"><div class="clip-header"><span class="clip-idx">#${c.clip_index+1}</span><span class="badge badge-${badgeClass}">${status.replace('_',' ')}</span>${_v698aPairedBadge}${_v821VariantBadge}${_v939Badge}${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="Copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}</div>${frameInfo}${_v815AutoRetryBadge}${_v939Detail}<div class="clip-text">${_v698aDisplayText}</div>${_v821AbLines}${_v853Ctl}<div class="clip-actions-collapsed">${acts}</div><div class="clip-actions-expanded">${expandedActs}</div></div></div>`;
 
         }
 
@@ -15730,7 +15786,24 @@ Ambient: same kitchen room tone, soft pour sound.
             }, 5000);
         }
 
-async function renderAutoEditCard(jobId) {
+        // v938.21 — is there a finished export to auto-edit? The FILE is the
+        // signal: /export-status reports only the most recent run, so during a
+        // re-export it would say "running" while a finished export sits there.
+        async function _autoEditHasExport(jobId) {
+            try {
+                const r = await fetch(`${API}/jobs/${jobId}/list-outputs`);
+                if (!r.ok) return null;                  // unknown, not "no"
+                const d = await r.json();
+                return (d.files || []).some(f => f.startsWith('final_export_') && f.endsWith('.mp4'));
+            } catch (e) {
+                return null;
+            }
+        }
+
+async function renderAutoEditCard(jobId, hasExport) {
+            // v938.21 — hasExport: true = a final_export_*.mp4 exists, false =
+            // none, null = could not tell (the file list failed). See the call
+            // site in loadExistingExports for why the file is the signal.
             try {
                 // A poll left over from another job must never repaint this one.
                 if (_autoEditTimerJob && _autoEditTimerJob !== jobId) _autoEditStopPoll();
@@ -15752,6 +15825,26 @@ async function renderAutoEditCard(jobId) {
                     }
                     return;
                 }
+                // v938.21 — nothing has ever been auto-edited AND there is no
+                // export to act on: do not mount, and do not create the Exports
+                // panel by asking for it. Re-arm so the card appears by itself
+                // the moment the export lands, without the operator reloading.
+                //
+                // `status` truthy means a run exists (queued / running / done /
+                // failed), which can only happen after an export, so that case
+                // always renders. hasExport === null means the file list failed;
+                // treat it as "do not know" and stay hidden rather than
+                // resurrect the empty panel on a transient blip.
+                if (!status) {
+                    // Most callers (the poll re-arms, the post-run repaints)
+                    // pass nothing, so resolve the signal here rather than let
+                    // an unpassed argument hide the card forever.
+                    let known = hasExport;
+                    if (known === undefined) known = await _autoEditHasExport(jobId);
+                    if (selectedJobId !== jobId) return;
+                    if (known !== true) { _autoEditRearm(jobId); return; }
+                }
+
                 _autoEditLatestFile = (status && status.result_filename) || null;
                 const musicFiles = await _autoEditGetMusicOutputs(jobId);
                 if (selectedJobId !== jobId) return;     // operator switched jobs mid-fetch
@@ -16052,14 +16145,31 @@ async function renderAutoEditCard(jobId) {
         // Load existing exports when switching jobs
         async function loadExistingExports(jobId) {
             reconnectActiveExport(jobId);    // v864 — fire-and-forget: re-show a live export banner even when no file exists yet
-            renderAutoEditCard(jobId);       // v928 — fire-and-forget: the card shows whether or not a result exists yet
             try {
                 const response = await fetch(`${API}/jobs/${jobId}/list-outputs`);
-                if (!response.ok) return;
+                if (!response.ok) { renderAutoEditCard(jobId, null); return; }
                 if (selectedJobId !== jobId) return; // Stale response — user switched jobs
-                
+
                 const data = await response.json();
                 const files = data.files || [];
+
+                // v938.21 — Automatic Finish is mounted only once there is
+                // something for it to act on.
+                //
+                // It used to be called unconditionally at the top of this
+                // function, and because it calls ensureExportsSection() it
+                // CONJURED the whole "Exports" panel on a job that had never
+                // been exported. Operator: "these sections appear even before i
+                // do the export." Auto-edit runs ON the export — the server
+                // answers 409 "Export the final video first" — so offering the
+                // control before one exists is an invitation to a dead end.
+                //
+                // The signal is the FILE, not the newest ExportRun: /export-status
+                // returns only the most recent run, so during a re-export it
+                // would report "running" while a finished export sits right
+                // there and auto-edit is perfectly legal.
+                const _hasExport = files.some(f => f.startsWith('final_export_') && f.endsWith('.mp4'));
+                renderAutoEditCard(jobId, _hasExport);
                 
                 // Filter for export files (final_export_, final_broll_, voice_cloned_).
                 // v698A — final_broll_*.mp4 is the b-roll variant produced
