@@ -17223,6 +17223,8 @@ Five separate stages broke it, and each one silently served stale output while t
 
 **The detection pattern, and the real lesson: THE LOG WAS TRUTHFUL AND THE OUTPUT WAS STILL WRONG.** A render logged `hook: full-frame still + speaker at 0.430 flush bottom-left`, wrote a correct composite to disk, and delivered a video with the old layout. Stage logs prove a stage ran; they cannot prove its output reached the file. **Verify a pipeline change by measuring the DELIVERED artifact, never by reading its logs.**
 
+**This rule is now ENFORCED, not written down (v938.18).** The four cache-name builders are pure functions under the `CACHE NAMES` header in `autoedit_pipeline.py` (`audio_chain_key` / `audio_cache_name`, `compose_cache_key`, `cap_pass_name`, `occupancy_name`), and `code/tests/test_autoedit_cache_keys.py` changes one input at a time and asserts the name moves — a builder that ignores an input cannot pass. **Mutation-tested against the real breaches**: each of the five was reintroduced one at a time and all five were caught. Adding a cache? Add its builder there and a case in that file. Prose had already failed to hold this rule five times in one day.
+
 ### 2. THE AUDIO — measured against CapCut, not guessed
 
 **Do not invent a quality metric.** The chain was first tuned to a "presence-to-mud" ratio (2-5 kHz over 200-500 Hz) invented for the purpose. That number goes UP when a voice loses its body and gains treble — which is exactly the thin, brittle sound being complained about. Optimising it moved the sound AWAY from the target while reporting a 62% improvement.
