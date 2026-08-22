@@ -943,11 +943,12 @@ def run_quality_checks(output: Path, base: Path, expected_dur: float, buckets,
 
 def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, repairs=None):
     """Everything up to (and including) the uncaptioned composed video.
-    Returns (nocap_path, dur, segs, auto_offset, pip_y, chin, base_path).
-    `base_path` is returned too (in addition to the documented 6 fields)
-    because the caption-placement stage's occupancy scan needs the raw
-    downloaded video, not the composed one — dropping it would change
-    what build_occupancy() scans on an uncached run."""
+    Returns (nocap_path, dur, segs, auto_offset, pip_y, chin, base_path, audio_path).
+    `base_path` is returned because the caption-placement stage's occupancy scan
+    needs the raw downloaded video, not the composed one — dropping it would
+    change what build_occupancy() scans on an uncached run.
+    `audio_path` is returned (v938.14) because the libass caption fallback needs
+    the ENHANCED audio and used to guess its filename; see _render_caption_pass."""
     from autoedit_qc import normalize_repairs
     repairs = normalize_repairs(repairs)
     work.mkdir(parents=True, exist_ok=True)
@@ -988,7 +989,7 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
     base, _ = trim_media(base, work / f"base_trim_{trim_key}.mp4",
                          start_s, end_s, dur)
     segs = shifted_segments(segs, start_s, trimmed_dur)
-    return nocap, trimmed_dur, segs, auto_offset, pip_y, chin, base
+    return nocap, trimmed_dur, segs, auto_offset, pip_y, chin, base, audio
 
 
 def caption_engine() -> str:
@@ -1018,7 +1019,8 @@ def caption_engine() -> str:
         return "libass"
 
 
-def _render_caption_pass(nocap: Path, out: Path, template: str, windows, work: Path, dur: float):
+def _render_caption_pass(nocap: Path, out: Path, template: str, windows, work: Path,
+                         dur: float, audio: Path):
     """One entry point for both caption renderers, so run_autoedit does not care."""
     engine = caption_engine()
     if engine == "pycaps":
@@ -1037,9 +1039,13 @@ def _render_caption_pass(nocap: Path, out: Path, template: str, windows, work: P
             f"Caption style '{template}' needs the browser renderer (pycaps), "
             f"which is not installed here. The fallback renderer only has: "
             f"{', '.join(sorted(_ac.STYLES))}.")
-    audio = work / "audio_pol.wav"
-    if not audio.exists():
-        audio = work / "audio_enh.wav"
+    # v938.14 — the caller hands us the enhanced audio. This used to be
+    # `work / "audio_pol.wav"` with a fallback to `audio_enh.wav`, and once the
+    # audio cache started keying its filename on the voice chain, that hardcoded
+    # name stopped existing — so this path silently fell through to audio_enh,
+    # which is the DENOISED-BUT-UN-EQ'd file. The libass fallback would have
+    # shipped video with none of the CapCut matching applied, and nothing would
+    # have said so. Guessing a filename is what made that possible.
     _ac.render(nocap, out, template, windows, audio, work)
 
 
@@ -1049,7 +1055,7 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
     """The whole pass. `progress` gets called with a stage-name string."""
     from autoedit_qc import normalize_repairs
     repairs = normalize_repairs(repairs)
-    nocap, dur, segs, auto_offset, pip_y, chin, base = prepare_composition(
+    nocap, dur, segs, auto_offset, pip_y, chin, base, audio = prepare_composition(
         job_id, work, progress, repairs=repairs)
     buckets = []
     windows = []
@@ -1065,12 +1071,12 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
             buckets = build_occupancy(base, dur)
         occ_file.write_text(json.dumps(buckets))
         windows = plan_caption_windows(buckets, chin, segs, pip_y, dur)
-        _render_caption_pass(nocap, out, template, windows, work, dur)
+        _render_caption_pass(nocap, out, template, windows, work, dur, audio)
     elif repairs["captions_enabled"]:
         buckets = build_occupancy(base, dur)
         chosen_offset = offset if offset is not None else auto_offset
         windows = [(0.0, dur, chosen_offset)]
-        _render_caption_pass(nocap, out, template, windows, work, dur)
+        _render_caption_pass(nocap, out, template, windows, work, dur, audio)
     else:
         out.unlink(missing_ok=True)
         shutil.copy2(nocap, out)
