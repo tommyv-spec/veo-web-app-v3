@@ -176,11 +176,16 @@ def resolve_clip_duration_s(
 ) -> Optional[int]:
     """Final per-clip duration. Precedence, highest first:
 
-    1. ``explicit``      — the scene's `- **clip_duration_s:**` bullet (v861)
-    2. ``anchor_bucket`` — the v667 frame-anchor-derived bucket (transformation
-                           montages; already ceil'd to [4,6,8] by the caller)
-    3. ``line_text`` sized by the v861 word table and the v884 char table,
-       whichever asks for the longer clip
+    1. ``explicit``      — the scene's `- **clip_duration_s:**` bullet (v861).
+                           Outranks everything: a declared duration is a
+                           deliberate author choice, and the auditor is where a
+                           bad one gets caught, not here.
+    2. SPOKEN line — ``max(anchor_bucket, what the line needs)`` (v939.8). The
+       v667 anchor may LENGTHEN a clip but never shorten it below the speech:
+       the anchor describes visual timing and knows nothing about how long the
+       words take. The line is sized by the v861 word table and the v884 char
+       table, whichever asks for the longer clip.
+    3. SILENT scene — ``anchor_bucket`` alone; there is no speech to fit.
     4. None              — no line, no anchor: the job-level duration applies
 
     Both caller-supplied durations go through the same validation gate. Neither
@@ -192,8 +197,28 @@ def resolve_clip_duration_s(
     """
     if explicit is not None:
         return _validated_duration_s(explicit, "clip_duration_s")
-    if anchor_bucket is not None:
-        return _validated_duration_s(anchor_bucket, "anchor_bucket")
+
+    # v939.8 — THE ANCHOR MAY LENGTHEN A CLIP, NEVER SHORTEN IT BELOW THE
+    # SPEECH. The anchor bucket is derived from frame anchors: it describes
+    # VISUAL timing and knows nothing about how long the words take to say.
+    # Letting it outrank the line's own requirement breaks v708's zero
+    # word-loss contract by construction.
+    #
+    # Measured 2026-08-23: all NINE under-bound clips in production took this
+    # path — `target_duration_s` set and equal to the stored duration in every
+    # case — and every one was cut short at render. Two of them (14302, 14303)
+    # are clips that turned up in the cut-clip investigation. One stored 4s for
+    # a line the table sizes at 8s.
+    #
+    # A longer anchor still wins: a visual beat may legitimately want more room
+    # than the words need. Only the shortening direction is a defect.
     if count_line_words(line_text) == 0:
+        # Silent scene: no speech to fit, so the anchor is the only signal.
+        if anchor_bucket is not None:
+            return _validated_duration_s(anchor_bucket, "anchor_bucket")
         return None
-    return pick_clip_duration_for_line(line_text)
+
+    line_needs = pick_clip_duration_for_line(line_text)
+    if anchor_bucket is None:
+        return line_needs
+    return max(_validated_duration_s(anchor_bucket, "anchor_bucket"), line_needs)
