@@ -17195,3 +17195,101 @@ Recorded so they are not assumed to exist: **clips QC** (Whisper line-match, lip
 
 **Still true, and not changed by any of this: v886.3 — the operator makes every pick, QC chooses nothing, and QC can never block a send.**
 
+---
+
+## v938 — THE AUTO-EDIT PASS: the manual CapCut edit, measured and automated (2026-08-21/22)
+
+**What it is.** The operator's hand-editing of every finished render — combine the export with its b-roll, key the green-screen hook, enhance the voice, burn karaoke captions — runs as a platform feature. Three entry points, one pipeline (`code/autoedit_pipeline.py`): the Auto-Edit card on the job page, `python code/send_to_platform.py autoedit <job-id>`, and the local `python tools/capcut_autoedit.py <job-id>`. The server QUEUES (`autoedit_runs` + 7 endpoints in `main.py`); the render happens server-side or on the operator's PC via `code/static/autoedit_worker.py --watch`. Every stage is cached in a work dir.
+
+Sub-versions v938.1-.11 built the feature; **v938.12-.17 are the corrections below, and they are the part worth reading.** Every number here is reproducible with `python code/measure_capcut_match.py <file>`.
+
+### 1. THE CACHE-KEY DEFECT — five instances of one mistake. Read this before touching this file.
+
+**The rule: anything cached must be named after EVERYTHING baked into it.** Not after the settings that produced it, not after the stage that wrote it — after every input whose change would change the bytes.
+
+Five separate stages broke it, and each one silently served stale output while the log said the new code had run:
+
+| # | stage | keyed on | what it missed | symptom |
+|---|---|---|---|---|
+| .12 | `enhance_audio` | nothing (`audio_pol.wav`) | the voice chain | a rebuilt chain **never ran** on any job with a cached file; proved bit-identical by md5, mtime 10h older than the fix |
+| .14 | `compose()` | picture + music | **the audio it muxes in** | new audio + cached video = old voice; render succeeds, nothing sounds different |
+| .14b | `_render_caption_pass` | hardcoded `audio_pol.wav` | that the name had changed | fell through to the un-EQ'd file; the libass path burned captions over audio with none of the matching applied |
+| .16 | `render_captions_dynamic` | offset + template | **the video burned over** | a correct new composite was built and then discarded for yesterday's captioned pass |
+| .17 | occupancy map | trim values | which video was scanned | would reuse a scan of the wrong source |
+
+**Why it kept happening.** Each cache was written by someone thinking about their own stage's settings. The bug is always the input from ANOTHER stage. `compose()` even carried the comment *"Every visual/audio repair setting is in the cache name"* — true, and it still shipped the wrong voice, because the audio is not a setting.
+
+**The fix pattern**: `file_fingerprint(path)` — an md5 of the file's CONTENT (not mtime, so an identical re-render still hits the cache) folded into the cached artifact's filename, plus deletion of stale siblings so existing work dirs self-heal.
+
+**The detection pattern, and the real lesson: THE LOG WAS TRUTHFUL AND THE OUTPUT WAS STILL WRONG.** A render logged `hook: full-frame still + speaker at 0.430 flush bottom-left`, wrote a correct composite to disk, and delivered a video with the old layout. Stage logs prove a stage ran; they cannot prove its output reached the file. **Verify a pipeline change by measuring the DELIVERED artifact, never by reading its logs.**
+
+### 2. THE AUDIO — measured against CapCut, not guessed
+
+**Do not invent a quality metric.** The chain was first tuned to a "presence-to-mud" ratio (2-5 kHz over 200-500 Hz) invented for the purpose. That number goes UP when a voice loses its body and gains treble — which is exactly the thin, brittle sound being complained about. Optimising it moved the sound AWAY from the target while reporting a 62% improvement.
+
+**Measure the target instead.** Five videos existed on the operator's machine in BOTH states: the platform export dropped into CapCut (`~/Downloads/final_export_*.mp4`) and the file CapCut wrote back (`~/AppData/Local/CapCut/Videos/`). Same speech, one editing pass between. Averaging the long-term speech spectrum of both sides gives what the tool actually does, per band:
+
+```
+  60-120 Hz  -13.8      2-3 kHz   +1.1
+ 120-250 Hz   -0.3      3-5 kHz   +1.1
+ 250-500 Hz   +0.3      5-8 kHz   -1.0
+ 500-1k Hz    +0.0      8-12 kHz  -1.9
+   1-2 kHz    -0.0     12-16 kHz  -0.5
+```
+
+**CapCut does ONE substantial thing: it loses the sub-120 Hz rumble.** Everything else moves under 2 dB. There is no neural resynthesis to chase and no tool to buy. Corroborated independently: the operator's CapCut drafts show **237 of 276 using `denoise_v2`**, the small built-in denoiser; the server-side "Enhance voice" model was never invoked.
+
+Scored as weighted deviation from that curve — `code/measure_capcut_match.py`, where `--derive <before> <after> ...` rebuilds the target from new pairs:
+
+```
+ old chain (thin + bright)   3.47
+ tone only                   1.37
+ + fitted low shelf          1.09   (Nuri)
+ a real CapCut export        1.78   <- spread among CapCut's OWN files
+```
+
+**1.78 is the scale.** A score inside CapCut's own file-to-file variation is done; chasing lower is chasing noise.
+
+**The low end must be FITTED, never fixed (v938.17).** DeepFilterNet over-removes rumble (60-120 Hz measured +1.0 dB before it, -21.6 after), so a shelf puts back what it took. But a fixed +7 dB shelf tuned on one voice **boosts the fundamental** of a deep male voice whose fundamental sits at 100-120 Hz: that render scored **4.27, worse than the 3.47 it started from.** `fit_low_shelf()` now measures this job's own 60-120 Hz against its own 500-2000 Hz body and corrects closed-loop — a shelf spills into neighbouring bands and never delivers the gain you ask for, so it applies to a 40s probe, re-measures, and corrects the remainder. Male 4.27 → 3.10 open-loop → **2.91** closed-loop; Nuri unchanged at 1.17. On the DeepFilter-SKIPPED path the correction FLIPS (rumble still present → cut, not boost): `_VOICE_CHAIN_RAW`.
+
+**MEASURE THE SAME WAY YOU SET THE TARGET.** The first fit read the band with ffmpeg `bandpass`+`volumedetect` while the target came from an FFT. Same physical quantity, different numbers — **-12.9 vs -21.6 dB on identical audio**, because volumedetect averages the whole file including silence and the filter skirts leak. That produced a confident correction **with the wrong sign**. `low_shelf_gain()` now uses the identical FFT size, speech gate and body normalisation as the scorer.
+
+**Neural speech-enhancement tools: tested, rejected, with numbers.** ClearVoice `MossFormer2_SE_48K` made this material WORSE (0.151 → 0.086) — the source is clean TTS with nothing to denoise. LavaSR is a bandwidth-extension model and destroys 1-8 kHz (ratio 1.007 → 0.006). VoiceFixer needs 2946 MB and resemble-enhance 2529-2766 MB, both OOM on the 2 GB box. NVIDIA NeMo SE **weights** are `cc-by-nc-sa-4.0` — non-commercial — despite the Apache-2.0 toolkit.
+
+**Loudness is not the gap.** Our output targets -15 LUFS; the operator's CapCut files measure -18.7 to -23.3, i.e. **we are 4-8 LU LOUDER than the file he prefers.** Loudness bias normally hands the win to the louder file; he preferred the quieter one anyway, so the preference is genuinely tonal. Do not chase a louder preset.
+
+**The standing caveat, deliberately not engineered away:** the target is an average of five exports that are mostly ONE speaker. A deep male voice should not be forced onto it — his residual gap sits in 120-250 Hz and 5-8 kHz, which is his voice, not a defect. The score is a guide when the voice differs from the reference set, not a law.
+
+### 3. THE HOOK COMPOSITE — the corner speaker (v938.15/.16, opt-in)
+
+Two independent sources agree, and the pipeline did the inverse of both.
+
+**The decoded corpus.** Of 319 `raw/videos/decoded_*.md`, **16 composite a person into a corner; 15 bottom-LEFT, 1 bottom-right** (`arms-before-after`, a different producer). All put the speaker over **full-screen SHARP b-roll** — never a blurred backdrop. Measured off the decodes' own frames: the green-screen doctor in `salvora_reel4` reads **37.5% W x 29% H**, the granny PiP in `salvora_reel2` **39% W x 33% H**. Both flush to the left and bottom edges, never floated with a margin. `pip-narrator-elijah:36` describes it as *"roughly the bottom-left quarter of the frame"* with b-roll cutting every 1.3-2.0s behind.
+
+Two jobs it does: a **persistent narrator corner-cam** through the hook, or a **handoff bridge** that opens late to introduce the body speaker — `salvora_reel1:29` states it outright: *"PiP introduces the BODY voice over the still-running HOOK image."* Both end in a hard cut to that speaker full-frame.
+
+**The operator's own CapCut projects** (`draft_content.json`, canvas 1080x1920):
+
+| project | clip scale | transform | box | behind |
+|---|---|---|---|---|
+| `0819(2)-a29a3425` | **0.429** | (-0.571,-0.571) | **x[0..463] y[1097..1920]** | `final_broll`, full-frame |
+| `0819(2)` (7ba370bc) | 0.895 | (-0.487,-0.691) | overflowing left+bottom | `final_broll`, cut 3x in 9s |
+| `0818-1f35eac2` | 0.607 | (0.000,-0.393) | bottom-CENTRE, flush bottom | a full-frame **still** |
+
+**The corner exists ONLY during the hook** — every other clip on those timelines is `transform=(0,0)` full-frame. The clip box (0.429) is larger than the visible person because the cutout leaves transparent margin, so **a 0.43 clip scale lands the person at ~37-39% width — exactly where both decodes sit.** The two sources converge from opposite directions.
+
+**CapCut's background removal is stored as `materials.videos[].matting.flag=3`, NOT as a `chromas` material.** Reading "no chromas" as "it is a plain rectangle" is wrong: the corner figure is a CUT-OUT, which is what our chromakey already produces.
+
+**Two supporting facts the pipeline needed.** (a) Jobs export **`final_broll_<job>_<stamp>.mp4` — full-frame 1080x1920, sharp** — and `fetch_job_files` only ever looked for `support_track_16x9_*`, so the hook had no real background and blurring a scrap of the 16:9 track was the only thing `compose()` could do. (b) The background may be a **STILL IMAGE** — the 1f35eac2 edit used a full-frame black-and-white interview frame — which needs `-loop 1` or ffmpeg emits one frame and the hook goes black.
+
+**Shipped opt-in; the default is unchanged.** `--hook-corner 0.43 --hook-bg <output-filename>`; omitted, the layout is exactly as before. The `syntheticperformer` watermark draws at `x=44, y=h-78` — inside that exact corner — so when the corner is in use it moves to the bottom RIGHT for the whole video (§14.1 needs it legible; a watermark that jumps mid-video reads as a glitch).
+
+**The occupancy scan must read what the VIEWER sees (v938.17).** It normally scans the raw export, which is fine while the composite only adds the PIP. With `hook_corner` they disagree completely — base has the speaker full-frame on green, the composite has him small in the corner with someone else behind — and captions planned against the base landed **across his face**, the one thing the operator has ruled out absolutely. When the hook is recomposited the scan now reads the composite.
+
+**Evidence:** `docs/experiments/autoedit-hook-composite-placement-2026-08-22.md` (per-decode table with line citations, the CapCut numbers, and a reproduce script).
+
+### 4. Two pre-existing bugs found here, NOT fixed
+
+- `code/audio_processor.py` asks ffmpeg for `arnndn=m=cb.rnnn`; **that model file is absent from the repo**, so the platform's **export** denoise has been silently falling back to a cruder `afftdn`.
+- `try_elevenlabs_voice_isolator` is fully implemented with **zero call sites** and no API key configured.
+
