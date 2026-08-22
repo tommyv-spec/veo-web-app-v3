@@ -16,6 +16,7 @@ import json
 import uuid
 import shutil
 import secrets
+import tempfile
 import hashlib
 import asyncio
 from datetime import datetime, timedelta
@@ -9652,6 +9653,126 @@ class ExportSettings(BaseModel):
     # Legacy (backwards compatibility)
     playback_speed: float = Field(default=1.0, ge=1.0, le=1.5)  # 1.0 = normal, up to 1.5×
     enhance_audio: bool = False
+
+
+MEDIA_STAGE_PREFIX = "media-staging"
+MEDIA_STAGE_MAX_BYTES = 500 * 1024 * 1024
+MEDIA_STAGE_EXT = {".mp4", ".mov", ".m4v", ".webm", ".jpg", ".jpeg", ".png"}
+
+
+def _media_stage_key(user_id: str, stage_id: str, suffix: str) -> str:
+    """User-scoped so one caller can never presign or delete another's file."""
+    return f"{MEDIA_STAGE_PREFIX}/{user_id}/{stage_id}{suffix}"
+
+
+@app.post("/api/media/stage")
+async def stage_media(
+    file: UploadFile = File(...),
+    expires_in: int = Form(3600),
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Give any file a short-lived public URL, without the caller owning storage.
+
+    Publishing a reel through Instagram's Business Login route — or through a
+    broker like Blotato — requires the video to sit at a URL the remote service
+    can fetch ANONYMOUSLY. Job outputs already get that from the presigned-R2
+    redirect on /api/jobs/{id}/outputs/{name}. A file the platform has never
+    seen (a local edit, an experiment render) had no route at all, and the only
+    workarounds were handing every user R2 credentials or pushing their video to
+    a third-party file host. Neither is acceptable for a normal user.
+
+    The URL is unguessable (uuid) and expires; the object is user-scoped and
+    deletable via DELETE /api/media/stage/{stage_id}.
+    """
+    from backends.storage import is_storage_configured, get_storage
+
+    if not is_storage_configured():
+        raise HTTPException(status_code=503,
+                            detail="Object storage is not configured on this server")
+
+    suffix = Path(file.filename).suffix.lower() if file.filename else ""
+    if suffix not in MEDIA_STAGE_EXT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported type '{suffix}'. Allowed: {', '.join(sorted(MEDIA_STAGE_EXT))}")
+
+    expires_in = max(60, min(int(expires_in or 3600), 86400))
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(content) > MEDIA_STAGE_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File is {len(content) / 1e6:.0f}MB; the cap is "
+                   f"{MEDIA_STAGE_MAX_BYTES / 1e6:.0f}MB")
+
+    stage_id = uuid.uuid4().hex
+    key = _media_stage_key(current_user.id, stage_id, suffix)
+
+    tmp_path = Path(tempfile.gettempdir()) / f"stage_{stage_id}{suffix}"
+    try:
+        tmp_path.write_bytes(content)
+        storage = get_storage()
+        await asyncio.to_thread(
+            storage.upload_file, str(tmp_path), key,
+            file.content_type or "application/octet-stream")
+        url = storage.get_presigned_url(key, expires_in=expires_in)
+    finally:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+
+    # [TEMP v901] remove once operator-side evidence lands
+    print(f"[MediaStage v901] user={current_user.id[:8]} staged {key} "
+          f"({len(content) / 1e6:.1f}MB, {expires_in}s)", flush=True)
+
+    return {
+        "stage_id": stage_id,
+        "key": key,
+        "url": url,
+        "size_bytes": len(content),
+        "expires_in": expires_in,
+    }
+
+
+@app.delete("/api/media/stage/{stage_id}")
+async def unstage_media(
+    stage_id: str,
+    ext: str = Query("", description="file suffix used at stage time, e.g. .mp4"),
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Delete a staged object. Scoped to the caller's own prefix, so a guessed
+    stage_id belonging to another user resolves to a key that is not theirs and
+    simply is not found."""
+    from backends.storage import is_storage_configured, get_storage
+
+    if not is_storage_configured():
+        raise HTTPException(status_code=503, detail="Object storage is not configured")
+    if not re.fullmatch(r"[0-9a-f]{32}", stage_id or ""):
+        raise HTTPException(status_code=400, detail="Bad stage_id")
+
+    storage = get_storage()
+    suffixes = [ext.lower()] if ext else sorted(MEDIA_STAGE_EXT)
+    removed = []
+    for suffix in suffixes:
+        if suffix not in MEDIA_STAGE_EXT:
+            continue
+        key = _media_stage_key(current_user.id, stage_id, suffix)
+        try:
+            if await asyncio.to_thread(storage.exists, key):
+                await asyncio.to_thread(storage.delete, key)
+                removed.append(key)
+        except Exception as exc:                                  # noqa: BLE001
+            print(f"[MediaStage v901] delete failed {key}: {exc}", flush=True)
+
+    # [TEMP v901] remove once operator-side evidence lands
+    print(f"[MediaStage v901] user={current_user.id[:8]} unstaged "
+          f"{len(removed)} object(s) for {stage_id}", flush=True)
+    return {"removed": removed}
 
 
 @app.post("/api/jobs/{job_id}/upload-master-audio")
