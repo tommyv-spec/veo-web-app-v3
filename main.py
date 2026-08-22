@@ -9711,19 +9711,23 @@ async def stage_media(
     stage_id = uuid.uuid4().hex
     key = _media_stage_key(current_user.id, stage_id, suffix)
 
-    tmp_path = Path(tempfile.gettempdir()) / f"stage_{stage_id}{suffix}"
+    # Upload the bytes straight through. The earlier version staged them in a
+    # temp file first and swallowed OSError on unlink, so any failure to remove
+    # it leaked disk on a long-running server. There is no reason to touch the
+    # local filesystem at all — the content is already in memory.
+    storage = get_storage()
+    await asyncio.to_thread(
+        storage.upload_bytes, content, key,
+        file.content_type or "application/octet-stream")
     try:
-        tmp_path.write_bytes(content)
-        storage = get_storage()
-        await asyncio.to_thread(
-            storage.upload_file, str(tmp_path), key,
-            file.content_type or "application/octet-stream")
         url = storage.get_presigned_url(key, expires_in=expires_in)
-    finally:
+    except Exception:
+        # Presigning can fail after the object landed; do not orphan it.
         try:
-            tmp_path.unlink()
-        except OSError:
-            pass
+            await asyncio.to_thread(storage.delete, key)
+        except Exception:                                         # noqa: BLE001
+            print(f"[MediaStage] orphaned {key} after presign failure", flush=True)
+        raise
 
     print(f"[MediaStage] user={current_user.id[:8]} staged {key} "
           f"({len(content) / 1e6:.1f}MB, {expires_in}s)", flush=True)
