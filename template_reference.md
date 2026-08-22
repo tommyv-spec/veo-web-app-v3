@@ -17318,6 +17318,18 @@ Measured against the whole corpus when it landed: **0 of 163 decodes newly hard-
 
 **Why this is a gate and not a checklist line.** The corpus described composite layouts in words for a year and every frame had to be re-measured the moment the edit layer needed a number. Prose decays; a gate does not. Same philosophy as `layer_evidence` beside it: the checker cannot judge whether a box is CORRECT, so it requires the DECLARATION and requires it to be numeric — an author made to write a fraction has to go measure one. `tools/grid_frames.py` makes that one command (10% grid overlay; the box reads straight off).
 
+### 3b. TRIED AND REJECTED — protecting the hero prop from captions (v938.19)
+
+Reviewing job `1ba2d06d` (a palm held up dead-centre while the presenter counts on it) the captions sat straight across that palm. No face was covered, so every check passed, and the subject of the shot was still behind the text. The obvious fix is to make the hero prop a third avoid-zone beside faces and the insert. **It was built, measured, and reverted. Do not rebuild it without reading this.**
+
+**Why ranking cannot help — the geometry is full.** Scanning EVERY band centre from 0.14 to 0.71 rather than the three the planner offers, on that video: **39-71 legal positions per second, and ZERO of 38 seconds had a single band that clears the hero zone.** The best possible position was identical to the one already chosen (-0%). A presented palm spans the whole usable strip between the faces above it and the platform safe zone below. Wired in as a ranking cost it produced **-1% coverage and two extra caption jumps** — strictly worse. A smaller caption card does not help either: the band is 100% inside the palm at every legal position.
+
+**Why the detector cannot be trusted either.** The zone was found by skin segmentation (YCrCb, largest non-face blobs). That detects SKIN, not hero props — necks, chests and forearms all qualify. Demoted to a report-only NOTE, it fired on **both** test videos, including a plain talking head with no dominant prop. A check that fires on everything measures nothing (v936.2's lesson, again).
+
+**What is actually true here:** when a hero prop is framed dead-centre and large — which our own rules ask for (`[[visual-hook-construction-rules]]` Rule 24, hero prop dead-centre foreground) — a caption **cannot** avoid it. That is a framing consequence, not a placement bug. A real fix would have to come from the build side (frame the prop higher or smaller) or from a genuine object detector that can tell a held prop from a person's own skin. Neither is a caption-placement change.
+
+The operator rule stands unchanged and is met: **captions never cover a face.** Verified on this job by drawing the detected boxes — the one apparent violation was OpenCV mis-reading an orange pill-bottle label as a face.
+
 ### 4. Two pre-existing bugs found here, NOT fixed
 
 - `code/audio_processor.py` asks ffmpeg for `arnndn=m=cb.rnnn`; **that model file is absent from the repo**, so the platform's **export** denoise has been silently falling back to a cruder `afftdn`.
