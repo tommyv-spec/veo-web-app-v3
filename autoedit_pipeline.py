@@ -88,6 +88,72 @@ def file_fingerprint(path, n=8):
     return h.hexdigest()[:n]
 
 
+# ---------------------------------------------------------------------------
+# CACHE NAMES — one pure function per cached artifact.
+#
+# THE RULE: a cached artifact is named after EVERYTHING baked into it. Not the
+# settings of the stage that wrote it — every input whose change would change
+# the bytes. Five stages in this file broke that rule, and each one silently
+# served stale output while the log said the new code had run:
+#
+#   audio_pol.wav      keyed on nothing        -> a rebuilt voice chain never ran
+#   nocap_wm_*.mp4     keyed on picture+music  -> muxed the NEW audio, served the OLD video
+#   cap_pass_*.mp4     keyed on offset+template-> burned captions over yesterday's composite
+#   occupancy_*.json   keyed on trim values    -> reused a scan of the wrong video
+#   (plus a caption helper that guessed a filename that had stopped existing)
+#
+# They live here, as pure functions, so the rule is READABLE and TESTABLE
+# (code/tests/test_autoedit_cache_keys.py asserts each name moves when any of
+# its inputs moves). Adding a cache? Add its builder here and a test with it.
+# ---------------------------------------------------------------------------
+
+def audio_chain_key():
+    """Fingerprint of the whole voice-processing definition.
+
+    Both chains AND the constants behind the measured low shelf: the shelf gain
+    is derived from the audio, so the same source always yields the same gain,
+    but changing the target or the clamps must invalidate every cached file.
+    """
+    return hashlib.md5(
+        (_VOICE_CHAIN + "|" + _VOICE_CHAIN_RAW +
+         f"|{_LOW_TARGET_DB}|{_LOW_GAIN_MIN}|{_LOW_GAIN_MAX}").encode()).hexdigest()[:8]
+
+
+def audio_cache_name(chain_key, denoised):
+    """`denoised` is in the name because the two paths need OPPOSITE low-end
+    corrections, and because a fallback result must never be mistaken for a
+    denoised one on a later run."""
+    return f"audio_pol_{chain_key}_{'df' if denoised else 'raw'}.wav"
+
+
+def compose_cache_key(pip_y, pip_enabled, chroma_similarity, chroma_blend,
+                      music, music_db, audio_fingerprint, hook_corner):
+    """Every visual setting AND the audio this mp4 muxes in.
+
+    The audio is the half that was missing. It is not a "setting", which is
+    exactly why it was overlooked — the old comment said every repair setting
+    was in the name, and it was true, and the file still shipped the wrong voice.
+    """
+    music_key = music.stem[:24] if music else "none"
+    corner_key = "off" if not hook_corner else f"{hook_corner:.3f}"
+    return (f"y{pip_y}_p{int(pip_enabled)}_k{chroma_similarity:.3f}_"
+            f"b{chroma_blend:.3f}_m{music_key}_{music_db:.1f}_"
+            f"a{audio_fingerprint}_hc{corner_key}")
+
+
+def cap_pass_name(offset, template, source_fingerprint):
+    """A captioned pass is named after the VIDEO it was burned over."""
+    tag = str(offset).replace('-', 'm').replace('.', '_')
+    return f"cap_pass_{tag}_{template}_{source_fingerprint}.mp4"
+
+
+def occupancy_name(trim_start_s, trim_end_s, source_fingerprint):
+    """The face/motion map is named after the video that was SCANNED — which
+    is not always the base export (see the hook_corner path in run_autoedit)."""
+    return (f"occupancy_s{trim_start_s:.2f}_e{trim_end_s:.2f}_"
+            f"{source_fingerprint}.json")
+
+
 def pycaps_exe():
     p = shutil.which("pycaps")
     if p:
@@ -682,12 +748,10 @@ def enhance_audio(base, work: Path):
     # The measured shelf is derived from the audio itself, so the same source
     # always yields the same gain and the cache stays sound — but the CONSTANTS
     # behind that measurement must invalidate it when they change.
-    chain_key = hashlib.md5(
-        (_VOICE_CHAIN + "|" + _VOICE_CHAIN_RAW +
-         f"|{_LOW_TARGET_DB}|{_LOW_GAIN_MIN}|{_LOW_GAIN_MAX}").encode()).hexdigest()[:8]
+    chain_key = audio_chain_key()
     raw_wav, enh = work / "audio_raw.wav", work / "audio_enh.wav"
-    pol = work / f"audio_pol_{chain_key}_df.wav"
-    pol_raw = work / f"audio_pol_{chain_key}_raw.wav"
+    pol = work / audio_cache_name(chain_key, denoised=True)
+    pol_raw = work / audio_cache_name(chain_key, denoised=False)
     if pol.exists():
         print(f"audio: cached (chain {chain_key})")
         return pol
@@ -783,11 +847,8 @@ def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio,
     # earlier in enhance_audio; the two caches have to agree or neither works.
     # Fingerprinting the bytes (not the mtime) means an identical re-render
     # still hits the cache.
-    music_key = music.stem[:24] if music else "none"
-    corner_key = "off" if not hook_corner else f"{hook_corner:.3f}"
-    cache_key = (f"y{pip_y}_p{int(pip_enabled)}_k{chroma_similarity:.3f}_"
-                 f"b{chroma_blend:.3f}_m{music_key}_{music_db:.1f}_"
-                 f"a{file_fingerprint(audio)}_hc{corner_key}")
+    cache_key = compose_cache_key(pip_y, pip_enabled, chroma_similarity, chroma_blend,
+                                  music, music_db, file_fingerprint(audio), hook_corner)
     nocap = work / f"nocap_wm_{cache_key}.mp4"
     if nocap.exists():
         print("compose: cached")
@@ -933,7 +994,7 @@ def render_captions_dynamic(nocap: Path, out: Path, template: str, windows, work
     src_key = file_fingerprint(nocap)
     for o in offsets:
         tag = str(o).replace('-', 'm').replace('.', '_')
-        p = work / f"cap_pass_{tag}_{template}_{src_key}.mp4"
+        p = work / cap_pass_name(o, template, src_key)
         for stale in work.glob(f"cap_pass_{tag}_{template}_*.mp4"):
             if stale != p:
                 stale.unlink(missing_ok=True)
@@ -1275,9 +1336,8 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
         # The cache name records WHICH video was scanned. It used to key on the
         # trim values alone, so switching sources would have silently reused the
         # other one's map — the same stale-cache shape as the four before it.
-        occ_file = work / (f"occupancy_s{repairs['trim_start_s']:.2f}_"
-                           f"e{repairs['trim_end_s']:.2f}_"
-                           f"{file_fingerprint(occ_src)}.json")
+        occ_file = work / occupancy_name(repairs["trim_start_s"], repairs["trim_end_s"],
+                                         file_fingerprint(occ_src))
         for stale in work.glob("occupancy_s*.json"):
             if stale != occ_file:
                 stale.unlink(missing_ok=True)
