@@ -9725,8 +9725,7 @@ async def stage_media(
         except OSError:
             pass
 
-    # [TEMP v901] remove once operator-side evidence lands
-    print(f"[MediaStage v901] user={current_user.id[:8]} staged {key} "
+    print(f"[MediaStage] user={current_user.id[:8]} staged {key} "
           f"({len(content) / 1e6:.1f}MB, {expires_in}s)", flush=True)
 
     return {
@@ -9771,10 +9770,9 @@ async def unstage_media(
                 await asyncio.to_thread(storage.delete, key)
                 removed.append(key)
         except Exception as exc:                                  # noqa: BLE001
-            print(f"[MediaStage v901] delete failed {key}: {exc}", flush=True)
+            print(f"[MediaStage] delete failed {key}: {exc}", flush=True)
 
-    # [TEMP v901] remove once operator-side evidence lands
-    print(f"[MediaStage v901] user={current_user.id[:8]} unstaged "
+    print(f"[MediaStage] user={current_user.id[:8]} unstaged "
           f"{len(removed)} object(s) for {stage_id}", flush=True)
     return {"removed": removed}
 
