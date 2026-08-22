@@ -67,6 +67,20 @@ def run(cmd, **kw):
     return r
 
 
+def file_fingerprint(path, n=8):
+    """Short hash of a file's CONTENT, for use in a cache name.
+
+    Content, not mtime: an identical re-render should still hit the cache.
+    Used so a cached artifact that BAKES IN another file (compose() muxes the
+    enhanced audio into its mp4) is invalidated when that file changes.
+    """
+    h = hashlib.md5()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:n]
+
+
 def pycaps_exe():
     p = shutil.which("pycaps")
     if p:
@@ -485,7 +499,8 @@ def enforce_min_dwell(windows, buckets, min_dwell=2.0):
 # on this machine in both states — the platform export the operator dropped
 # into CapCut, and the file CapCut wrote back out. Same speech, one editing
 # pass in between. Averaging the long-term spectrum of both sides gives what
-# CapCut actually did, in dB per band (script: scratchpad/capcut_forensics.py):
+# CapCut actually did, in dB per band. Reproduce it with
+# `python code/measure_capcut_match.py --derive <before> <after> ...`:
 #
 #     60-120 Hz  -13.8      2-3 kHz   +1.1
 #    120-250 Hz   -0.3      3-5 kHz   +1.1
@@ -506,14 +521,33 @@ def enforce_min_dwell(windows, buckets, min_dwell=2.0):
 # 200-500 Hz) rewards removing body and adding treble, so optimising it drove
 # the sound away from the target while the number went up. The target is now
 # CapCut's own curve, and the score is the weighted deviation from it:
-# 3.47 dB for the old chain, 1.23 dB for this one (scratchpad/grid_to_capcut.py).
+# 3.47 for the old chain, 1.23 for tone alone, 0.73 once the low shelf below
+# puts back what DeepFilter over-removed. `code/measure_capcut_match.py` scores
+# any file, so every number here is checkable rather than asserted.
 #
-# No highpass: DeepFilterNet already removes the rumble ahead of this stage,
-# and adding 80 Hz on top overshot to -22 dB where CapCut sits at -14.
-_VOICE_CHAIN = ("equalizer=f=190:t=q:w=1.0:g=4,"      # restore the voice body
-                "equalizer=f=9000:t=q:w=1.6:g=-4,"    # take off the brittle top
-                "acompressor=threshold=-20dB:ratio=2.5:attack=10:release=180:makeup=1.5,"
-                "alimiter=limit=0.95")
+# No fixed highpass on the denoised path: DeepFilterNet already removes the
+# rumble, and adding 80 Hz on top overshot to -22 dB where CapCut sits at -14.
+_TONE = ("equalizer=f=190:t=q:w=1.0:g=4,"       # restore the voice body
+         "equalizer=f=9000:t=q:w=1.6:g=-4,")    # take off the brittle top
+_LEVEL = ("acompressor=threshold=-20dB:ratio=2.5:attack=10:release=180:makeup=1.5,"
+          "alimiter=limit=0.95")
+
+# v938.14 — the low end, which is where the last of the gap was.
+#
+# DeepFilterNet over-removes rumble: measured on a real job, 60-120 Hz sits at
+# +1.0 dB before it and -21.6 dB after, while CapCut leaves that band at
+# -13.9 dB. So after denoising we are ~5-8 dB thinner than the file the
+# operator says sounds better, in the chest register. A low shelf puts back
+# what was over-removed. Swept on real audio: g=5 scores 0.74, g=7 scores 0.73,
+# g=9 scores 0.85 — so g=7, and the curve is flat enough that the exact value
+# is not delicate.
+_VOICE_CHAIN = "bass=g=7:f=110:width_type=q:w=0.7," + _TONE + _LEVEL
+
+# The DeepFilter-SKIPPED path needs the OPPOSITE correction. If denoising did
+# not run, the rumble is still there (+1.0 dB), so lifting it makes the voice
+# boomy — measured 5.50 with the shelf against 4.07 with a cut. Same tone and
+# level either way; only the low-end correction flips.
+_VOICE_CHAIN_RAW = "highpass=f=90:p=2," + _TONE + _LEVEL
 
 
 def enhance_audio(base, work: Path):
@@ -526,15 +560,21 @@ def enhance_audio(base, work: Path):
     # all and reasonably concluded the fix did nothing. compose() already
     # keys its own cache this way; this did not, and that asymmetry is what
     # hid the bug.
-    chain_key = hashlib.md5(_VOICE_CHAIN.encode()).hexdigest()[:8]
+    #
+    # v938.14 — the cached name also records WHETHER DEEPFILTER RAN, because
+    # the two paths need opposite low-end corrections. Only the denoised file
+    # is reused; if a previous run fell back (Modal down, network blip) that
+    # result is deliberately NOT reused, so a transient outage cannot leave a
+    # job permanently serving degraded audio.
+    chain_key = hashlib.md5((_VOICE_CHAIN + "|" + _VOICE_CHAIN_RAW).encode()).hexdigest()[:8]
     raw_wav, enh = work / "audio_raw.wav", work / "audio_enh.wav"
-    pol = work / f"audio_pol_{chain_key}.wav"
+    pol = work / f"audio_pol_{chain_key}_df.wav"
+    pol_raw = work / f"audio_pol_{chain_key}_raw.wav"
     if pol.exists():
         print(f"audio: cached (chain {chain_key})")
         return pol
     for stale in work.glob("audio_pol*.wav"):
-        if stale != pol:
-            stale.unlink(missing_ok=True)   # do not hoard one file per chain edit
+        stale.unlink(missing_ok=True)   # do not hoard one file per chain edit
     run(["ffmpeg", "-v", "error", "-i", str(base), "-vn", "-ac", "1", "-ar", "48000", "-y", str(raw_wav)])
     ok = False
     try:
@@ -544,18 +584,22 @@ def enhance_audio(base, work: Path):
         print(f"deepfilter modal unavailable: {e}")
     if not ok:
         shutil.copy(raw_wav, enh)
+        pol = pol_raw
 
-    # v938.13 — the chain is defined and justified at _VOICE_CHAIN above, where
-    # it is measured against CapCut's own output. In short:
+    # The chains are defined and justified above, where they are measured
+    # against CapCut's own output. In short:
     #
-    #   +4dB @ 190Hz    put back the voice body the old chain cut away
-    #   -4dB @ 9kHz     take off the brittle top the old chain added
-    #   acompressor     steadier level, gentle ratio so it does not pump
-    #   alimiter        catch peaks without clipping
+    #   +7dB shelf @110Hz   put back the low end DeepFilter over-removed
+    #                       (or a 90Hz CUT instead, when DeepFilter did not run)
+    #   +4dB @ 190Hz        restore the voice body the old chain cut away
+    #   -4dB @ 9kHz         take off the brittle top the old chain added
+    #   acompressor         steadier level, gentle ratio so it does not pump
+    #   alimiter            catch peaks without clipping
     #
-    # Scored as deviation from CapCut's measured tonal curve: 3.47 dB before,
-    # 1.37 dB after, verified by running this function on a real job.
-    chain = _VOICE_CHAIN
+    # Scored as deviation from CapCut's measured tonal curve, on real job audio:
+    # 3.47 before v938.13, 1.23 with tone only, 0.73 with the shelf. Check any
+    # file with `python code/measure_capcut_match.py <file>`.
+    chain = _VOICE_CHAIN if ok else _VOICE_CHAIN_RAW
 
     # Two-pass loudness. One pass guesses and undershoots — the old chain
     # aimed at -15 LUFS and landed at -17.1. Measuring first hits the target.
@@ -600,9 +644,20 @@ def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio,
             chroma_blend=0.02, music=None, music_db=-20.0):
     # Every visual/audio repair setting is in the cache name. A re-run with a
     # stronger key or different music must never silently reuse the old video.
+    #
+    # v938.14 — the AUDIO ITSELF is in the key too, and it was the missing half.
+    # This function muxes `audio` into the cached mp4, but the key only ever
+    # described the picture and the music. So a rebuilt voice chain produced a
+    # new audio file, and compose handed back the old video with the OLD voice
+    # still baked in — the fix would ship, the render would succeed, and nothing
+    # would sound different. That is the same defect just fixed one stage
+    # earlier in enhance_audio; the two caches have to agree or neither works.
+    # Fingerprinting the bytes (not the mtime) means an identical re-render
+    # still hits the cache.
     music_key = music.stem[:24] if music else "none"
     cache_key = (f"y{pip_y}_p{int(pip_enabled)}_k{chroma_similarity:.3f}_"
-                 f"b{chroma_blend:.3f}_m{music_key}_{music_db:.1f}")
+                 f"b{chroma_blend:.3f}_m{music_key}_{music_db:.1f}_"
+                 f"a{file_fingerprint(audio)}")
     nocap = work / f"nocap_wm_{cache_key}.mp4"
     if nocap.exists():
         print("compose: cached")
