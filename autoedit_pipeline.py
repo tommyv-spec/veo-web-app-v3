@@ -568,6 +568,94 @@ _LEVEL = ("acompressor=threshold=-20dB:ratio=2.5:attack=10:release=180:makeup=1.
 # is not delicate.
 _VOICE_CHAIN = "bass=g=7:f=110:width_type=q:w=0.7," + _TONE + _LEVEL
 
+# v938.17 — the low-end correction is MEASURED per job, not fixed.
+#
+# A fixed +7dB shelf assumes the source is the one it was tuned on. It is not:
+# on a deep male voice whose fundamental sits at 100-120Hz, the same shelf
+# boosts the fundamental instead of replacing stripped rumble, and the mix
+# lands at +2.8dB where CapCut sits at -13.9 (measured: the 1f35eac2 render
+# scored 4.27 against CapCut's curve with the fixed shelf, worse than the
+# 3.47 the whole exercise started from). One number cannot serve both voices.
+#
+# So: measure this job's own 60-120Hz level against its own 500-2000Hz body,
+# and apply whatever gain lands it on CapCut's ratio. Clamped, because a huge
+# correction means the estimate is wrong, not that the fix should be huge.
+_LOW_TARGET_DB = -13.9      # CapCut's 60-120Hz level, relative to the speech body
+_LOW_GAIN_MIN, _LOW_GAIN_MAX = -12.0, 12.0
+
+
+def low_shelf_gain(src):
+    """How much 60-120Hz this file needs to sit where CapCut sits.
+
+    The measurement MUST match code/measure_capcut_match.py exactly — same FFT
+    size, same speech-active gate, same body normalisation — because the target
+    (-13.9 dB) comes from that scorer. Measuring the same physical thing a
+    different way does not give a comparable number: an ffmpeg
+    bandpass+volumedetect version of this read the same audio as -12.9 where the
+    FFT reads -21.6, because volumedetect averages the whole file including
+    silence and the filter skirts leak. Mixing the two scales produced a
+    confident correction with the wrong sign.
+
+    Returns a dB gain for the 110Hz shelf, or None if it could not measure
+    (caller falls back to the fixed shelf rather than skipping the fix).
+    """
+    import numpy as np
+
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(src), "-ac", "1",
+                          "-ar", "48000", "-f", "f32le", "-"], capture_output=True).stdout
+    x = np.frombuffer(raw, dtype=np.float32)
+    nfft, hop = 8192, 4096
+    if len(x) < nfft * 2:
+        return None
+    win = np.hanning(nfft)
+    frames = [np.abs(np.fft.rfft(x[s:s + nfft] * win))
+              for s in range(0, len(x) - nfft, hop)
+              if float(np.sqrt((x[s:s + nfft] ** 2).mean())) >= 0.01]
+    if not frames:
+        return None
+    spec = np.mean(frames, axis=0)
+    freq = np.fft.rfftfreq(nfft, 1 / 48000)
+
+    def band(lo, hi):
+        return 20 * np.log10(max(spec[(freq >= lo) & (freq < hi)].mean(), 1e-12))
+
+    body = (band(500, 1000) + band(1000, 2000)) / 2
+    return float(band(60, 120) - body)
+
+
+def _low_shelf(gain):
+    return f"bass=g={gain:.1f}:f=110:width_type=q:w=0.7"
+
+
+def fit_low_shelf(src, work: Path):
+    """Pick the 110Hz shelf gain that lands this file on CapCut's low end.
+
+    Closed loop, because a shelf is not a band control: it spills into
+    120-250Hz and the achieved change never equals the requested one. Measured
+    open-loop on a deep male voice, asking for -8.2 dB moved 60-120Hz only to
+    -6.6 against a -13.9 target. So: measure, apply to a short probe, measure
+    again, and correct by whatever is still missing.
+
+    Returns the gain in dB, or None if it could not measure.
+    """
+    have = low_shelf_gain(src)
+    if have is None:
+        return None
+    gain = max(_LOW_GAIN_MIN, min(_LOW_GAIN_MAX, _LOW_TARGET_DB - have))
+
+    probe = work / "audio_probe.wav"
+    try:
+        run(["ffmpeg", "-v", "error", "-t", "40", "-i", str(src),
+             "-af", _low_shelf(gain), "-ar", "48000", "-ac", "1", "-y", str(probe)])
+        got = low_shelf_gain(probe)
+        if got is not None:
+            gain = max(_LOW_GAIN_MIN, min(_LOW_GAIN_MAX, gain + (_LOW_TARGET_DB - got)))
+    except AutoEditError:
+        pass          # keep the open-loop estimate rather than failing the render
+    finally:
+        probe.unlink(missing_ok=True)
+    return gain
+
 # The DeepFilter-SKIPPED path needs the OPPOSITE correction. If denoising did
 # not run, the rumble is still there (+1.0 dB), so lifting it makes the voice
 # boomy — measured 5.50 with the shelf against 4.07 with a cut. Same tone and
@@ -591,7 +679,12 @@ def enhance_audio(base, work: Path):
     # is reused; if a previous run fell back (Modal down, network blip) that
     # result is deliberately NOT reused, so a transient outage cannot leave a
     # job permanently serving degraded audio.
-    chain_key = hashlib.md5((_VOICE_CHAIN + "|" + _VOICE_CHAIN_RAW).encode()).hexdigest()[:8]
+    # The measured shelf is derived from the audio itself, so the same source
+    # always yields the same gain and the cache stays sound — but the CONSTANTS
+    # behind that measurement must invalidate it when they change.
+    chain_key = hashlib.md5(
+        (_VOICE_CHAIN + "|" + _VOICE_CHAIN_RAW +
+         f"|{_LOW_TARGET_DB}|{_LOW_GAIN_MIN}|{_LOW_GAIN_MAX}").encode()).hexdigest()[:8]
     raw_wav, enh = work / "audio_raw.wav", work / "audio_enh.wav"
     pol = work / f"audio_pol_{chain_key}_df.wav"
     pol_raw = work / f"audio_pol_{chain_key}_raw.wav"
@@ -624,7 +717,17 @@ def enhance_audio(base, work: Path):
     # Scored as deviation from CapCut's measured tonal curve, on real job audio:
     # 3.47 before v938.13, 1.23 with tone only, 0.73 with the shelf. Check any
     # file with `python code/measure_capcut_match.py <file>`.
-    chain = _VOICE_CHAIN if ok else _VOICE_CHAIN_RAW
+    if ok:
+        # v938.17 — measure this job's own low end instead of assuming it.
+        g = fit_low_shelf(enh, work)
+        if g is None:
+            chain = _VOICE_CHAIN
+            print("audio: low-end measurement failed, using the fixed shelf")
+        else:
+            chain = _low_shelf(g) + "," + _TONE + _LEVEL
+            print(f"audio: low shelf {g:+.1f} dB (fitted to CapCut's -13.9)")
+    else:
+        chain = _VOICE_CHAIN_RAW
 
     # Two-pass loudness. One pass guesses and undershoots — the old chain
     # aimed at -15 LUFS and landed at -17.1. Measuring first hits the target.
@@ -1155,19 +1258,39 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
     windows = []
     if repairs["captions_enabled"]:
         progress("captions")
+    # v938.17 — WHICH video the occupancy scan reads.
+    #
+    # Normally it reads the raw downloaded export: the composite only adds the
+    # PIP, whose box the planner is told about separately, so base and composite
+    # agree about where the faces are.
+    #
+    # With hook_corner they do NOT agree. In the base export the hook speaker is
+    # full-frame on green; in the composite he is a small figure in the bottom-
+    # left and a different person fills the frame behind him. Planning against
+    # the base put captions straight across his face — exactly the thing the
+    # operator said must never happen. So when the hook is recomposited, scan
+    # what the viewer will actually see.
+    occ_src = nocap if repairs.get("hook_corner") else base
     if repairs["captions_enabled"] and placement == "dynamic" and offset is None:
+        # The cache name records WHICH video was scanned. It used to key on the
+        # trim values alone, so switching sources would have silently reused the
+        # other one's map — the same stale-cache shape as the four before it.
         occ_file = work / (f"occupancy_s{repairs['trim_start_s']:.2f}_"
-                           f"e{repairs['trim_end_s']:.2f}.json")
+                           f"e{repairs['trim_end_s']:.2f}_"
+                           f"{file_fingerprint(occ_src)}.json")
+        for stale in work.glob("occupancy_s*.json"):
+            if stale != occ_file:
+                stale.unlink(missing_ok=True)
         if occ_file.exists():
             buckets = json.loads(occ_file.read_text())
             print("occupancy: cached")
         else:
-            buckets = build_occupancy(base, dur)
+            buckets = build_occupancy(occ_src, dur)
         occ_file.write_text(json.dumps(buckets))
         windows = plan_caption_windows(buckets, chin, segs, pip_y, dur)
         _render_caption_pass(nocap, out, template, windows, work, dur, audio)
     elif repairs["captions_enabled"]:
-        buckets = build_occupancy(base, dur)
+        buckets = build_occupancy(occ_src, dur)
         chosen_offset = offset if offset is not None else auto_offset
         windows = [(0.0, dur, chosen_offset)]
         _render_caption_pass(nocap, out, template, windows, work, dur, audio)
@@ -1176,7 +1299,7 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
         shutil.copy2(nocap, out)
 
     if repairs["captions_enabled"] and not buckets:
-        buckets = build_occupancy(base, dur)
+        buckets = build_occupancy(occ_src, dur)
     if not windows:
         windows = [(0.0, dur, 0.0)]
     scan = json.loads((work / "scan.json").read_text()) if (work / "scan.json").exists() else {}
