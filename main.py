@@ -9658,11 +9658,63 @@ class ExportSettings(BaseModel):
 MEDIA_STAGE_PREFIX = "media-staging"
 MEDIA_STAGE_MAX_BYTES = 500 * 1024 * 1024
 MEDIA_STAGE_EXT = {".mp4", ".mov", ".m4v", ".webm", ".jpg", ".jpeg", ".png"}
+# Longest a staged object may live. Matches the maximum expires_in, so nothing
+# outlives the URL that could reach it.
+MEDIA_STAGE_MAX_AGE_S = 86400
 
 
 def _media_stage_key(user_id: str, stage_id: str, suffix: str) -> str:
-    """User-scoped so one caller can never presign or delete another's file."""
-    return f"{MEDIA_STAGE_PREFIX}/{user_id}/{stage_id}{suffix}"
+    """User-scoped so one caller can never presign or delete another's file.
+
+    The epoch prefix makes a key self-dating: list_objects returns keys only,
+    with no LastModified, so without it there is no way to find stale objects
+    without a HEAD per key."""
+    # main.py has no bare module-level `time` (only `import time as _time_v872`)
+    # and no `re` either — every stdlib name here must be imported locally or
+    # it resolves at CALL time into a NameError. See v901.1.
+    import time as _t
+    return f"{MEDIA_STAGE_PREFIX}/{user_id}/{int(_t.time())}-{stage_id}{suffix}"
+
+
+def _media_stage_age_s(key: str):
+    """Seconds since this key was staged, or None if it predates the epoch
+    format (2026-08-22) and cannot be dated."""
+    import time as _t
+    tail = key.rsplit("/", 1)[-1]
+    stamp, sep, _ = tail.partition("-")
+    if not sep or not stamp.isdigit():
+        return None
+    return max(0, int(_t.time()) - int(stamp))
+
+
+def _sweep_stale_stage_objects(storage, user_id: str) -> int:
+    """Delete this user's staged objects that are past the maximum lifetime.
+
+    A presigned URL expires but the OBJECT does not, so a caller that dies
+    between staging and cleanup leaves a file behind forever. Rather than
+    depend on a bucket lifecycle rule that lives outside this repo (and that
+    nobody here has credentials to set), every stage request sweeps the
+    caller's own prefix. Cheap: one list scoped to one user, normally 0-2 keys.
+
+    Never raises — a failed sweep must not fail the upload the user asked for.
+    """
+    removed = 0
+    try:
+        for key in storage.list_objects(f"{MEDIA_STAGE_PREFIX}/{user_id}/", max_keys=1000):
+            age = _media_stage_age_s(key)
+            if age is None or age <= MEDIA_STAGE_MAX_AGE_S:
+                continue          # undatable (pre-2026-08-22) or still current
+            try:
+                storage.delete(key)
+                removed += 1
+            except Exception as exc:                              # noqa: BLE001
+                print(f"[MediaStage] sweep could not delete {key}: {exc}", flush=True)
+    except Exception as exc:                                      # noqa: BLE001
+        print(f"[MediaStage] sweep failed for {user_id[:8]}: {exc}", flush=True)
+    if removed:
+        print(f"[MediaStage] swept {removed} stale object(s) for {user_id[:8]}",
+              flush=True)
+    return removed
 
 
 @app.post("/api/media/stage")
@@ -9716,6 +9768,9 @@ async def stage_media(
     # it leaked disk on a long-running server. There is no reason to touch the
     # local filesystem at all — the content is already in memory.
     storage = get_storage()
+    # Sweep this caller's stale objects before adding another. Keeps the bucket
+    # self-cleaning without depending on a lifecycle rule set outside the repo.
+    await asyncio.to_thread(_sweep_stale_stage_objects, storage, current_user.id)
     await asyncio.to_thread(
         storage.upload_bytes, content, key,
         file.content_type or "application/octet-stream")
@@ -9763,16 +9818,24 @@ async def unstage_media(
         raise HTTPException(status_code=400, detail="Bad stage_id")
 
     storage = get_storage()
-    suffixes = [ext.lower()] if ext else sorted(MEDIA_STAGE_EXT)
+    # Keys carry an epoch prefix, so they cannot be rebuilt from stage_id alone.
+    # Listing the caller's own prefix and matching is both correct and cheaper
+    # than the previous guess-every-extension loop — one call instead of seven.
     removed = []
-    for suffix in suffixes:
-        if suffix not in MEDIA_STAGE_EXT:
+    prefix = f"{MEDIA_STAGE_PREFIX}/{current_user.id}/"
+    try:
+        keys = await asyncio.to_thread(storage.list_objects, prefix, 1000)
+    except Exception as exc:                                      # noqa: BLE001
+        print(f"[MediaStage] list failed for {prefix}: {exc}", flush=True)
+        keys = []
+    for key in keys:
+        # The prefix already scopes this to the caller, so a stage_id belonging
+        # to someone else simply does not appear here.
+        if stage_id not in key.rsplit("/", 1)[-1]:
             continue
-        key = _media_stage_key(current_user.id, stage_id, suffix)
         try:
-            if await asyncio.to_thread(storage.exists, key):
-                await asyncio.to_thread(storage.delete, key)
-                removed.append(key)
+            await asyncio.to_thread(storage.delete, key)
+            removed.append(key)
         except Exception as exc:                                  # noqa: BLE001
             print(f"[MediaStage] delete failed {key}: {exc}", flush=True)
 
