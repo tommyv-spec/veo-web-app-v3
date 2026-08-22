@@ -56,6 +56,34 @@ class AutoEditQcTests(unittest.TestCase):
         self.assertEqual(report["verdict"], "READY")
         self.assertEqual(report["reasons"], [])
 
+    def test_info_status_reports_without_blocking(self):
+        """v938.20 — the CapCut tone score is recorded on every render and must
+        never flip the verdict.
+
+        The target curve is an average of exports that are mostly ONE speaker,
+        so a deep or unusual voice scores worse with nothing actually wrong
+        (measured: 1.08 and 1.89 on two deliveries, 2.91 on a deep male voice).
+        Hard-gating that would repeat the v936.2 mistake of giving a soft
+        signal a hard gate.
+        """
+        report = build_qc_report([
+            {"id": "video", "status": "pass", "message": "Video is valid"},
+            {"id": "audio_tone_match", "status": "info",
+             "message": "Voice tone is 2.91 dB off CapCut's curve", "value": 2.91},
+        ])
+        self.assertEqual(report["verdict"], "READY")
+        self.assertEqual(report["reasons"], [])
+        row = next(c for c in report["checks"] if c["id"] == "audio_tone_match")
+        self.assertEqual(row["value"], 2.91)      # recorded, so it can be reviewed
+
+    def test_a_real_fail_still_blocks(self):
+        report = build_qc_report([
+            {"id": "audio_tone_match", "status": "info", "message": "off", "value": 3.0},
+            {"id": "captions", "status": "fail", "message": "Captions cover a face"},
+        ])
+        self.assertEqual(report["verdict"], "NEEDS_MANUAL_EDIT")
+        self.assertEqual(report["reasons"], ["Captions cover a face"])
+
 
 if __name__ == "__main__":
     unittest.main()

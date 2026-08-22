@@ -1141,6 +1141,34 @@ def run_quality_checks(output: Path, base: Path, expected_dur: float, buckets,
         checks.append({"id": "media_probe", "status": "fail",
                        "message": f"Could not inspect the finished file: {exc}"})
 
+    # v938.20 — report how close the finished audio sits to CapCut's measured
+    # tonal curve. The level check above answers "is it loud enough"; this
+    # answers "does it sound like the reference", which is the thing the
+    # operator actually judged and which nothing was watching.
+    #
+    # NEVER a fail. A `fail` flips the verdict to NEEDS_MANUAL_EDIT, and the
+    # target is an average of five exports that are mostly ONE speaker — a
+    # deep male voice legitimately scores worse without anything being wrong
+    # (§v938.2). Blocking a delivery on that would be the v936.2 mistake:
+    # a soft signal given a hard gate. So it is recorded, with the scale
+    # attached, and the human decides.
+    try:
+        from measure_capcut_match import band_curve, score as capcut_score
+        tone = round(float(capcut_score(band_curve(output))), 2)
+    except Exception:
+        tone = None
+    if tone is not None:
+        close = tone <= 2.5
+        checks.append({
+            "id": "audio_tone_match",
+            "status": "pass" if close else "info",
+            "message": (f"Voice tone matches CapCut ({tone} dB deviation; a real CapCut "
+                        f"export scores 1.78 against its own siblings)" if close else
+                        f"Voice tone is {tone} dB off CapCut's curve — worth a listen. "
+                        f"Expected under ~2.5; a very deep or unusual voice can score "
+                        f"higher without anything being wrong"),
+            "value": tone})
+
     try:
         levels = audio_levels(output)
     except Exception:
