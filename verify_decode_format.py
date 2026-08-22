@@ -236,6 +236,9 @@ def lint(path):
         # twice in the commit that added it - so the era boundary is a date the
         # linter reads, not a habit.
         V890B_DATE = "2026-08-12"
+        # v938.3 composite geometry — forward-only from the day it was measured.
+        # Older decodes keep their prose descriptions and only WARN.
+        V938_DATE = "2026-08-22"
         created = ""
         cm = re.search(r'^created:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})', t, re.M)
         if cm:
@@ -299,6 +302,25 @@ def lint(path):
         # DECLARATION: each layer block names the tell that put its contents
         # there. An author made to name a tell has to go look for one.
         evidence_field = re.compile(r"\*\*layer_evidence:\*\*", re.I)
+        # v938.3 - a composite's FOREGROUND layer must carry MEASURED geometry,
+        # not an adjective. Decodes have been recording "small PiP bottom-left"
+        # for a year; when the edit layer finally needed the number, nobody had
+        # it and the frames had to be re-measured from scratch. They turned out
+        # to be strikingly consistent - 15 of 16 corner composites in the corpus
+        # sit bottom-LEFT at ~37-40% of frame width and ~29-33% of height, flush
+        # to both edges, for the hook only - which is exactly the kind of fact a
+        # decode exists to capture and prose threw away.
+        #
+        # Same philosophy as layer_evidence above: the checker cannot judge
+        # whether a box is correct, so it requires the DECLARATION, and requires
+        # it to contain NUMBERS. An author made to write a fraction has to go
+        # measure one. Overlay a grid on the frame first:
+        #   ffmpeg -i f.jpg -vf "drawgrid=w=iw/10:h=ih/10:t=2:c=red@0.9" g.jpg
+        # (tools/grid_frames.py does this for a whole frame directory.)
+        geom_field = re.compile(r"\*\*composite_geometry:\*\*", re.I)
+        bg_layer = re.compile(r"\*\*composite_layer:\*\*\s*background[- ]?plate", re.I)
+        geom_era = bool(created) and created >= V938_DATE
+        no_geometry, vague_geometry = [], []
         comp_blocks, layer_blocks, no_evidence = [], 0, []
         for num, body in zip(imgs, blocks):
             body = re.split(r'^##\s+', body, flags=re.M)[0]
@@ -306,6 +328,16 @@ def lint(path):
                 layer_blocks += 1
                 if not evidence_field.search(body):
                     no_evidence.append(num)
+                # the plate is full-frame by definition; only the layer IN FRONT
+                # has a box worth recording
+                if not bg_layer.search(body):
+                    m = re.search(
+                        r'^\s*[-*]\s*\*\*composite_geometry:\*\*(.*?)(?=^\s*[-*]\s*\*\*|\Z)',
+                        body, re.M | re.S | re.I)
+                    if not m:
+                        no_geometry.append(num)
+                    elif len(re.findall(r'\d', m.group(1))) < 2:
+                        vague_geometry.append(num)
             method = re.search(r'^\s*[-*]\s*\*\*production method[^*:]*:\*\*(.*)$',
                                body, re.M | re.I)
             if method and composite_words.search(method.group(1)):
@@ -320,6 +352,25 @@ def lint(path):
                 % ", ".join(no_evidence)
             )
             (fails if new_era else warns).append(msg)
+        if no_geometry:
+            msg = (
+                "v938.3: ### Image %s carry a foreground `- **composite_layer:**` but no "
+                "`- **composite_geometry:**` - record the MEASURED box, the edges it is flush "
+                "to, when it starts and ends, and what the plate behind it is doing "
+                "(e.g. `box: x[0..0.43W] y[0.57H..H] | flush: left, bottom | window: 0-2.5s "
+                "(hook only) | plate: sharp full-frame`). Overlay a grid on the frame and read "
+                "it off: tools/grid_frames.py, or ffmpeg -vf drawgrid=w=iw/10:h=ih/10"
+                % ", ".join(no_geometry)
+            )
+            (fails if geom_era else warns).append(msg)
+        if vague_geometry:
+            msg = (
+                "v938.3: ### Image %s have `- **composite_geometry:**` with almost no numbers in "
+                "it - 'small PiP bottom-left' is the description the corpus already had and it is "
+                "what forced a re-measure. Write fractions of the frame, not adjectives"
+                % ", ".join(vague_geometry)
+            )
+            (fails if geom_era else warns).append(msg)
         if comp_blocks and layer_blocks < 2:
             msg = (
                 "v890d: ### Image %s declare an assembled/composite production method but the "

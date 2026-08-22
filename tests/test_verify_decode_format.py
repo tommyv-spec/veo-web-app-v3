@@ -153,5 +153,87 @@ class VerifyDecodeShownBeatsLedgerTests(unittest.TestCase):
         self.assertEqual(0, result, output)
 
 
+class CompositeGeometryTests(unittest.TestCase):
+    """v938.3 — a foreground composite layer must carry MEASURED geometry.
+
+    The corpus spent a year recording "small PiP bottom-left"; when the edit
+    layer needed the box, every frame had to be re-measured. The checker cannot
+    tell whether a box is right, so it requires the declaration AND requires it
+    to contain numbers — an author made to write a fraction has to go measure.
+    """
+
+    FOREGROUND = (
+        "### Image 2\n"
+        "- **composite_layer:** foreground-keyed\n"
+        "- **composite_with:** image_1\n"
+        "- **layer_evidence:** hard matte edge, flat frontal light unlike the plate\n"
+        "{geometry}"
+        "\n"
+    )
+
+    def lint_text(self, text):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "decoded_fixture.md"
+            path.write_text(text, encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = verify_decode_format.lint(path)
+            return result, output.getvalue()
+
+    def build(self, geometry, created="2026-08-22"):
+        text = decode_with_ledger(
+            "| enormous belly / adult man | fills the lower two-thirds of the frame "
+            "and dwarfs his chest | 5/5 viral-max | NO |")
+        text = f"created: {created}\n" + text
+        return text.replace(
+            "## Images\n### Image 1",
+            "## Images\n### Image 1\n- **composite_layer:** background-plate\n"
+            "- **composite_with:** image_2\n"
+            "- **layer_evidence:** unbroken background, never occluded by the matte\n\n"
+            + self.FOREGROUND.format(geometry=geometry))
+
+    def test_measured_geometry_passes(self):
+        geo = ("- **composite_geometry:** box: x[0..0.43W] y[0.57H..H] | flush: left, bottom | "
+               "window: 0-2.5s (hook only) | plate: sharp full-frame\n")
+        result, output = self.lint_text(self.build(geo))
+        self.assertNotIn("v938.3", output, output)
+
+    def test_missing_geometry_fails_in_the_new_era(self):
+        result, output = self.lint_text(self.build(""))
+        self.assertIn("v938.3", output)
+        self.assertIn("FAIL", output)
+        self.assertEqual(1, result, output)
+
+    def test_adjectives_instead_of_numbers_fail(self):
+        geo = "- **composite_geometry:** small inset, bottom-left corner\n"
+        result, output = self.lint_text(self.build(geo))
+        self.assertIn("v938.3", output)
+        self.assertIn("almost no numbers", output)
+
+    def test_older_decode_only_warns(self):
+        """Forward-only: decodes written before the rule keep their prose."""
+        result, output = self.lint_text(self.build("", created="2026-07-01"))
+        self.assertIn("v938.3", output)
+        self.assertIn("WARN", output)
+        self.assertNotIn("FAIL: v938.3", output)
+
+    def test_background_plate_needs_no_geometry(self):
+        """The plate is full-frame by definition; only the layer in front has a box."""
+        text = decode_with_ledger(
+            "| enormous belly / adult man | fills the lower two-thirds of the frame "
+            "and dwarfs his chest | 5/5 viral-max | NO |")
+        text = "created: 2026-08-22\n" + text
+        text = text.replace(
+            "## Images\n### Image 1",
+            "## Images\n### Image 1\n- **composite_layer:** background-plate\n"
+            "- **composite_with:** image_2\n"
+            "- **layer_evidence:** unbroken background, never occluded by the matte\n\n"
+            + self.FOREGROUND.format(
+                geometry="- **composite_geometry:** box: x[0..0.40W] y[0.67H..H] | "
+                         "flush: left, bottom | window: 0-9s\n"))
+        result, output = self.lint_text(text)
+        self.assertNotIn("v938.3", output, output)
+
+
 if __name__ == "__main__":
     unittest.main()
