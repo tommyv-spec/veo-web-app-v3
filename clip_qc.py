@@ -1240,6 +1240,85 @@ def diagnose_cut(line: str, take: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def all_takes_cut(takes: Sequence[Dict[str, Any]]) -> bool:
+    """Is EVERY rendered take of this clip cut short?
+
+    The operator's trigger is "if all of the generated clips are cut". One
+    take counts, deliberately: 837 of 854 clips in this corpus have exactly
+    one take, so a rule that waited for a second would essentially never
+    fire. What the condition really means is "no take of this clip is
+    usable", and with one take that is decided already.
+    """
+    if not takes:
+        return False
+    return all("tail_truncated" in (t.get("hard") or []) for t in takes)
+
+
+def next_bucket_up(seconds: int) -> Optional[int]:
+    """The next legal render length above `seconds`, or None at the top.
+
+    Uses ALLOWED_CLIP_DURATIONS_S (4, 6, 8, 10), not VEO_API_DURATIONS_S:
+    10 is a real length on the Flow path and the worker folds it to 8 on the
+    API path by itself, so choosing it here is safe on both.
+    """
+    from clip_duration import ALLOWED_CLIP_DURATIONS_S
+    for s in sorted(ALLOWED_CLIP_DURATIONS_S):
+        if s > seconds:
+            return s
+    return None
+
+
+def plan_duration_repair(diag: Dict[str, Any],
+                         all_cut: bool = False) -> Dict[str, Any]:
+    """Diagnosis -> what to actually do. Pure.
+
+    The causes get different actions, which is the whole point: widening an
+    `abandoned` clip spends a render to reproduce the same failure, because
+    that clip already had time it did not use.
+
+    `all_cut` is the operator's own trigger — "if all of the generated clips
+    are cut". It does not change the action on its own; it changes the
+    ESCALATION at the ceiling, where every take has been cut and there is no
+    wider bucket left to try. At that point re-rolling is just spending
+    renders, and the line itself is the problem.
+    """
+    d = diag.get("diagnosis")
+    if d is None:
+        return {"action": None, "new_duration": None, "why": "not cut"}
+
+    if d == "unknown":
+        # We could not tell starved from abandoned. Widening on a guess is the
+        # one move that both wastes a render and can change good pacing, so
+        # take the cheap reversible option instead.
+        return {"action": "redo_same_duration", "new_duration": None,
+                "why": diag.get("why") or "cause could not be determined"}
+
+    if d == "under_bucketed":
+        return {"action": "widen_and_redo",
+                "new_duration": diag["table_duration"],
+                "why": (f"rendered at {diag['rendered_duration']}s but the line's "
+                        f"own bucket is {diag['table_duration']}s")}
+
+    if d == "starved":
+        nxt = next_bucket_up(int(diag.get("rendered_duration") or 0))
+        if nxt is None:
+            return {"action": "shorten_the_line", "new_duration": None,
+                    "why": ("speech filled the whole render, every take was cut, "
+                            "and there is no longer bucket - the line has to get "
+                            "shorter or be split"
+                            if all_cut else
+                            "speech filled the whole render and there is no longer "
+                            "bucket - the line has to get shorter or be split")}
+        return {"action": "widen_and_redo", "new_duration": nxt,
+                "why": (f"speech ran to the end of a {diag['rendered_duration']}s "
+                        f"render - try {nxt}s")}
+
+    # abandoned
+    return {"action": "redo_same_duration", "new_duration": None,
+            "why": (f"had {diag.get('unused_silence_s')}s of unused silence, so a "
+                    f"longer render will not help - re-roll instead")}
+
+
 def request_redo(session: Any, base: str, clip_id: int,
                  reason: str) -> Tuple[bool, str]:
     """Send the clip back to be re-rendered. Never raises."""

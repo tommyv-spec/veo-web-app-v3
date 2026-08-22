@@ -705,3 +705,81 @@ def test_an_old_report_without_the_timing_fields_is_unknown_not_guessed():
     old = {"attempt": 1, "hard": ["tail_truncated"], "tail_missing": 3,
            "coverage": 0.6}          # no tail_room_s, no audio_duration
     assert q.diagnose_cut("some line here", old)["diagnosis"] == "unknown"
+
+
+# --- all_takes_cut ----------------------------------------------------------
+
+def test_all_takes_cut_is_false_when_one_take_is_clean():
+    takes = [{"attempt": 1, "hard": ["tail_truncated"]},
+             {"attempt": 2, "hard": []}]
+    assert q.all_takes_cut(takes) is False
+
+
+def test_all_takes_cut_is_true_when_every_take_is_cut():
+    takes = [{"attempt": 1, "hard": ["tail_truncated"]},
+             {"attempt": 2, "hard": ["tail_truncated", "line_missing"]}]
+    assert q.all_takes_cut(takes) is True
+
+
+def test_a_single_cut_take_counts_as_all_takes_cut():
+    # 98% of clips have exactly one take; requiring two would make this
+    # feature fire almost never.
+    assert q.all_takes_cut([{"attempt": 1, "hard": ["tail_truncated"]}]) is True
+
+
+def test_no_takes_is_not_all_cut():
+    assert q.all_takes_cut([]) is False
+
+
+# --- plan_duration_repair ----------------------------------------------------
+
+def test_under_bucketed_repairs_to_the_table_duration():
+    plan = q.plan_duration_repair({"diagnosis": "under_bucketed",
+                                   "table_duration": 8, "rendered_duration": 4})
+    assert plan["action"] == "widen_and_redo"
+    assert plan["new_duration"] == 8
+
+
+def test_starved_repairs_to_the_next_bucket_up():
+    plan = q.plan_duration_repair({"diagnosis": "starved",
+                                   "table_duration": 6, "rendered_duration": 6})
+    assert plan["action"] == "widen_and_redo"
+    assert plan["new_duration"] == 8
+
+
+def test_abandoned_rerolls_without_touching_the_duration():
+    # It already had unused time; a longer window cannot help.
+    plan = q.plan_duration_repair({"diagnosis": "abandoned",
+                                   "table_duration": 6, "rendered_duration": 6})
+    assert plan["action"] == "redo_same_duration"
+    assert plan["new_duration"] is None
+
+
+def test_a_starved_clip_already_at_the_top_bucket_needs_a_shorter_line():
+    # 10s is the last bucket. There is no wider window to buy.
+    plan = q.plan_duration_repair({"diagnosis": "starved",
+                                   "table_duration": 10, "rendered_duration": 10})
+    assert plan["action"] == "shorten_the_line"
+    assert plan["new_duration"] is None
+    assert "no longer bucket" in plan["why"]
+
+
+def test_a_clip_that_was_not_cut_needs_no_repair():
+    plan = q.plan_duration_repair({"diagnosis": None})
+    assert plan["action"] is None
+
+
+def test_an_undiagnosable_clip_is_re_rolled_never_widened():
+    # "unknown" means we could not tell starved from abandoned. Widening on a
+    # guess is the one move that can waste a render AND change good pacing.
+    plan = q.plan_duration_repair({"diagnosis": "unknown"})
+    assert plan["action"] == "redo_same_duration"
+    assert plan["new_duration"] is None
+
+
+def test_all_takes_cut_at_the_top_bucket_escalates_to_shorten_the_line():
+    # The operator's own trigger: every take cut, and no wider window to buy.
+    plan = q.plan_duration_repair({"diagnosis": "starved", "table_duration": 10,
+                                   "rendered_duration": 10}, all_cut=True)
+    assert plan["action"] == "shorten_the_line"
+    assert "every take" in plan["why"]
