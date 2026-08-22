@@ -9748,11 +9748,15 @@ async def unstage_media(
     """Delete a staged object. Scoped to the caller's own prefix, so a guessed
     stage_id belonging to another user resolves to a key that is not theirs and
     simply is not found."""
+    # main.py has no module-level `re` — every other use in this file is a
+    # function-local import. Relying on a global here raised NameError at call
+    # time (500), which `import main` cannot catch because the body never runs.
+    import re as _re
     from backends.storage import is_storage_configured, get_storage
 
     if not is_storage_configured():
         raise HTTPException(status_code=503, detail="Object storage is not configured")
-    if not re.fullmatch(r"[0-9a-f]{32}", stage_id or ""):
+    if not _re.fullmatch(r"[0-9a-f]{32}", stage_id or ""):
         raise HTTPException(status_code=400, detail="Bad stage_id")
 
     storage = get_storage()
