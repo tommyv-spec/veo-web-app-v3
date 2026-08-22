@@ -295,6 +295,18 @@ def run_image_platform_migrations():
         # v936: image-QC shadow-mode report (written by code/image_qc.py)
         ("image_nodes", "qc_json",
          "ALTER TABLE image_nodes ADD COLUMN qc_json TEXT"),
+        # v940: the operator's THREE-WAY review split. Choosing a variant says
+        # which one is best; it says nothing about the ones left behind, and
+        # every picking experiment so far read "not chosen" as "bad" and
+        # trained on a lie. These two columns record the missing middle:
+        # 'still_good' (usable, just not the pick) vs 'rejected' (actually
+        # bad). NULL = the operator never said, which stays distinct from both.
+        # Pure data capture — nothing in the render / choose / promote paths
+        # reads them (v886.3: the operator approves every variant himself).
+        ("image_variants", "operator_verdict",
+         "ALTER TABLE image_variants ADD COLUMN operator_verdict TEXT"),
+        ("image_variants", "verdict_at",
+         "ALTER TABLE image_variants ADD COLUMN verdict_at TIMESTAMP"),
         # v701: when Flow rejects start_frame for content-policy reasons,
         # the worker stamps error_code=CONTENT_POLICY_VIOLATION and the
         # rejected frame's R2 key gets stashed here so the frontend can
@@ -463,6 +475,14 @@ def run_image_platform_migrations():
         # v936: image-QC shadow-mode report — see SQLite migration above.
         ("image_nodes", "qc_json",
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS qc_json TEXT"),
+        # v940: per-variant operator verdict — see SQLite migration above for
+        # the rationale. Listed here too because production is Postgres: a
+        # SQLite-only migration entry means the column never exists live and
+        # every write to it 500s.
+        ("image_variants", "operator_verdict",
+         "ALTER TABLE image_variants ADD COLUMN IF NOT EXISTS operator_verdict VARCHAR(16)"),
+        ("image_variants", "verdict_at",
+         "ALTER TABLE image_variants ADD COLUMN IF NOT EXISTS verdict_at TIMESTAMP"),
         # v701: see SQLite migration above for the rationale.
         ("clips", "replacement_start_frame",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS replacement_start_frame VARCHAR(512)"),
@@ -981,6 +1001,26 @@ def _clear_qc(node):
     node.qc_json = None
 
 
+# v940 — the only two verdicts a NON-chosen variant can carry. The pick itself
+# is not in this list on purpose: choosing is already recorded by
+# ImageNode.chosen_variant_id, and duplicating it here would let the two
+# disagree. Read the tuple, never retype the strings.
+VARIANT_VERDICTS = ("still_good", "rejected")
+
+
+def _clear_verdict(variant):
+    """v940: drop a variant's operator verdict.
+
+    A verdict judges one specific rendered image against the prompt it was
+    rendered for. Whenever the row survives but the thing it was judging is
+    gone (the prompt was rewritten under it) the label is no longer about
+    anything, and a stale 'rejected' would train the ledger on an image that
+    was never actually rejected. When the ROW itself is deleted no call is
+    needed — the columns die with it."""
+    variant.operator_verdict = None
+    variant.verdict_at = None
+
+
 class ImageNode(Base):
     """A single image-generation request in the graph.
 
@@ -1254,6 +1294,13 @@ class ImageVariant(Base):
     # Dual-backend: which renderer produced this variant. 'banana' (Flow/Banana,
     # default) | 'chatgpt'. Base nodes carry both; the grid badges them.
     backend = Column(String(16), nullable=False, default='banana')
+    # v940 — the operator's verdict on a variant he did NOT pick:
+    # 'still_good' | 'rejected'. NULL means untagged, which is a third state,
+    # not a synonym for either. Nullable and never defaulted so an untouched
+    # variant stays honestly blank. DISPLAY/CAPTURE ONLY (v886.3) — no code
+    # path reads this to choose, render, or promote anything.
+    operator_verdict = Column(String(16), nullable=True)
+    verdict_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     node = relationship("ImageNode", back_populates="variants", foreign_keys=[node_id])
@@ -1287,6 +1334,10 @@ class ImageVariant(Base):
             # 'M' badge / folder icon on manual variants.
             "source": self.source or 'ai',
             "backend": self.backend or 'banana',
+            # v940 — three-way review split. NULL stays NULL here (not ''), so
+            # the UI can tell "untagged" from a real verdict.
+            "operator_verdict": self.operator_verdict,
+            "verdict_at": self.verdict_at.isoformat() if self.verdict_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -1659,6 +1710,15 @@ class ChooseVariantRequest(BaseModel):
 
 class NodeQCRequest(BaseModel):
     report: Dict[str, Any]
+
+
+class VariantVerdictRequest(BaseModel):
+    """v940 — one operator verdict on one non-chosen variant.
+
+    Typed as a free Optional[str] rather than a pattern so a bad value comes
+    back as our own plain 422 message naming the allowed words, instead of
+    Pydantic's nested validation blob. NULL clears the tag."""
+    verdict: Optional[str] = None
 
 
 # =============================================================================
@@ -3544,6 +3604,12 @@ def choose_variant(
     if not variant:
         raise HTTPException(404, "Variant not found on this node")
     node.chosen_variant_id = variant.id
+    # v940: picking this variant supersedes any 'still good' / 'rejected' tag
+    # on it — the pick is the strongest statement the operator can make, and a
+    # chosen-and-'rejected' row is a contradiction the ledger cannot read.
+    # Clearing here is also what keeps the endpoint's "unchoose first" guard
+    # honest: a chosen variant is always untagged.
+    _clear_verdict(variant)
     if node.status != "ready":
         node.status = "ready"
     node.updated_at = datetime.utcnow()
@@ -3627,6 +3693,68 @@ def set_node_qc(
     log.info(f"[image_platform] [qc] node {node_id} scored: recommended={rec} "
              f"skipped={rep.get('skipped_checks')}")
     return {"ok": True, "node_id": node_id}
+
+
+@router.post("/nodes/{node_id}/variants/{variant_id}/verdict")
+def set_variant_verdict(
+    node_id: int,
+    variant_id: int,
+    req: VariantVerdictRequest,
+    db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v940 — record the operator's verdict on a variant he did NOT pick.
+
+    Choosing a variant only ever said which one was best. It never said
+    whether the rest were usable, so every downstream reader had to assume
+    "not chosen" meant "bad" — and among four variants some genuinely are bad
+    while others are perfectly fine. This endpoint captures that middle:
+    'still_good' or 'rejected', written while the operator is reviewing
+    anyway.
+
+    DATA CAPTURE ONLY (v886.3). Nothing here selects, renders, promotes, or
+    reorders anything, and no other code path reads the column to make a
+    decision. tools/pick_ledger.py will read these rows later; that is a
+    separate change.
+
+    verdict=null clears the tag and is always allowed — a label you cannot
+    remove is worse than no label."""
+    node = db.query(ImageNode).filter(
+        ImageNode.id == node_id,
+        ImageNode.user_id == current_user.id,
+    ).first()
+    if not node:
+        raise HTTPException(404, "Node not found")
+    variant = db.query(ImageVariant).filter(
+        ImageVariant.id == variant_id,
+        ImageVariant.node_id == node_id,
+    ).first()
+    if not variant:
+        # Same wording and code as /choose: a variant id that exists but hangs
+        # off another node is not findable HERE, and saying "not found" keeps
+        # one node's ids from confirming another node's contents.
+        raise HTTPException(404, "Variant not found on this node")
+    verdict = req.verdict
+    if isinstance(verdict, str):
+        verdict = verdict.strip().lower() or None
+    if verdict is not None and verdict not in VARIANT_VERDICTS:
+        raise HTTPException(
+            422, f"verdict must be one of {', '.join(VARIANT_VERDICTS)}, or null to clear")
+    # Only SETTING a verdict collides with the pick. Clearing stays legal even
+    # on the chosen variant so a tag stranded by any older row can be removed.
+    if verdict is not None and node.chosen_variant_id == variant.id:
+        raise HTTPException(422, "the chosen variant IS the pick — unchoose first")
+    variant.operator_verdict = verdict
+    variant.verdict_at = datetime.utcnow() if verdict else None
+    node.updated_at = datetime.utcnow()
+    db.commit()
+    # v940 [LEDGER] this line IS the feature's trace until pick_ledger.py reads
+    # the column — it is not removable scaffolding. Read via:
+    # python code/render_logs.py --text "[verdict]"
+    log.info(f"[image_platform] [verdict] node {node_id} variant {variant_id} "
+             f"-> {verdict or 'cleared'}")
+    return {"ok": True, "node_id": node_id, "variant_id": variant_id,
+            "verdict": verdict}
 
 
 # ---- uploads (seed nodes) ------------------------------------------------
@@ -7272,6 +7400,16 @@ def _import_scene_table_impl(
             _v891_dropped = 0
             for _old_v in list(existing.variants):
                 if getattr(_old_v, "source", "ai") == "manual":
+                    # v940: the ONLY invalidation site where a variant row
+                    # outlives the thing its verdict judged. Everywhere else
+                    # (generate / regenerate / manual replace / orphan cleanup
+                    # / worker re-upload) the row is db.delete()d and the
+                    # columns go with it. Here the manual row is deliberately
+                    # kept while the prompt under it is rewritten, so a verdict
+                    # recorded against the OLD text would carry over onto a new
+                    # question — the same reason this site already drops the
+                    # pick and the QC report two lines up.
+                    _clear_verdict(_old_v)
                     continue
                 db.delete(_old_v)
                 _v891_dropped += 1

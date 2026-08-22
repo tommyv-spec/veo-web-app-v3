@@ -1115,6 +1115,36 @@
         .img-variant.manual-variant .variant-badge-qc {
             bottom: 42px;
         }
+        /* v940 — the operator's three-way review split. Bottom-LEFT is taken by
+           the v936 QC badge (and the manual folder icon), and bottom-right's own
+           corner is the download pill, so these sit directly ABOVE that pill —
+           the same stacking trick the manual-variant QC badge uses on the left.
+           Rendered on NON-chosen tiles only: the chosen tile already makes the
+           strongest statement there is. The handler stops propagation, so
+           tagging a variant never also selects it. */
+        .img-variant .variant-verdicts {
+            position: absolute; bottom: 48px; right: 12px;
+            display: flex; gap: 4px; z-index: 4;
+        }
+        .img-variant .variant-verdict-btn {
+            background: rgba(0, 0, 0, 0.78); color: #e5e7eb;
+            padding: 4px 8px; border-radius: 4px;
+            font-size: 10px; font-weight: 700; letter-spacing: 0.5px;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            line-height: 1; cursor: pointer;
+            transition: filter 0.12s;
+        }
+        .img-variant .variant-verdict-btn:hover { filter: brightness(1.45); }
+        /* Same green / red the QC badge already uses for pick / fail, so one
+           tile never speaks two colour languages. */
+        .img-variant .variant-verdict-btn.verdict-on-good {
+            background: rgba(34, 197, 94, 0.92); color: #fff;
+            border-color: rgba(255, 255, 255, 0.45);
+        }
+        .img-variant .variant-verdict-btn.verdict-on-reject {
+            background: rgba(239, 68, 68, 0.92); color: #fff;
+            border-color: rgba(255, 255, 255, 0.35);
+        }
         /* dual-backend — "still waiting on the ChatGPT lane" placeholder tile.
            The Banana lane owns node.status and usually finishes first, so a
            node reads 'ready' with its Banana variants on screen while the
@@ -24158,6 +24188,48 @@ async function renderAutoEditCard(jobId, hasExport) {
                         return '';
                     }
                 };
+                // v940 — the two extra review buttons. Choosing a variant only
+                // ever recorded which one was best; it never said whether the
+                // others were usable, so anything reading the history had to
+                // treat "not chosen" as "bad" — and among four variants some
+                // really are bad while others are fine. These capture that
+                // middle while the operator is reviewing anyway.
+                //
+                // DATA CAPTURE ONLY (v886.3). Nothing here changes what is
+                // chosen, rendered, or promoted; the tile's own onclick (which
+                // DOES choose) is untouched and still fires everywhere except
+                // on these two buttons.
+                //
+                // Same defensive shape as qcBadgeHtml: never throw out of a
+                // tile, and treat anything that is not one of the two known
+                // strings as untagged.
+                const verdictBtnsHtml = (v) => {
+                    try {
+                        const cur = (v && typeof v.operator_verdict === 'string')
+                            ? v.operator_verdict : '';
+                        const isGood = (cur === 'still_good');
+                        const isRej  = (cur === 'rejected');
+                        // `cur` is server-validated to two literals, but it is
+                        // going into an HTML attribute — escape it like every
+                        // other injected value in this file.
+                        const curSafe = imgEscape(cur);
+                        const btn = (want, label, onCls, on, tip) =>
+                            `<button class="variant-verdict-btn${on ? ' ' + onCls : ''}"
+                                     type="button"
+                                     data-track="variant_verdict"
+                                     aria-pressed="${on ? 'true' : 'false'}"
+                                     title="${tip}"
+                                     onclick="imgSetVariantVerdict(event, ${node.id}, ${v.id}, '${want}', '${curSafe}')">${label}</button>`;
+                        return `<div class="variant-verdicts">
+                            ${btn('still_good', '✓ good', 'verdict-on-good', isGood,
+                                  'Usable, just not the one you picked. Click again to clear. Records only — it selects nothing.')}
+                            ${btn('rejected', '✗ reject', 'verdict-on-reject', isRej,
+                                  'Actually bad, not just unpicked. Click again to clear. Records only — it deletes nothing.')}
+                        </div>`;
+                    } catch (e) {
+                        return '';
+                    }
+                };
 
                 variantsHtml = `
                     ${isGenerating ? `<div style="font-size:12px;color:var(--accent);margin-bottom:8px;font-weight:600;display:flex;align-items:center;gap:6px;">
@@ -24194,6 +24266,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                                     <span class="variant-label">${v.variant_index}</span>
                                     ${isManual ? '<div class="manual-icon" title="Manual upload">📁</div>' : ''}
                                     ${qcBadgeHtml(v)}
+                                    ${chosen ? '' : verdictBtnsHtml(v)}
                                     ${chosen ? '<div class="chosen-badge">✓</div>' : ''}
                                     <button class="img-dl-btn" title="Download the original file at full size" data-track="image_download_one"
                                             onclick="imgDownloadOne(event, ${node.id}, ${v.id}, '${vLabel}')">⬇ Download</button>
@@ -24638,6 +24711,48 @@ async function renderAutoEditCard(jobId, hasExport) {
                 alert('Error: ' + e.message);
                 // On failure, refresh to revert UI to server state
                 try { await imgRefreshNodes(); } catch (_) {}
+            }
+        }
+
+        // v940 — tag a NON-chosen variant 'still_good' or 'rejected'.
+        //
+        // Toggle: clicking the button that is already on clears the tag, so the
+        // operator can undo a misclick without a third control. The two are
+        // mutually exclusive because the server stores ONE column — clicking
+        // 'reject' on a 'good' variant overwrites it, no un-click needed.
+        //
+        // `cur` is passed in from the rendered markup rather than looked up in
+        // imgState, so the toggle always reflects the tile the operator is
+        // actually looking at; the whole detail pane is re-rendered on every
+        // refresh anyway.
+        //
+        // This is DATA CAPTURE ONLY (v886.3): it must never select a variant.
+        // stopPropagation is what keeps that true — the tile's own onclick is
+        // imgChooseVariant, and letting the event bubble would choose the very
+        // variant the operator just rejected.
+        async function imgSetVariantVerdict(ev, nodeId, variantId, want, cur) {
+            if (ev) { ev.stopPropagation(); ev.preventDefault(); }
+            const next = (cur === want) ? null : want;
+            const btn = ev && ev.currentTarget ? ev.currentTarget : null;
+            if (btn) btn.disabled = true;
+            try {
+                const res = await fetch(
+                    `/api/images/nodes/${nodeId}/variants/${variantId}/verdict`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ verdict: next }),
+                    });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail || 'Could not save that verdict');
+                }
+                await imgRefreshNodes();
+            } catch (e) {
+                alert('Error: ' + e.message);
+                // Repaint from server state so a failed tag can't look applied.
+                try { await imgRefreshNodes(); } catch (_) {}
+            } finally {
+                if (btn) btn.disabled = false;
             }
         }
 
