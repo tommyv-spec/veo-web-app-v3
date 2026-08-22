@@ -102,6 +102,84 @@ def _lint_intensity_ledger(adaptation_body, fails):
             fails.append(f"{prefix} is 5/5 viral-max but says headroom YES")
 
 
+OVERLAY_WORDS = re.compile(
+    r"composite|green[- ]?screen|keyed|picture[- ]in[- ]picture|\bpip\b|split[- ]screen|"
+    r"cut[- ]?out|inset|overlay|b[- ]?roll|insert panel|letterbox", re.I)
+
+
+def _lint_overlay_ledger(adaptation_body, full_text, new_era, fails, warns):
+    """v938.4 — everything an editor needs to REBUILD the composition.
+
+    v938.3 made the corner speaker's box measurable. But a composed video is
+    more than its one keyed layer: b-roll inserts sit in a specific box for
+    specific seconds, stills get placed over the frame, the caption band moves,
+    a watermark occupies a corner. Replicating the video needs all of it, and
+    the decode was recording none of it — the operator's point: *"not just the
+    corner thing, but also the info we need to replicate a composed video, with
+    brolls or images — where they place the images, all the details."*
+
+    So: one row per overlaid element, with a MEASURED box and the window it
+    holds for. Same philosophy as every other ledger here — the checker cannot
+    judge whether a box is right, so it requires the declaration and requires
+    it to carry numbers.
+
+    Only demanded when the decode itself shows overlay evidence, so a plain
+    single-take talking head is never asked for one. `| none observed |` is an
+    explicit, legal answer for a source that composites nothing.
+    """
+    if not OVERLAY_WORDS.search(full_text):
+        return
+    m = re.search(
+        r"^###\s+Edit-layer overlay ledger\s*$\n(.*?)(?=^###\s|^##\s|\Z)",
+        adaptation_body, re.S | re.M | re.I)
+    if not m:
+        msg = ("v938.4: this decode shows composite/overlay/b-roll work but "
+               "`## Adaptation-extraction` has no `### Edit-layer overlay ledger` — one row per "
+               "overlaid element (`element | source | box | window (s) | layer | notes`) with the "
+               "box as fractions of the frame, or a single `| none observed | n/a | n/a | n/a | "
+               "n/a | n/a |` row. Without it the composition cannot be rebuilt: knowing a b-roll "
+               "exists does not say where it sat or for how long. Measure with tools/grid_frames.py")
+        (fails if new_era else warns).append(msg)
+        return
+
+    rows = []
+    for line in m.group(1).splitlines():
+        if not line.strip().startswith("|"):
+            continue
+        cells = [_clean_cell(c) for c in line.strip().strip("|").split("|")]
+        if len(cells) != 6:
+            continue
+        if cells[0].lower() == "element":
+            continue
+        if all(re.fullmatch(r":?-{3,}:?", c) for c in cells):
+            continue
+        rows.append(cells)
+
+    if not rows:
+        (fails if new_era else warns).append(
+            "v938.4: overlay ledger has no six-column data row "
+            "(`element | source | box | window (s) | layer | notes`)")
+        return
+
+    if len(rows) == 1 and rows[0][0].strip().lower() == "none observed":
+        return
+
+    vague = [r[0] for r in rows if len(re.findall(r"\d", r[2])) < 2]
+    if vague:
+        (fails if new_era else warns).append(
+            "v938.4: overlay ledger rows %s have no measured box — write fractions of the "
+            "frame (`x[0..0.43W] y[0.57H..H]`), not 'lower third' or 'small inset'. "
+            "The adjective is the failure mode this ledger exists to fix"
+            % ", ".join(repr(v) for v in vague[:4]))
+    no_window = [r[0] for r in rows if not re.search(r"\d", r[3])]
+    if no_window:
+        (fails if new_era else warns).append(
+            "v938.4: overlay ledger rows %s have no window — say WHEN each element is on "
+            "screen in seconds (`12.6-16.8`, or `whole` for a persistent element). An overlay "
+            "with no timing cannot be placed back on a timeline"
+            % ", ".join(repr(v) for v in no_window[:4]))
+
+
 def _lint_shown_beats_ledger(adaptation_body, fails):
     """Mechanical half of v790 source-beat capture. Frame truth stays human."""
     m = re.search(
@@ -164,6 +242,16 @@ def lint(path):
 
     fails, warns = [], []
 
+    # The decode's own `created:` date is the era boundary for every
+    # forward-only rule below. Parsed ONCE here because two separate checks now
+    # need it and they run in different blocks.
+    V938_DATE = "2026-08-22"        # v938.3 / v938.4 — measured composite + overlay geometry
+    created = ""
+    cm = re.search(r'^created:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})', t, re.M)
+    if cm:
+        created = cm.group(1)
+    geom_era = bool(created) and created >= V938_DATE
+
     # 1. required top-level sections present (incl the canary)
     # v865 — a tuple entry passes when ANY of its title variants is present.
     for s in REQUIRED_SECTIONS:
@@ -186,6 +274,7 @@ def lint(path):
                 fails.append(f"## Adaptation-extraction missing the {label} (keyword '{kw}')")
         _lint_intensity_ledger(adaptation_body, fails)
         _lint_shown_beats_ledger(adaptation_body, fails)
+        _lint_overlay_ledger(adaptation_body, t, geom_era, fails, warns)
 
         # v887a — audio design read (WARN-only, forward-only 2026-08-03:
         # required on NEW decodes, the 148 pre-v887 decodes are never retro-failed)
@@ -236,13 +325,8 @@ def lint(path):
         # twice in the commit that added it - so the era boundary is a date the
         # linter reads, not a habit.
         V890B_DATE = "2026-08-12"
-        # v938.3 composite geometry — forward-only from the day it was measured.
-        # Older decodes keep their prose descriptions and only WARN.
-        V938_DATE = "2026-08-22"
-        created = ""
-        cm = re.search(r'^created:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})', t, re.M)
-        if cm:
-            created = cm.group(1)
+        # `created` and geom_era (v938, 2026-08-22) are parsed once at the top
+        # of lint() — two blocks need them now.
         new_era = bool(created) and created >= V890B_DATE
 
         # Field names may carry an annotation before the colon, e.g.
@@ -319,7 +403,6 @@ def lint(path):
         # (tools/grid_frames.py does this for a whole frame directory.)
         geom_field = re.compile(r"\*\*composite_geometry:\*\*", re.I)
         bg_layer = re.compile(r"\*\*composite_layer:\*\*\s*background[- ]?plate", re.I)
-        geom_era = bool(created) and created >= V938_DATE
         no_geometry, vague_geometry = [], []
         comp_blocks, layer_blocks, no_evidence = [], 0, []
         for num, body in zip(imgs, blocks):

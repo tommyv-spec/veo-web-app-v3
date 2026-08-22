@@ -17264,7 +17264,7 @@ Scored as weighted deviation from that curve — `code/measure_capcut_match.py`,
 
 Two independent sources agree, and the pipeline did the inverse of both.
 
-**The decoded corpus.** Of 319 `raw/videos/decoded_*.md`, **16 composite a person into a corner; 15 bottom-LEFT, 1 bottom-right** (`arms-before-after`, a different producer). All put the speaker over **full-screen SHARP b-roll** — never a blurred backdrop. Measured off the decodes' own frames: the green-screen doctor in `salvora_reel4` reads **37.5% W x 29% H**, the granny PiP in `salvora_reel2` **39% W x 33% H**. Both flush to the left and bottom edges, never floated with a margin. `pip-narrator-elijah:36` describes it as *"roughly the bottom-left quarter of the frame"* with b-roll cutting every 1.3-2.0s behind.
+**The decoded corpus.** Of 163 `raw/videos/decoded_*.md`, **16 composite a person into a corner; 15 bottom-LEFT, 1 bottom-right** (`arms-before-after`, a different producer). All put the speaker over **full-screen SHARP b-roll** — never a blurred backdrop. Measured off the decodes' own frames: the green-screen doctor in `salvora_reel4` reads **37.5% W x 29% H**, the granny PiP in `salvora_reel2` **39% W x 33% H**. Both flush to the left and bottom edges, never floated with a margin. `pip-narrator-elijah:36` describes it as *"roughly the bottom-left quarter of the frame"* with b-roll cutting every 1.3-2.0s behind.
 
 Two jobs it does: a **persistent narrator corner-cam** through the hook, or a **handoff bridge** that opens late to introduce the body speaker — `salvora_reel1:29` states it outright: *"PiP introduces the BODY voice over the still-running HOOK image."* Both end in a hard cut to that speaker full-frame.
 
@@ -17287,6 +17287,34 @@ Two jobs it does: a **persistent narrator corner-cam** through the hook, or a **
 **The occupancy scan must read what the VIEWER sees (v938.17).** It normally scans the raw export, which is fine while the composite only adds the PIP. With `hook_corner` they disagree completely — base has the speaker full-frame on green, the composite has him small in the corner with someone else behind — and captions planned against the base landed **across his face**, the one thing the operator has ruled out absolutely. When the hook is recomposited the scan now reads the composite.
 
 **Evidence:** `docs/experiments/autoedit-hook-composite-placement-2026-08-22.md` (per-decode table with line citations, the CapCut numbers, and a reproduce script).
+
+### 3a. THE EDIT-LAYER OVERLAY LEDGER (v938.4) — everything needed to rebuild a composition
+
+v938.3 made the corner speaker's box measurable. But a composed video is more than its one keyed layer. Operator, immediately after: *"not just the corner thing, but also the info we need to replicate a composed video, with brolls or images — you know where they place the images, all the details."*
+
+Right. A b-roll insert sits in a specific box for specific seconds; a still gets placed over the frame; the caption band moves; a watermark occupies a corner. **Knowing a b-roll EXISTS does not say where it sat or for how long**, and a decode that only says "b-roll insert at 12s" cannot be rebuilt from.
+
+So `## Adaptation-extraction` carries a `### Edit-layer overlay ledger` — one row per overlaid element:
+
+```
+| element | source | box | window (s) | layer | notes |
+|---|---|---|---|---|---|
+| corner speaker | keyed hook clip | x[0..0.43W] y[0.57H..H] | 0-2.5 | front | flush left+bottom, cutout |
+| b-roll insert | product demo clip | x[0.13..0.87W] y[0.55..0.78H] | 12.6-16.8 | front | rounded corners |
+| caption band | burned text | y[0.55..0.75H] | whole | front | moves to y[0.14H] at 23-28s |
+| watermark | genaicontent | x[0.04..0.20W] y[0.96H..H] | whole | front | bottom-left |
+```
+
+**Enforced by `code/verify_decode_format.py`**, forward-only from `created: 2026-08-22`:
+
+- demanded **only when the decode itself shows overlay evidence** (composite / keyed / PiP / inset / split-screen / b-roll / insert panel / letterbox). A plain single-take talking head is never asked for one — a check that fires on everything measures nothing (v936.2's lesson).
+- `| none observed | n/a | n/a | n/a | n/a | n/a |` is an explicit, legal answer.
+- a row whose **box** carries fewer than two digits FAILS — "lower third" and "small inset" are the failure mode this exists to fix.
+- a row with **no window** FAILS — an overlay with no timing cannot be placed back on a timeline.
+
+Measured against the whole corpus when it landed: **0 of 163 decodes newly hard-failed** (all predate the era date), 40 warned — those are the ones that will want a ledger on their next rewrite.
+
+**Why this is a gate and not a checklist line.** The corpus described composite layouts in words for a year and every frame had to be re-measured the moment the edit layer needed a number. Prose decays; a gate does not. Same philosophy as `layer_evidence` beside it: the checker cannot judge whether a box is CORRECT, so it requires the DECLARATION and requires it to be numeric — an author made to write a fraction has to go measure one. `tools/grid_frames.py` makes that one command (10% grid overlay; the box reads straight off).
 
 ### 4. Two pre-existing bugs found here, NOT fixed
 

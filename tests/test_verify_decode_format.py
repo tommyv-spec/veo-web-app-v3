@@ -235,5 +235,79 @@ class CompositeGeometryTests(unittest.TestCase):
         self.assertNotIn("v938.3", output, output)
 
 
+class OverlayLedgerTests(unittest.TestCase):
+    """v938.4 — everything an editor needs to rebuild the composition.
+
+    Knowing a b-roll exists does not say where it sat or for how long. One row
+    per overlaid element, with a measured box and a window.
+    """
+
+    HEADER = ("### Edit-layer overlay ledger\n\n"
+              "| element | source | box | window (s) | layer | notes |\n"
+              "|---|---|---|---|---|---|\n")
+
+    def lint_text(self, text):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "decoded_fixture.md"
+            path.write_text(text, encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = verify_decode_format.lint(path)
+            return result, output.getvalue()
+
+    def build(self, rows, created="2026-08-22", overlay_evidence="picture-in-picture inset"):
+        text = decode_with_ledger(
+            "| enormous belly / adult man | fills the lower two-thirds of the frame "
+            "and dwarfs his chest | 5/5 viral-max | NO |")
+        text = f"created: {created}\n" + text
+        # the trigger: the decode itself must show overlay work
+        text = text.replace("register proxy chain angle",
+                            f"register proxy chain angle\n\n{overlay_evidence}\n")
+        if rows is not None:
+            text = text.replace("### Shown beats ledger",
+                                self.HEADER + rows + "\n\n### Shown beats ledger")
+        return text
+
+    def test_measured_ledger_passes(self):
+        rows = ("| corner speaker | keyed hook clip | x[0..0.43W] y[0.57H..H] | 0-2.5 | front | "
+                "flush left+bottom, cutout |\n"
+                "| b-roll insert | product demo | x[0.13..0.87W] y[0.55..0.78H] | 12.6-16.8 | "
+                "front | rounded corners |\n")
+        result, output = self.lint_text(self.build(rows))
+        self.assertNotIn("v938.4", output, output)
+
+    def test_missing_ledger_fails_on_a_composite_decode(self):
+        result, output = self.lint_text(self.build(None))
+        self.assertIn("v938.4", output)
+        self.assertIn("no `### Edit-layer overlay ledger`", output)
+        self.assertEqual(1, result, output)
+
+    def test_adjective_box_fails(self):
+        rows = "| b-roll insert | product demo | lower third | 12.6-16.8 | front | — |\n"
+        result, output = self.lint_text(self.build(rows))
+        self.assertIn("no measured box", output)
+
+    def test_missing_window_fails(self):
+        rows = "| b-roll insert | product demo | x[0.13..0.87W] y[0.55..0.78H] | — | front | — |\n"
+        result, output = self.lint_text(self.build(rows))
+        self.assertIn("no window", output)
+
+    def test_none_observed_is_a_legal_answer(self):
+        rows = "| none observed | n/a | n/a | n/a | n/a | n/a |\n"
+        result, output = self.lint_text(self.build(rows))
+        self.assertNotIn("v938.4", output, output)
+
+    def test_a_plain_single_take_is_never_asked_for_one(self):
+        """No overlay evidence in the decode -> the ledger is not demanded."""
+        result, output = self.lint_text(
+            self.build(None, overlay_evidence="one locked-off talking head, no assembly"))
+        self.assertNotIn("v938.4", output, output)
+
+    def test_older_decode_only_warns(self):
+        result, output = self.lint_text(self.build(None, created="2026-07-01"))
+        self.assertIn("v938.4", output)
+        self.assertNotIn("FAIL: v938.4", output)
+
+
 if __name__ == "__main__":
     unittest.main()
