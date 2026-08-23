@@ -17607,9 +17607,30 @@ Either way the clip was then rendered at whatever bucket the composer was still 
 
 **The general lesson, and it generalises past this file: a recovery path that logs and continues is a fail-open path.** The warning made it *look* handled. The same function fails closed 40 lines away, and nobody noticed the two halves disagreed until a clip shipped cut.
 
+### v939.10 — WHEN EVERY TAKE IS CUT, RETRIGGER A *CORRECTED* GENERATION (2026-08-23)
+
+Operator: *"if all the clips of a clip aren't right we should retrigger the corrected generation."* The word that matters is **corrected**. `all_takes_cut` already existed but only changed a log string, so an all-cut clip still got an **identical re-roll** — a gamble on inputs that had already failed every single time.
+
+The escalation now walks the corrections that are actually available, cheapest first, and **stops when there are none**:
+
+| condition | action | why |
+|---|---|---|
+| one bad take, others fine | `redo_same_duration` | Veo is stochastic; a single failure is not evidence about the line |
+| every take cut, a reworded line exists | **`reword_and_redo`** | v821 Prompt B is the same meaning in different words — the only change that addresses a model refusing to say *this* wording |
+| every take cut, no reworded line, headroom left | `widen_and_redo` | the last automatic lever, and **declared as a long shot**: an abandoned clip already left time unused |
+| every take cut, nothing left to change | `shorten_the_line`, **`redo: False`** | do NOT queue another render. The line has to get shorter or be split, and that is the operator's call |
+
+**Every plan now carries `redo`**, so the caller never has to infer from the action string whether to spend a render. That closed a real hole: the apply loop previously queued a redo for *every* row, so a `shorten_the_line` verdict — the one that means "we have nothing left to try" — still fired an identical render. The report also now carries `alt_line` (the clip's `dialogue_text_b`), because the escalation cannot use a reworded line it was never told about.
+
+**The principle: a retry that changes nothing is not a retry.** Once every take has failed, the same inputs are known-bad, and the only honest moves are to change something or to stop and say so.
+
+Live result (2026-08-23): the three unreviewed broken clips were re-triggered — 14330 diagnosed `under_bucketed` and **widened 4s → 6s before the redo**, 14153 and 14331 re-rolled at their correct length. All three confirmed `flow_redo_queued` at attempt 2, with 14330 holding the widened 6s.
+
 ### Not done, deliberately
 
 No automatic discard (every removal is an explicit `--apply`), no automatic widening (`--repair-duration` and `--fix` are both opt-in), and **nothing pushed** — v939.8 and v939.9 only take effect on new renders once `code/` is deployed. The thresholds are first-draft: the `--backtest` sweep is uninformative because three failures in 142 takes leave every top setting tied. **What would settle them is a batch where the operator's rejected takes are KEPT instead of overwritten** — twenty genuinely-bad renders would calibrate this properly. Until the PROSPECTIVE bucket has real numbers in it, nothing here may act on its own.
+
+**SHIP STATUS, superseding the sentence above (2026-08-23):** that line is kept verbatim because `check_masters_vs_main.py` requires this file to stay a superset of `origin/main` — a status line may be corrected but never silently dropped. **v939 through v939.10 are now DEPLOYED and live**: `464e8a0` (clips.qc_json + the endpoint + canon) and `29057fb` (the corrected-generation escalation), both health-confirmed through `deploy.ps1`, which waits for `/api/health` to serve the new SHA rather than assuming. The Flow worker re-downloads `flow_worker.py` on its next launch, so v939.9's fail-closed behaviour arrives with the next worker start, not mid-run.
 
 CLI: `python code/clip_qc.py --job <id>` · `--since-days N --limit M` (the endpoint defaults `since_days` to 3 per v726, so it must be passed) · `--backtest` · `--out report.json`. Evidence is cached under `~/.kaveno/clipqc-cache/` as raw measurements, never verdicts, so a threshold sweep costs no network and no model time.
 
