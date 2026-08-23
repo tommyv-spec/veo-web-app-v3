@@ -1145,6 +1145,32 @@
             background: rgba(239, 68, 68, 0.92); color: #fff;
             border-color: rgba(255, 255, 255, 0.35);
         }
+        /* v940.1 — the "label the history" banner. Same shape and tokens as the
+           attention banner above; this one sits inside the node detail and says
+           where the operator is in the walk. It is a progress strip, not a new
+           design language: no new colours, no new radius, no new font. */
+        .img-verdict-history {
+            display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-left: 3px solid var(--accent);
+            border-radius: 6px;
+            padding: 10px 12px;
+            margin-bottom: 12px;
+            font-size: 12px;
+        }
+        .img-verdict-history .vh-title {
+            font-weight: 700; color: var(--accent); white-space: nowrap;
+        }
+        .img-verdict-history .vh-progress {
+            font-weight: 700; color: var(--text-primary); white-space: nowrap;
+        }
+        .img-verdict-history .vh-hint {
+            color: var(--text-muted); flex: 1; min-width: 180px;
+        }
+        .img-verdict-history .vh-actions {
+            display: flex; gap: 6px; flex-shrink: 0;
+        }
         /* dual-backend — "still waiting on the ChatGPT lane" placeholder tile.
            The Banana lane owns node.status and usually finishes first, so a
            node reads 'ready' with its Banana variants on screen while the
@@ -19312,6 +19338,14 @@ async function renderAutoEditCard(jobId, hasExport) {
             // so these are re-merged on every refresh to keep the directly-
             // accessed old job visible until the user navigates away.
             extraNodesById: {},
+            // v940.1 — the retro-labelling walk. Null when the mode is off.
+            // When on:
+            //   { queue: [server rows, newest first], idx, pendingTotal,
+            //     doneTotal, doneThisRun }
+            // The queue is a plain worklist of node ids: the mode navigates,
+            // and the labelling itself is still the v940 buttons on the tiles.
+            // Nothing in here ever picks a variant (v886.3).
+            verdictHistory: null,
         };
 
         function switchMainTab(tab) {
@@ -20759,6 +20793,27 @@ async function renderAutoEditCard(jobId, hasExport) {
                 } else {
                     parts.push(`<span style="color:rgb(245,158,11);font-weight:700">${batchesIncomplete}/${batchesTotal} batches need work</span>`);
                 }
+            }
+            // v940.1 — the way into labelling already-picked history. Shown
+            // unconditionally: the only honest count lives on the server (the
+            // sidebar list is windowed to since_days, and old images are the
+            // whole point), so hiding this behind a locally-derived test would
+            // hide it exactly from the operator with months of history. One
+            // click asks the server and says so if there is nothing left.
+            {
+                const _vh = imgState.verdictHistory;
+                const _vhLeft = _vh
+                    ? Math.max(0, (_vh.pendingTotal || 0) - (_vh.doneThisRun || 0))
+                    : null;
+                parts.push(
+                    `<button onclick="${_vh ? 'imgVerdictHistoryResume()' : 'imgStartVerdictHistory()'}"`
+                    + ` title="${imgEscape(_vh
+                        ? 'Back to the image the history walk is on'
+                        : 'Go back through images you already picked and say which of the OTHER variants were good and which you would have thrown away. Records only — it never changes a pick.')}"`
+                    + ` style="background:none;border:none;padding:0;font:inherit;cursor:pointer;`
+                    + `color:var(--accent);font-weight:700;text-decoration:underline">`
+                    + `🏷 ${_vh ? `labelling history — ${_vhLeft} left` : 'Label history'}</button>`
+                );
             }
             if (counts.ready) parts.push(`<span style="color:var(--success)">${counts.ready} ready</span>`);
             if (counts.generating + counts.queued) parts.push(`<span style="color:var(--accent)">${counts.generating+counts.queued} in progress</span>`);
@@ -22714,6 +22769,227 @@ async function renderAutoEditCard(jobId, hasExport) {
             )[0];
         }
 
+        // ---------------------------------------------------------------
+        // v940.1 — labelling the HISTORY.
+        //
+        // v940 only ever reaches images the operator reviews from now on.
+        // Everything already picked carries the pick and nothing else, which is
+        // the same "not chosen = bad" conflation v940 exists to kill, aimed at
+        // the past. This mode walks back through those images newest-first so
+        // the siblings can be tagged in bulk.
+        //
+        // It is NAVIGATION ONLY. The labelling is still the same v940 buttons
+        // on the same tiles, hitting the same endpoint; nothing here picks,
+        // renders, promotes or deletes anything (v886.3). Skipping writes
+        // nothing at all — untagged stays NULL, because "the operator never
+        // said" is a real answer and must not be forged into one of the two.
+        // ---------------------------------------------------------------
+
+        // How many of a node's NON-chosen variants still carry no verdict.
+        // The chosen variant is excluded because the endpoint refuses to label
+        // the pick at all (it is already recorded by chosen_variant_id) — count
+        // it and every node would be permanently unfinishable.
+        function imgUntaggedSiblings(node) {
+            if (!node || !node.chosen_variant_id) return 0;
+            const vs = Array.isArray(node.variants) ? node.variants : [];
+            return vs.filter(v => v && v.id !== node.chosen_variant_id
+                                    && !v.operator_verdict).length;
+        }
+
+        function imgVerdictHistoryEntry() {
+            const vh = imgState.verdictHistory;
+            if (!vh || !Array.isArray(vh.queue)) return null;
+            return vh.queue[vh.idx] || null;
+        }
+
+        // The worklist comes from the server, not from imgState.nodes: the
+        // sidebar fetch is windowed to since_days (default 3) and old videos
+        // are the entire point of this mode. A locally-derived queue would
+        // report "nothing left" while months of history sat unlabelled.
+        async function imgFetchVerdictQueue() {
+            const res = await fetch('/api/images/nodes/verdict-queue');
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            return await res.json();
+        }
+
+        window.imgStartVerdictHistory = async function() {
+            try {
+                if (typeof imgShowToast === 'function') imgShowToast('Loading your picked images…');
+                const data = await imgFetchVerdictQueue();
+                const queue = Array.isArray(data.queue) ? data.queue : [];
+                if (!queue.length) {
+                    imgState.verdictHistory = null;
+                    if (typeof imgShowToast === 'function') {
+                        imgShowToast('Nothing left to label',
+                            'Every image you picked already has a verdict on the ones you did not pick.');
+                    }
+                    if (typeof imgUpdateTabCount === 'function') imgUpdateTabCount();
+                    return;
+                }
+                imgState.verdictHistory = {
+                    queue: queue,
+                    idx: 0,
+                    pendingTotal: data.pending_total || queue.length,
+                    doneTotal: data.done_total || 0,
+                    doneThisRun: 0,
+                };
+                await imgVerdictHistoryGoTo(0);
+            } catch (e) {
+                console.warn('[v940.1] could not start history labelling:', e);
+                alert('Could not load the label queue: ' + e.message);
+            }
+        };
+
+        // Move the walk to queue position `idx` and open that node.
+        //
+        // A node older than the loaded window is not in imgState yet, so it is
+        // pulled in by batch first — the same escape hatch imgJumpToNextApproval
+        // already uses for an out-of-window approval.
+        // `_refetched` is the loop guard, and it is load-bearing. Without it a
+        // queue whose every row is unopenable (a batch fetch that keeps
+        // failing, a row with no batch_id) would run: skip all → refetch → same
+        // non-empty queue → skip all → refetch, forever, hammering the server
+        // from a page that looks idle. One refetch per walk-forward, then stop.
+        async function imgVerdictHistoryGoTo(idx, _refetched) {
+            const vh = imgState.verdictHistory;
+            if (!vh) return;
+            // Walk forward past anything that cannot be opened rather than
+            // dead-ending on it. Bounded by the queue length.
+            let unreachable = 0;
+            for (let i = idx; i < vh.queue.length; i++) {
+                const entry = vh.queue[i];
+                if (!entry || !entry.id) continue;
+                if (!imgState.nodesById[entry.id] && entry.batch_id) {
+                    try { await imgFetchBatchNodes(entry.batch_id); } catch (_) {}
+                }
+                if (imgState.nodesById[entry.id]) {
+                    vh.idx = i;
+                    imgFocusNode(entry.id);
+                    return;
+                }
+                unreachable++;
+                console.warn('[v940.1] skipping node', entry.id,
+                             '— could not load it (batch', entry.batch_id, ')');
+            }
+            // Ran off the end of this page. Ask the server again: the operator
+            // has been labelling, so the remaining set really has changed.
+            if (!_refetched) {
+                try {
+                    const data = await imgFetchVerdictQueue();
+                    const queue = Array.isArray(data.queue) ? data.queue : [];
+                    if (queue.length) {
+                        vh.queue = queue;
+                        vh.idx = 0;
+                        vh.pendingTotal = data.pending_total || queue.length;
+                        vh.doneTotal = data.done_total || 0;
+                        vh.doneThisRun = 0;
+                        return imgVerdictHistoryGoTo(0, true);
+                    }
+                } catch (e) {
+                    console.warn('[v940.1] queue refresh failed:', e);
+                }
+            }
+            const done = vh.doneThisRun;
+            imgState.verdictHistory = null;
+            if (typeof imgShowToast === 'function') {
+                if (unreachable) {
+                    // Say what actually happened. "History labelled" here would
+                    // claim work that was never done.
+                    imgShowToast('Stopped labelling',
+                        `Could not open ${unreachable} image${unreachable === 1 ? '' : 's'} from the queue — they are still unlabelled.`);
+                } else {
+                    imgShowToast('History labelled',
+                        done ? `You labelled ${done} image${done === 1 ? '' : 's'} this run.`
+                             : 'Nothing left in the queue.');
+                }
+            }
+            if (typeof imgUpdateTabCount === 'function') imgUpdateTabCount();
+            if (imgState.detailNodeId && imgState.nodesById[imgState.detailNodeId]) {
+                try { imgRenderNodeDetail(imgState.nodesById[imgState.detailNodeId]); } catch (_) {}
+            }
+        }
+
+        // Leave this one alone and move on. Deliberately writes NOTHING: a
+        // skipped image stays NULL, which is the honest record of "the operator
+        // never said" and is not a synonym for either verdict.
+        window.imgVerdictHistorySkip = function() {
+            const vh = imgState.verdictHistory;
+            if (!vh) return;
+            imgVerdictHistoryGoTo(vh.idx + 1);
+        };
+
+        // The operator wandered off the queue (clicked a sidebar row). Put him
+        // back on the entry he was on, without losing his place.
+        window.imgVerdictHistoryResume = function() {
+            const vh = imgState.verdictHistory;
+            if (!vh) return;
+            imgVerdictHistoryGoTo(vh.idx);
+        };
+
+        window.imgVerdictHistoryExit = function() {
+            imgState.verdictHistory = null;
+            if (typeof imgUpdateTabCount === 'function') imgUpdateTabCount();
+            if (imgState.detailNodeId && imgState.nodesById[imgState.detailNodeId]) {
+                try { imgRenderNodeDetail(imgState.nodesById[imgState.detailNodeId]); } catch (_) {}
+            }
+        };
+
+        // The progress strip at the top of the node detail while the mode runs.
+        // Returns '' when the mode is off, so the detail render is unchanged for
+        // everyone not doing this. Injects no server-supplied text — the numbers
+        // are integers this file computed, so there is nothing here to escape.
+        function imgVerdictHistoryBannerHtml(node) {
+            const vh = imgState.verdictHistory;
+            if (!vh || !node) return '';
+            const entry = imgVerdictHistoryEntry();
+            const onQueue = !!(entry && entry.id === node.id);
+            const left = Math.max(0, (vh.pendingTotal || 0) - (vh.doneThisRun || 0));
+            const done = (vh.doneTotal || 0) + (vh.doneThisRun || 0);
+            const pos = `#${(vh.idx || 0) + 1} of ${vh.queue.length}`;
+            const exitBtn = `<button class="btn btn-secondary btn-sm" onclick="imgVerdictHistoryExit()" title="Stop labelling history. Everything you already tagged is saved.">✕ Exit</button>`;
+            if (!onQueue) {
+                return `<div class="img-verdict-history">
+                    <span class="vh-title">🏷 Labelling history</span>
+                    <span class="vh-progress">${left} left · ${done} done</span>
+                    <span class="vh-hint">You stepped off the queue. This image is not the one the walk is on.</span>
+                    <span class="vh-actions">
+                        <button class="btn btn-secondary btn-sm" onclick="imgVerdictHistoryResume()" title="Go back to where the walk was">↩ Back to queue (${pos})</button>
+                        ${exitBtn}
+                    </span>
+                </div>`;
+            }
+            const untagged = imgUntaggedSiblings(node);
+            const hint = untagged
+                ? `Tag the ${untagged} variant${untagged === 1 ? '' : 's'} you did NOT pick — <strong>✓ good</strong> = you would have shipped it, <strong>✗ reject</strong> = you would have thrown it away. The last tag moves you on.`
+                : 'All tagged. Moving on…';
+            return `<div class="img-verdict-history">
+                <span class="vh-title">🏷 Labelling history</span>
+                <span class="vh-progress">${left} left · ${done} done <span style="color:var(--text-muted);font-weight:400;">(${pos})</span></span>
+                <span class="vh-hint">${hint}</span>
+                <span class="vh-actions">
+                    <button class="btn btn-secondary btn-sm" onclick="imgVerdictHistorySkip()" title="Leave this one unlabelled and go to the next. Skipping records nothing — it stays blank, not 'rejected'.">Skip →</button>
+                    ${exitBtn}
+                </span>
+            </div>`;
+        }
+
+        // Called after a verdict saves. Advances only when THIS node is the one
+        // the walk is on and every non-chosen variant now carries an answer.
+        // Never called from the choose path — this mode does not pick.
+        function imgVerdictHistoryAfterVerdict(nodeId) {
+            const vh = imgState.verdictHistory;
+            if (!vh) return false;
+            const entry = imgVerdictHistoryEntry();
+            if (!entry || entry.id !== nodeId) return false;
+            const node = imgState.nodesById[nodeId];
+            if (!node || imgUntaggedSiblings(node) > 0) return false;
+            vh.doneThisRun = (vh.doneThisRun || 0) + 1;
+            console.log('[v940.1 history] node', nodeId, 'fully labelled →',
+                        vh.doneThisRun, 'done this run');
+            imgVerdictHistoryGoTo(vh.idx + 1);
+            return true;
+        }
+
         function imgRenderJobOverview(groupKey) {
             const area = document.getElementById('imgDetailArea');
             if (!area) return;
@@ -24350,6 +24626,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                     <h2 title="${nameTitleSafe}" style="overflow-wrap:anywhere;word-break:break-word;line-height:1.25;flex:1;min-width:0;">${nameSafe}${titleSuffix}</h2>
                     ${deleteBtnTop}
                 </div>
+                ${imgVerdictHistoryBannerHtml(node)}
                 <div style="font-size:11px;color:var(--text-muted);display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
                     <span>Status: <span class="node-status-badge status-${node.kind==='upload'?'upload':node.status}">${node.kind==='upload'?'upload':node.status}</span></span>
                     <span title="node id — use with send_to_platform.py (--subject / --product-node)">node id: <strong>${node.id}</strong></span>
@@ -24747,6 +25024,19 @@ async function renderAutoEditCard(jobId, hasExport) {
                     throw new Error(err.detail || 'Could not save that verdict');
                 }
                 await imgRefreshNodes();
+                // v940.1 — imgRefreshNodes only repaints the detail pane when
+                // its fingerprint (status / variant count / cg_status) changes,
+                // and a verdict changes none of the three. Without an explicit
+                // repaint the button the operator just pressed never lights up,
+                // so he cannot tell a saved tag from a lost one — which makes
+                // walking a hundred old images impossible. The history walk
+                // renders the next node itself, so only repaint when it didn't
+                // move us.
+                const _advanced = imgVerdictHistoryAfterVerdict(nodeId);
+                if (!_advanced && imgState.detailNodeId === nodeId
+                        && imgState.nodesById[nodeId]) {
+                    try { imgRenderNodeDetail(imgState.nodesById[nodeId]); } catch (_) {}
+                }
             } catch (e) {
                 alert('Error: ' + e.message);
                 // Repaint from server state so a failed tag can't look applied.

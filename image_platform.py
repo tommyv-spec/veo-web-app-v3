@@ -2897,6 +2897,118 @@ def approval_summary(
     }
 
 
+@router.get("/nodes/verdict-queue")
+def verdict_queue(
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v940.1 — the images already picked whose LEFT-BEHIND variants are still
+    untagged, newest first.
+
+    v940 put the two verdict buttons on every non-chosen tile, so a picture the
+    operator is reviewing right now gets labelled while he is looking at it.
+    That only ever reaches images from here on. Everything already picked —
+    months of it — carries the pick and nothing else, which is the exact
+    conflation v940 exists to kill, just aimed at the past instead of the
+    future. This endpoint is the worklist for walking back through it.
+
+    "Still needs labelling" = a generated node that finished rendering, HAS a
+    pick, and has at least one non-chosen variant whose ``operator_verdict`` is
+    NULL. The chosen variant is excluded from both counts on purpose: the
+    verdict endpoint refuses to label the pick (it is already recorded by
+    ``chosen_variant_id``), so counting it as "unlabelled" would make every node
+    permanently unfinishable.
+
+    Why this is a server query and not derived in the browser, for the same
+    reason ``/nodes/approval-summary`` exists: the sidebar's ``/nodes`` fetch is
+    windowed by ``since_days`` (default 3), and old videos are the whole point
+    of the request. A queue computed off that array would omit everything the
+    operator actually wants to go back to and quietly report "nothing left".
+
+    READ ONLY, and DATA CAPTURE ONLY downstream (v886.3). This selects nothing,
+    renders nothing, promotes nothing and writes nothing; it only says which
+    images still have a question outstanding. NULL stays NULL until the operator
+    answers — an image the operator skips is not tagged with anything.
+    """
+    # A node's non-chosen variants, and how many of them are still untagged.
+    # Two plain COUNT aggregates rather than one conditional SUM: a CASE inside
+    # an aggregate behaves differently across SQLite and Postgres, and this
+    # feature has to be right on Postgres (production) while the tests run on
+    # SQLite. Two indexed group-bys are cheap and identical on both.
+    base_filters = [
+        ImageNode.user_id == current_user.id,
+        ImageNode.kind == "generated",
+        ImageNode.status == "ready",
+        ImageNode.chosen_variant_id.isnot(None),
+        ImageVariant.id != ImageNode.chosen_variant_id,
+    ]
+    group_cols = (
+        ImageNode.id,
+        ImageNode.batch_id,
+        ImageNode.scene_index_in_batch,
+        ImageNode.name,
+        ImageNode.created_at,
+    )
+    sibling_rows = read_query_with_retry(db, lambda: db.query(
+        *group_cols, func.count(ImageVariant.id)
+    ).join(
+        ImageVariant, ImageVariant.node_id == ImageNode.id
+    ).filter(*base_filters).group_by(*group_cols).all())
+
+    untagged_rows = read_query_with_retry(db, lambda: db.query(
+        ImageNode.id, func.count(ImageVariant.id)
+    ).join(
+        ImageVariant, ImageVariant.node_id == ImageNode.id
+    ).filter(
+        *base_filters,
+        ImageVariant.operator_verdict.is_(None),
+    ).group_by(ImageNode.id).all())
+    untagged_by_node = {nid: int(cnt or 0) for nid, cnt in untagged_rows}
+
+    rows = []
+    done_total = 0
+    for nid, batch_id, scene_index, name, created_at, siblings in sibling_rows:
+        untagged = untagged_by_node.get(nid, 0)
+        if not untagged:
+            # Every sibling answered — this node is finished, and it is the
+            # "done" half of the progress counter the operator watches.
+            done_total += 1
+            continue
+        rows.append((created_at or datetime.min, nid, {
+            "id": nid,
+            "batch_id": batch_id,
+            "scene_index_in_batch": scene_index,
+            "name": name,
+            "created_at": created_at.isoformat() if created_at else None,
+            "siblings": int(siblings or 0),
+            "untagged": untagged,
+        }))
+    # Newest first — the operator remembers this week's picks and can label them
+    # honestly; a year-old render he has to squint at is the wrong place to
+    # start. Node id breaks ties so the order is stable across calls, which is
+    # what lets the client hold an index into this list.
+    rows.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    queue = [r[2] for r in rows]
+    page = queue[offset:offset + limit]
+
+    # v940.1 [LEDGER] this line IS the trace for the retro-labelling walk — how
+    # much history is still unanswered, and how much has been answered. Read via:
+    # python code/render_logs.py --text "[verdict-queue]"
+    log.info(f"[image_platform] [verdict-queue] user {current_user.id} "
+             f"pending={len(queue)} done={done_total} "
+             f"offset={offset} returned={len(page)}")
+    return {
+        "pending_total": len(queue),
+        "done_total": done_total,
+        "queue": page,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(page) < len(queue),
+    }
+
+
 @router.get("/nodes/{node_id}/final-prompt")
 def get_node_final_prompt(
     node_id: int,
