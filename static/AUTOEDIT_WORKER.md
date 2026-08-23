@@ -15,13 +15,33 @@ Each finish ends with one clear verdict:
   the finish checklist. The render is still kept; a quality warning does not
   throw away a usable file.
 
-**The server never renders any of that.** Render has 1 CPU / 2 GB and no
-OpenCV, no whisper, no browser. When you press auto-edit in the UI the server
-only writes a row in the queue. This worker, running on the operator's PC,
-claims the row, does the whole pass, and uploads the finished mp4 back.
+## Start it: double-click `start-autoedit-worker.cmd`
 
-So: **nothing renders while no worker is polling.** A job that looks stuck at
-"queued" usually means this script is not running.
+In the project root. Leave the window open; every "Finish video" you press
+goes to your PC from then on. Close it to stop. It finds its own token — there
+is nothing to configure. The long form is `python code/static/autoedit_worker.py --watch`.
+
+## The server CAN render too — that is why this is worth starting
+
+**Corrected 2026-08-23. This section used to say "the server never renders any
+of that" and "nothing renders while no worker is polling". Both stopped being
+true when the server-side executor was enabled** (`_autoedit_server_enabled()`
+defaults to on), and the stale text is why a 30-minute render looked like the
+only option.
+
+What is actually true now: with no worker running, the server does the whole
+pass itself. It works, and it is SLOW — 1 CPU, and burning the captions is the
+expensive part. Measured on a real job (`732b7f8f`, 2026-08-23): the caption
+stage alone took **32 minutes**, because the placement plan had three distinct
+caption heights and each one is a full pycaps pass over the whole video
+(22:43 → 22:54 → 23:04 in the render log). A job whose captions only move once
+takes about 4 minutes for the same stage.
+
+The same work on the operator PC is **3-4 minutes**. So the worker is not
+required any more — it is an 8x speed-up, and the reason to bother.
+
+A job sitting at "queued" for more than a minute or two with no worker running
+is the server queue waiting its turn, not a hang.
 
 Files:
 - `static/autoedit_worker.py` — the worker (this runbook's subject).

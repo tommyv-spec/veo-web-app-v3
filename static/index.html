@@ -15976,6 +15976,17 @@ async function renderAutoEditCard(jobId, hasExport) {
                                 ? 'Starts within about a minute. Your own PC picks it up sooner if the auto-edit worker is running.'
                                 : 'Captions are the slow part — 20-30 minutes on the server, or 3-4 minutes when your PC is doing it.'}
                         </div>
+                        <!-- v938.22 — the card told the operator their PC was
+                             8x faster and never said HOW to use it. The only
+                             mention of the worker anywhere in this file was a
+                             code comment. Say it where it is read, with the
+                             thing to double-click. -->
+                        <div style="margin-top:6px;font-size:11px;color:var(--text-secondary);">
+                            Want the fast one? Double-click
+                            <code style="background:var(--bg-input);padding:1px 5px;border-radius:3px;">start-autoedit-worker.cmd</code>
+                            in the project folder and leave the window open — it picks up every
+                            finish from then on. Nothing to configure.
+                        </div>
                         ${state === 'queued' ? `<button class="btn btn-secondary btn-sm" style="margin-top:6px;" onclick="cancelAutoEdit('${_autoEditAttr(jobId)}','${_autoEditAttr(status.autoedit_id)}')">Cancel</button>` : ''}`;
                 } else if (state === 'done' && status.result_filename) {
                     const fn = status.result_filename;
