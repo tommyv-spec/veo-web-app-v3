@@ -278,14 +278,31 @@ def test_labelling_every_sibling_clears_the_node_without_touching_the_pick():
 
 # --- source wiring --------------------------------------------------------
 
-def test_verdict_queue_route_is_declared_before_the_node_id_route():
+def _get_routes():
+    """(index, path) for every GET on the images router, in match order."""
+    return [(i, r.path) for i, r in enumerate(ip.router.routes)
+            if "GET" in (getattr(r, "methods", None) or ())]
+
+
+def test_the_literal_path_wins_over_the_node_id_route():
     # FastAPI matches routes in declaration order. Declared after
     # /nodes/{node_id}, the literal path would be swallowed as a node id and
-    # 422 on every call — and nothing else in the suite would notice.
-    src = _platform_src()
-    literal = src.index('@router.get("/nodes/verdict-queue")')
-    param = src.index('@router.get("/nodes/{node_id}")')
-    assert literal < param
+    # 422 on every call — and nothing else in the suite would notice. Asserted
+    # against the real router rather than the source text, so a reorder is
+    # caught however it happens.
+    routes = _get_routes()
+    want = "/api/images/nodes/verdict-queue"
+    matcher = re.compile
+    first = next(
+        (path for _, path in routes
+         if matcher("^" + re.sub(r"\{[^}]+\}", "[^/]+", path) + "$").match(want)),
+        None,
+    )
+    assert first == want, f"/nodes/verdict-queue is shadowed by {first}"
+
+
+def test_the_endpoint_is_actually_mounted():
+    assert any(p == "/api/images/nodes/verdict-queue" for _, p in _get_routes())
 
 
 def test_queue_endpoint_only_reads():
