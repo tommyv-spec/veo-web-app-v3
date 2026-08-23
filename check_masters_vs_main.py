@@ -25,8 +25,28 @@ Exit 1 if B is non-empty, because that is the destructive direction.
 
 USAGE
     python check_masters_vs_main.py            # compare working tree vs origin/main
+    python check_masters_vs_main.py --staged   # compare the STAGED content (pre-commit)
     python check_masters_vs_main.py --ref REF  # compare some other ref vs origin/main
     python check_masters_vs_main.py --fetch    # git fetch origin main first
+
+WHICH SIDE TO COMPARE (2026-08-23)
+
+The pre-commit hook now passes --staged, so it judges WHAT IS BEING COMMITTED
+rather than everything sitting in the working tree.
+
+The working tree was the wrong side for a hook, for one reason: this checkout is
+shared by several sessions at once (root CLAUDE.md §16.5). A master file that
+ANOTHER session has open and half-edited would block a commit that does not
+touch it — and did: a one-line correction was blocked by 130 uncommitted lines
+belonging to someone else's in-progress rule.
+
+The protection is unchanged for the commit itself. If the staged content drops a
+line that origin/main has, the index carries that removal and the gate still
+fails. What it no longer does is judge lines nobody is committing yet; those get
+caught when whoever owns them stages them.
+
+Run it with no flag to audit the whole working tree — still the right call before
+a sync or a deploy.
 
 NEVER sync these files with `git checkout <branch> -- <file>` while B is non-empty.
 Append the missing sections instead, then re-run this until B is zero.
@@ -63,9 +83,20 @@ def show(ref, path):
     return r.stdout if r.returncode == 0 else None
 
 
-def read_local(ref, path):
+def read_local(ref, path, staged=False):
+    """The content to compare against main.
+
+    `staged=True` reads the INDEX (`git show :path`) — what the commit in
+    progress actually contains. That is the right side for a pre-commit hook:
+    see --staged in main() for why the working tree is the wrong one there.
+    """
     if ref:
         return show(ref, path)
+    if staged:
+        # `:path` is stage 0 of the index. A file with no index entry (never
+        # added, or deleted) returns non-zero -> None -> the caller SKIPs it,
+        # which is the same thing it does for a file missing on either side.
+        return show("", path)
     full = os.path.join(HERE, path)
     if not os.path.isfile(full):
         return None
@@ -109,6 +140,9 @@ def main(argv):
     ap.add_argument("--ref", default=None, help="compare this ref instead of the working tree")
     ap.add_argument("--main", default="origin/main", help="reference to compare against")
     ap.add_argument("--fetch", action="store_true", help="git fetch the main ref first")
+    ap.add_argument("--staged", action="store_true",
+                    help="compare the STAGED content (the index) instead of the working tree — "
+                         "what a pre-commit hook should judge")
     args = ap.parse_args(argv[1:])
 
     if args.fetch:
@@ -137,7 +171,7 @@ def main(argv):
 
     drift, loss = {}, {}
     for path in MASTERS:
-        theirs, ours = show(args.main, path), read_local(args.ref, path)
+        theirs, ours = show(args.main, path), read_local(args.ref, path, args.staged)
         if ours is None or theirs is None:
             print("[SKIP] %-26s (missing on one side)" % path)
             continue

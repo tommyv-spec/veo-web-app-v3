@@ -80,13 +80,27 @@ git fetch -q origin main 2>/dev/null
 # The guard lives on main. A feature branch checkout usually does NOT have it —
 # which is exactly the situation this hook exists for — so fall back to running
 # main's copy from the object store instead of giving up.
+# --staged: judge WHAT IS BEING COMMITTED, not everything in the working tree.
+# This checkout is shared by several sessions (root CLAUDE.md §16.5), so a master
+# another session has half-edited would otherwise block a commit that does not
+# touch it — and did, on 2026-08-23: a one-line correction blocked by 130
+# uncommitted lines of someone else's in-progress rule. The protection for the
+# commit itself is unchanged: a staged removal of a main line still fails, proven
+# by a negative test (scratchpad fixture, 4 cases) before this was wired.
+#
+# An OLD copy of the script from the object store does not know the flag and
+# would die on it, so the fallback path probes for it first.
 if [ -f check_masters_vs_main.py ]; then
-  out=$(python check_masters_vs_main.py 2>/dev/null)
+  out=$(python check_masters_vs_main.py --staged 2>/dev/null)
   status=$?
 else
   script=$(git show origin/main:check_masters_vs_main.py 2>/dev/null)
   [ -z "$script" ] && exit 0
-  out=$(printf '%s' "$script" | python - 2>/dev/null)
+  if printf '%s' "$script" | grep -q -- "--staged"; then
+    out=$(printf '%s' "$script" | python - --staged 2>/dev/null)
+  else
+    out=$(printf '%s' "$script" | python - 2>/dev/null)
+  fi
   status=$?
 fi
 
