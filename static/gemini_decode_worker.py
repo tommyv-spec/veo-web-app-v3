@@ -285,26 +285,45 @@ def signed_in(page):
     # reach), so a length test calls a working session "signed out" — it did,
     # repeatedly, on 2026-08-13 while the operator was looking at a live window.
     # Judge by controls that only ever exist on one side of the line.
+    # ANY visible "Sign in" settles it. Checking `.first.is_visible()` did not:
+    # the logged-out page carries THREE of them (top-nav, banner, and one more),
+    # and if `.first` happens to be the one Playwright does not call visible the
+    # test falls through. Count every visible match instead (measured 2026-08-24:
+    # visible_signin == 3 on the page the worker called "signed in").
     try:
-        if page.locator("button:has-text('Sign in'), a:has-text('Sign in')").first.is_visible():
-            return False
+        loc = page.locator("button:has-text('Sign in'), a:has-text('Sign in')")
+        for i in range(loc.count()):
+            try:
+                if loc.nth(i).is_visible():
+                    return False
+            except Exception:
+                continue
     except Exception:
         pass
-    for sel in ("button[aria-label*='Upload' i]",          # composer upload menu
-                "button[aria-label*='mode picker' i]"):     # model switcher
+
+    # THE MODEL PILL IS THE ONLY HONEST TELL. Do not go back to probing for
+    # composer controls. This function used to accept `button[aria-label*=Upload]`
+    # and return True on the strength of it — but the logged-out Gemini page has
+    # a `+` upload button too, so the check passed on a signed-out page and the
+    # Flash-Lite guard below was never reached. Four decodes on 2026-08-24 ran
+    # against a stranger's Gemini and died at extraction with a misleading error.
+    # Google pins the logged-out page to Flash-Lite; a real session shows the
+    # mode the account actually has.
+    for sel in ("button[aria-label*='mode picker' i]",
+                "button[aria-label*='model' i]",
+                "[data-test-id='bard-mode-menu-button']"):
         try:
             loc = page.locator(sel).first
             if not loc.count():
                 continue
-            if "mode picker" in sel:
-                # the logged-out landing page pins Flash-Lite and offers nothing
-                # else; a session shows whatever mode the account can actually use
-                label = (loc.get_attribute("aria-label") or "").lower()
-                if "flash-lite" in label:
-                    continue
-            return True
+            label = ((loc.get_attribute("aria-label") or "") + " " +
+                     (loc.inner_text() or "")).lower()
+            if not label.strip():
+                continue
+            return "flash-lite" not in label
         except Exception:
             continue
+    # No pill at all means the app never rendered. That is not a session.
     return False
 
 
@@ -324,9 +343,17 @@ def ensure_session(page, email, firefox=False):
     where = dump_dom(page, "signed_out")
     raise RuntimeError(
         f"the browser is NOT signed in, so anything it produced would be a "
-        f"stranger's Gemini. Evidence at {where}. For Firefox, reseed with "
-        f"--reseed-firefox (the pull must land in a profile Camoufox has never "
-        f"opened, or the old WAL replays over the session)")
+        f"stranger's Gemini. Evidence at {where}.\n"
+        f"  FIRST check whether the SOURCE profile still has a live session — a "
+        f"pull cannot transplant a session Google has already revoked, and a "
+        f"revoked jar still shows all its cookies with valid expiry dates:\n"
+        f"      python -c \"import sys; sys.path.insert(0,'code/static'); "
+        f"import firefox_profile_pull as f; "
+        f"print(f.session_is_live(f.list_firefox_profiles()[0]))\"\n"
+        f"  False there means a HUMAN must sign in to Google in Firefox once; no "
+        f"reseed, clone or cookie injection can substitute. True there means the "
+        f"transplant is at fault — reseed into a profile Camoufox has never "
+        f"opened, or the old WAL replays over the session.")
 
 
 def firefox_pick_account(page, email, tries=3):

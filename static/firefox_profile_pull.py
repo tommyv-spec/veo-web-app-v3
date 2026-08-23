@@ -252,7 +252,14 @@ def _probe_google_emails_inproc(profile_dir, log=print):
                 if emails:
                     where = ("account chooser" if "accountchooser" in url
                              else "myaccount")
-                    log(f"[ff-pull] {os.path.basename(profile_dir)} signed in "
+                    # Say only what was proven. The chooser lists REMEMBERED
+                    # accounts, signed-out ones included, so "signed in" was a
+                    # claim this probe cannot make — and reading it as one is
+                    # what sent four decodes at a logged-out Gemini on
+                    # 2026-08-24. Liveness is session_is_live()'s job.
+                    proven = ("carries an account for" if where == "account chooser"
+                              else "signed in as")
+                    log(f"[ff-pull] {os.path.basename(profile_dir)} {proven} "
                         f"(resolved via {where}): {', '.join(emails[:3])}")
                 elif "signin" in url or "ServiceLogin" in url:
                     log(f"[ff-pull] {os.path.basename(profile_dir)} is not signed in "
@@ -313,6 +320,64 @@ def locate_firefox_profile(email, account_num=None, log=print):
     return None
 
 
+def session_is_live(profile_dir, log=print, timeout=25):
+    """Does this profile's cookie jar still authenticate with Google RIGHT NOW?
+
+    Everything else in this module answers "which profile remembers this email".
+    That is a DIFFERENT question, and conflating the two is what made the whole
+    decode lane produce garbage on 2026-08-24: the account chooser at
+    /v3/signin/accountchooser lists remembered accounts INCLUDING signed-out
+    ones, so `locate_firefox_profile` reported "signed in (resolved via account
+    chooser)" for a profile Google had already revoked. A golden was then built
+    from a dead jar, Camoufox opened a logged-out Gemini on Flash-Lite, and the
+    worker typed its prompt into a stranger's composer.
+
+    Cookie EXPIRY cannot answer it either — the revoked jar carried all 8 key
+    auth cookies, none of them past their expiry date. Only the server knows.
+
+    So ask the server, over plain HTTP, with no browser in the way: a live jar
+    gets myaccount.google.com; a dead one gets bounced to ServiceLogin (and a
+    jar that was never signed in gets bounced to the /intro marketing page).
+
+    Returns True (live), False (dead), or None (could not tell — no cookies, no
+    `requests`, network down). None must NEVER be treated as dead: a flaky
+    network would otherwise disable a perfectly good worker.
+    """
+    try:
+        import requests
+    except ImportError:
+        log("ff-pull: `requests` not installed - cannot verify the session is live")
+        return None
+    try:
+        jar = {c["name"]: c["value"] for c in read_cookies_for_playwright(
+            profile_dir, log=lambda m: None)
+            if "google.com" in (c.get("domain") or "")}
+    except Exception as e:
+        log(f"ff-pull: could not read the cookie jar ({e.__class__.__name__})")
+        return None
+    if not jar:
+        return None
+    s = requests.Session()
+    for k, v in jar.items():
+        s.cookies.set(k, v, domain=".google.com")
+    try:
+        r = s.get("https://myaccount.google.com/",
+                  headers={"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; "
+                                          "x64; rv:133.0) Gecko/20100101 "
+                                          "Firefox/133.0")},
+                  timeout=timeout, allow_redirects=False)
+    except Exception as e:
+        log(f"ff-pull: liveness probe could not reach Google ({e.__class__.__name__})")
+        return None
+    if r.status_code == 200:
+        return True
+    loc = (r.headers.get("location") or "")
+    if "signin" in loc.lower() or "ServiceLogin" in loc or "/intro" in loc:
+        return False
+    # an unfamiliar redirect is not evidence of death
+    return None
+
+
 def build_firefox_golden_from_profile(email, golden_folder, label="",
                                       account_num=None, log=print):
     """Build `golden_folder` as a Firefox profile carrying `email`'s session.
@@ -326,6 +391,20 @@ def build_firefox_golden_from_profile(email, golden_folder, label="",
         src = locate_firefox_profile(email, account_num=account_num, log=log)
         if not src:
             log(f"{tag}ff-pull: no source profile - worker will ask for a manual sign-in")
+            return False
+
+        # Refuse to build a golden from a jar Google has already revoked.
+        # Copying it "succeeds" at every file operation and still hands the
+        # worker a signed-out browser, which is the most expensive failure this
+        # lane has: it looks like a working run right up until the answer is
+        # empty. None = could not tell, so proceed (see session_is_live).
+        alive = session_is_live(src, log=lambda m: log(f"{tag}{m}"))
+        if alive is False:
+            log(f"{tag}ff-pull: {os.path.basename(src)} carries {email}'s cookies but "
+                f"GOOGLE HAS REVOKED THEM - the profile is signed out.")
+            log(f"{tag}ff-pull: cookie expiry dates look fine; only the server knows. "
+                f"Open Firefox, sign in to {email}, then re-run. Copying this jar "
+                f"would produce a worker that reads a logged-out page.")
             return False
 
         staged = golden_folder + ".ffpull-tmp"
