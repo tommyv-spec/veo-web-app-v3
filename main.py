@@ -18480,6 +18480,98 @@ async def serve_flow_worker():
     return Response(content=worker_path.read_text(), media_type="text/x-python")
 
 
+@app.get("/api/user-worker/download/autoedit/{name:path}")
+async def serve_autoedit_worker_file(name: str):
+    """Serve the auto-edit worker and the modules it imports.
+
+    v938.24 — the auto-edit worker was operator-only: the one launcher that
+    existed hard-coded `c:\\Users\\tomma\\Documents\\Videos Obsidian 2`, so
+    nobody else could run it and every finish fell back to the server, where
+    burning captions takes 20-30 minutes instead of 3-4.
+
+    Unlike flow_worker.py this is not ONE file — the worker imports its
+    pipeline from the repo — so the whole set is served here and the installer
+    lays it out in the same shape the imports expect:
+
+        <dir>/                    autoedit_pipeline.py, send_to_platform.py, ...
+        <dir>/static/             autoedit_worker.py
+        <dir>/caption_templates/  the korella style
+
+    The allow-list is explicit. A path parameter that reaches the filesystem is
+    a directory-traversal hole otherwise, and `..` in a URL survives more
+    normalisation than people expect.
+    """
+    ALLOWED = {
+        "autoedit_worker.py": Path("static") / "autoedit_worker.py",
+        "autoedit_pipeline.py": Path("autoedit_pipeline.py"),
+        "autoedit_qc.py": Path("autoedit_qc.py"),
+        "autoedit_captions.py": Path("autoedit_captions.py"),
+        "autoedit_queue.py": Path("autoedit_queue.py"),
+        "send_to_platform.py": Path("send_to_platform.py"),
+        "measure_capcut_match.py": Path("measure_capcut_match.py"),
+        "audio_processor.py": Path("audio_processor.py"),
+        "config.py": Path("config.py"),
+        # the korella house style — without these the worker still runs but only
+        # offers pycaps' builtin looks, not ours
+        "korella/pycaps.template.json": Path("caption_templates/korella/pycaps.template.json"),
+        "korella/styles.css": Path("caption_templates/korella/styles.css"),
+        "korella/Montserrat-ExtraBold.ttf":
+            Path("caption_templates/korella/resources/Montserrat-ExtraBold.ttf"),
+    }
+    rel = ALLOWED.get(name)
+    if rel is None:
+        raise HTTPException(404, f"not part of the auto-edit worker: {name}")
+    path = Path(__file__).parent / rel
+    if not path.exists():
+        raise HTTPException(404, f"missing on the server: {name}")
+    # The font is BINARY. read_text() on it either throws or silently mangles
+    # the bytes, and a corrupted font fails later inside a browser render where
+    # the message says nothing about fonts.
+    media = {".json": "application/json", ".css": "text/css",
+             ".ttf": "font/ttf"}.get(path.suffix, "text/x-python")
+    if path.suffix == ".ttf":
+        return Response(content=path.read_bytes(), media_type=media)
+    return Response(content=path.read_text(encoding="utf-8"), media_type=media)
+
+
+@app.get("/api/user-worker/download/autoedit-installer")
+async def download_autoedit_installer(
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: DBSession = Depends(get_db_session),
+):
+    """One .bat that sets up the auto-edit worker on the caller's own PC.
+
+    It reuses the token the main worker installer already wrote to
+    %USERPROFILE%\\veo-worker\\.env — `resolve_token()` reads that file — so
+    there is nothing to paste and no second token to manage. If that file is
+    missing the installer says to run the main worker setup first rather than
+    failing halfway through.
+    """
+    token = db.query(UserWorkerToken).filter(
+        UserWorkerToken.user_id == user.id,
+        UserWorkerToken.is_active == True  # noqa: E712
+    ).first()
+    if not token:
+        token = UserWorkerToken(
+            id=secrets.token_urlsafe(48),
+            user_id=user.id,
+            name=f"AutoEdit-{datetime.utcnow().strftime('%Y%m%d-%H%M')}",
+        )
+        db.add(token)
+        db.commit()
+
+    app_url = str(request.base_url).rstrip('/')
+    if 'kavenobuilder.com' not in app_url:
+        app_url = "https://kavenobuilder.com"
+
+    return Response(
+        content=_generate_autoedit_installer(token.id, app_url),
+        media_type="application/x-bat",
+        headers={"Content-Disposition": 'attachment; filename="Kaveno-AutoEdit-Setup.bat"'},
+    )
+
+
 @app.get("/api/user-worker/download/gemini_video_worker.py")
 async def serve_gemini_video_worker():
     """Serve the EMERGENCY worker — renders clips through the Gemini web app when
@@ -18985,6 +19077,129 @@ echo "  Starting the emergency worker now..."
 echo ""
 python3 gemini_video_worker.py --email {email} --serve --token {token}
 '''
+
+
+AUTOEDIT_WORKER_FILES = [
+    ("autoedit_worker.py", "static"),
+    ("autoedit_pipeline.py", ""),
+    ("autoedit_qc.py", ""),
+    ("autoedit_captions.py", ""),
+    ("autoedit_queue.py", ""),
+    ("send_to_platform.py", ""),
+    ("measure_capcut_match.py", ""),
+    ("audio_processor.py", ""),
+    ("config.py", ""),
+    ("korella/pycaps.template.json", "caption_templates\\korella"),
+    ("korella/styles.css", "caption_templates\\korella"),
+    ("korella/Montserrat-ExtraBold.ttf", "caption_templates\\korella\\resources"),
+]
+
+
+def _generate_autoedit_installer(token: str, app_url: str) -> str:
+    """A .bat that installs the auto-edit worker into %USERPROFILE%\\veo-worker\\autoedit.
+
+    v938.24. Kept deliberately plain: fetch the files, install the python deps,
+    write a start script, run it. No scheduled task, no service — the operator
+    starts it when they want their PC to take the work.
+
+    Layout matters. autoedit_worker.py does `sys.path.insert(parent.parent)`
+    and imports its pipeline as a sibling, so the files go into the same shape
+    the repo has or the imports fail with nothing useful to say.
+
+    ffmpeg is checked FIRST and the script stops if it is missing. Everything
+    downstream needs it, and a failure 200 lines later reads as "the worker is
+    broken" instead of "install ffmpeg".
+    """
+    # The URL name can carry a prefix ("korella/styles.css") to keep the
+    # allow-list unambiguous; what lands on disk is always the BASENAME inside
+    # its own folder, or the file would be written as "korella/styles.css"
+    # under an already-korella directory.
+    fetches = "\n".join(
+        'curl -sfL "%%APP%%/api/user-worker/download/autoedit/%s" -o "%%AE%%\\%s%s" || goto :dlfail'
+        % (fn, (sub + "\\") if sub else "", fn.rsplit("/", 1)[-1])
+        for fn, sub in AUTOEDIT_WORKER_FILES
+    )
+    return f"""@echo off
+setlocal EnableDelayedExpansion
+title Kaveno Auto-Edit worker setup
+set "APP={app_url}"
+set "WORKER_DIR=%USERPROFILE%\\veo-worker"
+set "AE=%WORKER_DIR%\\autoedit"
+
+echo.
+echo   Kaveno Auto-Edit worker
+echo   =======================
+echo   Finishes videos on THIS pc instead of the server.
+echo   The server can do it too, but it has one slow cpu: burning the
+echo   captions takes 20-30 minutes there and 3-4 minutes here.
+echo.
+
+where python >nul 2>nul || (echo   [X] python is not installed or not on PATH. && echo       Install it from python.org and tick "Add to PATH". && pause && exit /b 1)
+where ffmpeg >nul 2>nul || (echo   [X] ffmpeg is not on PATH - the worker cannot render without it. && echo       Get it from https://www.gyan.dev/ffmpeg/builds/ and add the bin folder to PATH. && pause && exit /b 1)
+
+if not exist "%WORKER_DIR%\\.env" (
+  echo   [X] %WORKER_DIR%\\.env not found.
+  echo       Run the main worker setup from the My Worker page first - this
+  echo       reuses the token it writes, so there is nothing to paste here.
+  pause
+  exit /b 1
+)
+
+echo   [1/4] making %AE%
+mkdir "%AE%" 2>nul
+mkdir "%AE%\\static" 2>nul
+mkdir "%AE%\\caption_templates" 2>nul
+mkdir "%AE%\\caption_templates\\korella" 2>nul
+mkdir "%AE%\\caption_templates\\korella\\resources" 2>nul
+
+echo   [2/4] downloading the worker
+{fetches}
+
+echo   [3/4] python packages (a few minutes the first time)
+python -m pip install --quiet --upgrade pip >nul 2>nul
+python -m pip install --quiet requests numpy "opencv-python<5" || goto :pipfail
+echo         optional: pycaps gives the TikTok-style captions. Without it the
+echo         worker still runs and uses a plainer caption look.
+python -m pip install --quiet "pycaps @ git+https://github.com/francozanardi/pycaps" playwright openai-whisper >nul 2>nul && python -m playwright install chromium >nul 2>nul
+
+echo   [4/4] writing the start script
+> "%WORKER_DIR%\\start-autoedit.bat" echo @echo off
+>> "%WORKER_DIR%\\start-autoedit.bat" echo title Auto-Edit worker - leave this open
+>> "%WORKER_DIR%\\start-autoedit.bat" echo cd /d "%%~dp0"
+>> "%WORKER_DIR%\\start-autoedit.bat" echo for /f "usebackq tokens=1,* delims==" %%%%a in (".env") do set "%%%%a=%%%%b"
+>> "%WORKER_DIR%\\start-autoedit.bat" echo set PYTHONIOENCODING=utf-8
+>> "%WORKER_DIR%\\start-autoedit.bat" echo echo Watching for videos to finish. Leave this window open.
+>> "%WORKER_DIR%\\start-autoedit.bat" echo python "autoedit\\static\\autoedit_worker.py" --watch
+>> "%WORKER_DIR%\\start-autoedit.bat" echo pause
+
+echo.
+echo   Done. Start it whenever you want this pc to do the finishing:
+echo       %WORKER_DIR%\\start-autoedit.bat
+echo.
+echo   Leave that window open. Every "Finish video" you press in the platform
+echo   is picked up here instead of the server. Close it to go back to normal.
+echo.
+choice /c YN /n /m "   Start it now? [Y/N] "
+if errorlevel 2 goto :done
+start "" "%WORKER_DIR%\\start-autoedit.bat"
+goto :done
+
+:dlfail
+echo.
+echo   [X] a download failed. Check the connection and run this again.
+pause
+exit /b 1
+
+:pipfail
+echo.
+echo   [X] installing the python packages failed - the message above says why.
+pause
+exit /b 1
+
+:done
+echo.
+pause
+"""
 
 
 def _generate_windows_installer(token: str, app_url: str, accounts: int = 1, reset: bool = False, update_only: bool = False, laptop_email: str = "") -> str:

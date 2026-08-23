@@ -474,7 +474,33 @@
 
         <!-- Emergency worker — last resort when the main worker cannot run -->
         <div class="card" id="emergencyCard" style="margin-top:14px;border-color:rgba(234,88,12,0.35);">
-            <h3 style="color:#fb923c;">Emergency Worker</h3>
+            <!-- v938.24 — the auto-edit worker used to be operator-only: the one
+                 launcher that existed hard-coded a path on one machine, so every
+                 other user's finish fell back to the server, where burning the
+                 captions takes 20-30 minutes instead of 3-4. Same shape as the
+                 installers above: one .bat, token reused from veo-worker\.env. -->
+            <h3 style="color:#22d3ee;">Auto-Edit Worker</h3>
+            <div style="font-size:12px;color:var(--text-muted);line-height:1.5;margin-bottom:10px;">
+                Finishes videos on <strong>your</strong> PC instead of the server —
+                the picture-in-picture, the keyed hook, the voice clean-up and the captions.
+                The server can do it too, but it has one slow CPU: burning the captions takes
+                <strong>20-30 minutes</strong> there and <strong>3-4 minutes</strong> here.
+                <br><br>
+                It does <strong>not</strong> clash with the main worker — different queue,
+                so you can run both at once. Needs
+                <strong>ffmpeg</strong> on PATH; the installer checks and tells you if it is missing.
+                Uses the token you already have, so there is nothing to paste.
+            </div>
+            <button class="btn" onclick="downloadAutoEditInstaller()" style="width:100%;">
+                Download Auto-Edit Worker setup
+            </button>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+                Installs to <code>%USERPROFILE%\veo-worker\autoedit</code> and writes
+                <code>start-autoedit.bat</code> next to it. Run that whenever you want this PC
+                to take the finishing; close the window to go back to the server.
+            </div>
+
+            <h3 style="color:#fb923c;margin-top:26px;">Emergency Worker</h3>
             <div style="font-size:12px;color:var(--text-muted);line-height:1.5;margin-bottom:10px;">
                 Renders your clips through the <strong>Gemini</strong> web app instead of Flow.
                 Use it only when the main worker will not run. It claims the
@@ -652,6 +678,15 @@ function downloadInstaller(os, opts) {
         + '&reset=' + reset
         + '&update_only=' + update
         + '&laptop_email=' + encodeURIComponent(laptopEmail || '');
+    let iframe = document.getElementById('dlFrame');
+    if (!iframe) { iframe = document.createElement('iframe'); iframe.id = 'dlFrame'; iframe.style.display = 'none'; document.body.appendChild(iframe); }
+    iframe.src = url;
+}
+
+// v938.24 — same hidden-iframe download the main installer uses, so the
+// browser gets the .bat with the Content-Disposition filename intact.
+function downloadAutoEditInstaller() {
+    const url = API + '/api/user-worker/download/autoedit-installer';
     let iframe = document.getElementById('dlFrame');
     if (!iframe) { iframe = document.createElement('iframe'); iframe.id = 'dlFrame'; iframe.style.display = 'none'; document.body.appendChild(iframe); }
     iframe.src = url;
