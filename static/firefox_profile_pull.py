@@ -43,6 +43,7 @@ import configparser
 import os
 import shutil
 import sqlite3
+import sys
 import tempfile
 
 # Data files that carry the session and survive a version gap. Deliberately does
@@ -165,6 +166,14 @@ def profile_google_emails(profile_dir, log=print):
         for line in (proc.stdout or "").splitlines():
             if line.startswith("EMAIL="):
                 found.append(line.split("=", 1)[1].strip())
+        # Relay the probe's own diagnostics. The child sends them on stderr
+        # (stdout is reserved for EMAIL= lines); without this relay they die in
+        # the captured pipe and a probe that resolved nothing is
+        # indistinguishable from a signed-out profile — which is exactly how
+        # the accountchooser misclassification stayed invisible for a day.
+        for line in (proc.stderr or "").splitlines():
+            if line.startswith("[ff-pull]"):
+                log(line)
         if found:
             _EMAIL_CACHE[profile_dir] = found
             return found
@@ -214,15 +223,40 @@ def _probe_google_emails_inproc(profile_dir, log=print):
                 # on the first try. Read the rendered HTML, not inner_text —
                 # the address lives in attributes as well as visible text.
                 page.goto("https://myaccount.google.com/", timeout=45000)
-                if "signin" in page.url or "ServiceLogin" in page.url:
-                    log(f"[ff-pull] {os.path.basename(profile_dir)} is not signed in")
-                else:
-                    html = page.content()
-                    hits = sorted(set(re.findall(
-                        r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", html or "")))
-                    # Drop asset filenames that look superficially like addresses.
-                    emails = [h for h in hits
-                              if not h.lower().endswith((".png", ".js", ".css", ".svg", ".gif"))]
+                # PARSE THE PAGE FIRST, JUDGE THE URL SECOND (fixed 2026-08-23).
+                #
+                # This used to bail whenever the URL contained "signin", before
+                # reading anything. Google has since stopped sending a fresh
+                # browser with a copied cookie jar straight to myaccount — it
+                # routes to the ACCOUNT CHOOSER instead:
+                #
+                #   https://accounts.google.com/v3/signin/accountchooser?authuser=0&...
+                #
+                # That URL contains "signin", so a perfectly live profile was
+                # declared "not signed in" while the page it refused to read
+                # listed the address in plain sight. The chooser appearing is
+                # POSITIVE evidence: a dead session gets a password prompt, not a
+                # list of accounts to pick from.
+                #
+                # So: always read the HTML and look for addresses. Only call it
+                # signed out when the page yields none AND the URL is a real
+                # sign-in wall. A password/challenge page has no address list,
+                # so it still resolves to "not signed in" correctly.
+                html = page.content()
+                hits = sorted(set(re.findall(
+                    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", html or "")))
+                # Drop asset filenames that look superficially like addresses.
+                emails = [h for h in hits
+                          if not h.lower().endswith((".png", ".js", ".css", ".svg", ".gif"))]
+                url = page.url or ""
+                if emails:
+                    where = ("account chooser" if "accountchooser" in url
+                             else "myaccount")
+                    log(f"[ff-pull] {os.path.basename(profile_dir)} signed in "
+                        f"(resolved via {where}): {', '.join(emails[:3])}")
+                elif "signin" in url or "ServiceLogin" in url:
+                    log(f"[ff-pull] {os.path.basename(profile_dir)} is not signed in "
+                        f"(no address on {url[:80]})")
             finally:
                 try:
                     ctx.close()
@@ -299,7 +333,53 @@ def build_firefox_golden_from_profile(email, golden_folder, label="",
         os.makedirs(staged, exist_ok=True)
 
         copied = []
+
+        # cookies.sqlite is copied with SQLite's BACKUP API, not shutil (2026-08-23).
+        #
+        # Why: when Firefox is RUNNING — the normal case, since the operator's own
+        # profile is the SSO source — the live session cookies sit in the -wal and
+        # have not been checkpointed into the main file. A plain file copy of
+        # (db, -wal, -shm) is wrong three ways: the three files are copied at three
+        # different instants from a database being written, so the snapshot can be
+        # torn; and -shm belongs to the WRITING PROCESS, so a copied one can make
+        # SQLite misread or ignore the WAL outright. The result is a golden that
+        # carries cookie ROWS but no live SESSION — which reads as "39 Google
+        # cookies present" and still lands on the signed-out page.
+        #
+        # con.backup() reads through the WAL and writes ONE consistent file, so the
+        # session survives. -wal/-shm are deliberately NOT copied; SQLite rebuilds
+        # them. Falls back to the old copy if the backup path fails, because a
+        # degraded pull must never crash the worker.
+        src_db = os.path.join(src, "cookies.sqlite")
+        if os.path.isfile(src_db):
+            try:
+                con = sqlite3.connect(f"file:{src_db}?mode=ro", uri=True, timeout=10)
+                try:
+                    dst = sqlite3.connect(os.path.join(staged, "cookies.sqlite"))
+                    try:
+                        con.backup(dst)
+                    finally:
+                        dst.close()
+                finally:
+                    con.close()
+                copied.append("cookies.sqlite")
+                log(f"{tag}ff-pull: cookies.sqlite snapshotted via SQLite backup "
+                    f"(WAL applied; -wal/-shm intentionally not copied)")
+            except Exception as e:
+                log(f"{tag}ff-pull: SQLite backup failed ({str(e)[:80]}) - "
+                    f"falling back to a raw copy, session may not survive")
+                for name in ("cookies.sqlite", "cookies.sqlite-wal", "cookies.sqlite-shm"):
+                    s = os.path.join(src, name)
+                    if os.path.isfile(s):
+                        try:
+                            shutil.copy2(s, os.path.join(staged, name))
+                            copied.append(name)
+                        except Exception as e2:
+                            log(f"{tag}ff-pull: could not copy {name}: {str(e2)[:80]}")
+
         for name in _DURABLE_FILES:
+            if name.startswith("cookies.sqlite"):
+                continue  # handled above
             s = os.path.join(src, name)
             if os.path.isfile(s):
                 try:
@@ -344,7 +424,17 @@ if __name__ == "__main__":
         # Subprocess entry point used by profile_google_emails(): the worker
         # runs inside an asyncio loop where the sync Playwright API refuses to
         # start, so the probe is exiled to a child process.
-        for e in _probe_google_emails_inproc(a.emails_for, log=lambda m: None):
+        # Send the probe's own log lines back to the PARENT on stderr (2026-08-23).
+        #
+        # They used to be discarded (`log=lambda m: None`). That is how a
+        # misclassification stayed invisible for a day: the probe knew it had
+        # landed on an account chooser, said so, and the message went nowhere —
+        # the caller only ever saw the summary "no Firefox profile is signed
+        # into <email>". stdout stays reserved for the EMAIL= lines the parent
+        # parses, so diagnostics go to stderr.
+        for e in _probe_google_emails_inproc(
+                a.emails_for,
+                log=lambda m: print(m, file=sys.stderr, flush=True)):
             print(f"EMAIL={e}")
         raise SystemExit(0)
 
