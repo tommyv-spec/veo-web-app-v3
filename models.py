@@ -458,6 +458,16 @@ class Clip(Base):
     # Currently selected variant (1-based, matches attempt number)
     selected_variant = Column(Integer, default=1)
 
+    # v939 — shadow-mode clip QC report, written by code/clip_qc.py from the
+    # operator's box. Purely additive metadata: it records whether each
+    # rendered take actually SAID its whole line, and it chooses nothing.
+    # v886.3 is untouched — the operator still approves every clip.
+    #
+    # Cleared whenever the takes it scored stop being the takes on the row (a
+    # redo, a new variant upload, a revert), because a report that outlives
+    # the audio it describes is worse than no report: it reads as current.
+    qc_json = Column(Text, nullable=True)
+
     # Kling (Higgsfield) additional-variant generation status.
     # None = not requested; 'queued'/'processing'/'done'/'failed' = server-side pass state.
     kling_variant_status = Column(String(20), nullable=True)
@@ -469,6 +479,32 @@ class Clip(Base):
     # Relationship
     job = relationship("Job", back_populates="clips")
     
+    def _safe_qc(self) -> Optional[Dict[str, Any]]:
+        """v939: decode Clip.qc_json for the API, never raising.
+
+        Mirrors image_platform._safe_qc and for the same reason: the clip list
+        is polled while a job renders, so a corrupt report must degrade to None
+        rather than 500 the whole page. Shape is checked as well as
+        parseability — the reader indexes into `takes`, so a valid-JSON scalar
+        or list would survive json.loads and crash it later.
+
+        Both rejections WARN. Shadow mode exists to measure machine-vs-operator
+        agreement, and a report dropped in silence under-counts with no trace.
+        """
+        if not self.qc_json:
+            return None
+        try:
+            parsed = json.loads(self.qc_json)
+        except Exception:
+            print(f"[models] [clip-qc] unparseable qc_json ignored (clip={self.id})",
+                  flush=True)
+            return None
+        if not isinstance(parsed, dict):
+            print(f"[models] [clip-qc] non-dict qc_json ignored (clip={self.id}, "
+                  f"type={type(parsed).__name__})", flush=True)
+            return None
+        return parsed
+
     def to_dict(self) -> Dict[str, Any]:
         raw_versions = json.loads(self.versions_json) if self.versions_json else []
         
@@ -505,6 +541,8 @@ class Clip(Base):
             "versions": versions,
             "total_variants": total_variants,
             "selected_variant": self.selected_variant or self.generation_attempt or 1,
+            # v939 shadow-mode QC. None until code/clip_qc.py scores the clip.
+            "qc": self._safe_qc(),
             # v667/v668 — transformation-video metadata.
             "cut_mode": self.cut_mode,
             "target_duration_s": self.target_duration_s,
@@ -1204,6 +1242,8 @@ def _run_migrations_postgresql(engine):
         # (table, column, sql)
         ("clips", "selected_variant", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS selected_variant INTEGER DEFAULT 1"),
         ("clips", "kling_variant_status", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS kling_variant_status VARCHAR(20)"),
+        # v939 — shadow-mode clip QC report (did the take say its whole line?)
+        ("clips", "qc_json", "ALTER TABLE clips ADD COLUMN IF NOT EXISTS qc_json TEXT"),
         ("jobs", "user_id", "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS user_id TEXT"),
         ("user_api_keys", "key_status", "ALTER TABLE user_api_keys ADD COLUMN IF NOT EXISTS key_status TEXT DEFAULT 'unknown'"),
         ("user_api_keys", "last_checked", "ALTER TABLE user_api_keys ADD COLUMN IF NOT EXISTS last_checked TIMESTAMP"),
@@ -1446,6 +1486,8 @@ def _run_migrations_sqlite(engine):
     migrations = [
         # Add selected_variant column to clips table
         ("clips", "selected_variant", "ALTER TABLE clips ADD COLUMN selected_variant INTEGER DEFAULT 1"),
+        # v939 — shadow-mode clip QC report (did the take say its whole line?)
+        ("clips", "qc_json", "ALTER TABLE clips ADD COLUMN qc_json TEXT"),
         # Add user_id column to jobs table
         ("jobs", "user_id", "ALTER TABLE jobs ADD COLUMN user_id TEXT"),
         # Add key_status column to user_api_keys table

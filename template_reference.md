@@ -17399,3 +17399,217 @@ The operator rule stands unchanged and is met: **captions never cover a face.** 
 - `code/audio_processor.py` asks ffmpeg for `arnndn=m=cb.rnnn`; **that model file is absent from the repo**, so the platform's **export** denoise has been silently falling back to a cruder `afftdn`.
 - `try_elevenlabs_voice_isolator` is fully implemented with **zero call sites** and no API key configured.
 
+---
+
+## v939 — CLIP VARIANT QC, SHADOW MODE: did the render actually SAY the whole line? (2026-08-22)
+
+Operator: *"just like we are doing for the image, we need to start working on approving the clips automatically … find a way to discard the ones that don't contain the full line of the dialogue … don't reinvent the wheel, find how others are doing it."*
+
+`code/clip_qc.py`, the clip-axis twin of v936. **v886.3 is untouched: the module has no write path at all.** It cannot approve, reject, select a variant or trigger a redo. It downloads takes, listens to them, and records an opinion. Nothing is wired to a real discard until the false-reject rate is measured and small — the same order v936 was forced into after its first rule rejected the operator's own image pick 44.5% of the time.
+
+Full experiment record + numbers: `docs/experiments/clip-qc-2026-08-22.md`. Tests: `code/test_clip_qc.py` (39, pure logic, no torch or network). Real-audio proofs: `tools/verify_clip_qc_detector.py` (synthetic fixtures) and `tools/clip_qc_sensitivity.py` (real Veo audio, cut short on purpose).
+
+### The wheel was already in the repo
+
+No new dependency. `code/transcript_alignment.py` has loaded torchaudio `MMS_FA` (MMS-300M CTC) and `faster-whisper distil-large-v3` since v773 and uses them at export time to trim silence; `rapidfuzz` is already installed. Nothing was reading them to ask whether a render said its line.
+
+### Two signals, and neither may fail a take alone
+
+1. **Forced alignment with a `<star>` token.** Hand the aligner the line you EXPECTED; it finds each word with a probability. This is the precise instrument — it says WHICH words are missing and WHERE.
+
+   The star is the part specific to this problem and it is not our invention: torchaudio's own CTC-alignment tutorial introduces it under *"when the transcript is partially missing"*, and NVIDIA's NeMo Forced Aligner does the same with its own CTC models. **Probed on torchaudio 2.7.1, not assumed:** the `MMS_FA` dictionary has 29 entries, `*` is id 28, `get_model(with_star=True)` returns 29 output dims against 28 without, and the star column is `0.0` in log space — probability 1 at every frame, so a star absorbs any audio for free. Targets are `* w1 … wn *`: one leading and one trailing star soak up the v644 pad, room tone and anything Veo invents, while every real word is still forced through the actual audio. A word that was never spoken cannot hide — the aligner must place it, so it gets crushed into a couple of frames at a near-zero score, and **that crushed span IS the detection** (measured on a real cut: present words score 0.70-1.00, absent ones 0.00-0.16).
+
+   Stars are NOT interleaved between every word: that scores real words slightly higher but makes every word cheap to skip, which is backwards for a missing-word detector. Our export path keeps `with_star=False`, correct for trimming and wrong for detection, and is deliberately left alone.
+
+2. **Free transcription then a word-level edit distance.** Whisper with no expectations, then compare. The round-trip check NVIDIA's Riva TTS-evaluation guide describes and the objective metric in the generative-speech literature. Blunt, but immune to the one way alignment lies: forced alignment ALWAYS produces a path, so a confident-looking alignment against the wrong audio is possible. The distance uses `rapidfuzz` directly — `jiwer` is the usual library and computes WER by calling rapidfuzz underneath, so it would be a dependency wrapping a function we already have.
+
+**Requiring both to point at the same missing words is what keeps the false-reject rate near zero**, and near zero is the only thing that makes an auto-discard safe to switch on later.
+
+### The verdict is STRUCTURAL (v936.4's rule, ported)
+
+FAIL iff one of a short HARD list fires; everything else is a warning that can never fail a take in either direction.
+
+| hard reason | conditions |
+|---|---|
+| `no_speech` | aligner placed nothing AND the transcript is empty |
+| `tail_truncated` | at least `TAIL_FAIL_WORDS` final words unplaced by the aligner **and** unheard in the edit path **and** the ending not findable in the transcript |
+| `line_missing` | coverage below `COVERAGE_FLOOR` **and** WER above `WER_CEILING` |
+
+Warnings: mid-line drops, extra speech (expected under v644), low-confidence words, a last word ending flush against EOF, substitutions.
+
+### Four rules that were wrong until real audio corrected them
+
+- **`TAIL_FAIL_WORDS` was 2 and let a broken clip ship.** Trimming a 3.85s line to 60% removes exactly one word; `min(align_tail=3, asr_tail=1) = 1` was under the bar, so a clip whose last word was gone passed. Now **1**. What stops it firing on a clipped breath is the third condition, not the count.
+- **The fuzzy tail search must scan the WHOLE transcript, not its end.** v644 pads short lines with real extra speech, so a five-word pad pushes the ending out of a five-word window and every padded clip reads as truncated. Caught by a unit test before it ever ran on real data.
+- **Ask about the FINAL WORD, not the last three as one string.** Measured: `"stood back up"` scores **87** on `partial_ratio` against `"his soldier stood back"` — the two surviving words carry the match and the missing one disappears. Comparing the final word against each heard word scores 0 there, and 80 when Whisper merely mishears it as `"cup"`.
+- **`TAIL_VETO_LIMIT = 3` — the veto has a ceiling.** All three truncations the rule missed on real Veo audio at a 55% cut had one cause: the line's final word also occurs earlier in the line (*"…not on a good NIGHT. every single NIGHT."*), so the veto matched its earlier self and forgave 3, 5 and 16 missing words. The veto exists to forgive ONE misheard final word; past three missing words the ending is plainly gone.
+
+### Three live repo facts that break a naive version
+
+1. **v644 `dialogue_pad`** — short lines are padded so Veo's audio path does not fail, so the clip contains extra spoken words ON PURPOSE. Always score the bare line; the trailing star eats the pad; extra speech is a note.
+2. **v821 Prompt B** — a B render spoke `dialogue_text_b`. Scoring it against line A fails every one. Both candidate lines are scored and the better kept, with the winner named, because `rendered_prompt_variant` is one column while takes accumulate per attempt.
+3. **v698A pairs** — a `visual_pair` clip is silent by design and its line lives on the `audio_pair` twin. Skipped by rule, with the reason recorded.
+
+### Measured (11 jobs, 139 clips, 142 takes)
+
+- **False-reject rate on APPROVED takes: 0/37 = 0.0%.** The veto number.
+- Any chosen take: 2/131 = 1.5%, both `pending_review` (never reviewed).
+- Chosen take could not be scored: 8 (4 approved) — **counted and printed, not dropped.**
+- Median coverage 0.955, median WER 0.000.
+
+**Sensitivity, measured on real Veo audio** (`tools/clip_qc_sensitivity.py`, 24 clips × 3 judgements): **specificity 24/24 intact clips PASS**, and of the cuts that genuinely removed speech, **16/16 caught at a 75% cut and 24/24 at 55% — 100% both times.** The tool's raw printout says 62.5% at 75% because it counts all 24 cuts as truncations; eight of them removed only trailing silence (a Veo render is longer than its speech), the clip still said its whole line, and the checker correctly passed it. Reporting the raw figure would be the same "a number that includes rows it cannot judge" failure this rule keeps running into, so both are stated.
+
+**Pick agreement is meaningless in this corpus** (136 of 139 clips had exactly one take, so agreement is arithmetic, not skill) and **the backtest cannot measure catching** — broken renders are redone and the bad take is gone, so a rule that never fires would score a perfect false-reject rate. That is why `tools/clip_qc_sensitivity.py` exists: it manufactures the failure from real material by cutting real clip audio short and scoring it against the same full line.
+
+### Two bugs this work surfaced
+
+- **A data bug, upstream and unfixed:** clip 14522 carries a markdown `clip_duration_s` bullet in `dialogue_text` — build-file syntax the importer swallowed as the spoken line. `clip_qc` now skips it, but whatever wrote that row is still writing it.
+- **A bug in the backtest's own arithmetic:** clips whose `selected_variant` is not among the scored takes were hitting `continue` and vanishing from both numerator and denominator. Eight were disappearing. Now reported on their own line — a rate that quietly drops the rows it cannot judge is the same failure as a checker that caps its coverage and does not say so.
+
+### v939.1 — THE AGREEMENT LEDGER, and why the clip question is not the image question
+
+Operator: *"let's build a system to keep track of what you would have picked and what I picked."*
+
+**Measured first, because the data changed the question.** Across 296 completed jobs / 854 scoreable clips: **837 clips (98.0%) have exactly ONE take**, 15 have two, 2 have three — and **`approval_status = 'rejected'` appears ZERO times** (594 approved, 260 pending_review). Images arrive as four variants and choosing is the whole job; a clip almost never has an alternative. A tracker built on "which take would you have picked" would collect ~17 data points across 296 jobs, and there is no stored negative label anywhere in the clip data because a bad take is redone, not rejected.
+
+**So the clip decision is KEEP or REDO, not which-one.** That is measurable on every clip, and it is where the value is: not helping the operator choose, but letting them stop watching the ones that are fine. The ledger scores keep/discard agreement primarily and records pick agreement only for the 2% where a real choice existed (`pick_meaningful`; one take → `pick_agreement: None`, never a free point).
+
+**`operator_state_at_scoring` is the field the whole thing rests on.** Scoring a clip the operator has ALREADY approved measures nothing — the machine agrees with a decision whose answer is visible in the row it is reading. Only a report written while the clip still says `pending_review` is a real test. The scorecard prints PROSPECTIVE and retrospective **separately and never averages them**. Three further rules keep the number from drifting up on its own: the FIRST report for a clip wins (rescoring after approval would convert a prospective call into a retrospective one); an unreviewed clip resolves to nothing (counting silence as agreement is the easiest way to fake a good score); and re-resolving de-duplicates by clip id.
+
+**Reports are stored locally as well as on the server.** The obvious reason is that the endpoint need not be deployed for the tracker to start counting. The load-bearing one: a report that lives only on the server can be overwritten by the next scoring run, and the ledger's entire claim is that the machine called it BEFORE the operator did — that needs a record written at call time which nothing later rewrites. `~/.kaveno/clip-qc-reports/<clip_id>.json` (write-once) and `~/.kaveno/clip-qc-agreement.jsonl` (append-only).
+
+First run: **128 reports written, 19 resolved, 109 scored and awaiting the operator's decision.** The prospective bucket is correctly EMPTY — nothing has yet been called before review. Retrospective 19 clips, keep/discard agreement 1.0, zero clips it would have discarded that the operator kept.
+
+CLI: `--post` (store on the clip so the badge renders) · `--resolve` (settle stored reports against what the operator did, append to the ledger; no audio, no models, cheap and meant to be run often) · `--scorecard` (needs neither server nor token).
+
+### Platform side (v939.2) — built and locally verified, NOT deployed
+
+`clips.qc_json` + both migration lists · `POST /api/clips/{id}/qc` mirroring `set_node_qc` (ownership, `version: 1`, **409 while the clip is pending/generating** because a report accepted mid-render is stale on arrival, `recommended_attempt` must name a take that exists on THIS clip or the metric compares against a ghost, 64,000-byte cap) · `qc` on `ClipResponse` + `Clip.to_dict` through a `_safe_qc` that degrades corrupt or non-dict JSON to `None` **with a WARN** rather than 500-ing a polled clip list · `_clear_clip_qc` on the four paths that change which takes exist (redo, variant upload, version prune, attach-clips) — a stale report still renders as a current verdict and poisons the ledger with disagreements that were never real · clip-card badge plus one plain-language line ("cut off before the end of the line", never `tail_truncated`), with `qc` added to BOTH render cache keys so a landing report actually repaints the card.
+
+Verification that mattered: `import main` clean (py_compile is not enough); the column round-trips on a real DB (store / read / corrupt→None / list→None / clear); and **both inline scripts in `static/index.html` pass `node --check`** — the SPA is 1.3 MB of template literals in one block, where a syntax slip is silent and total.
+
+### v939.3 — REMOVAL: the first thing here that changes anything
+
+Operator: *"can we at least have the clips with the wrong dialogue removed?"* `clip_qc.py --discard` sends failing clips back to be re-rendered. **No deploy needed** — `POST /api/clips/{id}/redo` and `/reject` already exist.
+
+**Two structural limits.** (1) **It may only touch a clip the operator has NOT decided on.** `approved` and `rejected` are human decisions and are never overturned, whatever the checker thinks. That bounds the worst case exactly: on an unreviewed clip a wrong removal costs one re-render; overturning an approval costs a decision, and no rate measured here buys that. (2) Dry run by default, capped at 15 per run, `--apply` must be typed. Failing clips the operator already decided are **printed, not hidden** — the only way "already approved but actually broken" ever surfaces.
+
+**The measurement that set the defaults.** On 313 clips / 151 approved the false-discard rate is **4 of 135 approved = 2.96%**, not the 0/37 of the first small sample. Reading those four rather than counting them is the point: clip 14274 (`"…twist open one saffron capsule and stir the red threads in"` → heard `"…twist open one saffron capsule and"`) **is genuinely cut off and it shipped**, so 2.96% is an upper bound that already contains real catches. The other three are Veo paraphrasing while delivering the whole idea, a shape the operator has approved repeatedly.
+
+**Therefore the removal rule is NARROWER than the flagging rule, and that separation is the lesson.** Flagging is cheap and should be sensitive; removing spends a render and must be specific. Two consequences: **`line_missing` is OUT of the default reason set** — it is literally "the wrong dialogue" but nearly every real firing is a complete paraphrase, so removing on it fights the operator's revealed preference (`--reasons` adds it back); and **`tail_truncated` removes at 2+ missing final words, not 1** (`DEFAULT_MIN_TAIL_TO_REMOVE`, `--min-tail`), because one missing word is a paraphrase ending on a synonym ("never hear about" → "never learn") while every real truncation measured lost 2, 4 or 6 and stopped mid-word ("especially that f"). With those defaults the dry run over 23 scored jobs proposes exactly the two broken clips and nothing else.
+
+Every removal is logged as `machine_redo` / `machine_reject` and kept **apart from the agreement rows**: once the machine acts the operator's counterfactual is gone forever, so those rows may never be counted as agreement.
+
+### v939.4 — A CUT CLIP THE OPERATOR APPROVED IS A CATCH, NOT A FALSE REJECT (2026-08-23)
+
+Operator: *"if i pick something that was cut was a mistake, good catch."*
+
+**The metric was labelled wrong and it was dragging the thresholds the wrong way.** Every earlier number here called an approved-but-failing clip a "false reject" and scored it as a cost. For the CUT cases that is backwards: the checker was right and the approval was the error. The damage was not cosmetic — the threshold sweep ranked settings by *fewest disagreements with approvals*, which **rewarded a rule for MISSING cut clips the operator had approved**, the exact opposite of the ask.
+
+Reasons are now split by whether the operator has ruled:
+
+| bucket | reasons | counted as |
+|---|---|---|
+| **settled** | `tail_truncated`, `no_speech` (`CUT_REASONS`) | flagging one on an approved clip is a **CATCH** |
+| **open** | `line_missing` (`JUDGEMENT_REASONS`) | its own line, **never folded into a rate** |
+
+`agreement_stats` returns `caught_a_cut_clip_you_approved` and `disagreed_on_a_paraphrase_you_approved` in place of the old single `false_reject_rate_approved`; the sweep ranks on paraphrase disagreements first (a real cost) then on cut clips caught (a benefit). **Re-scored over 390 clips / 194 approved: 5 cut clips caught, 2 paraphrase disagreements.** The five that shipped include `"…twist open one saffron capsule and"` (script ends `"and stir the red threads in"`) and `"that is blood moving"` (script ends `"three seconds later"`).
+
+`--include-approved-cuts` lets removal send those back. **Off by default, and it applies ONLY to cut reasons** — an approved paraphrase is the operator's taste and is never touched whatever flags are set. Clip 14313 shows the flag/remove split doing its job: a synonym ending (`"never hear about"` → `"never learn"`) flags at `tail_missing 1` and does not remove, because removal needs 2.
+
+**The general lesson, and it is not specific to clips:** before scoring agreement against a human, establish which disagreements the human considers THEIR error. A metric that assumes the human is always right cannot ever discover that they were not, and will tune itself into agreeing with their mistakes.
+
+### v939.5 — Prompt A/B is handled and effectively dead (2026-08-23)
+
+Operator: *"it can be either prompt A or prompt B of course."* Checked against the platform rather than assumed: of **854 scoreable clips, 2 carry a `dialogue_text_b` and ZERO have `rendered_prompt_variant == 'B'`.** All twelve flagged clips are `variant=A` with no B text, so the paraphrases are NOT B renders — Veo said a different sentence from the only script that exists. `expected_lines` does score both candidates and keep the better (tested), so the path is correct and simply never exercised. Recorded so nobody blames A/B for a future mismatch.
+
+### v939.6 — DIAGNOSE WHY A CLIP WAS CUT BEFORE REPAIRING IT (2026-08-23)
+
+Operator: *"if all of the generated clips are cut we need to redo the clip, maybe making the duration longer."* Right — but only for a specific third of cases, and the tool can now tell which.
+
+**Measured over 520 scored clips: 11 are cut and NOT ONE ran out of render time.** Every one leaves silence after the last spoken word. So "cut" and "the window was too short" are different things, and conflating them wastes renders.
+
+| diagnosis | meaning | count | repair |
+|---|---|---|---|
+| `under_bucketed` | rendered SHORTER than the v861/v884 table asks for its own line | 3 | set the duration the table already wanted |
+| `starved` | speech ran to the very end, no room left | **0** | next bucket up |
+| `abandoned` | correct duration, 0.2-2.0s of silence unused | 8 | re-roll; a longer window cannot help |
+
+A blanket "cut → render longer" spends eight wasted renders to fix three by accident. `diagnose_cut` / `all_takes_cut` / `plan_duration_repair` / `attach_repair_plan` are all pure and unit-tested; `set_clip_duration` PATCHes `veo_render_duration_s`; `--repair-duration` is opt-in on top of `--discard --apply`. **A failed PATCH SKIPS the clip rather than re-rendering at the old length** — otherwise the run spends a render reproducing a failure it already understands. `all_takes_cut` counts a single take as "all", because 837 of 854 clips have exactly one and a rule waiting for a second would never fire; it escalates a `starved` clip at the 10s ceiling to `shorten_the_line`, since there is no wider bucket to buy.
+
+**The defect plan self-review caught before any code existed.** `build_report` stored `coverage` and `tail_missing` but **dropped `tail_room_s` and `audio_duration`** — the two fields that separate `starved` from `abandoned`. As planned, `diagnose_cut` would have read `0.0` for both, labelled EVERY cut clip `starved`, and widened the eight that already had unused time. Fixed as its own task, ahead of the diagnosis. Reports written before the fix diagnose as **`unknown` → plain re-roll, never a widen on a guess**; the first smoke test hit exactly that and correctly refused to act until the store was re-scored.
+
+**v939.6a — the under-bucketing is TWO different bugs, neither fixed here.** `adaptive_duration` was **True** on both jobs, so this is not a job-setting artefact:
+
+| clip | stored `veo_render_duration_s` | table | actually rendered | fault |
+|---|---|---|---|---|
+| 14302 | **4** | 6 | 4s | stored duration wrong — import-binding bug |
+| 14303 | **4** | 8 | 4s | same, half the needed window |
+| 14330 | **6** | 6 | **4s** | stored duration CORRECT, the render ignored it |
+
+Only the first kind is helped by `--repair-duration`; on 14330 the PATCH is a no-op because the clip is already set to 6s, and the render path is what is wrong. Recorded rather than papered over by a tool that treats the symptom. Both are import/worker-path work with a different blast radius.
+
+Full record: `docs/experiments/clip-qc-2026-08-22.md` §10. Plan: `docs/superpowers/plans/2026-08-23-clip-cut-diagnosis-and-duration-repair.md`.
+
+### v939.7 — CATCH IT BEFORE IT RENDERS (2026-08-23)
+
+`code/preflight_duration.py`. Everything above repairs a clip AFTER Veo has already spent a render on it. **The same defect is knowable from two numbers already in the database, before a single frame exists:** the clip's render window (`clips.veo_render_duration_s`, or the job-level duration when it is NULL — v861 stores NULL to MEAN job-level) against what `pick_clip_duration_for_line()` says the line needs. No audio, no model, no render.
+
+**Measured over 543 clips:** 9 windows too short (each guaranteed to lose words), 391 match, and **143 longer than needed — 372s of render paid for and unused.** Two of the nine (14302, 14303) later turned up in the cut-clip list that started this whole line of work. They did not have to.
+
+**Only UNDER-bound clips that have NOT rendered yet are ever changed.** Over-bound is not a defect — rendering a short line in an 8s window costs some money and some trailing silence the export already trims, and changing it would alter the pacing of clips that are fine. A finished clip is `clip_qc.py`'s problem: widening it accomplishes nothing until something re-renders. Reports by default; `--fix` must be typed; capped at 25.
+
+**Where the defect actually comes from — narrowed, not yet fixed.** The under-binding is deterministic per LINE, not random: the same two lines appear in two different jobs and are under-bound both times. Checking the build that carries one of them, **the markdown declares `clip_duration_s: 6` and the database stored 4**, and zero scenes in that build declare a duration shorter than their line needs. So the authoring is right and the import path dropped the declared value. That is v861's resolution order (markdown bullet → v667 anchor bucket → word table) not holding somewhere. Import-path work, separate blast radius, still open.
+
+Run it between importing a job and rendering it — that is the only window where prevention is possible:
+
+    python code/preflight_duration.py --job <id>          # report
+    python code/preflight_duration.py --job <id> --fix    # widen the too-short ones
+
+### v939.8 — ROOT CAUSE FIXED: the v667 anchor may LENGTHEN a clip, never shorten the speech (2026-08-23)
+
+`code/clip_duration.py` · `resolve_clip_duration_s`. This is the bug behind every under-bound clip, and it was one line of precedence.
+
+The resolver ordered `explicit` → `anchor_bucket` → the line's own table. **The anchor bucket is derived from FRAME ANCHORS: it describes visual timing and knows nothing about how long the words take to say.** Letting it outrank the line meant an anchor of 4s on a line the table sizes at 8s produced a clip that could not physically say it — breaking v708's zero word-loss contract by construction, at import, before anything rendered.
+
+**Measured, and it is all of them:** all NINE under-bound clips in production took this path — `target_duration_s` set and exactly equal to the stored duration in every case — and every one was cut short at render, including 14302 and 14303, the clips that turned up in the cut-clip investigation that started this work. Under the fix **all 9 resolve long enough** (4→6, 4→8, 6→8, …).
+
+The fix is a floor, not a reordering:
+- an **explicit** `- **clip_duration_s:**` bullet still outranks everything (v861) — a declared duration is a deliberate author choice and the auditor is where a bad one gets caught;
+- a **silent** scene still takes the anchor alone, because there is no speech to fit;
+- a **longer** anchor still wins — a visual beat may legitimately want more room than the words need. Only the shortening direction was ever the defect.
+
+Forward-only: existing clips keep their stored value. Verified against the existing v861 and v884 suites (241 tests) plus a new `tests/test_clip_duration_anchor_floor.py` whose first assertion reproduces production clip 14303 exactly.
+
+**The general lesson: a number that is authoritative for one axis is not authoritative for another.** The anchor is the right source for how long a *shot* should be and the wrong source for how long a *sentence* takes, and nothing in the precedence chain recorded that distinction until it had cut nine clips.
+
+### v939.9 — THE SECOND ROOT CAUSE: fail closed when the Flow duration tab cannot be set (2026-08-23)
+
+`code/static/flow_worker.py`, both duration re-set sites. This is v939.6a's *other* bug — the one where the stored duration was CORRECT and the render produced something else — and it is a fail-open/fail-closed asymmetry inside a single function.
+
+**The evidence is two clips in the same job, same worker, same settings:**
+
+| clip | variants | stored | rendered | what happened |
+|---|---|---|---|---|
+| 14331 | 1 | 6s | **6.016s** | duration tab re-set succeeded |
+| 14330 | 2 | 6s | **4.010s** | re-set failed, inherited the previous clip's 4s |
+
+Measured with `ffprobe` on the delivered mp4s, not inferred. 14330 is the clip cut mid-word at *"especially that f"*.
+
+**The asymmetry.** On the FIRST submission in a project the settings pass already fails closed — an exception marks the clip `failed` and nothing renders. The REUSE path (clips 2..N, which re-click just the duration tab via the v861 fast path) failed OPEN in two separate ways:
+
+- `select_frames_to_video_mode(..., duration_only=True)` returning **False** fell through the `if` with **no message at all**;
+- an exception printed a warning and **carried on to submit anyway**.
+
+Either way the clip was then rendered at whatever bucket the composer was still on — the previous clip's. Both paths now mark the clip `failed` and `continue`, matching the first-submission behaviour.
+
+**Why failing is the cheaper outcome, and why this is not over-strict:** a render at the wrong bucket cannot say its line, so it is not a saving over failing — it is the same render cost with a broken clip at the end. And a `False` here genuinely means the composer could not be put on this clip's bucket: the `duration_only` fast path returns `True` when the tab is **already** correct (`if _dtab.get_attribute("aria-selected") != "true": click`), so there is no benign false. Carries a `[v939.9/flow TEMP]` diagnostic; remove after operator-side evidence shows whether it fires.
+
+**The general lesson, and it generalises past this file: a recovery path that logs and continues is a fail-open path.** The warning made it *look* handled. The same function fails closed 40 lines away, and nobody noticed the two halves disagreed until a clip shipped cut.
+
+### Not done, deliberately
+
+No automatic discard (every removal is an explicit `--apply`), no automatic widening (`--repair-duration` and `--fix` are both opt-in), and **nothing pushed** — v939.8 and v939.9 only take effect on new renders once `code/` is deployed. The thresholds are first-draft: the `--backtest` sweep is uninformative because three failures in 142 takes leave every top setting tied. **What would settle them is a batch where the operator's rejected takes are KEPT instead of overwritten** — twenty genuinely-bad renders would calibrate this properly. Until the PROSPECTIVE bucket has real numbers in it, nothing here may act on its own.
+
+CLI: `python code/clip_qc.py --job <id>` · `--since-days N --limit M` (the endpoint defaults `since_days` to 3 per v726, so it must be passed) · `--backtest` · `--out report.json`. Evidence is cached under `~/.kaveno/clipqc-cache/` as raw measurements, never verdicts, so a threshold sweep costs no network and no model time.
+

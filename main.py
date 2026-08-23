@@ -415,6 +415,13 @@ class ClipResponse(BaseModel):
     replacement_start_frame: Optional[str] = None
     # v815 — auto-image-retry audit: {original_frame, used_frame, tried, count, mode}
     auto_image_retry: Optional[Dict[str, Any]] = None
+    # v939 — shadow-mode clip QC: did each rendered take say its whole line?
+    # None until code/clip_qc.py scores it. Advisory only; chooses nothing.
+    qc: Optional[Dict[str, Any]] = None
+
+
+class ClipQCRequest(BaseModel):
+    report: Dict[str, Any]
 
 
 class RedoRequest(BaseModel):
@@ -3869,6 +3876,18 @@ def get_user_job(db: DBSession, job_id: str, user: User) -> Job:
     return job
 
 
+def _clear_clip_qc(clip: Clip) -> None:
+    """v939 — a QC report describes the exact takes that were on the clip when
+    it was scored. Drop it the moment that stops being true (a redo lands, a
+    variant is uploaded, versions are pruned, the render is replaced).
+
+    A stale report is worse than none: it still renders in the review UI as a
+    current verdict, and it poisons the agreement metric with disagreements
+    that were never real. Mirrors image_platform._clear_qc.
+    """
+    clip.qc_json = None
+
+
 def get_user_clip(db: DBSession, clip_id: int, user: User) -> Clip:
     """Helper to get a clip and verify ownership via job"""
     clip = db.query(Clip).filter(Clip.id == clip_id).first()
@@ -5836,6 +5855,7 @@ async def get_job_clips(
             auto_image_retry=(
                 json.loads(c.auto_image_retry_json) if c.auto_image_retry_json else None
             ),  # v815
+            qc=c._safe_qc(),  # v939 shadow-mode clip QC
         )
         for c in clips
     ]
@@ -5937,6 +5957,7 @@ async def get_job_clips_active(
             auto_image_retry=(
                 json.loads(c.auto_image_retry_json) if c.auto_image_retry_json else None
             ),  # v815
+            qc=c._safe_qc(),  # v939 shadow-mode clip QC
         )
         for c in clips
     ]
@@ -6814,6 +6835,7 @@ async def upload_clip_variant(
             versions.append(version_entry)
             versions.sort(key=lambda x: (x.get("attempt", 1), x.get("variant", 1)))
             clip.versions_json = json.dumps(versions)
+            _clear_clip_qc(clip)  # v939: an unscored take just joined this clip
 
             # Point the clip at the freshly uploaded variant (mirror select-variant).
             clip.output_filename = output_filename
@@ -7747,6 +7769,7 @@ async def select_clip_variant(
     
     # Save cleaned versions back
     clip.versions_json = json.dumps(versions)
+    _clear_clip_qc(clip)  # v939: the report may point at a deleted take
     
     if not versions:
         raise HTTPException(status_code=400, detail="No variants available")
@@ -7868,6 +7891,7 @@ async def request_clip_redo(
     # Increment attempt
     new_attempt = clip.generation_attempt + 1
     clip.generation_attempt = new_attempt
+    _clear_clip_qc(clip)  # v939: the scored takes are no longer the whole set
     
     # Determine if we use logged params
     # Attempt 2: use logged params (same settings)
@@ -8235,6 +8259,74 @@ async def get_clip(
         "generation_attempt": clip.generation_attempt,
         "attempts_remaining": UNLIMITED_ATTEMPTS_REMAINING,
     }
+
+
+@app.post("/api/clips/{clip_id}/qc")
+async def set_clip_qc(
+    clip_id: int,
+    req: ClipQCRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v939 — store the shadow-mode QC report for a clip.
+
+    Written by code/clip_qc.py from the operator's box. It records whether each
+    rendered take actually SAID its whole line and it decides nothing: v886.3
+    is untouched, the operator still approves every clip. Overwrites any
+    previous report, because the latest scoring of the same audio wins.
+
+    Mirrors image_platform.set_node_qc deliberately, including the 409: a clip
+    mid-render is about to replace the take a report would be describing, so a
+    report accepted now would be stale the moment it lands.
+    """
+    clip = get_user_clip(db, clip_id, current_user)
+
+    if clip.status in (ClipStatus.PENDING.value, ClipStatus.GENERATING.value):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Clip is {clip.status} - rescore after it lands")
+
+    rep = req.report
+    if rep.get("version") != 1:
+        raise HTTPException(status_code=422, detail="qc report must carry version: 1")
+    takes = rep.get("takes")
+    if takes is not None and not isinstance(takes, list):
+        raise HTTPException(status_code=422, detail="takes must be a list")
+
+    rec = rep.get("recommended_attempt")
+    if rec is not None:
+        # bool is an int subclass, so JSON `true` would otherwise resolve to
+        # attempt 1. Floats are rejected rather than silently truncated.
+        if isinstance(rec, bool) or not isinstance(rec, (int, str)):
+            raise HTTPException(status_code=422,
+                                detail="recommended_attempt must be an integer")
+        try:
+            rec = int(rec)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422,
+                                detail="recommended_attempt must be an integer")
+        rep["recommended_attempt"] = rec
+        # The recommendation must name a take that exists on THIS clip,
+        # otherwise the agreement metric compares against a ghost.
+        known = {v.get("attempt") for v in
+                 (json.loads(clip.versions_json) if clip.versions_json else [])}
+        known.add(clip.generation_attempt or 1)
+        if rec not in known:
+            raise HTTPException(status_code=422,
+                                detail="recommended_attempt is not a take on this clip")
+
+    blob = json.dumps(rep)
+    if len(blob) > 64_000:
+        raise HTTPException(status_code=413,
+                            detail=f"qc report too large ({len(blob)} bytes, cap 64000)")
+    clip.qc_json = blob
+    db.commit()
+
+    # v939 TEMP diagnostic — remove once operator-side evidence confirms reports
+    # are landing and rendering in the review UI.
+    print(f"[ClipQC/v939 TEMP] clip {clip_id} scored: verdict={rep.get('verdict')} "
+          f"recommended={rec} takes={len(takes or [])}", flush=True)
+    return {"ok": True, "clip_id": clip_id, "verdict": rep.get("verdict")}
 
 
 @app.get("/api/clips/{clip_id}/versions")
@@ -9512,6 +9604,7 @@ async def attach_clips_to_job(
         db_clip.approval_status = "pending_review"
         db_clip.generation_attempt = 1
         db_clip.selected_variant = 1
+        _clear_clip_qc(db_clip)  # v939: this render replaced the scored one
         db_clip.completed_at = datetime.utcnow()
         db_clip.versions_json = json.dumps([{
             "attempt": 1,
