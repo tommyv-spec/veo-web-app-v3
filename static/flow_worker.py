@@ -18943,13 +18943,44 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         _this_dur = str(clip.get('veo_render_duration_s') or job.get('duration', '8'))
         page._duration = _this_dur
         if not first_submission_in_project and _this_dur != getattr(page, '_duration_applied', None):
+            # v939.9 — FAIL CLOSED, the way the first-submission path already
+            # does. This branch used to fail OPEN in two ways: a False return
+            # fell through with no message at all, and an exception printed a
+            # warning and carried on. Either way the clip was then submitted at
+            # the PREVIOUS clip's duration.
+            #
+            # Measured 2026-08-23, job d06acaa2: clip 14330 needed 6s (stored
+            # correctly on the row), inherited 4s, rendered 4.010s and was cut
+            # mid-word at "especially that f". Its sibling 14331 in the same job
+            # re-set cleanly and rendered its full 6.016s. A render at the wrong
+            # bucket cannot say its line, so it is not a cheaper outcome than
+            # failing - it is the same cost with a broken clip at the end.
+            _dur_ok = False
             try:
-                if select_frames_to_video_mode(page, context=f"[dur c{clip_index+1}]", duration_only=True):
-                    page._duration_applied = _this_dur
-                    print(f"[v861/flow] clip {clip_index+1}: duration tab re-set → "
-                          f"{_this_dur}s (reuse path, bucket changed)", flush=True)
+                _dur_ok = bool(select_frames_to_video_mode(
+                    page, context=f"[dur c{clip_index+1}]", duration_only=True))
             except Exception as _de:
-                print(f"[v861/flow] ⚠ clip {clip_index+1} duration re-set failed: {_de}", flush=True)
+                print(f"[v861/flow] ⚠ clip {clip_index+1} duration re-set raised: {_de}",
+                      flush=True)
+            if _dur_ok:
+                page._duration_applied = _this_dur
+                print(f"[v861/flow] clip {clip_index+1}: duration tab re-set → "
+                      f"{_this_dur}s (reuse path, bucket changed)", flush=True)
+            else:
+                # v939.9 TEMP diagnostic — remove once operator-side evidence
+                # shows this firing (or never firing) in production.
+                print(f"[v939.9/flow TEMP] clip {clip_index+1}: could NOT set the "
+                      f"duration tab to {_this_dur}s (composer still on "
+                      f"{getattr(page, '_duration_applied', None)}s). Failing the "
+                      f"clip instead of rendering a window too short for its line.",
+                      flush=True)
+                update_clip_status(
+                    clip['id'], 'failed',
+                    error_message=(f"duration tab stuck at "
+                                   f"{getattr(page, '_duration_applied', None)}s, "
+                                   f"needed {_this_dur}s"))
+                permanently_failed_clips.add(clip_index)
+                continue
 
         if first_submission_in_project:
             # First clip actually submitted — needs frames and full setup.
@@ -20816,13 +20847,44 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         _this_dur = str(clip.get('veo_render_duration_s') or job.get('duration', '8'))
         page._duration = _this_dur
         if not first_submission_in_project and _this_dur != getattr(page, '_duration_applied', None):
+            # v939.9 — FAIL CLOSED, the way the first-submission path already
+            # does. This branch used to fail OPEN in two ways: a False return
+            # fell through with no message at all, and an exception printed a
+            # warning and carried on. Either way the clip was then submitted at
+            # the PREVIOUS clip's duration.
+            #
+            # Measured 2026-08-23, job d06acaa2: clip 14330 needed 6s (stored
+            # correctly on the row), inherited 4s, rendered 4.010s and was cut
+            # mid-word at "especially that f". Its sibling 14331 in the same job
+            # re-set cleanly and rendered its full 6.016s. A render at the wrong
+            # bucket cannot say its line, so it is not a cheaper outcome than
+            # failing - it is the same cost with a broken clip at the end.
+            _dur_ok = False
             try:
-                if select_frames_to_video_mode(page, context=f"[dur c{clip_index+1}]", duration_only=True):
-                    page._duration_applied = _this_dur
-                    print(f"[v861/flow] clip {clip_index+1}: duration tab re-set → "
-                          f"{_this_dur}s (reuse path, bucket changed)", flush=True)
+                _dur_ok = bool(select_frames_to_video_mode(
+                    page, context=f"[dur c{clip_index+1}]", duration_only=True))
             except Exception as _de:
-                print(f"[v861/flow] ⚠ clip {clip_index+1} duration re-set failed: {_de}", flush=True)
+                print(f"[v861/flow] ⚠ clip {clip_index+1} duration re-set raised: {_de}",
+                      flush=True)
+            if _dur_ok:
+                page._duration_applied = _this_dur
+                print(f"[v861/flow] clip {clip_index+1}: duration tab re-set → "
+                      f"{_this_dur}s (reuse path, bucket changed)", flush=True)
+            else:
+                # v939.9 TEMP diagnostic — remove once operator-side evidence
+                # shows this firing (or never firing) in production.
+                print(f"[v939.9/flow TEMP] clip {clip_index+1}: could NOT set the "
+                      f"duration tab to {_this_dur}s (composer still on "
+                      f"{getattr(page, '_duration_applied', None)}s). Failing the "
+                      f"clip instead of rendering a window too short for its line.",
+                      flush=True)
+                update_clip_status(
+                    clip['id'], 'failed',
+                    error_message=(f"duration tab stuck at "
+                                   f"{getattr(page, '_duration_applied', None)}s, "
+                                   f"needed {_this_dur}s"))
+                permanently_failed_clips.add(clip_index)
+                continue
 
         if first_submission_in_project:
             # First clip actually being submitted to this project — needs frames and full setup.
