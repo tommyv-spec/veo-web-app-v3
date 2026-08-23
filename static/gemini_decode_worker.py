@@ -599,12 +599,50 @@ def select_model(page, want):
     return now
 
 
+def _open_upload_menu(page, menu):
+    """Click the upload button, surviving a composer that is still settling.
+
+    The SECOND attach is the one that breaks (2026-08-23). Batch one — the nine
+    canon files — clicks fine; batch two, the mp4, dies after 30s on
+    "waiting for element to be visible, enabled and stable" with the locator
+    already resolved to the right button. By then nine chips have rendered and
+    the composer is still reflowing, so Playwright's stability check (same box
+    two animation frames running) keeps failing on an element that IS clickable.
+
+    Attaching both batches in one set_input_files call is NOT the fix — the app
+    keeps the documents and silently drops the video (see the two-batch rule in
+    docs/gemini-browser-decode-setup.md).
+
+    So: settle it into view, try normally, and only then force. The force path is
+    logged, because a click that had to bypass actionability is exactly the thing
+    a later failure will want to know about.
+    """
+    try:
+        menu.scroll_into_view_if_needed(timeout=5000)
+    except Exception:
+        pass
+    for attempt, force in ((1, False), (2, False), (3, True)):
+        try:
+            menu.click(timeout=15000, force=force)
+            if force:
+                log("upload menu opened with force=True (composer never went stable)")
+            return
+        except Exception as exc:
+            if attempt == 3:
+                where = dump_dom(page, "upload_menu_unclickable")
+                raise RuntimeError(
+                    f"could not open the upload menu after 3 tries "
+                    f"({exc.__class__.__name__}). Evidence at {where}"
+                ) from exc
+            jitter(1.5, 2.5)
+
+
 def attach(page, paths):
     """The file input is only mounted while the upload menu is open, so the menu
     opens first; the files are then set on the input directly, which skips the OS
     picker. All files go in ONE call — set_input_files replaces the list."""
     menu = find(page, "upload_menu", timeout_ms=10000)
-    menu.click()
+    _open_upload_menu(page, menu)
     jitter(1.5, 2.5)
     inp = find(page, "file_input", timeout_ms=10000, required=False)
     if inp is None:  # the input is hidden by design, so visibility is not required
@@ -706,8 +744,22 @@ def send(page, prompt):
         box.fill(prompt)
         jitter()
     btn = find(page, "send", timeout_ms=8000, required=False)
+    # Same trap as the composer above, and it bites here too (2026-08-23): with
+    # ten chips the send button resolves and is ENABLED but never settles, so a
+    # plain click waits out its whole timeout and the run dies with everything
+    # already attached. The existing Enter fallback did not cover it, because it
+    # only ran when the button was missing or disabled - never when it was simply
+    # unstable. Force, then Enter, and say which path was taken.
     if btn is not None and btn.is_enabled():
-        btn.click()
+        try:
+            btn.click(timeout=8000)
+        except Exception:
+            log("send button never went stable - forcing the click")
+            try:
+                btn.click(force=True, timeout=8000)
+            except Exception:
+                log("forced send click failed too - pressing Enter")
+                page.keyboard.press("Enter")
     else:
         page.keyboard.press("Enter")
     log(f"sent ({len(prompt)} chars)")
