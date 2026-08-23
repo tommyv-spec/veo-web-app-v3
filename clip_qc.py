@@ -1269,54 +1269,97 @@ def next_bucket_up(seconds: int) -> Optional[int]:
 
 
 def plan_duration_repair(diag: Dict[str, Any],
-                         all_cut: bool = False) -> Dict[str, Any]:
+                         all_cut: bool = False,
+                         has_alt_line: bool = False) -> Dict[str, Any]:
     """Diagnosis -> what to actually do. Pure.
 
     The causes get different actions, which is the whole point: widening an
     `abandoned` clip spends a render to reproduce the same failure, because
     that clip already had time it did not use.
 
-    `all_cut` is the operator's own trigger — "if all of the generated clips
-    are cut". It does not change the action on its own; it changes the
-    ESCALATION at the ceiling, where every take has been cut and there is no
-    wider bucket left to try. At that point re-rolling is just spending
-    renders, and the line itself is the problem.
+    `all_cut` is the operator's own trigger — "if all of the generated clips of
+    a clip aren't right we should retrigger the CORRECTED generation." That
+    word is the whole point: once EVERY take has come back cut, an identical
+    re-roll is not a retry, it is a gamble on the same inputs that already
+    failed every time. So all_cut escalates through the corrections we can
+    actually make, cheapest first, and STOPS when there are none left:
+
+      1. a reworded line exists (v821 Prompt B — same meaning, different
+         words) -> send that. It is the only change that addresses a model
+         that keeps refusing to say this particular wording.
+      2. no reworded line, but duration headroom -> widen. Weak: an abandoned
+         clip already had unused time. It is the last automatic lever, and it
+         is declared as a long shot rather than dressed up as a diagnosis.
+      3. nothing left to change -> `redo: False`. Do NOT queue another render.
+         The line has to get shorter or be split, and that is the operator's
+         call, not something a script should burn renders guessing at.
+
+    Every returned plan carries `redo`, so the caller never has to infer from
+    the action string whether a render should be queued.
     """
     d = diag.get("diagnosis")
     if d is None:
-        return {"action": None, "new_duration": None, "why": "not cut"}
+        return {"action": None, "new_duration": None, "redo": False,
+                "why": "not cut"}
 
     if d == "unknown":
         # We could not tell starved from abandoned. Widening on a guess is the
         # one move that both wastes a render and can change good pacing, so
         # take the cheap reversible option instead.
         return {"action": "redo_same_duration", "new_duration": None,
+                "redo": True,
                 "why": diag.get("why") or "cause could not be determined"}
 
     if d == "under_bucketed":
         return {"action": "widen_and_redo",
-                "new_duration": diag["table_duration"],
+                "new_duration": diag["table_duration"], "redo": True,
                 "why": (f"rendered at {diag['rendered_duration']}s but the line's "
                         f"own bucket is {diag['table_duration']}s")}
 
+    nxt = next_bucket_up(int(diag.get("rendered_duration") or 0))
+
     if d == "starved":
-        nxt = next_bucket_up(int(diag.get("rendered_duration") or 0))
         if nxt is None:
             return {"action": "shorten_the_line", "new_duration": None,
+                    "redo": False,
                     "why": ("speech filled the whole render, every take was cut, "
                             "and there is no longer bucket - the line has to get "
                             "shorter or be split"
                             if all_cut else
                             "speech filled the whole render and there is no longer "
                             "bucket - the line has to get shorter or be split")}
-        return {"action": "widen_and_redo", "new_duration": nxt,
+        return {"action": "widen_and_redo", "new_duration": nxt, "redo": True,
                 "why": (f"speech ran to the end of a {diag['rendered_duration']}s "
                         f"render - try {nxt}s")}
 
-    # abandoned
-    return {"action": "redo_same_duration", "new_duration": None,
-            "why": (f"had {diag.get('unused_silence_s')}s of unused silence, so a "
-                    f"longer render will not help - re-roll instead")}
+    # --- abandoned -------------------------------------------------------
+    # It had time it did not use, so a longer window is not indicated. One
+    # re-roll is still reasonable: Veo is stochastic and a single bad take is
+    # not evidence about the line.
+    if not all_cut:
+        return {"action": "redo_same_duration", "new_duration": None,
+                "redo": True,
+                "why": (f"had {diag.get('unused_silence_s')}s of unused silence, so a "
+                        f"longer render will not help - re-roll instead")}
+
+    # EVERY take came back cut. Re-rolling the same inputs is no longer a
+    # retry, it is a gamble on inputs that already failed every time. Escalate
+    # through the corrections available, cheapest first.
+    if has_alt_line:
+        return {"action": "reword_and_redo", "new_duration": None, "redo": True,
+                "why": ("every take was cut and the duration is not the problem - "
+                        "sending the reworded line (v821 Prompt B), because the "
+                        "wording is the only thing left that we can change")}
+    if nxt is not None:
+        return {"action": "widen_and_redo", "new_duration": nxt, "redo": True,
+                "why": (f"every take was cut and there is no reworded line - "
+                        f"widening {diag['rendered_duration']}s to {nxt}s is the "
+                        f"last automatic lever, and it is a long shot: this clip "
+                        f"already left {diag.get('unused_silence_s')}s unused")}
+    return {"action": "shorten_the_line", "new_duration": None, "redo": False,
+            "why": ("every take was cut, there is no reworded line and no longer "
+                    "bucket - nothing left to change automatically. The line has "
+                    "to get shorter or be split")}
 
 
 def attach_repair_plan(row: Dict[str, Any], qc: Dict[str, Any]) -> Dict[str, Any]:
@@ -1330,7 +1373,9 @@ def attach_repair_plan(row: Dict[str, Any], qc: Dict[str, Any]) -> Dict[str, Any
             "diagnosis": diag.get("diagnosis"),
             "diagnosis_detail": diag,
             "all_takes_cut": every_take_cut,
-            "repair": plan_duration_repair(diag, all_cut=every_take_cut)}
+            "repair": plan_duration_repair(
+                diag, all_cut=every_take_cut,
+                has_alt_line=bool((qc.get("alt_line") or "").strip()))}
 
 
 def request_redo(session: Any, base: str, clip_id: int,
@@ -1708,6 +1753,10 @@ def build_report(clip: Dict[str, Any], results: Sequence[Dict[str, Any]],
         "selected_at_scoring": chosen,
         "operator_state_at_scoring": clip.get("approval_status"),
         "line": (clip.get("dialogue_text") or "")[:400],
+        # v939.10 — the v821 reworded line, if the build authored one. It is
+        # the only correction available when every take comes back cut and the
+        # duration is not the problem.
+        "alt_line": (clip.get("dialogue_text_b") or "")[:400],
         "takes": takes,
         "thresholds": {
             "word_conf_floor": WORD_CONF_FLOOR,
@@ -2045,12 +2094,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                   f"{'reject' if args.reject_only else 're-render'} these.")
             return 0
 
-        done = failed = 0
+        done = failed = skipped_no_fix = 0
         rows = []
         now = _now_iso()
         for r in capped:
             widened = ""
             rep = r.get("repair") or {}
+            # v939.10 — a plan that says redo:False has nothing left to change.
+            # Queuing another identical render there is gambling, which is the
+            # exact thing "retrigger the CORRECTED generation" rules out.
+            if rep.get("redo") is False and not args.reject_only:
+                print(f"    clip {r['clip_id']}: NOT re-rendered - {rep.get('why')}",
+                      flush=True)
+                skipped_no_fix += 1
+                continue
             if (args.repair_duration and not args.reject_only
                     and rep.get("action") == "widen_and_redo"):
                 new_s = rep["new_duration"]
@@ -2063,6 +2120,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     failed += 1
                     continue
                 widened = f" [widened to {new_s}s]"
+            reworded = ""
+            if (not args.reject_only and rep.get("action") == "reword_and_redo"
+                    and r.get("alt_line")):
+                reworded = " [reworded line]"
             if args.reject_only:
                 ok, why = mark_rejected(session, base, r["clip_id"])
             else:
@@ -2070,7 +2131,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     session, base, r["clip_id"],
                     f"v939 clip QC: {', '.join(r['hard'])} - the render does not "
                     f"say the whole line")
-            print(f"    clip {r['clip_id']}: {why}{widened}", flush=True)
+            print(f"    clip {r['clip_id']}: {why}{widened}{reworded}", flush=True)
             if ok:
                 done += 1
                 # Recorded as a MACHINE decision. Once we act, the operator's
@@ -2090,7 +2151,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 failed += 1
         ledger_append(rows)
-        print(f"\n  {done} removed, {failed} failed. Logged to {LEDGER_PATH}")
+        print(f"\n  {done} removed, {failed} failed"
+              + (f", {skipped_no_fix} left alone (nothing left to change - the "
+                 f"line needs shortening)" if skipped_no_fix else "")
+              + f". Logged to {LEDGER_PATH}")
         return 0 if not failed else 1
 
     reports = []

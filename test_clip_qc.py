@@ -840,3 +840,66 @@ def test_repair_rows_carry_the_diagnosis_and_the_action():
     assert row["diagnosis"] == "under_bucketed"
     assert row["repair"]["action"] == "widen_and_redo"
     assert row["repair"]["new_duration"] == 8
+
+
+# --- all takes cut: escalate, never re-roll the same inputs ----------------
+
+def test_one_bad_take_still_gets_a_plain_reroll():
+    # Veo is stochastic; a single gamble is reasonable.
+    plan = q.plan_duration_repair({"diagnosis": "abandoned", "table_duration": 6,
+                                   "rendered_duration": 6, "unused_silence_s": 1.2},
+                                  all_cut=False)
+    assert plan["action"] == "redo_same_duration"
+
+
+def test_every_take_cut_with_a_reworded_line_available_uses_it():
+    # v821 Prompt B is the same meaning in different words. When identical
+    # re-rolls have failed for every take, that is a real correction.
+    plan = q.plan_duration_repair({"diagnosis": "abandoned", "table_duration": 6,
+                                   "rendered_duration": 6, "unused_silence_s": 1.2},
+                                  all_cut=True, has_alt_line=True)
+    assert plan["action"] == "reword_and_redo"
+    assert plan["new_duration"] is None
+
+
+def test_every_take_cut_with_no_reworded_line_widens_as_the_last_lever():
+    plan = q.plan_duration_repair({"diagnosis": "abandoned", "table_duration": 6,
+                                   "rendered_duration": 6, "unused_silence_s": 1.2},
+                                  all_cut=True)
+    assert plan["action"] == "widen_and_redo"
+    assert plan["new_duration"] == 8
+    assert "last automatic lever" in plan["why"]
+
+
+def test_every_take_cut_at_the_ceiling_stops_redoing_entirely():
+    # Nothing left to change. Queuing another identical render is gambling.
+    plan = q.plan_duration_repair({"diagnosis": "abandoned", "table_duration": 10,
+                                   "rendered_duration": 10, "unused_silence_s": 1.2},
+                                  all_cut=True)
+    assert plan["action"] == "shorten_the_line"
+    assert plan["redo"] is False
+
+
+def test_a_plain_reroll_is_marked_as_a_redo():
+    plan = q.plan_duration_repair({"diagnosis": "abandoned", "table_duration": 6,
+                                   "rendered_duration": 6, "unused_silence_s": 1.2})
+    assert plan["redo"] is True
+
+
+def test_shorten_the_line_never_queues_a_redo():
+    plan = q.plan_duration_repair({"diagnosis": "starved", "table_duration": 10,
+                                   "rendered_duration": 10}, all_cut=True)
+    assert plan["action"] == "shorten_the_line" and plan["redo"] is False
+
+
+def test_attach_repair_plan_passes_the_alt_line_through():
+    clip = _fail_clip()
+    clip["qc"]["line"] = "i was just like you. then i found this young korean healer."
+    clip["qc"]["selected_at_scoring"] = 1
+    clip["qc"]["alt_line"] = "i was right where you are. then a young korean healer changed it."
+    clip["qc"]["takes"][0].update({"tail_missing": 2, "tail_room_s": 1.2,
+                                   "audio_duration": 6.0, "coverage": 0.71})
+    rm, _ = q.discard_candidates([clip])
+    row = q.attach_repair_plan(rm[0], clip["qc"])
+    assert row["all_takes_cut"] is True
+    assert row["repair"]["action"] == "reword_and_redo"
