@@ -250,8 +250,17 @@ def pull_firefox_profile(email):
         shutil.rmtree(FF_PROFILE_DIR, ignore_errors=True)
         log("cleared the old Camoufox profile so the pulled session is not replayed over")
     try:
+        # account_num=1 makes locate_firefox_profile honour ACCOUNT1_FIREFOX_PROFILE
+        # BEFORE it tries to match the account by asking Google. That email probe
+        # is a documented false-negative (flow-dead-session-reclone-from-golden:
+        # "may return None even when a good profile exists"), and it hit us on
+        # 2026-08-23: it reported no profile for shenkevin480 while the profile
+        # held 39 google.com, 7 gemini.google.com and 5 labs.google cookies - a
+        # live session by the cookie test, which is the one that counts. Without
+        # this the worker silently drops to the Chrome-cookie bridge and drives a
+        # logged-out Gemini for six minutes before failing on a button timeout.
         ok = ffpull.build_firefox_golden_from_profile(
-            email, FF_PROFILE_DIR, label="GEMINI-FF", log=log)
+            email, FF_PROFILE_DIR, label="GEMINI-FF", account_num=1, log=log)
     except Exception as e:
         log(f"firefox profile pull failed ({e.__class__.__name__}: {str(e)[:90]})")
         return False
