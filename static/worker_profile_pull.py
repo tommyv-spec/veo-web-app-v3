@@ -764,6 +764,43 @@ def _diag_cookie_readiness(cookies_db, log=print, tag=""):
         log(f"{tag}cookie-diag: read failed: {e}")
 
 
+def _prune_labs_session_cookies(cookies_db, log=print):
+    """v914: delete EVERY labs.google cookie from a copied golden, keep Google SSO.
+
+    A golden built from a profile that still holds a labs.google session inherits
+    an ALREADY-FLAGGED session, and golden restores cannot fix it - each restore
+    faithfully restores the flagged session. Stripped, the first entry into the
+    app makes SSO mint a fresh session instead.
+
+    This existed as v914 and was NOT in this file on 2026-08-23; the golden built
+    that day carried labs.google=6 and one `__Secure-next-auth.session-token`
+    (which lives on labs.google, so this removes it - `_prune_handshake_cookies`
+    deliberately keeps it, and that is the cookie that has to go). The symptom was
+    a decode that signed in, attached, sent 16719 chars, reached "answer
+    complete", and then found the SIGNED-OUT landing page at extraction, losing
+    the finished answer.
+
+    Operates on the GOLDEN's copied Cookies DB only - never the real profile."""
+    if not cookies_db or not os.path.isfile(cookies_db):
+        return -1
+    try:
+        import sqlite3
+        con = sqlite3.connect(cookies_db, timeout=5)
+        try:
+            cur = con.execute(
+                "DELETE FROM cookies WHERE host_key LIKE '%labs.google%'")
+            con.commit()
+            return cur.rowcount if cur.rowcount is not None else 0
+        finally:
+            con.close()
+    except Exception as e:
+        try:
+            log(f"  prune labs.google cookies failed: {e}")
+        except Exception:
+            pass
+        return -1
+
+
 def _prune_handshake_cookies(cookies_db, log=print):
     """Delete stale next-auth handshake cookies from a copied golden Cookies DB
     (keeps the session token + Google SSO). Returns count deleted, -1 on error.
@@ -883,6 +920,15 @@ def build_lean_golden_from_profile(email, golden_folder, label="",
         if _pruned > 0:
             log(f"{tag}lean golden: dropped {_pruned} stale next-auth handshake cookie(s) "
                 f"(kept session-token + Google SSO)")
+        # v914: then strip the labs.google session itself. The handshake prune
+        # above deliberately keeps the session-token; v914 says that is exactly
+        # the cookie that has to go, because a golden carrying a labs session
+        # inherits an already-flagged one and every restore faithfully restores
+        # the flag. SSO is untouched, so the first entry mints a fresh session.
+        _labs = _prune_labs_session_cookies(
+            os.path.join(tmp, "Default", "Network", "Cookies"), log=log)
+        if _labs > 0:
+            log(f"{tag}lean golden: v914 stripped {_labs} labs.google cookie(s)")
         # DIAG: prove the auth cookies actually landed in the golden (read-only,
         # no decrypt). If these are present + v10 but Flow still says logged-out,
         # the blocker is decryption at launch (mac keychain), not the copy.
