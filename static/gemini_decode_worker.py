@@ -925,6 +925,21 @@ def extract(page):
     where = dump_dom(page, "extract_failed")
     if best:
         dump(best[0], "extract_failed_text")
+    # Gemini's own failure reply is not an extraction problem, and reporting it as
+    # one sends the next person hunting selectors. Cost 2026-08-23: hours spent on
+    # a non-existent extraction bug, when the answer element held exactly
+    # "Sorry, something went wrong. Please try your request again." - 77 chars,
+    # correctly rejected as too short. Name it instead.
+    if best and any(p in best[0].lower() for p in (
+            "something went wrong", "please try your request again",
+            "try again later", "unable to process")):
+        raise RuntimeError(
+            f"GEMINI REFUSED THE REQUEST - it answered "
+            f"{best[0].strip()[:120]!r}. Nothing to extract, and nothing here is "
+            f"broken: the pipeline signed in, attached and sent. This is "
+            f"server-side (rate limit / quota / oversized request are the usual "
+            f"causes). Wait and retry one video, or try a shorter clip before "
+            f"changing any code. Evidence at {where}")
     raise RuntimeError(
         f"no extraction path returned usable markdown. Evidence at {where}")
 
