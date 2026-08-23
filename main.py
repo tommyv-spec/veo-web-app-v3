@@ -18537,6 +18537,7 @@ async def serve_autoedit_worker_file(name: str):
 @app.get("/api/user-worker/download/autoedit-installer")
 async def download_autoedit_installer(
     request: Request,
+    os: str = Query("windows", regex="^(windows|mac|linux)$"),
     user: User = Depends(get_current_user),
     db: DBSession = Depends(get_db_session),
 ):
@@ -18565,10 +18566,17 @@ async def download_autoedit_installer(
     if 'kavenobuilder.com' not in app_url:
         app_url = "https://kavenobuilder.com"
 
+    if os == "windows":
+        return Response(
+            content=_generate_autoedit_installer(token.id, app_url),
+            media_type="application/x-bat",
+            headers={"Content-Disposition": 'attachment; filename="Kaveno-AutoEdit-Setup.bat"'},
+        )
+    # .command so macOS runs it on double-click; Linux users run it with bash.
     return Response(
-        content=_generate_autoedit_installer(token.id, app_url),
-        media_type="application/x-bat",
-        headers={"Content-Disposition": 'attachment; filename="Kaveno-AutoEdit-Setup.bat"'},
+        content=_generate_autoedit_installer_unix(token.id, app_url),
+        media_type="application/x-sh",
+        headers={"Content-Disposition": 'attachment; filename="Kaveno-AutoEdit-Setup.command"'},
     )
 
 
@@ -19093,6 +19101,108 @@ AUTOEDIT_WORKER_FILES = [
     ("korella/styles.css", "caption_templates\\korella"),
     ("korella/Montserrat-ExtraBold.ttf", "caption_templates\\korella\\resources"),
 ]
+
+
+def _generate_autoedit_installer_unix(token: str, app_url: str) -> str:
+    """Mac / Linux twin of the Windows auto-edit installer.
+
+    v938.24b. Deliberately built with __PLACEHOLDER__ replacement rather than an
+    f-string: this is dense bash, and `${VAR}` inside an f-string has to be
+    written `${{VAR}}` everywhere. One missed pair produces a script that looks
+    right in review and expands to nonsense at run time.
+
+    Same contract as the Windows one — reuse the token the main installer wrote,
+    check the hard prerequisites first, lay the files out in the shape the
+    imports expect, leave a start script behind.
+    """
+    fetches = "\n".join(
+        'curl -sfL "$APP/api/user-worker/download/autoedit/%s" -o "$AE/%s%s" || fail_dl'
+        % (fn, (sub.replace("\\", "/") + "/") if sub else "", fn.rsplit("/", 1)[-1])
+        for fn, sub in AUTOEDIT_WORKER_FILES
+    )
+    script = r'''#!/bin/bash
+# Kaveno Auto-Edit worker setup (Mac / Linux).
+#
+# Finishes videos on THIS machine instead of the server. The server can do it
+# too, but it has one slow cpu: burning the captions takes 20-30 minutes there
+# and 3-4 minutes here.
+
+APP="__APP__"
+DIR="$HOME/veo-worker"
+AE="$DIR/autoedit"
+
+fail_dl() { echo ""; echo "  [X] a download failed. Check the connection and run this again."; exit 1; }
+
+echo ""
+echo "  Kaveno Auto-Edit worker"
+echo "  ======================="
+echo ""
+
+PY=""
+for c in python3 python; do command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }; done
+if [ -z "$PY" ]; then
+  echo "  [X] python3 is not installed. Install it, then run this again."
+  exit 1
+fi
+
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "  [X] ffmpeg is not on PATH - the worker cannot render without it."
+  echo "      Mac:   brew install ffmpeg"
+  echo "      Linux: sudo apt install ffmpeg"
+  exit 1
+fi
+
+if [ ! -f "$DIR/.env" ]; then
+  echo "  [X] $DIR/.env not found."
+  echo "      Run the main worker setup from the My Worker page first - this"
+  echo "      reuses the token it writes, so there is nothing to paste here."
+  exit 1
+fi
+
+echo "  [1/4] making $AE"
+mkdir -p "$AE/static" "$AE/caption_templates/korella/resources"
+
+echo "  [2/4] downloading the worker"
+__FETCHES__
+
+echo "  [3/4] python packages (a few minutes the first time)"
+"$PY" -m pip install --quiet --upgrade pip >/dev/null 2>&1
+"$PY" -m pip install --quiet requests numpy "opencv-python<5" || {
+  echo "  [X] installing the python packages failed - the message above says why."
+  exit 1
+}
+echo "        optional: pycaps gives the TikTok-style captions. Without it the"
+echo "        worker still runs and uses a plainer caption look."
+"$PY" -m pip install --quiet "pycaps @ git+https://github.com/francozanardi/pycaps" playwright openai-whisper >/dev/null 2>&1 \
+  && "$PY" -m playwright install chromium >/dev/null 2>&1
+
+echo "  [4/4] writing the start script"
+cat > "$DIR/start-autoedit.command" <<'LAUNCHER'
+#!/bin/bash
+cd "$(dirname "$0")"
+set -a; . ./.env; set +a
+export PYTHONIOENCODING=utf-8
+echo "Watching for videos to finish. Leave this window open."
+PY=""
+for c in python3 python; do command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }; done
+"$PY" autoedit/static/autoedit_worker.py --watch
+LAUNCHER
+chmod +x "$DIR/start-autoedit.command"
+
+echo ""
+echo "  Done. Start it whenever you want this machine to do the finishing:"
+echo "      $DIR/start-autoedit.command"
+echo ""
+echo "  Leave that window open. Every \"Finish video\" you press in the platform"
+echo "  is picked up here instead of the server. Close it to go back to normal."
+echo ""
+printf "  Start it now? [y/N] "
+read -r ans
+case "$ans" in
+  [yY]*) exec "$DIR/start-autoedit.command" ;;
+esac
+'''
+    return script.replace("__APP__", app_url).replace("__FETCHES__", fetches)
 
 
 def _generate_autoedit_installer(token: str, app_url: str) -> str:

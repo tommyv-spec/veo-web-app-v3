@@ -491,10 +491,14 @@
                 <strong>ffmpeg</strong> on PATH; the installer checks and tells you if it is missing.
                 Uses the token you already have, so there is nothing to paste.
             </div>
-            <button class="btn" onclick="downloadAutoEditInstaller()" style="width:100%;">
+            <div class="os-pills">
+                <span class="os-pill active" onclick="selectAutoEditOS('windows',this)">Windows</span>
+                <span class="os-pill" onclick="selectAutoEditOS('mac',this)">Mac / Linux</span>
+            </div>
+            <button class="btn" onclick="downloadAutoEditInstaller()" style="width:100%;margin-top:10px;">
                 Download Auto-Edit Worker setup
             </button>
-            <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">
+            <div id="autoEditPathHint" style="font-size:11px;color:var(--text-muted);margin-top:8px;">
                 Installs to <code>%USERPROFILE%\veo-worker\autoedit</code> and writes
                 <code>start-autoedit.bat</code> next to it. Run that whenever you want this PC
                 to take the finishing; close the window to go back to the server.
@@ -685,8 +689,25 @@ function downloadInstaller(os, opts) {
 
 // v938.24 — same hidden-iframe download the main installer uses, so the
 // browser gets the .bat with the Content-Disposition filename intact.
+let autoEditOS = 'windows';
+
+function selectAutoEditOS(os, el) {
+    autoEditOS = os;
+    el.parentElement.querySelectorAll('.os-pill').forEach(p => p.classList.remove('active'));
+    el.classList.add('active');
+    const hint = document.getElementById('autoEditPathHint');
+    if (!hint) return;
+    hint.innerHTML = os === 'windows'
+        ? 'Installs to <code>%USERPROFILE%\\veo-worker\\autoedit</code> and writes '
+          + '<code>start-autoedit.bat</code> next to it. Run that whenever you want this PC '
+          + 'to take the finishing; close the window to go back to the server.'
+        : 'Installs to <code>~/veo-worker/autoedit</code> and writes '
+          + '<code>start-autoedit.command</code> next to it. On Mac double-click it; on Linux '
+          + 'run it with bash. Close the window to go back to the server.';
+}
+
 function downloadAutoEditInstaller() {
-    const url = API + '/api/user-worker/download/autoedit-installer';
+    const url = API + '/api/user-worker/download/autoedit-installer?os=' + autoEditOS;
     let iframe = document.getElementById('dlFrame');
     if (!iframe) { iframe = document.createElement('iframe'); iframe.id = 'dlFrame'; iframe.style.display = 'none'; document.body.appendChild(iframe); }
     iframe.src = url;
