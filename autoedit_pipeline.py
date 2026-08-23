@@ -958,13 +958,24 @@ def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio,
     return nocap
 
 
-def render_captions(nocap: Path, out: Path, template: str, offset=-0.05):
+def render_captions(nocap: Path, out: Path, template: str, offset=-0.05, subtitle_data=None):
+    """Burn captions once, at one vertical offset.
+
+    `subtitle_data` replays the transcription+tagging pycaps already did for
+    this exact video, which is ~45% of the work and identical across offsets.
+    See render_captions_dynamic for why that matters and how it was measured.
+    """
     cwd = str(TEMPLATES_DIR) if template in local_styles() else None
     out.unlink(missing_ok=True)  # pycaps refuses to overwrite
-    print(f"captions: pycaps template={template}")
-    r = subprocess.run([pycaps_exe(), "render", "--input", str(nocap), "--output", str(out),
-                        "--template", template, "--layout-align", "center",
-                        "--layout-align-offset", str(offset)],
+    cmd = [pycaps_exe(), "render", "--input", str(nocap), "--output", str(out),
+           "--template", template, "--layout-align", "center",
+           "--layout-align-offset", str(offset)]
+    if subtitle_data and Path(subtitle_data).exists():
+        cmd += ["--subtitle-data", str(subtitle_data)]
+        print(f"captions: pycaps template={template} (reusing transcript)")
+    else:
+        print(f"captions: pycaps template={template}")
+    r = subprocess.run(cmd,
                        capture_output=True, text=True, encoding="utf-8", errors="replace",
                        cwd=cwd, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
     if r.returncode != 0 or not out.exists():
@@ -992,6 +1003,7 @@ def render_captions_dynamic(nocap: Path, out: Path, template: str, windows, work
     # Fourth instance of the same defect in this file — see enhance_audio and
     # compose. Anything cached here must be named after everything baked into it.
     src_key = file_fingerprint(nocap)
+    first_data = None          # v938.23 — the transcript every later pass replays
     for o in offsets:
         tag = str(o).replace('-', 'm').replace('.', '_')
         p = work / cap_pass_name(o, template, src_key)
@@ -1001,8 +1013,30 @@ def render_captions_dynamic(nocap: Path, out: Path, template: str, windows, work
         legacy = work / f"cap_pass_{tag}_{template}.mp4"   # pre-v938.16 name
         legacy.unlink(missing_ok=True)
         if not p.exists():
-            render_captions(nocap, p, template, o)
+            # v938.23 — every pass after the first replays the FIRST pass's
+            # transcription instead of redoing it.
+            #
+            # This stage is the slow one, and it costs one full pycaps pass per
+            # distinct caption height: a plan with three heights ran 32 minutes
+            # on the server (job 732b7f8f, 22:43 -> 22:54 -> 23:04 in the render
+            # log), while a two-height plan took four. Timed on a 30s clip, a
+            # pass is ~14s transcribing and ~13s drawing frames — and the
+            # transcript is IDENTICAL across offsets, because only the vertical
+            # position changes.
+            #
+            # pycaps writes its subtitle data beside the output, and
+            # --subtitle-data replays it, skipping transcription and tagging.
+            # Measured: 31s -> 17s, a 45% cut per extra pass. Verified it still
+            # honours a DIFFERENT offset rather than baking in the first one —
+            # caption centre 0.59 at +0.10 vs 0.29 at -0.25, same text, same
+            # timing. That check is the whole reason this is safe.
+            render_captions(nocap, p, template, o, subtitle_data=first_data)
         passes[o] = p
+        # pycaps names it <output-stem>.json; the first pass to land owns it.
+        if first_data is None:
+            cand = p.with_suffix(".json")
+            if cand.exists():
+                first_data = cand
     if len(offsets) == 1:
         shutil.copy(passes[offsets[0]], out)
         return
