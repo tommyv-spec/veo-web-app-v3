@@ -15748,7 +15748,34 @@ Ambient: same kitchen room tone, soft pour sound.
         // instead of rebuilding the card. It needs no network and cannot be
         // killed by a failed fetch. The 5s poll is now only for STAGE changes.
         let _autoEditTicker = null;
-        let _autoEditLiveInfo = null;   // {jobId, createdAt, stage, state}
+        let _autoEditLiveInfo = null;   // {jobId, createdAt, stage, state, restartedAt}
+
+        // v938.25 — highest stage reached on the run being watched, so a stage
+        // that moves BACKWARDS can be recognised as a restart. Keyed by run id
+        // because a different run legitimately starts at stage 0 again.
+        let _autoEditStagePeak = { id: null, idx: -1 };
+
+        function _autoEditSince(ms) {
+            const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+            return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+        }
+
+        /** Returns restartedAt (ms) when this poll shows the stage going
+         *  backwards on the SAME run; otherwise keeps whatever we had. */
+        function _autoEditTrackRestart(runId, stage, prevRestartedAt) {
+            const idx = _AUTOEDIT_STAGES.indexOf(stage);
+            if (idx < 0) return prevRestartedAt || null;
+            if (_autoEditStagePeak.id !== runId) {
+                _autoEditStagePeak = { id: runId, idx: idx };
+                return null;                       // new run — nothing to compare
+            }
+            if (idx < _autoEditStagePeak.idx) {
+                _autoEditStagePeak.idx = idx;
+                return Date.now();                 // went backwards: it restarted
+            }
+            if (idx > _autoEditStagePeak.idx) _autoEditStagePeak.idx = idx;
+            return prevRestartedAt || null;
+        }
 
         function _autoEditStartTicker() {
             if (_autoEditTicker) return;
@@ -15761,8 +15788,23 @@ Ambient: same kitchen room tone, soft pour sound.
                 if (clock) {
                     const i = _AUTOEDIT_STAGES.indexOf(info.stage);
                     const stepTxt = i >= 0 ? `step ${i + 1} of ${_AUTOEDIT_STAGES.length}` : '';
+                    // v938.25 — a restart must not read as a hang.
+                    //
+                    // The clock counts from created_at, which is when the run was
+                    // first QUEUED. A server-side render that is killed by a deploy
+                    // is re-queued with its attempt refunded (on purpose), so
+                    // neither the clock nor `attempts` changes and the operator sees
+                    // "step 2 of 7 · 79m" — indistinguishable from a stuck job. It
+                    // had in fact restarted three times.
+                    //
+                    // There is no claimed_at on the model to count from, but a
+                    // restart is still visible: the STAGE GOES BACKWARDS. When it
+                    // does, show the time on this attempt and say it restarted.
+                    const restarted = info.restartedAt
+                        ? ` · restarted, ${_autoEditSince(info.restartedAt)} on this try`
+                        : '';
                     const el = _autoEditElapsed(info.createdAt);
-                    clock.textContent = `${stepTxt}${stepTxt && el ? ' · ' : ''}${el}`;
+                    clock.textContent = `${stepTxt}${stepTxt && el ? ' · ' : ''}${el}${restarted}`;
                 }
                 const bar = card.querySelector('.autoedit-progress > div');
                 if (bar) bar.style.width = _autoEditPercent(info.state, info.stage, info.jobId) + '%';
@@ -15977,15 +16019,17 @@ async function renderAutoEditCard(jobId, hasExport) {
                                 : 'Captions are the slow part — 20-30 minutes on the server, or 3-4 minutes when your PC is doing it.'}
                         </div>
                         <!-- v938.22 — the card told the operator their PC was
-                             8x faster and never said HOW to use it. The only
-                             mention of the worker anywhere in this file was a
-                             code comment. Say it where it is read, with the
-                             thing to double-click. -->
+                             8x faster and never said HOW to use it.
+                             v938.25: this named a file in the project folder,
+                             which only ever existed on one machine and which I
+                             then deleted — so the card was pointing at nothing.
+                             It points at the installer every user can actually
+                             get instead. -->
                         <div style="margin-top:6px;font-size:11px;color:var(--text-secondary);">
-                            Want the fast one? Double-click
-                            <code style="background:var(--bg-input);padding:1px 5px;border-radius:3px;">start-autoedit-worker.cmd</code>
-                            in the project folder and leave the window open — it picks up every
-                            finish from then on. Nothing to configure.
+                            Want the fast one? Set up the Auto-Edit worker on this machine from
+                            <a href="/static/my-worker.html" target="_blank" style="color:var(--accent);">My&nbsp;Worker</a>
+                            — one download, nothing to paste. Then finishes run here in 3-4
+                            minutes instead of 20-30.
                         </div>
                         ${state === 'queued' ? `<button class="btn btn-secondary btn-sm" style="margin-top:6px;" onclick="cancelAutoEdit('${_autoEditAttr(jobId)}','${_autoEditAttr(status.autoedit_id)}')">Cancel</button>` : ''}`;
                 } else if (state === 'done' && status.result_filename) {
@@ -16081,8 +16125,13 @@ async function renderAutoEditCard(jobId, hasExport) {
                     _autoEditWasLive = jobId;
                     // hand the ticker what it needs so the clock keeps moving
                     // between polls, and through a failed one
-                    _autoEditLiveInfo = { jobId: jobId, createdAt: status.created_at,
-                                          stage: status.stage, state: state };
+                    const _prevRestart = (_autoEditLiveInfo && _autoEditLiveInfo.jobId === jobId)
+                        ? _autoEditLiveInfo.restartedAt : null;
+                    _autoEditLiveInfo = {
+                        jobId: jobId, createdAt: status.created_at,
+                        stage: status.stage, state: state,
+                        restartedAt: _autoEditTrackRestart(status.autoedit_id, status.stage, _prevRestart),
+                    };
                     _autoEditStartTicker();
                     _autoEditTimer = setTimeout(() => {
                         _autoEditTimer = null;

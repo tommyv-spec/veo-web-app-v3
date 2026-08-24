@@ -11129,15 +11129,36 @@ def _autoedit_work_dir(job_id: str) -> Path:
     Falls back to temp when no persistent disk is mounted (local dev), where
     losing the cache costs nothing.
     """
+    # v938.25 — SAY WHY when the persistent disk is not used.
+    #
+    # This fell back to /tmp in production and nobody could see it: the
+    # `except Exception: pass` swallowed the reason, and /tmp is wiped on every
+    # container restart, so a redeploy mid-render threw away every cached stage
+    # and started the whole pass again. Combined with three deploys during one
+    # render that is how a job reached 80 minutes still on an early stage while
+    # the queue said attempt=1 (the shutdown handover refunds the attempt on
+    # purpose, so the counter does not reveal it either).
+    #
+    # A silent fallback that costs 20 minutes per restart has to be loud.
+    why = ""
     try:
         from config import config
-        root = Path(getattr(config, "outputs_dir", None) or "").parent
-        if root and root.exists():
-            return root / "autoedit_work" / job_id
-    except Exception:
-        pass
+        out = getattr(config, "outputs_dir", None)
+        if not out:
+            why = "config.outputs_dir is unset"
+        else:
+            root = Path(out).parent
+            if root.exists():
+                return root / "autoedit_work" / job_id
+            why = f"{root} does not exist"
+    except Exception as exc:
+        why = f"{type(exc).__name__}: {exc}"
     import tempfile
-    return Path(tempfile.gettempdir()) / "autoedit" / job_id
+    tmp = Path(tempfile.gettempdir()) / "autoedit" / job_id
+    print(f"[AutoEdit/server] WORK DIR falling back to {tmp} — {why}. "
+          f"This is wiped on restart, so a deploy mid-render restarts the whole pass.",
+          flush=True)
+    return tmp
 
 
 AUTOEDIT_WORK_KEEP_HOURS = int(os.environ.get("AUTOEDIT_WORK_KEEP_HOURS", "48"))
