@@ -79,8 +79,11 @@ import difflib
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 ACK_FILENAME = ".deploy_ack.json"
 
@@ -307,11 +310,67 @@ def main(argv):
         except SyntaxError as e:
             broken.append("%s:%s %s" % (path, e.lineno, e.msg))
 
+    # Inline JavaScript in changed .html files (2026-08-24).
+    # static/index.html is ~26k lines and ~83% of it is inline JS in two
+    # <script> blocks. ast.parse above never saw it, so a syntax error there
+    # shipped and broke the page at runtime. `node --check` parses without
+    # running. Written inline on purpose: this file is piped in over stdin by
+    # the pre-push hook (`git show main:check_deploy_safety.py | python -`),
+    # so it has no sibling modules to import.
+    html_changed = [p for p in changed
+                    if p.strip().lower().endswith((".html", ".htm")) and p in ours_files]
+    if html_changed:
+        if not shutil.which("node"):
+            unverified.append(
+                "inline JS in %d changed .html file(s): node is not installed, "
+                "so it could not be parsed" % len(html_changed))
+        else:
+            for path in html_changed:
+                txt, reason = blob(args.ref, path)
+                if reason:
+                    unverified.append("%s inline JS: %s" % (path, reason))
+                    continue
+                for m in re.finditer(r"<script([^>]*)>(.*?)</script\s*>", txt, re.S | re.I):
+                    attrs, body = m.group(1), m.group(2)
+                    if re.search(r"""\bsrc\s*=\s*["']""", attrs, re.I) or not body.strip():
+                        continue
+                    tm = re.search(r"""\btype\s*=\s*["']([^"']*)["']""", attrs, re.I)
+                    stype = (tm.group(1) if tm else "").strip().lower()
+                    # anything else (text/template, application/json, importmap)
+                    # is data, not code — parsing it as JS is a false failure
+                    if stype not in ("", "text/javascript", "application/javascript", "module"):
+                        continue
+                    start_line = txt[: m.start(2)].count("\n") + 1
+                    tmp = None
+                    try:
+                        with tempfile.NamedTemporaryFile(
+                            "w", suffix=".mjs" if stype == "module" else ".js",
+                            delete=False, encoding="utf-8",
+                        ) as fh:
+                            fh.write(body)
+                            tmp = fh.name
+                        proc = subprocess.run(["node", "--check", tmp],
+                                              capture_output=True, text=True, errors="replace")
+                    except OSError as e:
+                        unverified.append("%s inline JS could not be parsed: %s" % (path, e))
+                        continue
+                    finally:
+                        if tmp:
+                            try:
+                                os.unlink(tmp)
+                            except OSError:
+                                pass
+                    if proc.returncode != 0:
+                        err = (proc.stderr or proc.stdout or "").strip().split("\n")
+                        detail = next((ln for ln in err if "Error" in ln), err[0] if err else "?")
+                        broken.append("%s: inline <script> at line %d — %s"
+                                      % (path, start_line, detail.strip()))
+
     n_lost = sum(len(v) for v in losses.values())
     print("candidate descends from %s : %s" % (args.main, "YES" if descendant else "NO"))
     print("files deleted vs %s : %d" % (args.main, len(gone)))
     print("files losing lines   : %d  (%d line(s) total)" % (len(losses), n_lost))
-    print("changed .py broken   : %d" % len(broken))
+    print("changed .py/.html broken : %d  (python AST + inline JS via node --check)" % len(broken))
     print("files/checks unread  : %d" % len(unverified))
 
     if not descendant:
@@ -363,7 +422,7 @@ def main(argv):
                   " meant to go before deploying." % vanished_n)
 
     if broken:
-        print("\nSYNTAX ERRORS in changed python:")
+        print("\nSYNTAX ERRORS in changed python / inline JavaScript:")
         for b in broken:
             print("   %s" % b)
 
