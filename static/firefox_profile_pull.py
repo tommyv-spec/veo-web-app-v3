@@ -320,6 +320,50 @@ def locate_firefox_profile(email, account_num=None, log=print):
     return None
 
 
+def _read_cookies_wal_applied(profile_dir):
+    """Cookies from a profile whose Firefox is RUNNING.
+
+    `read_cookies_for_playwright` plain-copies cookies.sqlite. When the operator's
+    own Firefox is open — the normal case, it is the SSO source — the current
+    session sits in a `-wal` that has not been checkpointed, so that copy returns
+    rows that are minutes-to-hours stale. On 2026-08-24 the WAL was 557 KB and a
+    WAL-blind read made a perfectly good, logged-in profile probe as SIGNED OUT.
+
+    con.backup() reads THROUGH the WAL, the same call build_firefox_golden uses.
+    """
+    src = os.path.join(profile_dir, "cookies.sqlite")
+    if not os.path.isfile(src):
+        return []
+    tmp = os.path.join(tempfile.gettempdir(),
+                       f"ffpull_live_{abs(hash(profile_dir))}.sqlite")
+    try:
+        con = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=10)
+        try:
+            dst = sqlite3.connect(tmp)
+            try:
+                con.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            con.close()
+    except Exception:
+        # a degraded read must never crash a caller; fall back to the plain copy
+        return read_cookies_for_playwright(profile_dir, log=lambda m: None)
+    out = []
+    try:
+        c = sqlite3.connect(tmp)
+        try:
+            for name, value, host in c.execute(
+                    "SELECT name, value, host FROM moz_cookies"):
+                if name and host is not None:
+                    out.append({"name": name, "value": value or "", "domain": host})
+        finally:
+            c.close()
+    except Exception:
+        return []
+    return out
+
+
 def session_is_live(profile_dir, log=print, timeout=25):
     """Does this profile's cookie jar still authenticate with Google RIGHT NOW?
 
@@ -349,9 +393,8 @@ def session_is_live(profile_dir, log=print, timeout=25):
         log("ff-pull: `requests` not installed - cannot verify the session is live")
         return None
     try:
-        jar = {c["name"]: c["value"] for c in read_cookies_for_playwright(
-            profile_dir, log=lambda m: None)
-            if "google.com" in (c.get("domain") or "")}
+        jar = {c["name"]: c["value"] for c in _read_cookies_wal_applied(profile_dir)
+               if "google.com" in (c.get("domain") or "")}
     except Exception as e:
         log(f"ff-pull: could not read the cookie jar ({e.__class__.__name__})")
         return None
@@ -393,19 +436,12 @@ def build_firefox_golden_from_profile(email, golden_folder, label="",
             log(f"{tag}ff-pull: no source profile - worker will ask for a manual sign-in")
             return False
 
-        # Refuse to build a golden from a jar Google has already revoked.
-        # Copying it "succeeds" at every file operation and still hands the
-        # worker a signed-out browser, which is the most expensive failure this
-        # lane has: it looks like a working run right up until the answer is
-        # empty. None = could not tell, so proceed (see session_is_live).
-        alive = session_is_live(src, log=lambda m: log(f"{tag}{m}"))
-        if alive is False:
-            log(f"{tag}ff-pull: {os.path.basename(src)} carries {email}'s cookies but "
-                f"GOOGLE HAS REVOKED THEM - the profile is signed out.")
-            log(f"{tag}ff-pull: cookie expiry dates look fine; only the server knows. "
-                f"Open Firefox, sign in to {email}, then re-run. Copying this jar "
-                f"would produce a worker that reads a logged-out page.")
-            return False
+        # NOTE: deliberately NOT probing myaccount.google.com here. `session_is_live`
+        # exists for diagnosis and stays callable by hand, but it is off the build
+        # path on purpose: myaccount is an account-MANAGEMENT surface and touching
+        # it with a freshly copied jar invites the very password challenge this
+        # lane cannot answer. The browser's own SSO handshake is both the cheaper
+        # and the more accurate test, and it runs a moment later anyway.
 
         staged = golden_folder + ".ffpull-tmp"
         shutil.rmtree(staged, ignore_errors=True)

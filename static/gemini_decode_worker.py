@@ -371,23 +371,36 @@ def firefox_pick_account(page, email, tries=3):
         url = page.url or ""
         if "accounts.google.com" not in url and "accountchooser" not in url:
             return True
+
+        # A credentials challenge is the ONE state a cookie transplant cannot
+        # recover. Everything else is just the handshake not finished yet.
+        if "/signin/challenge/" in url:
+            log("Google is asking for CREDENTIALS — these cookies really are dead. "
+                f"Sign in to {email} in Firefox once, then re-run.")
+            return False
+
         log(f"account chooser (attempt {attempt}) — picking {email or 'the first account'}")
         picked = False
         if email:
-            try:
-                tile = page.locator(f"*:has-text('{email}')").last
-                if tile.count() and tile.is_visible():
-                    tile.click()
-                    picked = True
-            except Exception:
-                pass
+            for sel in (f"div[data-identifier='{email}']",
+                        f"li[data-identifier='{email}']",
+                        f"*:has-text('{email}')"):
+                try:
+                    tile = page.locator(sel).last if "has-text" in sel \
+                        else page.locator(sel).first
+                    if tile.count() and tile.is_visible(timeout=4000):
+                        tile.click()
+                        picked = True
+                        break
+                except Exception:
+                    continue
         if not picked:
             # no email match: take the first listed account rather than stalling
             for sel in ("div[data-identifier]", "li[data-identifier]",
                         "[role='link']", "form li"):
                 try:
                     t = page.locator(sel).first
-                    if t.count() and t.is_visible():
+                    if t.count() and t.is_visible(timeout=2000):
                         t.click()
                         picked = True
                         break
@@ -395,23 +408,73 @@ def firefox_pick_account(page, email, tries=3):
                     continue
         if not picked:
             break
-        time.sleep(6)
+
+        # DO NOT NAVIGATE HERE. A goto during the OAuth redirect chain cancels
+        # the handshake, and the page lands back on a signed-out Gemini — which
+        # is exactly what this worker did on every run: click the tile, sleep 6s,
+        # then `page.goto(GEMINI_URL)` straight through the redirect. flow_worker
+        # never had this bug because it POLLS (tools/flow_charswap.py:538,
+        # "a goto here cancels the OAuth handshake mid-redirect"). Poll, up to 45s.
+        for _ in range(45):
+            time.sleep(1)
+            u = page.url or ""
+            if "accounts.google.com" not in u and "accountchooser" not in u:
+                break
+        time.sleep(3)
     return "accounts.google.com" not in (page.url or "")
 
 
 def firefox_login(page, email):
-    """Land on Gemini signed in, without a human at the keyboard."""
-    page.goto("https://myaccount.google.com/", wait_until="domcontentloaded")
-    time.sleep(5)
-    firefox_pick_account(page, email)
+    """Land on Gemini signed in, without a human at the keyboard.
+
+    Modelled on the Flow lane's recovery loop, which is the one that works
+    (`tools/flow_charswap.py`): enter ONCE, then let the account chooser and the
+    OAuth redirect chain run to completion on their own. The old version entered,
+    clicked, and immediately `goto`'d Gemini — cancelling the handshake it had
+    just started — then judged the result by body-text length, which Camoufox
+    reports as ~55 chars for a perfectly good session.
+    """
+    page.goto(GEMINI_URL, wait_until="domcontentloaded")
+    time.sleep(6)
+
+    for attempt in range(1, 5):
+        url = page.url or ""
+        if "accounts.google.com" not in url and "accountchooser" not in url:
+            if signed_in(page):
+                log(f"Gemini session live (after {attempt - 1} chooser pass(es))")
+                return True
+            # Signed out ON Gemini. Ask GEMINI to start the sign-in, never
+            # myaccount.google.com — that is an account-management surface and
+            # Google re-challenges for the PASSWORD there on any profile it has
+            # not seen, which no cookie transplant can answer. The old code went
+            # to myaccount first and that is what produced "Hi Kevin, enter your
+            # password" on 2026-08-24. Flow's lane never visits it
+            # (tools/flow_charswap.py) and never gets challenged.
+            clicked = False
+            for sel in ("a[href*='ServiceLogin']", "a[href*='accounts.google.com']",
+                        "button:has-text('Sign in')", "a:has-text('Sign in')"):
+                try:
+                    b = page.locator(sel).first
+                    if b.count() and b.is_visible(timeout=2000):
+                        b.click()
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if not clicked:
+                break
+            for _ in range(30):
+                time.sleep(1)
+                if "accounts.google.com" in (page.url or ""):
+                    break
+            continue
+        if not firefox_pick_account(page, email, tries=1):
+            return False   # credentials challenge — a human must sign in
+
+    # The handshake finishes on a Google property; now it is safe to navigate.
     page.goto(GEMINI_URL, wait_until="load")
     time.sleep(8)
-    firefox_pick_account(page, email)
-    try:
-        body = page.locator("body").inner_text()
-    except Exception:
-        body = ""
-    ok = len(body) > 800 and "sign in" not in body.lower()[:600]
+    ok = signed_in(page)
     log("Gemini session " + ("live" if ok else "still signed out"))
     return ok
 
@@ -1178,6 +1241,14 @@ def main():
                     help="skip the per-run Firefox profile pull (it is on by default; "
                          "the transplanted session only survives one launch)")
     ap.add_argument("--headless", action="store_true", help="not recommended; Google flags it")
+    ap.add_argument("--profile-dir",
+                    help="launch on THIS Firefox profile and keep it. Implies no pull "
+                         "and no per-run directory, so a sign-in done here survives. "
+                         "Use with --login to build a golden by hand, then let "
+                         "decode_batch clone it.")
+    ap.add_argument("--wait-minutes", type=int, default=10,
+                    help="with --login, how long to wait for a human to finish the "
+                         "Google sign-in (default 10)")
     args = ap.parse_args()
 
     if not (args.login or args.decode):
@@ -1198,7 +1269,18 @@ def main():
 
     if args.firefox:
         global FF_PROFILE_DIR
-        if os.environ.get("GEMINI_FF_PROFILE_DIR"):
+        if args.profile_dir:
+            # A profile the operator OWNS. Never pulled into, never deleted, never
+            # per-PID. A cookie transplant can land on Google's password challenge
+            # (measured 2026-08-24: fresh golden from a live, logged-in Firefox ->
+            # "Hi Kevin, enter your password"), and no amount of re-pulling gets
+            # past that. A sign-in done by a human IN THIS PROFILE does, and it
+            # persists, which is what makes it clonable per video afterwards.
+            FF_PROFILE_DIR = os.path.abspath(args.profile_dir)
+            os.makedirs(FF_PROFILE_DIR, exist_ok=True)
+            args.no_reseed = True
+            log(f"using the operator's profile as-is: {FF_PROFILE_DIR}")
+        elif os.environ.get("GEMINI_FF_PROFILE_DIR"):
             FF_PROFILE_DIR = os.environ["GEMINI_FF_PROFILE_DIR"]
         elif args.email:
             # A per-RUN directory. Camoufox leaves state behind that survives an
@@ -1226,12 +1308,47 @@ def main():
         ctx, page = (launch_firefox(p, headless=args.headless) if args.firefox
                      else gvw.launch(p, headless=args.headless))
         try:
+            if args.login:
+                # Hold the window open and let a human finish. Throwing here was
+                # wrong: Google's password/2FA challenge is the ONE state no
+                # transplant can automate past, and it is exactly the state a
+                # fresh clone hits. One human sign-in makes this profile a real
+                # logged-in Firefox, and decode_batch clones it per video after.
+                page.goto(GEMINI_URL, wait_until="load")
+                time.sleep(5)
+                if signed_in(page):
+                    log("already signed in. Profile is ready to clone.")
+                    return 0
+                # Run the SSO handshake FIRST — chooser click then poll, the way
+                # the Flow lane does it. Only a real credentials challenge should
+                # ever reach a human.
+                if args.firefox and firefox_login(page, args.email) and signed_in(page):
+                    log(f"signed in via the account chooser. Profile kept at {FF_PROFILE_DIR}")
+                    return 0
+                deadline = time.time() + args.wait_minutes * 60
+                log("=" * 68)
+                log("SIGN IN IN THE FIREFOX WINDOW THAT JUST OPENED.")
+                log(f"  account: {args.email or '(whichever you use for Gemini)'}")
+                log("  Google is asking for the password because this is a new")
+                log("  browser profile - a copied cookie jar cannot get past that.")
+                log(f"  Waiting up to {args.wait_minutes} min. Leave the window open.")
+                log("=" * 68)
+                while time.time() < deadline:
+                    time.sleep(5)
+                    try:
+                        if signed_in(page):
+                            time.sleep(3)
+                            log(f"signed in. Profile kept at {FF_PROFILE_DIR}")
+                            log("decode_batch can clone this per video now.")
+                            return 0
+                    except Exception:
+                        continue
+                log("timed out waiting for the sign-in.")
+                return 1
+
             # Prove the session EVERY run. The inherited check passed a
             # signed-out page and everything after it was worthless.
             ensure_session(page, args.email, firefox=args.firefox)
-            if args.login:
-                log("logged in. Profile is warm for later runs.")
-                return 0
             out = decode(page, args.decode, args.slug, args.note, args.model,
                          args.out, args.repair_rounds, args.prep, not args.no_prep)
             return 0 if verify(out)[0] else 2
