@@ -364,61 +364,26 @@ def _read_cookies_wal_applied(profile_dir):
     return out
 
 
-def session_is_live(profile_dir, log=print, timeout=25):
-    """Does this profile's cookie jar still authenticate with Google RIGHT NOW?
-
-    Everything else in this module answers "which profile remembers this email".
-    That is a DIFFERENT question, and conflating the two is what made the whole
-    decode lane produce garbage on 2026-08-24: the account chooser at
-    /v3/signin/accountchooser lists remembered accounts INCLUDING signed-out
-    ones, so `locate_firefox_profile` reported "signed in (resolved via account
-    chooser)" for a profile Google had already revoked. A golden was then built
-    from a dead jar, Camoufox opened a logged-out Gemini on Flash-Lite, and the
-    worker typed its prompt into a stranger's composer.
-
-    Cookie EXPIRY cannot answer it either — the revoked jar carried all 8 key
-    auth cookies, none of them past their expiry date. Only the server knows.
-
-    So ask the server, over plain HTTP, with no browser in the way: a live jar
-    gets myaccount.google.com; a dead one gets bounced to ServiceLogin (and a
-    jar that was never signed in gets bounced to the /intro marketing page).
-
-    Returns True (live), False (dead), or None (could not tell — no cookies, no
-    `requests`, network down). None must NEVER be treated as dead: a flaky
-    network would otherwise disable a perfectly good worker.
-    """
-    try:
-        import requests
-    except ImportError:
-        log("ff-pull: `requests` not installed - cannot verify the session is live")
-        return None
-    try:
-        jar = {c["name"]: c["value"] for c in _read_cookies_wal_applied(profile_dir)
-               if "google.com" in (c.get("domain") or "")}
-    except Exception as e:
-        log(f"ff-pull: could not read the cookie jar ({e.__class__.__name__})")
-        return None
-    if not jar:
-        return None
-    s = requests.Session()
-    for k, v in jar.items():
-        s.cookies.set(k, v, domain=".google.com")
-    try:
-        r = s.get("https://myaccount.google.com/",
-                  headers={"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; "
-                                          "x64; rv:133.0) Gecko/20100101 "
-                                          "Firefox/133.0")},
-                  timeout=timeout, allow_redirects=False)
-    except Exception as e:
-        log(f"ff-pull: liveness probe could not reach Google ({e.__class__.__name__})")
-        return None
-    if r.status_code == 200:
-        return True
-    loc = (r.headers.get("location") or "")
-    if "signin" in loc.lower() or "ServiceLogin" in loc or "/intro" in loc:
-        return False
-    # an unfamiliar redirect is not evidence of death
-    return None
+# DO NOT ADD A COOKIE-REPLAY LIVENESS PROBE HERE.
+#
+# A `session_is_live()` lived here for a few hours on 2026-08-24. It took the
+# profile's Google auth cookies and replayed them at myaccount.google.com from
+# python-requests with a spoofed Firefox user-agent, to answer "is this jar
+# still good". Two things went wrong and both are worth the paragraph:
+#
+# 1. IT WAS WRONG. It read cookies.sqlite without the -wal, so a profile that
+#    was signed in the whole time probed as dead - twice - and that verdict was
+#    briefly wired into this function as a hard refusal to build a golden.
+# 2. IT GOT THE ACCOUNT SIGNED OUT. Same credentials + non-browser client +
+#    the account-SECURITY surface, repeated across ~13 profiles in one sweep,
+#    is the shape of a session-hijack attempt. Google invalidated the session
+#    everywhere, including the operator's own desktop Firefox, and he had to
+#    sign in again.
+#
+# The browser that launches a moment later answers the same question for free,
+# accurately, and without touching myaccount. If a jar is bad, the SSO handshake
+# says so; if Google truly wants credentials it lands on /signin/challenge/ and
+# gemini_decode_worker reports that. Let the browser do it.
 
 
 def build_firefox_golden_from_profile(email, golden_folder, label="",

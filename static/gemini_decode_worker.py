@@ -344,16 +344,17 @@ def ensure_session(page, email, firefox=False):
     raise RuntimeError(
         f"the browser is NOT signed in, so anything it produced would be a "
         f"stranger's Gemini. Evidence at {where}.\n"
-        f"  FIRST check whether the SOURCE profile still has a live session — a "
-        f"pull cannot transplant a session Google has already revoked, and a "
-        f"revoked jar still shows all its cookies with valid expiry dates:\n"
-        f"      python -c \"import sys; sys.path.insert(0,'code/static'); "
-        f"import firefox_profile_pull as f; "
-        f"print(f.session_is_live(f.list_firefox_profiles()[0]))\"\n"
-        f"  False there means a HUMAN must sign in to Google in Firefox once; no "
-        f"reseed, clone or cookie injection can substitute. True there means the "
-        f"transplant is at fault — reseed into a profile Camoufox has never "
-        f"opened, or the old WAL replays over the session.")
+        f"  CHECK WHICH PRODUCT IS SIGNED IN, not whether the cookies exist. On "
+        f"2026-08-24 one browser on one golden had Flow logged in and Gemini "
+        f"logged out at the same instant, with a complete auth-cookie set — the "
+        f"source Firefox had simply never signed into Gemini. Open "
+        f"gemini.google.com in the REAL Firefox: if it shows Sign in there, no "
+        f"pull, clone or reseed can invent a session, and one human sign-in fixes "
+        f"it permanently.\n"
+        f"  Do NOT replay these cookies at myaccount.google.com to 'test' them. "
+        f"That is a non-browser client on the account-security surface; it got the "
+        f"account signed out everywhere once already, and it answers the wrong "
+        f"question anyway.")
 
 
 def firefox_pick_account(page, email, tries=3):
