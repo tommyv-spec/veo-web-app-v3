@@ -1028,6 +1028,60 @@ The portable-abstraction layer — what makes this video INNOVATABLE. For each l
 
 ---
 
+## Adaptation-extraction
+
+> **MANDATORY on every decode — `verify_decode_format.py` hard-FAILs without this exact
+> `## Adaptation-extraction` heading.** It was described in prose two sections up and never
+> SHOWN here until 2026-08-24, and the result was that decodes emitted it only by luck: of one
+> 13-video batch, 5 carried it and 7 did not, all from the same prompt. The model copies what
+> the skeleton shows, so the skeleton has to show it.
+>
+> **The four bullets are CONTAINERS, not claims.** Write all four even when one does not apply
+> to this source — the linter matches the bracketed keyword (`register`, `proxy`, `chain`,
+> `angle`), so a missing line is a hard FAIL while `none observed` passes. Inventing a symptom
+> to fill a container is worse than writing `none observed`.
+
+- **Frame register read:** <the register these frames sit in, e.g. spectacle event / clinical demo / domestic chore>
+- **Symptom-proxy state read:** proxy: <what stands in for the invisible symptom, and its state — or `none observed`>
+- **Recurring-character chain map:** chain: <who recurs across frames and what anchors them — or `none observed`>
+- **HOOK-angle / swap-layer map:** angle: <the hook angle + which layer a port would swap — or `none observed`>
+
+### Hero-symptom intensity ledger
+
+One data row per hero symptom, or a single `none observed` row with `n/a` in the other three
+columns. The anchor column is matched by a REGEX, so it must be LITERAL — a measurement, a
+fraction of the frame, or a spatial relation (`fills`, `dwarfs`, `spans`, `two-thirds of the
+frame`, `larger than`). A mood word like "severe" does not match.
+
+| Hero symptom / carrier | Literal observed scale + comparison anchor | Intensity | Exaggeration headroom |
+| --- | --- | --- | --- |
+| <symptom or `none observed`> | <literal anchor or `n/a`> | <1/5-5/5 or `n/a`> | <YES/NO or `n/a`> |
+
+### Shown beats ledger
+
+Every beat the video SHOWS. The evidence column must name a source clip or frame — `clip 3`,
+`g_007` — never a bare description.
+
+| Source beat ID | Frame / clip evidence | Shown action / process step | Meaningful objects visibly present |
+| --- | --- | --- | --- |
+| SB1 | <clip N / frame g_NNN> | <what is done on screen> | <objects in frame> |
+
+### Edit-layer overlay ledger
+
+One row per overlay actually burned into the frame. If there are none, write a single row
+reading `none observed` across the columns rather than dropping the block.
+
+| element | source | box | window (s) | layer | notes |
+| --- | --- | --- | --- | --- | --- |
+| <caption / arrow / sticker> | <burned text / graphic> | x[..W] y[..H] | <whole or a-b> | front/back | <colour, outline, motion> |
+
+### Audio design read
+
+Required on NEW decodes (v887a; older decodes are exempt and never retro-failed). What the ear
+gets: music bed, voice treatment, diegetic sound, silence, and where each starts and stops.
+
+---
+
 ## Google Omni Final Prompts (per clip)
 
 > **v865 (2026-07-24):** the per-clip body is the Google Omni master block — twelve labelled blocks, no `IMMEDIATE ACTION:` / `TERMINAL STATE:` anchors. Both the Prompt A body and the Prompt B body sit INSIDE a triple-backtick fence (Prompt B has no unfenced parser fallback — `code/veo_prompt_overrides.py:396`). The `Negative Constraints:` block is prose inside the Text prompt and is REQUIRED; it is NOT the retired `**Negative prompt:**` field. The spoken line must be the ONLY double-quoted span in each prompt. Canonical fill map: `code/template_omni_master.md`; deep-dive: `code/template_reference.md` §v865.
