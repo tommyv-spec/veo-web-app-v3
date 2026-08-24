@@ -1053,9 +1053,30 @@ columns. The anchor column is matched by a REGEX, so it must be LITERAL — a me
 fraction of the frame, or a spatial relation (`fills`, `dwarfs`, `spans`, `two-thirds of the
 frame`, `larger than`). A mood word like "severe" does not match.
 
+**The anchor column is matched by a REGEX. Copy the SHAPE of these example rows.** A mood word
+("severe", "visible", "noticeable") does NOT match and is a hard FAIL — every one of these was a
+real failure on 2026-08-24. The anchor must contain a measurement, a fraction of the frame, a
+count, or one of these relation words: `fills` · `covers` · `spans` · `occupies` · `dwarfs` ·
+`extends` · `reaches` · `larger than` · `smaller than` · `compared to` · `past the` · `beyond the`.
+
 | Hero symptom / carrier | Literal observed scale + comparison anchor | Intensity | Exaggeration headroom |
 | --- | --- | --- | --- |
 | <symptom or `none observed`> | <literal anchor or `n/a`> | <1/5-5/5 or `n/a`> | <YES/NO or `n/a`> |
+
+**Now the same table FILLED IN, because the line above is a legend and the model copies examples.**
+The anchor column is matched by a REGEX: it must contain a measurement, a fraction of the frame, a
+count, or one of these relation words — `fills` · `covers` · `spans` · `occupies` · `dwarfs` ·
+`extends` · `reaches` · `larger than` · `smaller than` · `compared to` · `past the` · `beyond the`.
+
+| Hero symptom / carrier | Literal observed scale + comparison anchor | Intensity | Exaggeration headroom |
+| --- | --- | --- | --- |
+| loose skin on the thigh | the fold **spans** roughly one third of the thigh's width and hangs **past the** knee line | 3/5 | YES |
+| clogged gut (pipe proxy) | brown sludge **fills** about 70% of the transparent pipe's bore | 4/5 | YES |
+| none observed | n/a | n/a | n/a |
+
+WRONG, and these exact strings were rejected by the linter on 2026-08-24: `severe cellulite` ·
+`loose skin / the wife` · `clogged gut`. Each names the symptom in the column meant to MEASURE it,
+and a mood word ("severe", "visible", "noticeable") never matches.
 
 ### Shown beats ledger
 
@@ -1065,6 +1086,15 @@ Every beat the video SHOWS. The evidence column must name a source clip or frame
 | Source beat ID | Frame / clip evidence | Shown action / process step | Meaningful objects visibly present |
 | --- | --- | --- | --- |
 | SB1 | <clip N / frame g_NNN> | <what is done on screen> | <objects in frame> |
+
+**Filled in.** The evidence column holds the clip id and NOTHING else; the description goes in the
+next column. `SB1 | she pours the tea` is a hard FAIL.
+
+| Source beat ID | Frame / clip evidence | Shown action / process step | Meaningful objects visibly present |
+| --- | --- | --- | --- |
+| SB1 | clip 1 | unscrews the jar and tips it over the bowl | glass jar, ceramic bowl |
+| SB2 | g_007 | holds the pipe up to the lens, sludge visible | transparent pipe |
+| SB3 | frames g_012-g_015 | wipes the counter clear, sets the mug down | cloth, mug |
 
 ### Edit-layer overlay ledger
 
