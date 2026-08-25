@@ -14802,8 +14802,9 @@ Ambient: same kitchen room tone, soft pour sound.
                                         </div>
                                         <div id="silenceControlsSection" style="display:none;margin-top:10px;">
                                             <div style="display:flex;gap:4px;margin-bottom:10px;background:var(--bg-elevated);padding:3px;border-radius:6px;">
-                                                <button class="mode-btn active" id="silModeEnergy" onclick="document.getElementById('silModeEnergy').classList.add('active');document.getElementById('silModeWhisper').classList.remove('active');document.getElementById('energyControls').style.display='block';document.getElementById('whisperInfo').style.display='none';" style="flex:1;padding:5px 8px;font-size:10px;font-weight:600;">⚡ Energy</button>
-                                                <button class="mode-btn" id="silModeWhisper" onclick="document.getElementById('silModeWhisper').classList.add('active');document.getElementById('silModeEnergy').classList.remove('active');document.getElementById('energyControls').style.display='none';document.getElementById('whisperInfo').style.display='block';" style="flex:1;padding:5px 8px;font-size:10px;font-weight:600;">🎤 Whisper</button>
+                                                <button class="mode-btn active" id="silModeEnergy" onclick="setSilMode('energy')" style="flex:1;padding:5px 8px;font-size:10px;font-weight:600;">⚡ Energy</button>
+                                                <button class="mode-btn" id="silModeWhisper" onclick="setSilMode('whisper')" style="flex:1;padding:5px 8px;font-size:10px;font-weight:600;">🎤 Whisper</button>
+                                                <button class="mode-btn" id="silModeAction" onclick="setSilMode('action')" style="flex:1;padding:5px 8px;font-size:10px;font-weight:600;">🎬 Action</button>
                                             </div>
                                             <div id="energyControls">
                                             <div style="margin-bottom:8px;">
@@ -14819,6 +14820,8 @@ Ambient: same kitchen room tone, soft pour sound.
                                                     <span style="font-size:9px;color:var(--text-muted);">strict</span>
                                                 </div>
                                             </div>
+                                            </div>
+                                            <div id="sharedGapControls">
                                             <div style="margin-bottom:8px;">
                                                 <div style="display:flex;justify-content:space-between;margin-bottom:3px;">
                                                     <span style="font-size:10px;color:var(--text-secondary);">Trigger (min gap)</span>
@@ -14843,6 +14846,12 @@ Ambient: same kitchen room tone, soft pour sound.
                                                     <strong style="color:var(--accent);">🎤 Whisper Speech Detection</strong><br>
                                                     Transcribes the audio and keeps only segments with actual spoken words. Ignores noise, hiss, and artifacts that energy-based detection can't distinguish from speech.<br>
                                                     <span style="color:var(--text-muted);font-size:9px;">Slower but much more accurate for Veo clips.</span>
+                                                </div>
+                                            </div>
+                                            <div id="actionInfo" style="display:none;margin-top:8px;">
+                                                <div style="font-size:10px;color:var(--text-secondary);line-height:1.5;padding:8px;background:var(--bg-elevated);border-radius:6px;">
+                                                    <strong style="color:var(--accent);">🎬 Action-Aware</strong><br>
+                                                    Keeps spoken script words AND action beats — blender sounds, throws, pours — even when nobody is talking. Cuts only stretches that are silent and visually static. Trigger = shortest pause it may cut; Keep = breathing room left at every cut.
                                                 </div>
                                             </div>
                                         </div>
@@ -15355,17 +15364,27 @@ Ambient: same kitchen room tone, soft pour sound.
                 // if (saved.apply_deepfilter === true) document.getElementById('modalDeepFilter')?.classList.add('active');
                 // if (saved.apply_loudnorm === true) document.getElementById('modalLoudnorm')?.classList.add('active');
                 // if (saved.apply_voice_filter === true) document.getElementById('modalVoiceFilter')?.classList.add('active');
+                // Three-way silence mode switch (energy | whisper | action).
+                // Global on purpose: the mode buttons' onclick attributes call it.
+                window.setSilMode = function(m) {
+                    const modes = { energy: 'silModeEnergy', whisper: 'silModeWhisper', action: 'silModeAction' };
+                    for (const [name, id] of Object.entries(modes)) {
+                        document.getElementById(id)?.classList.toggle('active', name === m);
+                    }
+                    const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? 'block' : 'none'; };
+                    show('energyControls', m === 'energy');
+                    show('sharedGapControls', m === 'energy' || m === 'action');
+                    show('whisperInfo', m === 'whisper');
+                    show('actionInfo', m === 'action');
+                };
                 if (saved.remove_silence === true) {
                     document.getElementById('modalRemoveSilence')?.classList.add('active');
                     const sc = document.getElementById('silenceControlsSection');
                     if (sc) sc.style.display = 'block';
                 }
                 if (saved.silence_threshold) document.getElementById('modalSilenceThreshold').value = saved.silence_threshold;
-                if (saved.silence_mode === 'whisper') {
-                    document.getElementById('silModeWhisper')?.classList.add('active');
-                    document.getElementById('silModeEnergy')?.classList.remove('active');
-                    document.getElementById('energyControls').style.display = 'none';
-                    document.getElementById('whisperInfo').style.display = 'block';
+                if (saved.silence_mode === 'whisper' || saved.silence_mode === 'action') {
+                    setSilMode(saved.silence_mode);
                 }
                 if (saved.silence_trigger) {
                     document.getElementById('modalSilenceTrigger').value = saved.silence_trigger;
@@ -15478,7 +15497,8 @@ Ambient: same kitchen room tone, soft pour sound.
                         })(),
                         // Silence removal
                         remove_silence: document.getElementById('modalRemoveSilence').classList.contains('active'),
-                        silence_mode: document.getElementById('silModeWhisper')?.classList.contains('active') ? 'whisper' : 'energy',
+                        silence_mode: document.getElementById('silModeAction')?.classList.contains('active') ? 'action'
+                            : document.getElementById('silModeWhisper')?.classList.contains('active') ? 'whisper' : 'energy',
                         silence_threshold: parseFloat(document.getElementById('modalSilenceThreshold')?.value || 0.75),
                         silence_trigger: parseFloat(document.getElementById('modalSilenceTrigger')?.value || 1.5),
                         silence_keep: parseFloat(document.getElementById('modalSilenceKeep')?.value || 0.3),
@@ -16404,7 +16424,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                         if (metadata) {
                             const tags = [];
                             if (metadata.playback_speed && metadata.playback_speed > 1.01) tags.push(`⚡ ${parseFloat(metadata.playback_speed).toFixed(2)}×`);
-                            if (metadata.remove_silence) tags.push(metadata.silence_mode === 'whisper' ? '🎤 whisper silence' : '🔇 silence removed');
+                            if (metadata.remove_silence) tags.push(metadata.silence_mode === 'whisper' ? '🎤 whisper silence' : metadata.silence_mode === 'action' ? '🎬 action silence' : '🔇 silence removed');
                             if (metadata.remove_laughter) tags.push('😂');
                             if (metadata.apply_deepfilter) tags.push('🎛️');
                             if (metadata.apply_voice_filter) tags.push('🎚️');
@@ -16953,7 +16973,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                 if (exportSettings.master_audio_filename) tags.push('🎵 audio synced');
                 if (exportSettings.transition && exportSettings.transition !== 'none') tags.push(`✨ ${exportSettings.transition}`);
                 if (exportSettings.playback_speed && exportSettings.playback_speed > 1.01) tags.push(`⚡ ${parseFloat(exportSettings.playback_speed).toFixed(2)}×`);
-                if (exportSettings.remove_silence) tags.push(exportSettings.silence_mode === 'whisper' ? '🎤 whisper silence' : '🔇 silence removed');
+                if (exportSettings.remove_silence) tags.push(exportSettings.silence_mode === 'whisper' ? '🎤 whisper silence' : exportSettings.silence_mode === 'action' ? '🎬 action silence' : '🔇 silence removed');
                 if (exportSettings.remove_laughter) tags.push('😂 laughter');
                 if (exportSettings.apply_deepfilter) tags.push('🎛️ deepfilter');
                 if (exportSettings.apply_voice_filter) tags.push('🎚️ voice filter');
