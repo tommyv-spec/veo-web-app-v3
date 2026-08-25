@@ -13492,6 +13492,28 @@ async def queue_autoedit(
             detail="Caption offset must be between -0.45 and 0.45",
         )
     from autoedit_qc import normalize_repairs
+    # Settings STICK to the job (operator 2026-08-25, after a default-settings
+    # re-queue silently dropped an agreed hook layout): when the request names
+    # neither hook field, inherit both from the job's most recent run, so a
+    # re-render keeps what was decided for this job. Explicit values —
+    # including hook_corner=0, the explicit OFF — always win and are what a
+    # later run then inherits.
+    hook_corner_req, hook_bg_req = req.hook_corner, req.hook_bg
+    if hook_corner_req is None and hook_bg_req is None:
+        prev = db.query(AutoEditRun).filter(
+            AutoEditRun.job_id == job_id,
+        ).order_by(AutoEditRun.created_at.desc()).first()
+        if prev is not None and prev.repair_json:
+            try:
+                prev_rep = json.loads(prev.repair_json)
+                hook_corner_req = prev_rep.get("hook_corner")
+                hook_bg_req = prev_rep.get("hook_bg")
+                if hook_corner_req is not None or hook_bg_req is not None:
+                    print(f"[AutoEdit] job={job_id[:8]} inheriting hook layout "
+                          f"from run {prev.id[:8]}: corner={hook_corner_req} "
+                          f"bg={hook_bg_req}", flush=True)
+            except (ValueError, TypeError):
+                pass
     try:
         repairs = normalize_repairs({
             "trim_start_s": req.trim_start_s,
@@ -13502,8 +13524,8 @@ async def queue_autoedit(
             "chroma_blend": req.chroma_blend,
             "music_filename": req.music_filename,
             "music_db": req.music_db,
-            "hook_corner": req.hook_corner,
-            "hook_bg": req.hook_bg,
+            "hook_corner": hook_corner_req,
+            "hook_bg": hook_bg_req,
         })
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

@@ -9,7 +9,27 @@ import pathlib
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-from autoedit_pipeline import plan_caption_windows, enforce_min_dwell, clean_buckets  # noqa: E402
+from autoedit_pipeline import (  # noqa: E402
+    plan_caption_windows, enforce_min_dwell, clean_buckets, resolve_hook_corner)
+
+
+def test_hook_corner_rule_is_automatic_when_ingredients_present():
+    # The documented corpus rule applies BY ITSELF: keyed hook + full-frame
+    # background -> corner speaker at 0.43. No per-run setting required.
+    assert resolve_hook_corner(None, hook_end=2.5, key_hex="00ff00",
+                               has_fullframe_bg=True) == 0.43
+
+
+def test_hook_corner_auto_stays_off_without_ingredients():
+    # No keyed hook, or no background -> legacy layout, never a bare corner.
+    assert resolve_hook_corner(None, 0.0, None, True) is None
+    assert resolve_hook_corner(None, 2.5, "00ff00", False) is None
+    assert resolve_hook_corner(None, 0.0, None, False) is None
+
+
+def test_hook_corner_explicit_wins_and_zero_disables():
+    assert resolve_hook_corner(0.607, 2.5, "00ff00", True) == 0.607
+    assert resolve_hook_corner(0.0, 2.5, "00ff00", True) is None
 
 
 def bucket(t, faces=None, motion=None):

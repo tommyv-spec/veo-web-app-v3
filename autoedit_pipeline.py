@@ -1429,6 +1429,13 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
     scan_file.write_text(json.dumps(s))
     progress("audio")
     audio = enhance_audio(base, work)
+    hook_corner = resolve_hook_corner(
+        repairs.get("hook_corner"), hook_end, key_hex, broll is not None)
+    if hook_corner is not None and repairs.get("hook_corner") is None:
+        print(f"[compose] hook layout AUTO: keyed hook ({hook_end:.1f}s) + "
+              f"full-frame background present → corner speaker at "
+              f"{hook_corner:.2f} (the documented corpus rule; pass "
+              f"hook_corner=0 to disable)", flush=True)
     progress("compose")
     nocap = compose(
         base, sup, work, dur, hook_end, key_hex, segs, audio, pip_y,
@@ -1436,7 +1443,7 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
         chroma_similarity=repairs["chroma_similarity"],
         chroma_blend=repairs["chroma_blend"],
         music=music, music_db=repairs["music_db"],
-        hook_corner=repairs.get("hook_corner"), broll=broll,
+        hook_corner=hook_corner, broll=broll,
     )
     start_s, end_s = repairs["trim_start_s"], repairs["trim_end_s"]
     trim_key = f"s{start_s:.2f}_e{end_s:.2f}"
@@ -1446,6 +1453,28 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
                          start_s, end_s, dur)
     segs = shifted_segments(segs, start_s, trimmed_dur)
     return nocap, trimmed_dur, segs, auto_offset, pip_y, chin, base, audio
+
+
+def resolve_hook_corner(hook_corner, hook_end, key_hex, has_fullframe_bg):
+    """Which hook layout this render uses (pure function).
+
+    The corner rule is REUSABLE, not a per-run setting to remember (operator
+    2026-08-25: "how can we apply this to all the jobs that need it").
+    docs/experiments/autoedit-hook-composite-placement-2026-08-22.md §4 states
+    the rule conditionally — green-keyed hook + a sharp full-frame background
+    → speaker at 0.43 flush bottom-left for the hook only — so when the
+    ingredients are present the layout applies BY ITSELF:
+
+    - an explicit hook_corner always wins (0 or negative = explicitly OFF);
+    - None = AUTO: 0.43 when the job HAS a keyed hook AND a full-frame
+      background (final_broll_* or an explicit/inherited hook_bg);
+    - otherwise the legacy full-size-over-blurred layout.
+    """
+    if hook_corner is not None:
+        return hook_corner if hook_corner > 0 else None
+    if hook_end and hook_end > 0 and key_hex and has_fullframe_bg:
+        return 0.43
+    return None
 
 
 def caption_engine() -> str:

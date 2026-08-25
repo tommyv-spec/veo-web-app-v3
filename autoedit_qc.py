@@ -83,10 +83,18 @@ def normalize_repairs(value=None):
             hc = float(hc)
         except (TypeError, ValueError):
             raise ValueError("Hook corner size must be a number")
-        if not 0.20 <= hc <= 0.95:
+        if hc == 0:
+            # Explicit OFF: distinct from None (= AUTO — the corner rule
+            # applies by itself when the job has a keyed hook + full-frame
+            # background; see resolve_hook_corner). 0 blocks both the auto
+            # rule and settings inheritance at queue time.
+            out["hook_corner"] = 0.0
+        elif not 0.20 <= hc <= 0.95:
             raise ValueError("Hook corner size must be between 0.20 and 0.95 "
-                             "(0.43 matches the decoded corpus and the operator's own edit)")
-        out["hook_corner"] = hc
+                             "(0.43 matches the decoded corpus and the operator's own edit), "
+                             "or exactly 0 to disable the corner layout")
+        else:
+            out["hook_corner"] = hc
 
     bg = out.get("hook_bg")
     if bg in (None, ""):
