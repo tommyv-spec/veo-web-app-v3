@@ -111,11 +111,12 @@ def normalize_repairs(value=None):
     return out
 
 
-def caption_face_overlap_metrics(buckets, windows, frame_height=1920, band_height=0.15):
+def caption_face_overlap_metrics(buckets, windows, frame_height=1920, band_height=0.17):
     """Measure caption-band overlap with every detected face.
 
     Returns total and worst overlap in vertical pixels. This deliberately uses
-    the same one-second occupancy buckets as the placement planner; it is a
+    the same one-second occupancy buckets as the placement planner, and the
+    same band height the planner reserves (2 * its half of 0.085); it is a
     conservative screen-space check, not a claim about subtitle glyph pixels.
     """
     total = 0.0

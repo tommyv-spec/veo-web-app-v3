@@ -52,6 +52,57 @@ BASE_URL = os.environ.get("KAVENO_BASE_URL", "https://kavenobuilder.com")
 CODE_DIR = Path(__file__).resolve().parent
 TEMPLATES_DIR = CODE_DIR / "caption_templates"
 PIP_W, PIP_H, PIP_X, PIP_Y = 800, 450, 140, 1050  # clears the Reels bottom-420px UI zone
+# Face sensor for caption placement (2026-08-25). YuNet (a small ONNX face
+# detector bundled with OpenCV's zoo) replaces the Haar cascade as the default:
+# measured on a real job (fecd12), Haar never saw a passenger's three-quarter
+# face, saw a burger t-shirt graphic as a face for one second (which pushed the
+# hook captions to the top of the frame), and saw a shirt as a face once more
+# mid-video (5s caption excursion). YuNet found every real face in those same
+# frames and none of the phantoms. Haar stays as the fallback when the model
+# file is missing so the pipeline still runs.
+YUNET_MODEL = CODE_DIR / "models" / "face_detection_yunet_2023mar.onnx"
+
+
+def face_detector_tag():
+    """Which face sensor is active — baked into cache names (v938.1: a cache is
+    named after everything baked into it; detector output IS baked into the
+    occupancy map and the layout numbers)."""
+    return "yunet" if YUNET_MODEL.exists() else "haar"
+
+
+def make_face_detector(width, height):
+    """One callable `frame -> [[x0,y0,x1,y1], ...]` (fractions of the frame),
+    shared by detect_layout and build_occupancy so both see the same faces."""
+    import cv2
+    if YUNET_MODEL.exists():
+        det = cv2.FaceDetectorYN.create(str(YUNET_MODEL), "", (width, height),
+                                        score_threshold=0.6)
+        def detect(frame):
+            h, w = frame.shape[:2]
+            if (w, h) != (width, height):
+                det.setInputSize((w, h))
+            _, faces = det.detect(frame)
+            out = []
+            if faces is not None:
+                for f in faces:
+                    x, y, fw, fh = (float(v) for v in f[:4])
+                    out.append([max(0.0, x / w), max(0.0, y / h),
+                                min(1.0, (x + fw) / w), min(1.0, (y + fh) / h)])
+            return out
+        return detect
+    if not hasattr(cv2, "CascadeClassifier"):
+        # OpenCV 5 dropped this from the default build; requirements pin <5.
+        raise AutoEditError(
+            f"This OpenCV build ({getattr(cv2, '__version__', '?')}) has no CascadeClassifier "
+            f"and the YuNet model file is missing ({YUNET_MODEL}), so faces cannot be "
+            "detected and captions could cover one.")
+    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    def detect(frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+        return [[x / w, y / h, (x + fw) / w, (y + fh) / h]
+                for x, y, fw, fh in cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))]
+    return detect
 BUILTIN_TEMPLATES = ["classic", "default", "explosive", "fast", "hype", "line-focus",
                      "minimalist", "model", "neo-minimal", "retro-gaming", "vibrant", "word-focus"]
 # Watermark font: this pipeline only runs on this Windows PC today, so the
@@ -149,8 +200,10 @@ def cap_pass_name(offset, template, source_fingerprint):
 
 def occupancy_name(trim_start_s, trim_end_s, source_fingerprint):
     """The face/motion map is named after the video that was SCANNED — which
-    is not always the base export (see the hook_corner path in run_autoedit)."""
-    return (f"occupancy_s{trim_start_s:.2f}_e{trim_end_s:.2f}_"
+    is not always the base export (see the hook_corner path in run_autoedit) —
+    AND after the face detector that scanned it: a Haar-era map must not be
+    served to a YuNet-era planner (v938.1)."""
+    return (f"occupancy_{face_detector_tag()}_s{trim_start_s:.2f}_e{trim_end_s:.2f}_"
             f"{source_fingerprint}.json")
 
 
@@ -304,30 +357,22 @@ def detect_layout(base, dur, segs):
     PIP below the captions, clamp everything to platform safe zones.
     Returns (caption_offset_for_pycaps, pip_y_px)."""
     import cv2
-    if not hasattr(cv2, "CascadeClassifier"):
-        # OpenCV 5 dropped this from the default build; requirements pin <5.
-        # Say so plainly — the raw AttributeError reads like a code bug.
-        raise AutoEditError(
-            f"This OpenCV build ({getattr(cv2, '__version__', '?')}) has no CascadeClassifier, "
-            "so faces cannot be detected and captions could cover one. "
-            "Install opencv-python-headless<5.")
-    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     cap = cv2.VideoCapture(str(base))
     fps = cap.get(cv2.CAP_PROP_FPS) or 24
-    bottoms = []
+    bottoms, detect = [], None
     for t in range(1, int(dur), 2):
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(t * fps))
         ok, frame = cap.read()
         if not ok:
             continue
         h, w = frame.shape[:2]
-        scale = 360 / w
-        small = cv2.resize(frame, (360, int(h * scale)))
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        faces = cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
-        if len(faces):
-            x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])  # largest face
-            bottoms.append((y + fh) / small.shape[0])
+        small = cv2.resize(frame, (360, int(h * 360 / w)))
+        if detect is None:
+            detect = make_face_detector(small.shape[1], small.shape[0])
+        faces = detect(small)
+        if faces:
+            x0, y0, x1, y1 = max(faces, key=lambda f: (f[2] - f[0]) * (f[3] - f[1]))
+            bottoms.append(y1)
     cap.release()
     if bottoms:
         import statistics
@@ -350,13 +395,14 @@ def detect_layout(base, dur, segs):
 
 def build_occupancy(base, dur):
     """Per-second map of what the captions must NEVER cover: every detected
-    face box + a coarse motion grid (where the action is). Fractions of frame."""
+    face box + a coarse motion grid (where the action is). Fractions of frame.
+    Detection runs at 360px width (not the old 180): YuNet needs the pixels,
+    and Haar at 180 was the sensor that hallucinated shirt-graphic faces."""
     import cv2
     import numpy as np
-    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
     cap = cv2.VideoCapture(str(base))
     fps = cap.get(cv2.CAP_PROP_FPS) or 24
-    buckets, prev = [], None
+    buckets, prev, detect = [], None, None
     for t in [x + 0.5 for x in range(int(dur))]:
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(t * fps))
         ok, frame = cap.read()
@@ -364,11 +410,11 @@ def build_occupancy(base, dur):
             buckets.append({"t": t, "faces": [], "motion": [0.0] * 10})
             continue
         h, w = frame.shape[:2]
-        small = cv2.resize(frame, (180, int(h * 180 / w)))
+        small = cv2.resize(frame, (360, int(h * 360 / w)))
         gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        sh, sw = gray.shape
-        faces = [[x / sw, y / sh, (x + fw) / sw, (y + fh) / sh]
-                 for x, y, fw, fh in cascade.detectMultiScale(gray, 1.1, 5, minSize=(30, 30))]
+        if detect is None:
+            detect = make_face_detector(small.shape[1], small.shape[0])
+        faces = detect(small)
         if prev is not None and prev.shape == gray.shape:
             diff = cv2.absdiff(gray, prev).astype("float32") / 255.0
             rows = np.array_split(diff, 10, axis=0)
@@ -381,12 +427,64 @@ def build_occupancy(base, dur):
     return buckets
 
 
+def clean_buckets(buckets):
+    """Sensor cleanup between detection and planning (pure function).
+
+    Measured failure modes this removes (job fecd12, 2026-08-25):
+    - a PHANTOM face that exists for one second (Haar saw a burger t-shirt
+      graphic as a face at t=1.5 — that single box made the hook captions
+      jump to the top of the frame);
+    - single-second BOX JITTER on a real face (a chin 'dipping' 0.03 for one
+      bucket grazed the caption band edge and caused two mid-video jumps).
+
+    For every second, boxes from the surrounding ±2 buckets are clustered by
+    overlap; a cluster must appear in ≥2 distinct buckets to count as a face
+    (kills one-second phantoms), and the emitted box is the per-coordinate
+    MEDIAN of the cluster (kills one-second jitter). A real face that the
+    detector drops every other second still survives: it appears in ≥2 of the
+    5 buckets around any given second."""
+    import statistics
+
+    def overlaps(a, b):
+        ix = min(a[2], b[2]) - max(a[0], b[0])
+        iy = min(a[3], b[3]) - max(a[1], b[1])
+        if ix <= 0 or iy <= 0:
+            return False
+        inter = ix * iy
+        area_a = (a[2] - a[0]) * (a[3] - a[1])
+        area_b = (b[2] - b[0]) * (b[3] - b[1])
+        return inter / max(min(area_a, area_b), 1e-9) >= 0.3
+
+    cleaned = []
+    for i, b in enumerate(buckets):
+        clusters = []  # each: list of (bucket_index, box)
+        # A full 5-bucket window even at the edges (slid, not truncated): a
+        # truncated 3-bucket window at the last second demanded 2-of-3 from a
+        # face the detector only sees every other second, and dropped it.
+        lo = max(0, min(i - 2, len(buckets) - 5))
+        for j in range(lo, min(len(buckets), lo + 5)):
+            for box in buckets[j]["faces"]:
+                home = next((cl for cl in clusters if overlaps(cl[-1][1], box)), None)
+                if home is None:
+                    clusters.append([(j, box)])
+                else:
+                    home.append((j, box))
+        faces = []
+        for cl in clusters:
+            if len({j for j, _ in cl}) < 2:
+                continue  # one-second phantom
+            faces.append([statistics.median(box[k] for _, box in cl) for k in range(4)])
+        cleaned.append({**b, "faces": faces})
+    return cleaned
+
+
 def plan_caption_windows(buckets, chin, segs, pip_y, dur):
     """Dynamic placement: per second pick a caption band that covers NO face,
-    NO PIP window, least action — with hysteresis so it moves only when it must.
-    Returns [(start, end, offset)] merged windows."""
-    half = 0.075                      # caption band half-height (2-line card)
-    cands = [min(chin + 0.095, 0.60), 0.70, 0.14]  # below-chin | lower-third | top
+    NO PIP window, least action — decided globally (shortest path with a cost
+    per move) so captions hold ONE home position and move only when the
+    picture forces it. Returns [(start, end, offset)] merged windows."""
+    half = 0.085                      # caption band half-height (2-line card + highlight padding)
+    cands = [min(chin + 0.095, 0.60), 0.70, 0.15]  # below-chin | lower-third | top-last-resort
     pip_band = (pip_y / 1920, (pip_y + PIP_H) / 1920)
 
     def pip_active(t):
@@ -444,54 +542,87 @@ def plan_caption_windows(buckets, chin, segs, pip_y, dur):
         rows = [m for i, m in enumerate(b["motion"]) if y1 > i / 10 and y0 < (i + 1) / 10]
         return sum(rows) / max(len(rows), 1)
 
-    # smooth face flicker: a face counts if seen in this bucket OR a neighbour
-    smoothed = []
-    for i, b in enumerate(buckets):
-        faces = []
-        for j in (i - 1, i, i + 1):
-            if 0 <= j < len(buckets):
-                faces.extend(buckets[j]["faces"])
-        smoothed.append({**b, "faces": faces})
-    buckets = smoothed
+    # Sensor cleanup first: one-second phantom faces and one-second box jitter
+    # were the trigger for EVERY unwanted caption move on the job that led to
+    # this design (see clean_buckets).
+    buckets = clean_buckets(buckets)
 
-    def stable(c, i, n=3):
-        """candidate stays valid for the next n buckets"""
-        return all(valid(c, buckets[j]) for j in range(i, min(i + n, len(buckets))))
+    # Decision layer: shortest path over (second, candidate) with a price on
+    # every move — replaces the old greedy hold/lookahead heuristic, which
+    # moved whenever a locally-better candidate looked stable for 3-4s and
+    # produced 8 moves in 88s on a real job. Here a move must EARN its switch
+    # cost over the rest of the video, which is the actual requirement:
+    # captions live in one home position and move only when the picture forces
+    # it. Hard rules unchanged: a face or the PIP is never covered while ANY
+    # candidate clears both (valid()); when nothing is legal the squeeze
+    # ladder still applies (face-clear first, then least face overlap).
+    SWITCH = 25.0                     # one move costs this much accumulated preference
+    # Lower-third is the preferred home, below-chin second: verified on real
+    # frames (job fecd12) that the below-chin band in a selling video sits on
+    # the DEMO ZONE — the chest-height area where this persona presents the
+    # product and the palm-with-pill shot — while the lower third lands on the
+    # counter. "Never cover the main action" outranks the below-chin habit;
+    # below-chin remains for when the lower third is face- or PIP-blocked.
+    PRIOR = {0: 0.5, 1: 0.0, 2: 8.0}  # below-chin | lower-third | top only when pushed
+    HOOK_TOP_PRIOR = 30.0             # top captions over the hook read broken — never
+    HOOK_S = 6.0                      # unless every other band would cover a face
 
-    cur, plan, squeezed, heavy_squeezed = None, [], 0, 0
-    for i, b in enumerate(buckets):
+    squeezed, heavy_squeezed = 0, 0
+    allowed_per_s = []                # per second: {candidate: cost}
+    for b in buckets:
         options = [c for c in cands if valid(c, b)]
-        best = next((c for c in cands if c in options and stable(c, i)), None)
-        if cur is not None and cur in options and (best is None or best == cur or not stable(best, i, 4)):
-            choice = cur              # hold position; move back up-priority only when it will last
-        elif best is not None:
-            choice = best
-        elif options:
-            choice = min(options, key=lambda c: (round(action_score(c, b), 3), cands.index(c)))
+        if options:
+            costs = {}
+            for c in options:
+                prior = PRIOR[cands.index(c)]
+                if cands.index(c) == 2 and b["t"] < HOOK_S:
+                    prior = HOOK_TOP_PRIOR
+                costs[c] = 10.0 * action_score(c, b) + prior
         else:
-            # Squeeze: no candidate clears both the face(s) and the PIP + safe zones.
-            # Operator rule, verbatim: "never cover the main action or any face --
-            # never". Faces are the hard, unconditional priority; the PIP is our own
-            # inserted overlay, not a person, so it is the one allowed to give way.
-            # Graceful degradation ladder:
-            #   2. face-clear (zero measured face overlap) -- insert overlap accepted.
-            #      Prefer candidates in their normal priority order.
-            #   3. when even that is impossible, the candidate with the SMALLEST total
-            #      face overlap wins (pixels on a 1920-tall frame), tie-broken by
-            #      smaller insert overlap, then candidate order. This is what stops the
-            #      old blind "always cands[0]" pick from choosing the WORST-covering
-            #      option purely because it was first in the list.
+            # Squeeze: no candidate clears both the face(s) and the PIP + safe
+            # zones. Operator rule, verbatim: "never cover the main action or
+            # any face -- never". Faces are the hard, unconditional priority;
+            # the PIP is our own inserted overlay, not a person, so it is the
+            # one allowed to give way. Ladder:
+            #   2. face-clear (zero measured face overlap) -- insert overlap
+            #      accepted, priced so the least-covering position wins.
+            #   3. when even that is impossible, the candidate with the
+            #      SMALLEST total face overlap (pixels, 1920-tall frame) is
+            #      forced, tie-broken by smaller insert overlap, then order.
+            squeezed += 1
             face_clear = [c for c in cands if face_overlap_px(c, b) == 0]
             if face_clear:
-                choice = face_clear[0]
+                costs = {c: 0.05 * pip_overlap_px(c, b) + PRIOR[cands.index(c)]
+                         for c in face_clear}
             else:
-                choice = min(cands, key=lambda c: (round(face_overlap_px(c, b), 1),
-                                                     round(pip_overlap_px(c, b), 1),
-                                                     cands.index(c)))
                 heavy_squeezed += 1
-            squeezed += 1
-        plan.append(choice)
-        cur = choice
+                forced = min(cands, key=lambda c: (round(face_overlap_px(c, b), 1),
+                                                   round(pip_overlap_px(c, b), 1),
+                                                   cands.index(c)))
+                costs = {forced: 0.0}
+        allowed_per_s.append(costs)
+
+    if not allowed_per_s:
+        return []
+    INF = float("inf")
+    dp = [{c: allowed_per_s[0].get(c, INF) for c in cands}]
+    back = []
+    for i in range(1, len(allowed_per_s)):
+        row, brow = {}, {}
+        for c in cands:
+            own = allowed_per_s[i].get(c, INF)
+            if own == INF:
+                row[c], brow[c] = INF, None
+                continue
+            prev_c = min(cands, key=lambda p: dp[-1][p] + (0.0 if p == c else SWITCH))
+            row[c] = own + dp[-1][prev_c] + (0.0 if prev_c == c else SWITCH)
+            brow[c] = prev_c
+        dp.append(row)
+        back.append(brow)
+    plan = [min(cands, key=lambda c: dp[-1][c])]
+    for brow in reversed(back):
+        plan.append(brow[plan[-1]])
+    plan.reverse()
     windows, start = [], 0.0
     for i in range(1, len(plan) + 1):
         if i == len(plan) or plan[i] != plan[i - 1]:
@@ -520,7 +651,7 @@ def enforce_min_dwell(windows, buckets, min_dwell=2.0):
     the earlier/left neighbour, so the caption simply stays where it already was.
     Repeats until every window is >= min_dwell or only one window remains (both
     conditions guarantee termination: each merge strictly shrinks the window count)."""
-    half = 0.075
+    half = 0.085
     by_t = {b["t"]: b for b in buckets}
 
     def merged_y_intervals(faces):
@@ -1283,12 +1414,14 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
     else:
         hook_end, key_hex, segs = s["hook_end"], s["key_hex"], [tuple(x) for x in s["segs"]]
         print("scan: cached")
-    if len(s.get("layout", [])) != 3:
+    # The 4th element records WHICH face detector produced these numbers — a
+    # Haar-era chin must be re-measured when YuNet is active (v938.1).
+    if len(s.get("layout", [])) != 4 or s["layout"][3] != face_detector_tag():
         progress("layout")
         auto_offset, pip_y, chin = detect_layout(base, dur, segs)
-        s["layout"] = [auto_offset, pip_y, chin]
+        s["layout"] = [auto_offset, pip_y, chin, face_detector_tag()]
     else:
-        auto_offset, pip_y, chin = s["layout"]
+        auto_offset, pip_y, chin = s["layout"][:3]
         print(f"layout: cached (offset {auto_offset:+.3f}, pip_y {pip_y}, chin {chin:.2f})")
     scan_file.write_text(json.dumps(s))
     progress("audio")
@@ -1400,7 +1533,7 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
         # other one's map — the same stale-cache shape as the four before it.
         occ_file = work / occupancy_name(repairs["trim_start_s"], repairs["trim_end_s"],
                                          file_fingerprint(occ_src))
-        for stale in work.glob("occupancy_s*.json"):
+        for stale in work.glob("occupancy_*.json"):
             if stale != occ_file:
                 stale.unlink(missing_ok=True)
         if occ_file.exists():

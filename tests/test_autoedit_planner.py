@@ -9,7 +9,7 @@ import pathlib
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-from autoedit_pipeline import plan_caption_windows, enforce_min_dwell  # noqa: E402
+from autoedit_pipeline import plan_caption_windows, enforce_min_dwell, clean_buckets  # noqa: E402
 
 
 def bucket(t, faces=None, motion=None):
@@ -108,6 +108,71 @@ def test_picks_least_face_overlap_when_nothing_is_clear():
             f"expected the least-overlap candidate 0.70 (144px), got offset {off} "
             f"(candidate {chosen}, ~{overlap_px.get(chosen, '?')}px measured)"
         )
+
+
+# --- Regression tests from a real job (fecd12, 2026-08-25). The operator saw
+# captions "move a lot and in the wrong places, especially the hook". Every bad
+# move traced to one-second sensor noise; these lock in that noise can no
+# longer move a caption. Face boxes below are the ACTUAL cached occupancy boxes.
+
+DRIVER = [0.01, 0.24, 0.38, 0.45]        # real face, present every second
+SHIRT_PHANTOM = [0.30, 0.36, 0.87, 0.68]  # burger t-shirt detected as a face for 1s
+
+
+def test_one_second_phantom_face_does_not_move_captions():
+    # On the real job this phantom blocked the lower-third band during the hook
+    # and pushed the captions to the top of the frame for 3 seconds.
+    buckets = [bucket(t + 0.5, faces=[DRIVER] + ([SHIRT_PHANTOM] if t == 1 else []))
+               for t in range(20)]
+    windows = plan_caption_windows(buckets, chin=0.36, segs=[], pip_y=1050, dur=20)
+    assert len(windows) == 1, f"a 1s phantom face caused a move: {windows}"
+    assert windows[0][2] == pytest.approx(0.20), f"expected lower-third home, got {windows}"
+
+
+KITCHEN_FACE = [0.30, 0.14, 0.66, 0.35]
+KITCHEN_FACE_DIP = [0.34, 0.18, 0.71, 0.39]  # same face, box bottom dips for 1s
+
+
+def test_one_second_chin_dip_does_not_move_captions():
+    # On the real job two of these dips (t=31.5, t=78.5) each caused a jump to
+    # the lower third and back — four visible moves from detector jitter.
+    buckets = [bucket(t + 0.5, faces=[KITCHEN_FACE_DIP if t == 12 else KITCHEN_FACE])
+               for t in range(30)]
+    windows = plan_caption_windows(buckets, chin=0.37, segs=[], pip_y=1050, dur=30)
+    assert len(windows) == 1, f"1s box jitter caused a move: {windows}"
+
+
+def test_hook_prefers_lower_third_over_top():
+    # A small high face leaves BOTH the below-chin and top bands technically
+    # legal; the hook (first seconds) must still not sit at the top of the
+    # frame — top is a last resort, not a preference.
+    high_small = [0.30, 0.08, 0.60, 0.30]
+    buckets = [bucket(t + 0.5, faces=[high_small]) for t in range(20)]
+    windows = plan_caption_windows(buckets, chin=0.32, segs=[], pip_y=1050, dur=20)
+    first = windows[0]
+    assert 0.5 + first[2] > 0.3, f"hook caption landed at the top of the frame: {windows}"
+
+
+def test_scene_change_moves_at_most_once():
+    # Car scene (face low, chin deep) for 20s, then kitchen scene (face high)
+    # for 40s: the plan should be at most one move, at the scene boundary.
+    car = [0.0, 0.20, 0.34, 0.52]
+    kitchen = [0.30, 0.14, 0.66, 0.35]
+    buckets = [bucket(t + 0.5, faces=[car if t < 20 else kitchen]) for t in range(60)]
+    windows = plan_caption_windows(buckets, chin=0.37, segs=[], pip_y=1050, dur=60)
+    assert len(windows) <= 2, f"more than one move across a single scene change: {windows}"
+
+
+def test_clean_buckets_keeps_a_flickering_real_face():
+    # A real face the detector drops every other second must survive cleaning
+    # at EVERY second (it is protective data), while a 1s phantom must die.
+    buckets = [bucket(t + 0.5, faces=([KITCHEN_FACE] if t % 2 == 0 else [])
+                      + ([SHIRT_PHANTOM] if t == 5 else [])) for t in range(12)]
+    cleaned = clean_buckets(buckets)
+    for cb in cleaned:
+        ys = [(round(f[1], 2), round(f[3], 2)) for f in cb["faces"]]
+        assert (0.14, 0.35) in ys, f"flickering real face lost at t={cb['t']}: {ys}"
+        assert (0.36, 0.68) not in ys, f"1s phantom survived cleaning at t={cb['t']}: {ys}"
 
 
 def test_no_window_shorter_than_two_seconds():
