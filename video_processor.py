@@ -3134,18 +3134,104 @@ def assemble_action_evidence(silero_spans, anchor_window, event_spans, motion_sp
     return speech, events, sorted(motion_spans or [])
 
 
+def _onset_spans(values, dt, abs_floor, min_delta, rel_delta_factor=0.0,
+                 baseline_s=3.0, baseline_gap_s=0.4, sustain_frac=0.5,
+                 join_gap_s=0.35, min_span_s=0.2, exclude=None):
+    """Transient-ONSET spans (pure function): moments where a signal rises
+    notably above its own TRAILING baseline, extended while it stays above
+    the onset level.
+
+    Operator correction 2026-08-25: "i don't need every single action, i need
+    the important ones... the husband smiling is not important and is dead
+    space." The importance proxy is CHANGE: a throw starting, a blender
+    turning on, a hand raising all spike above what came before; a car's
+    scrolling scenery and constant road noise are SUSTAINED levels — they ARE
+    the baseline, so they can never trigger. trigger = value >= abs_floor AND
+    value >= trailing_median + delta, where delta = max(min_delta,
+    rel_delta_factor * baseline); a triggered span extends while the value
+    holds above max(abs_floor, baseline + delta * sustain_frac), so a long
+    pour survives past its onset.
+    """
+    n = len(values)
+    if n == 0:
+        return []
+    exclude = exclude or [False] * n
+    wb = max(1, int(baseline_s / dt))
+    wg = max(0, int(baseline_gap_s / dt))
+    _all = sorted(v for k, v in enumerate(values) if not exclude[k])
+    global_base = _all[len(_all) // 2] if _all else abs_floor
+    spans = []
+    i = 0
+    while i < n:
+        if exclude[i]:
+            i += 1
+            continue
+        lo = max(0, i - wb)
+        hi = max(lo + 1, i - wg)
+        window = sorted(v for k, v in enumerate(values[lo:hi], start=lo)
+                        if not exclude[k])
+        # A mostly-excluded neighbourhood (e.g. right after a spoken line)
+        # falls back to the clip's GLOBAL ambience level — loud constant
+        # ambience (road noise) stays its own baseline there too, so it
+        # cannot sneak in as an "event" the moment a line ends.
+        base = window[len(window) // 2] if len(window) >= 4 else global_base
+        delta = max(min_delta, rel_delta_factor * base)
+        if values[i] >= abs_floor and values[i] >= base + delta:
+            sustain = max(abs_floor, base + delta * sustain_frac)
+            j = i
+            while j + 1 < n and not exclude[j + 1] and values[j + 1] >= sustain:
+                j += 1
+            s, e = i * dt, (j + 1) * dt
+            if spans and s - spans[-1][1] <= join_gap_s:
+                spans[-1][1] = e
+            else:
+                spans.append([s, e])
+            i = j + 1
+        else:
+            i += 1
+    return [(s, e) for s, e in spans if e - s >= min_span_s]
+
+
+def _bidirectional_onset_spans(values, dt, **kw):
+    """Union of forward and time-reversed onset detection (pure function).
+
+    A clip that OPENS mid-action (the v752 catalyst rule makes this the
+    normal case) has no forward onset — but the action still ENDS, which the
+    reversed pass sees as an onset. True ambience (constant road noise, a
+    scrolling background) never changes in either direction and stays
+    invisible to both passes.
+    """
+    n = len(values)
+    fwd = _onset_spans(values, dt, **kw)
+    kw_rev = dict(kw)
+    if kw_rev.get("exclude") is not None:
+        kw_rev["exclude"] = list(reversed(kw_rev["exclude"]))
+    rev = _onset_spans(list(reversed(values)), dt, **kw_rev)
+    total = n * dt
+    spans = sorted(fwd + [(total - e, total - s) for s, e in rev])
+    merged = []
+    for s, e in spans:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
 def _event_spans_from_envelope(db_env, hop_s, speech_spans,
                                floor_db=-45.0, rel_db=18.0,
                                min_event_s=0.2, join_gap_s=0.2):
     """Sound-event spans from a per-window dB envelope (pure function).
 
-    The threshold is RELATIVE to the clip's own voice: reference = median dB
-    inside the known speech spans (fallback: 90th percentile of the whole
-    envelope minus 10). threshold = max(floor_db, reference - rel_db). This
-    is what lets a blender count while room hum does not, and what the old
-    energy mode's fixed -29dB floor could never do — a quiet pour under a
-    quiet voice stayed "silence" there. Windows already inside speech spans
-    are NOT emitted as events (they are speech evidence, reported separately).
+    Two gates compose:
+    - LOUD ENOUGH TO MATTER: above max(floor_db, median speech dB - rel_db) —
+      relative to the clip's own voice, so a blender counts while room hum
+      does not (a fixed -29dB floor could never do that).
+    - AN EVENT, NOT AMBIENCE: a transient onset over the trailing baseline
+      (_onset_spans, +8dB attack, hold above +4dB) — constant road noise is
+      the baseline and never triggers; a blender STARTING does.
+    Windows inside speech spans are masked to the floor first (speech is
+    reported separately as speech evidence, never as an event).
     """
     if not db_env:
         return []
@@ -3160,17 +3246,12 @@ def _event_spans_from_envelope(db_env, hop_s, speech_spans,
     else:
         sv = sorted(db_env)
         ref = sv[min(len(sv) - 1, int(len(sv) * 0.9))] - 10.0
-    threshold = max(floor_db, ref - rel_db)
-    spans = []
-    for i, v in enumerate(db_env):
-        t = i * hop_s
-        if v < threshold or _in_speech(t):
-            continue
-        if spans and t - spans[-1][1] <= join_gap_s:
-            spans[-1][1] = t + hop_s
-        else:
-            spans.append([t, t + hop_s])
-    return [(s, e) for s, e in spans if e - s >= min_event_s]
+    loud_floor = max(floor_db, ref - rel_db)
+    exclude = [_in_speech(i * hop_s) for i in range(len(db_env))]
+    return _bidirectional_onset_spans(db_env, hop_s, abs_floor=loud_floor,
+                                      min_delta=8.0, rel_delta_factor=0.0,
+                                      sustain_frac=0.5, join_gap_s=join_gap_s,
+                                      min_span_s=min_event_s, exclude=exclude)
 
 
 def _rms_event_spans(wav_path, speech_spans):
@@ -3250,22 +3331,23 @@ def _motion_spans(video_path, sample_fps=6.0,
     cap.release()
     if not samples:
         return []
-    srt = sorted(s for _, s in samples)
-    median = srt[len(srt) // 2]
-    threshold = min(0.15, max(0.03, 2.5 * median))
-    spans = []
-    for t, share in samples:
-        if share < threshold:
-            continue
-        if spans and t - spans[-1][1] <= join_gap_s:
-            spans[-1][1] = t
-        else:
-            spans.append([t, t])
-    out = [(s, max(e, s) + step / fps) for s, e in spans
-           if (e - s) + step / fps >= min_span_s]
-    print(f"[ActionVAD] motion share: median={median:.3f} "
+    t0 = samples[0][0]
+    values = [s for _, s in samples]
+    dt = step / fps
+    # Onset detection over the trailing baseline (operator 2026-08-25: only
+    # IMPORTANT actions count, and importance = something CHANGES). A car's
+    # scrolling scenery holds a high but CONSTANT share — it is the baseline
+    # and never triggers; a throw/pour/raise spikes above it and does.
+    spans = _bidirectional_onset_spans(values, dt, abs_floor=0.03,
+                                       min_delta=0.05, rel_delta_factor=0.8,
+                                       sustain_frac=0.5, join_gap_s=join_gap_s,
+                                       min_span_s=min_span_s)
+    out = [(t0 + s, t0 + e) for s, e in spans]
+    srt = sorted(values)
+    print(f"[ActionVAD] motion share: median={srt[len(srt)//2]:.3f} "
           f"p90={srt[int(len(srt)*0.9)]:.3f} max={srt[-1]:.3f} "
-          f"threshold={threshold:.3f} (2.5x median, clamped) -> {len(out)} span(s)",
+          f"onset-detect (delta>=max(0.05, 0.8x trailing baseline)) "
+          f"-> {len(out)} span(s)",
           flush=True)
     return out
 
