@@ -17664,3 +17664,29 @@ v940's buttons only ever reach images **from here on**. Everything already picke
 
 **General lesson, and the reason this is a v-rule rather than a note:** *an absent label and a negative label are different data.* A schema that cannot say "I was never asked" will have that silence read as a judgement by whatever trains on it next.
 
+## v941 — ROUTING A RAW FILE IS NOT INGESTING IT (2026-08-25)
+
+**The failure this exists to stop.** The operator was twice told the corpus work was done when only routing had happened — his reply, verbatim, was *"all done and ingested???"*. Both times a checker had passed. It was the wrong checker.
+
+**There are two gates and they answer different questions.** Verified by reading both tools 2026-08-25, not from a session report:
+
+| Gate | Question it answers | What satisfies it |
+|---|---|---|
+| `tools/check_raw_coverage.py` | *Does every canonical raw source have SOME route?* | a direct `wiki/sources/**` pointer page, **or** a row in `tools/raw_source_routes.txt` (`ROUTES_FILE`, line 28) naming a grouped/lane route, **or** a named duplicate exclusion |
+| `tools/check_ingest.py --source <raw-path>` | *Is THIS one source properly ingested?* | the pointer page carries the full v1 frontmatter contract (`type`, `title`, `raw_path`, `tags`, `created`, `updated`, `ingest_version`, `ingest_kind`) **and** the commit stages the whole atomic set together |
+
+**`tools/raw_source_routes.txt` satisfies coverage and is INVISIBLE to the ingest check.** Measured: `check_ingest.py` contains **zero** references to it. So a row there makes coverage green while the ingest contract has never been applied to that file. One session added 18 `ROUTED` rows to make a grouped page cover 20 decodes, then deleted them in the same session on discovering exactly this. **Passing one gate says nothing about the other. Run both, and never report "ingested" on the strength of coverage alone.**
+
+**The ingest is ATOMIC, so order matters — pages-first is wrong.** `check_ingest.py:273` requires this set staged *together*: the raw file, the pointer page, `wiki/index.md`, `wiki/log.md`, `HANDOFF.md`, and `wiki/hot.md` when the ingest is significant. Missing any one fails with `staged ingest is not atomic: missing <path>`. Writing the pages in one commit and the bookkeeping in the next fails by construction.
+
+### v941.1 — two contract clauses that NO checker enforces
+
+Both are real requirements of the ingest contract and both are currently unverified — grep confirms neither checker tests them:
+
+- **A grouped cluster page is `type: synthesis`, never `type: source`.** A `source` page is the thin pointer for exactly one raw file.
+- **Two pages may never claim the same `raw_path`.** The pointer is a 1:1 route; two claimants make "which page owns this source" unanswerable.
+
+`wiki/CLAUDE.md`'s page-types table states neither, which is where someone actually looks while writing a page. **Until a checker exists, these are honour-system clauses — treat them as the load-bearing kind, because nothing will catch you.** Adding them to the ingest checker is open work; measure the blast radius over existing pages first, since `check_ingest` gates staged commits.
+
+**General lesson:** *a green checker answers its own question, not yours.* Before reporting work complete, name which gate you ran and what that gate actually measures — "the check passed" is not a status.
+
