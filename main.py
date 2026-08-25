@@ -13500,6 +13500,11 @@ async def queue_autoedit(
     # later run then inherits.
     hook_corner_req, hook_bg_req = req.hook_corner, req.hook_bg
     if hook_corner_req is None and hook_bg_req is None:
+        # Deliberately NO state filter (reviewer asked): repairs capture the
+        # operator's CHOICE at queue time, not the render's outcome. A failed
+        # or cancelled run still carries the settings the operator wanted —
+        # filtering to done-only would lose them on a retry, which is the
+        # exact silent-drop this inheritance exists to prevent.
         prev = db.query(AutoEditRun).filter(
             AutoEditRun.job_id == job_id,
         ).order_by(AutoEditRun.created_at.desc()).first()
