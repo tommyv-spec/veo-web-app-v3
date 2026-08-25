@@ -3308,6 +3308,123 @@ def merge_action_keep_spans(speech, events, motion, total_duration,
     return [(round(s, 6), round(e, 6)) for s, e in padded]
 
 
+def detect_speech_segments_action(
+    video_path,
+    dialogue_text,
+    language: str = "English",
+    min_cut_gap: float = 0.5,
+    breathing_gap: float = 0.3,
+    v709_audit_sink: dict = None,
+):
+    """silence_mode='action': keep spoken script words AND action beats.
+
+    Evidence per clip: (1) the Whisper anchor window bounds SCRIPT speech and
+    excludes the Veo pad-trailer; (2) silero speech spans give word-level
+    coverage inside that window; (3) RMS sound events (voice-relative
+    threshold) keep a blender/pour/impact; (4) motion spans (changed-pixel
+    share) keep a quiet throw. Cut = silent AND static only. The operator's
+    silence_trigger and silence_keep knobs are honored (unlike whisper mode,
+    which ignores them).
+    """
+    import os as _os
+    import tempfile as _tf
+    info = ffprobe_json(video_path)
+    total_duration = get_duration(info)
+    script = (dialogue_text or "").strip()
+    word_count = len(script.split())
+
+    _spans, details = _whisper_anchor_trim(
+        video_path, [script] if script else [], language=language,
+        return_details=True)
+    wav = details.get("wav_path")
+    _own_wav = False
+    if wav is None:
+        # No-script or extract-fail path: get a wav ourselves for the audio
+        # sensors (a silent clip still deserves event detection).
+        with _tf.NamedTemporaryFile(suffix=".wav", delete=False) as _t:
+            wav = _t.name
+        _c, _, _ = run([FFMPEG_BIN, "-y", "-i", str(video_path), "-ar", "16000",
+                        "-ac", "1", "-f", "wav", wav])
+        if _c != 0:
+            try:
+                _os.unlink(wav)
+            except Exception:
+                pass
+            wav = None
+        else:
+            _own_wav = True
+    try:
+        silero = _silero_spans(wav) if wav else []
+        window = details.get("window")
+        if window and not any(s < window[1] and e > window[0] for s, e in silero):
+            # Silero failed where Whisper anchored script words — trust the
+            # anchor window itself as the speech evidence rather than cutting
+            # a line silero could not see.
+            silero = list(silero) + [window]
+        events_raw = _rms_event_spans(wav, silero) if wav else []
+        motion_raw = _motion_spans(video_path)
+        speech, events, motion = assemble_action_evidence(
+            silero, window, events_raw, motion_raw)
+        keep = merge_action_keep_spans(
+            speech, events, motion, total_duration,
+            min_cut_gap=min_cut_gap, breathing_gap=breathing_gap,
+            script_word_count=word_count)
+    finally:
+        # The anchor-trim handed us its wav (return_details contract) — or we
+        # extracted our own. Either way this function owns the cleanup.
+        if wav:
+            try:
+                _os.unlink(wav)
+            except Exception:
+                pass
+
+    kept_s = sum(e - s for s, e in keep)
+    print(
+        f"[ActionVAD] window={'%.2f-%.2f' % window if window else 'none'} "
+        f"speech={len(speech)} events={len(events)} motion={len(motion)} -> "
+        f"keep {len(keep)} span(s) {kept_s:.2f}s of {total_duration:.2f}s: "
+        + " | ".join(f"{s:.2f}-{e:.2f}" for s, e in keep),
+        flush=True,
+    )
+
+    if v709_audit_sink is not None:
+        # A REAL word audit (the whisper_anchor sink fills constants): fuzzy-
+        # match every script token against what Whisper actually heard.
+        heard = [w.get("text", "") for w in details.get("heard_words", [])]
+        tokens = details.get("script_tokens") or []
+        matched, missing = 0, []
+        try:
+            from rapidfuzz import fuzz as _fz
+            for t in tokens:
+                if any(_fz.ratio(t, h) >= 78 for h in heard):
+                    matched += 1
+                else:
+                    missing.append(t)
+        except ImportError:
+            matched, missing = len(tokens), []
+        trust = (matched / len(tokens)) if tokens else 1.0
+        v709_audit_sink.update({
+            "script_provided": bool(script),
+            "backend": "action",
+            "script_words": len(tokens),
+            "aligned_words": matched,
+            "low_confidence_words": [],
+            "audio_duration": total_duration,
+            "speech_duration": kept_s,
+            "trim_ratio": kept_s / max(total_duration, 0.001),
+            "fallback_reason": None,
+            "trust": round(trust, 2),
+            "matched": matched,
+            "heard_words": len(heard),
+            "missing": missing,
+            # SOFT (advisory) when a noticeable share is unheard: ASR limits
+            # and true TTS drops are indistinguishable here; the operator's
+            # ear stays the arbiter, this just surfaces the signal honestly.
+            "failsafe": "SOFT" if tokens and trust < 0.8 else None,
+        })
+    return keep
+
+
 def apply_vad(
     src: Path,
     out: Path,
@@ -3358,7 +3475,17 @@ def apply_vad(
         progress_callback("Analyzing audio for speech...")
     
     # Detect speech segments — route based on mode
-    if silence_mode == "whisper":
+    if silence_mode == "action":
+        print(f"[VAD] Using action-aware detection (mode=action)", flush=True)
+        speech_segments = detect_speech_segments_action(
+            src,
+            " ".join((t or "").strip() for t in (dialogue_texts or []) if (t or "").strip()),
+            language=language,
+            min_cut_gap=min_gap_duration,
+            breathing_gap=silence_keep_duration,
+            v709_audit_sink=v709_audit_sink,
+        )
+    elif silence_mode == "whisper":
         print(f"[VAD] Using Whisper speech detection (mode=whisper)", flush=True)
         speech_segments = detect_speech_segments_whisper(
             src,
@@ -5790,7 +5917,7 @@ def export_final_video(
             # match the v691 condition (user enabled whisper + clip has
             # dialogue + clip is NOT timeline-mode + NOT text_card).
             _per_clip_whisper_ran = False  # v701w — sentinel for final-pass skip
-            if _user_remove_silence and (_user_silence_mode or "").lower() == "whisper":
+            if _user_remove_silence and (_user_silence_mode or "").lower() in ("whisper", "action"):
                 vad_targets = []
                 for slot_zero, info in enumerate(clip_info):
                     cm = (info.get("cut_mode") or "").lower()
@@ -5846,21 +5973,25 @@ def export_final_video(
                     # model is supplied from the outside (we own the
                     # lifecycle out here).
                     _shared_whisper = None
-                    try:
-                        from faster_whisper import WhisperModel as _WM
-                        _shared_whisper = _WM("tiny", device="cpu", compute_type="int8")
-                        print(
-                            f"[VideoProcessor/v701y] pre-loaded Whisper-tiny once for "
-                            f"{len(vad_targets)} clips (saves {len(vad_targets) - 1}× reload)",
-                            flush=True,
-                        )
-                    except Exception as _wm_err:
-                        print(
-                            f"[VideoProcessor/v701y] shared model preload failed: "
-                            f"{_wm_err} — falling back to per-clip load",
-                            flush=True,
-                        )
-                        _shared_whisper = None
+                    if (_user_silence_mode or "").lower() != "action":
+                        # action mode uses the Whisper-base singleton inside
+                        # _whisper_anchor_trim; preloading tiny here would be
+                        # pure waste (~50MB + 0.5s, never used).
+                        try:
+                            from faster_whisper import WhisperModel as _WM
+                            _shared_whisper = _WM("tiny", device="cpu", compute_type="int8")
+                            print(
+                                f"[VideoProcessor/v701y] pre-loaded Whisper-tiny once for "
+                                f"{len(vad_targets)} clips (saves {len(vad_targets) - 1}× reload)",
+                                flush=True,
+                            )
+                        except Exception as _wm_err:
+                            print(
+                                f"[VideoProcessor/v701y] shared model preload failed: "
+                                f"{_wm_err} — falling back to per-clip load",
+                                flush=True,
+                            )
+                            _shared_whisper = None
 
                     for slot_zero, info, full_text in vad_targets:
                         trimmed_file = files_to_concat[slot_zero]
@@ -5881,7 +6012,7 @@ def export_final_video(
                                 threshold=vad_threshold,
                                 min_gap_duration=silence_trigger,
                                 silence_keep_duration=silence_keep,
-                                silence_mode="whisper",
+                                silence_mode=(_user_silence_mode or "whisper").lower(),
                                 dialogue_texts=[full_text],
                                 language=language,
                                 clip_boundaries=None,
