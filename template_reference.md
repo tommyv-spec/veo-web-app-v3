@@ -17634,3 +17634,33 @@ No automatic discard (every removal is an explicit `--apply`), no automatic wide
 
 CLI: `python code/clip_qc.py --job <id>` · `--since-days N --limit M` (the endpoint defaults `since_days` to 3 per v726, so it must be passed) · `--backtest` · `--out report.json`. Evidence is cached under `~/.kaveno/clipqc-cache/` as raw measurements, never verdicts, so a threshold sweep costs no network and no model time.
 
+## v940 — THE THREE-WAY REVIEW SPLIT: "not chosen" is not "bad" (2026-08-24; canon backfilled 2026-08-25)
+
+**This section is a BACKFILL, and that is the first thing to learn from it.** v940 and v940.1 shipped and went live — HANDOFF revs 451-453 record the verdict buttons API-verified and the retro-labelling committed — while carrying **zero** entries in this file and zero rows in `wiki/patterns/conventions.md`. `check_rule_index.py` reported `PASS` throughout, because it verifies that conventions indexes every rule **defined here**; a rule that ships in code and was never written into the masters is invisible to it. That is v914's failure running backwards (documented-but-absent-from-code becomes shipped-but-absent-from-canon), and the checker cannot see either direction. Read the code before trusting a backfill: this entry was written from `image_platform.py`, not from the HANDOFF one-liners.
+
+**The defect.** Choosing a variant says which one is best. It says **nothing** about the ones left behind. Every picking experiment so far read "not chosen" as "bad" and trained on a lie — a variant can be perfectly usable and simply not the pick.
+
+**The fix — record the missing middle.** Two columns on the variant row (`image_platform.py:298`, `:478`) carry one operator verdict on a variant he did **not** pick:
+
+```python
+VARIANT_VERDICTS = ("still_good", "rejected")   # image_platform.py:1004
+```
+
+- `still_good` — usable, just not the pick.
+- `rejected` — actually bad.
+- `NULL` — the operator never said, which stays **distinct from both**. Silence is not a verdict.
+
+**The pick itself is deliberately NOT in that tuple.** Choosing is already recorded by `ImageNode.chosen_variant_id`; duplicating it as a third verdict would let the two disagree. Read the tuple, never retype the strings.
+
+**Pure data capture.** Nothing in the render / choose / promote paths reads these columns — v886.3 stands, the operator approves every variant himself. This is a label store for future picking work, not a control input.
+
+**A verdict is bound to the image it judged.** It judges one specific rendered image against the prompt it was rendered for, so `_clear_verdict()` (`:1012`) drops it whenever the row survives but the thing it was judging changes; `:7515` is the only invalidation site where a variant row outlives its own image. Picking a variant supersedes any `still_good` / `rejected` tag on it (`:3719`). A stale label is worse than no label, for the same reason a stale QC report reads as a current verdict (v939.2).
+
+**UI (`static/index.html:1118`).** Three-way review split on every non-chosen tile; the two verdict buttons sit in the slot the pick does not use.
+
+### v940.1 — the retro-labelling walk
+
+v940's buttons only ever reach images **from here on**. Everything already picked — months of it — carries the pick and nothing else, which is precisely the conflation v940 exists to kill, aimed at the past instead of the future. `image_platform.py:2907` is the worklist endpoint: generated nodes that finished rendering, **have** a pick, and still have at least one non-chosen variant whose `operator_verdict` is unset — newest first. The labelling itself is still the v940 buttons on the tiles (`static/index.html:19401`, `:20857`); the banner reuses the same shape and tokens as the existing cards. `:2996` and `:3863` are the `[LEDGER]` trace lines until `pick_ledger.py` reads them.
+
+**General lesson, and the reason this is a v-rule rather than a note:** *an absent label and a negative label are different data.* A schema that cannot say "I was never asked" will have that silence read as a judgement by whatever trains on it next.
+
