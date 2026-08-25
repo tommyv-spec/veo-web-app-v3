@@ -3048,6 +3048,108 @@ def map_time_through_keep_segments(t_pre: float, keep_segments) -> float:
     return max(0.0, acc)
 
 
+# === silence_mode='action' — action-aware silence removal (2026-08-25) ===
+# Operator rule, verbatim intent: "i want an entertaining video without long
+# silences (spoken words) but neither of those keep both actions (like
+# blending sounds, or throw action) if not done together with a spoken line."
+# Neither existing mode satisfies it: 'whisper' keeps ONLY script-word
+# windows (a silent throw is cut), 'energy' keeps only loudness above a
+# fixed -29dB floor (a quiet visual action is cut, a noise blip is kept).
+# The action mode keeps the union of three evidence streams — script speech,
+# sound events, visual motion — and cuts only what fails all three.
+
+
+def assemble_action_evidence(silero_spans, anchor_window, event_spans, motion_spans):
+    """Split raw sensor spans into the three keep streams for the action mode.
+
+    - speech  = silero speech CLIPPED to the Whisper anchor window. Speech
+      outside the window is the Veo pad-trailer, which the export cuts today
+      (v692f) and must stay cut. anchor_window=None means Whisper found no
+      anchors — then ALL silero speech is trusted (nothing to clip against).
+    - events  = sound events MINUS any overlap with out-of-window speech
+      (a spoken pad is loud; it must not sneak back in as an 'event').
+    - motion  = passed through (a big physical action wins even during pad
+      speech — the operator keeps actions, full stop).
+    Pure function; all spans are (start_s, end_s) tuples.
+    """
+    if anchor_window:
+        w0, w1 = anchor_window
+    else:
+        w0, w1 = 0.0, float("inf")
+    speech, pad_speech = [], []
+    for s, e in (silero_spans or []):
+        cs, ce = max(s, w0), min(e, w1)
+        if ce > cs:
+            speech.append((cs, ce))
+        if s < w0:
+            pad_speech.append((s, min(e, w0)))
+        if e > w1:
+            pad_speech.append((max(s, w1), e))
+    pad_speech.sort()
+    events = []
+    for s, e in (event_spans or []):
+        for ps, pe in pad_speech:
+            if s < pe and e > ps:
+                if s < ps:
+                    events.append((s, ps))
+                s = pe
+                if s >= e:
+                    break
+        else:
+            if e > s:
+                events.append((s, e))
+    return speech, events, sorted(motion_spans or [])
+
+
+def merge_action_keep_spans(speech, events, motion, total_duration,
+                            min_cut_gap=0.5, breathing_gap=0.3,
+                            min_island=0.4, script_word_count=0):
+    """Decide what survives for silence_mode='action' (pure function).
+
+    keep = union(speech, events, motion). A gap shorter than min_cut_gap
+    (the operator's silence_trigger) is never cut. A kept block containing
+    no speech and shorter than min_island is a noise blip and is dropped —
+    the 0.377s stutter islands measured on job 732b7f8f's energy-mode export
+    are exactly this failure. Every surviving cut keeps breathing_gap of
+    silence, split half on each side, so pacing is uniform instead of the
+    seam-tighter-than-pause rhythm the old modes produce. If the total kept
+    falls under the v706 script floor (0.18s/word, min 1s) the evidence is
+    distrusted and the clip stays whole — losing tightening on one clip is
+    vastly better than losing dialogue.
+    """
+    blocks = sorted(tuple(b) for b in
+                    list(speech or []) + list(events or []) + list(motion or []))
+    if not blocks:
+        return [(0.0, float(total_duration))]
+    merged = [list(blocks[0])]
+    for s, e in blocks[1:]:
+        if s - merged[-1][1] < min_cut_gap:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+
+    def _has_speech(b):
+        return any(ss < b[1] and se > b[0] for ss, se in (speech or []))
+
+    merged = [b for b in merged if _has_speech(b) or (b[1] - b[0]) >= min_island]
+    if not merged:
+        return [(0.0, float(total_duration))]
+    half = breathing_gap / 2.0
+    padded = []
+    for s, e in merged:
+        ps = max(0.0, s - half)
+        pe = min(float(total_duration), e + half)
+        if padded and ps <= padded[-1][1]:
+            padded[-1] = (padded[-1][0], max(padded[-1][1], pe))
+        else:
+            padded.append((ps, pe))
+    kept = sum(e - s for s, e in padded)
+    floor = max(1.0, script_word_count * 0.18)
+    if script_word_count and kept < floor:
+        return [(0.0, float(total_duration))]
+    return [(round(s, 6), round(e, 6)) for s, e in padded]
+
+
 def apply_vad(
     src: Path,
     out: Path,
