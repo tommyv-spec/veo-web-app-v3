@@ -100,7 +100,10 @@ def make_face_detector(width, height):
     def detect(frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
-        return [[x / w, y / h, (x + fw) / w, (y + fh) / h]
+        # Haar's sliding window cannot leave the frame, but clamp anyway so a
+        # future detector swap inherits the same [0,1] contract as YuNet above.
+        return [[max(0.0, x / w), max(0.0, y / h),
+                 min(1.0, (x + fw) / w), min(1.0, (y + fh) / h)]
                 for x, y, fw, fh in cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))]
     return detect
 BUILTIN_TEMPLATES = ["classic", "default", "explosive", "fast", "hype", "line-focus",
