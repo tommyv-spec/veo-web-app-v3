@@ -17690,3 +17690,30 @@ Both are real requirements of the ingest contract and both are currently unverif
 
 **General lesson:** *a green checker answers its own question, not yours.* Before reporting work complete, name which gate you ran and what that gate actually measures — "the check passed" is not a status.
 
+## v943 — PROVE A LIVE SESSION; NEVER INFER ONE (2026-08-25)
+
+Written from the shipping code (`static/firefox_profile_pull.py`, `static/gemini_decode_worker.py`), which is ahead of every session report about it.
+
+**Three instruments were tried and all three lied**, each in the same direction — calling a state true because a proxy for it was present:
+
+1. **A URL substring.** `if "signin" in page.url` declared a fully live profile dead, because Google routes a copied cookie jar to `accounts.google.com/v3/signin/accountchooser`, which *lists* accounts. Fixed in `20dbb84`.
+2. **Page-text length.** Camoufox returns ~55 characters of body text for a perfectly signed-in Gemini (the app renders where `inner_text` does not reach), so a length test called a working session signed out — repeatedly, on 2026-08-13, while the operator was looking at a live window.
+3. **A composer / upload control.** `signed_in()` accepted `button[aria-label*=Upload]` — but the **logged-out** Gemini page has a `+` upload button too, so the check passed on a signed-out page and the Flash-Lite guard below it was never reached. Four decodes on 2026-08-24 ran against a stranger's Gemini and died at extraction with a misleading error.
+
+**The rule: require a positive tell AND the absence of the negative one.**
+
+- **Any visible "Sign in" settles it — count them all.** `.first.is_visible()` is not enough: the logged-out page carries **three** Sign-in controls, and if `.first` is the one Playwright does not call visible, the test falls through. Measured 2026-08-24: `visible_signin == 3` on the page the worker had called "signed in".
+- **The model pill is the only honest positive tell.** Google pins the logged-out page to Flash-Lite; a real session shows the mode the account actually has. Do not go back to probing composer controls.
+
+### v943.1 — three states, not two (the distinction that cost four decodes)
+
+`carries an account` ≠ `is signed in` ≠ `the session is live`. **The account chooser lists REMEMBERED accounts, signed-out ones included.** So the chooser proves the profile *carries* an address; it does **not** prove a usable session. Reading it as "signed in" is exactly what sent four decodes at a logged-out Gemini on 2026-08-24 — the probe was corrected but its output was still over-claimed downstream.
+
+`firefox_profile_pull.py:252-263` now says only what it proved: `carries an account for` via the chooser, `signed in as` via myaccount — and **liveness is `session_is_live()`'s job, not the probe's.** This supersedes the earlier framing that "the chooser appearing is positive evidence of a live login": it is positive evidence of a remembered account and nothing more.
+
+**Reading the jar at all requires the `-wal`.** A plain copy of `cookies.sqlite` measures a stale snapshot; `_read_cookies_wal_applied()` and the `cookies.sqlite-wal` / `-shm` copy list exist because that single omission produced a false "the account was revoked" conclusion that was written into HANDOFF as fact and had a hard gate built on top of it.
+
+**Never probe an account by replaying its cookies at an account-security surface.** Testing a jar at `myaccount.google.com` signed the operator out **everywhere, including his own desktop Firefox**, across ~13 profiles — same credentials, non-browser client, account-security surface. The function was deleted; `1685445` removed the cookie-replay liveness probe entirely.
+
+**General lesson:** *a control that exists on both sides of a boundary cannot tell you which side you are on.* Before trusting a signal, ask what the FAILING state looks like — all three instruments above were only ever tested against the state they were expected to find.
+
