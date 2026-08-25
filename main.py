@@ -4251,7 +4251,12 @@ import instagram_match as _ig_match
 
 class CreateInstagramAccountRequest(BaseModel):
     handle: str
-    api_key: str
+    # Either a raw HikerAPI key, or copy_key_from = id of an already-connected
+    # account whose ENCRYPTED key gets reused as-is. The key never travels back
+    # to a client; reusing it server-side is what lets a new handle be added
+    # from a machine that does not hold the secret.
+    api_key: str = ""
+    copy_key_from: Optional[int] = None
 
 
 class MatchInstagramVideoRequest(BaseModel):
@@ -4296,10 +4301,19 @@ async def create_instagram_account(
     existing = db.query(InstagramAccount).filter_by(user_id=current_user.id, handle=handle).first()
     if existing:
         raise HTTPException(409, detail="Handle already linked")
+    if req.copy_key_from is not None:
+        src = _get_user_ig_account(db, req.copy_key_from, current_user)
+        key_encrypted = src.api_key_encrypted
+        print(f"[ig-accounts] @{handle}: reusing encrypted HikerAPI key of "
+              f"account {src.id} @{src.handle}", flush=True)  # TEMP diagnostic
+    elif (req.api_key or "").strip():
+        key_encrypted = _enc_encrypt(req.api_key.strip())
+    else:
+        raise HTTPException(400, detail="Give api_key or copy_key_from")
     acc = InstagramAccount(
         user_id=current_user.id,
         handle=handle,
-        api_key_encrypted=_enc_encrypt(req.api_key.strip()),
+        api_key_encrypted=key_encrypted,
     )
     db.add(acc)
     db.commit()
