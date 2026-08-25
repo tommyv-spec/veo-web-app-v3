@@ -74,18 +74,18 @@ class DeploySafetyTests(unittest.TestCase):
         ):
             self.assertTrue(check_deploy_safety.is_text_path(path), path)
 
-    def test_removed_line_blocks(self):
+    def test_deliberate_line_replacement_is_reported_but_passes(self):
         (self.repo / "notes.md").write_text("replacement note\n", encoding="utf-8")
         candidate = commit(self.repo, "remove line")
         result = check(self.repo, candidate, self.base)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("CONTENT LOSS", result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("REPLACEMENT ACCOUNTING", result.stdout)
 
-    def test_removed_duplicate_blocks(self):
+    def test_removed_duplicate_is_reported_but_passes(self):
         (self.repo / "app.py").write_text("print('keep')\nprint('duplicate')\n", encoding="utf-8")
         candidate = commit(self.repo, "remove one duplicate")
         result = check(self.repo, candidate, self.base)
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("app.py (1)", result.stdout)
 
     def test_broken_changed_python_blocks_even_when_loss_is_allowed(self):
@@ -112,7 +112,40 @@ class DeploySafetyTests(unittest.TestCase):
         candidate = commit(self.repo, "delete notes")
         result = check(self.repo, candidate, self.base, "--allow-loss")
         self.assertEqual(result.returncode, 0)
-        self.assertIn("loss acknowledged", result.stdout)
+        self.assertIn("deletion allowed via --allow-loss", result.stdout)
+
+    def test_malformed_script_markup_blocks_html_deploy(self):
+        static = self.repo / "static"
+        static.mkdir()
+        page = static / "index.html"
+        page.write_text(
+            "<html><script>const ok = true;</script></html>\n", encoding="utf-8"
+        )
+        base = commit(self.repo, "add valid page")
+        page.write_text("<html><script const broken = ;</html>\n", encoding="utf-8")
+        candidate = commit(self.repo, "break script markup")
+
+        result = check(self.repo, candidate, base)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("no complete <script>...</script> block", result.stdout)
+        self.assertIn("RESULT: FAIL", result.stdout)
+
+    def test_removing_all_script_markup_from_scripted_page_blocks(self):
+        static = self.repo / "static"
+        static.mkdir()
+        page = static / "index.html"
+        page.write_text(
+            "<html><script>const ok = true;</script></html>\n", encoding="utf-8"
+        )
+        base = commit(self.repo, "add scripted page")
+        page.write_text("<html>const broken = ;</html>\n", encoding="utf-8")
+        candidate = commit(self.repo, "remove script markup")
+
+        result = check(self.repo, candidate, base)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("no complete <script>...</script> block", result.stdout)
 
 
 if __name__ == "__main__":

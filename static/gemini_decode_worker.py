@@ -292,14 +292,17 @@ def signed_in(page):
     # visible_signin == 3 on the page the worker called "signed in").
     try:
         loc = page.locator("button:has-text('Sign in'), a:has-text('Sign in')")
-        for i in range(loc.count()):
+        sign_in_count = loc.count()
+        for i in range(sign_in_count):
             try:
                 if loc.nth(i).is_visible():
                     return False
             except Exception:
-                continue
+                # "Could not inspect the negative" is not proof that it is
+                # absent. ensure_session retries, so fail closed here.
+                return False
     except Exception:
-        pass
+        return False
 
     # THE MODEL PILL IS THE ONLY HONEST TELL. Do not go back to probing for
     # composer controls. This function used to accept `button[aria-label*=Upload]`

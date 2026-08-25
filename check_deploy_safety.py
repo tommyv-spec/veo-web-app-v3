@@ -41,7 +41,9 @@ WHAT STILL FAILS
      Never acknowledgeable.
   2. DELETED FILES — a whole text file present on main and absent from the
      push. Rare + highest blast radius, so it keeps the --ack ceremony.
-  3. SYNTAX — every changed .py file must parse. Never acknowledgeable.
+  3. SYNTAX — every changed .py file and every inline-JS block in changed HTML
+     must parse. Script markup that cannot be extracted is unverified and blocks.
+     Never acknowledgeable.
 
 Trivial lines (blank, pure punctuation, closing braces/fences) are ignored so
 reformatting does not cause noise.
@@ -330,7 +332,21 @@ def main(argv):
                 if reason:
                     unverified.append("%s inline JS: %s" % (path, reason))
                     continue
-                for m in re.finditer(r"<script([^>]*)>(.*?)</script\s*>", txt, re.S | re.I):
+                script_matches = list(re.finditer(
+                    r"<script([^>]*)>(.*?)</script\s*>", txt, re.S | re.I))
+                # A malformed opening/closing tag can make the extractor find
+                # zero blocks. Treat that as unreadable, not as "zero syntax
+                # errors". This exact shape previously let a broken page pass:
+                # the candidate still contained <script, but no complete pair.
+                base_txt, _ = blob(args.main, path)
+                base_had_script = bool(
+                    base_txt and re.search(r"<script\b", base_txt, re.I))
+                if (base_had_script or re.search(r"<script\b", txt, re.I)) and not script_matches:
+                    unverified.append(
+                        "%s inline JS: script markup exists but no complete "
+                        "<script>...</script> block could be extracted" % path)
+                    continue
+                for m in script_matches:
                     attrs, body = m.group(1), m.group(2)
                     if re.search(r"""\bsrc\s*=\s*["']""", attrs, re.I) or not body.strip():
                         continue

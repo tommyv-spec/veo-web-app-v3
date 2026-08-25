@@ -256,7 +256,8 @@ def _probe_google_emails_inproc(profile_dir, log=print):
                     # accounts, signed-out ones included, so "signed in" was a
                     # claim this probe cannot make — and reading it as one is
                     # what sent four decodes at a logged-out Gemini on
-                    # 2026-08-24. Liveness is session_is_live()'s job.
+                    # 2026-08-24. Liveness is the Gemini worker's signed_in()
+                    # check, not this identity probe's job.
                     proven = ("carries an account for" if where == "account chooser"
                               else "signed in as")
                     log(f"[ff-pull] {os.path.basename(profile_dir)} {proven} "
@@ -401,12 +402,10 @@ def build_firefox_golden_from_profile(email, golden_folder, label="",
             log(f"{tag}ff-pull: no source profile - worker will ask for a manual sign-in")
             return False
 
-        # NOTE: deliberately NOT probing myaccount.google.com here. `session_is_live`
-        # exists for diagnosis and stays callable by hand, but it is off the build
-        # path on purpose: myaccount is an account-MANAGEMENT surface and touching
-        # it with a freshly copied jar invites the very password challenge this
-        # lane cannot answer. The browser's own SSO handshake is both the cheaper
-        # and the more accurate test, and it runs a moment later anyway.
+        # Do not add a separate request-based cookie liveness probe here. Profile
+        # lookup may resolve WHICH account a real browser profile carries, but it
+        # does not claim that Gemini can use the session. The Gemini worker's own
+        # signed_in() check proves that after launch and retries safely if unsure.
 
         staged = golden_folder + ".ffpull-tmp"
         shutil.rmtree(staged, ignore_errors=True)
