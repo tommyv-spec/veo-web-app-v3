@@ -17717,3 +17717,34 @@ Written from the shipping code (`static/firefox_profile_pull.py`, `static/gemini
 
 **General lesson:** *a control that exists on both sides of a boundary cannot tell you which side you are on.* Before trusting a signal, ask what the FAILING state looks like — all three instruments above were only ever tested against the state they were expected to find.
 
+## v942 — A SHARED-TREE GATE JUDGES WHAT YOU STAGED, NOT THE WHOLE TREE (2026-08-25)
+
+**The failure.** A dozen sessions share ONE working tree. `tools/check_raw_coverage.py` ran repo-wide from `.githooks/pre-commit`, so an un-ingested `raw/` file belonging to *any* session failed the gate for *every* session. On 2026-08-24 it blocked three independently: a routine one-path submodule bump, three finished commits, and a rule-index half-landing. None of the three owned the file that blocked them.
+
+**Measured before changing anything** (last 200 commits):
+
+| | commits | effect of scoping |
+|---|---|---|
+| stage ≥1 raw source | **11 (6%)** | still gated, exactly as before |
+| stage no raw source | **189 (94%)** | can only ever be blocked by someone else's work |
+
+So the repo-wide scope protected nothing on 94% of commits and could only hurt them. When raw *is* staged it is a median of 1 file (max 12).
+
+**The change.** `--staged` scopes only the ORPHAN verdict: an un-routed source this commit does not stage is reported on a new `deferred` list instead of failing. The hook now passes `--staged`; running the tool with no flag is still the full repo-wide blocking audit, so nothing is lost for a deliberate sweep or CI.
+
+**Three deliberate limits — this is a narrowing, not a weakening:**
+
+1. **Route-file integrity still fails repo-wide.** A malformed `tools/raw_source_routes.txt` (missing owner, non-canonical source, `ROUTED` owner outside `wiki/`) is broken for everybody, not just its author.
+2. **Nothing is hidden.** Deferred orphans print as `NOT YOURS (n)` with the paths — the report-don't-block pattern §16.5 already uses for commit scope. Silence would let orphans accumulate unnoticed, which is the failure this gate exists to prevent.
+3. **`git could not tell me` ≠ `nothing is staged`.** `_staged_files()` returns `None` on a git failure and the caller falls back to repo-wide. An empty set would have silently converted the gate into a no-op — the single most dangerous way to write this.
+
+**Verified on an isolated fixture repo** (the shared tree was never touched), all four cases:
+
+| case | repo-wide | `--staged` |
+|---|---|---|
+| everything routed | PASS | PASS |
+| another session's orphan, not staged by me | **FAIL** ← the bug | **PASS** + `NOT YOURS` |
+| an orphan I staged myself | FAIL | **FAIL** ← protection kept |
+
+**General lesson:** *on a shared tree, a gate's scope must match what the committer can actually control.* A check that fails on someone else's unfinished work teaches people to bypass it, which costs more than the orphan it was guarding against. The sibling precedents were already in the same hook — `check_ingest.py --staged`, and `62ff1e0` scoping the canon-drift gate.
+
