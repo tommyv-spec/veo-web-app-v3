@@ -36,9 +36,10 @@ class AutoEditQcTests(unittest.TestCase):
 
     def test_caption_overlap_reports_vertical_pixels(self):
         buckets = [{"t": 0.5, "faces": [[0.2, 0.4, 0.8, 0.6]]}]
-        windows = [(0.0, 1.0, 0.0)]  # caption band 0.425-0.575
+        windows = [(0.0, 1.0, 0.0)]  # caption band 0.415-0.585 (0.17 = the planner's reserve)
         result = caption_face_overlap_metrics(buckets, windows)
-        self.assertAlmostEqual(result["worst_vertical_px"], 288.0)
+        # overlap 0.415-0.585 vs face 0.40-0.60 -> 0.17 of a 1920-tall frame
+        self.assertAlmostEqual(result["worst_vertical_px"], 326.4)
         self.assertEqual(result["seconds_checked"], 1)
 
     def test_qc_report_routes_failures_to_manual_edit(self):
