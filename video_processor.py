@@ -3101,6 +3101,131 @@ def assemble_action_evidence(silero_spans, anchor_window, event_spans, motion_sp
     return speech, events, sorted(motion_spans or [])
 
 
+def _event_spans_from_envelope(db_env, hop_s, speech_spans,
+                               floor_db=-45.0, rel_db=18.0,
+                               min_event_s=0.2, join_gap_s=0.2):
+    """Sound-event spans from a per-window dB envelope (pure function).
+
+    The threshold is RELATIVE to the clip's own voice: reference = median dB
+    inside the known speech spans (fallback: 90th percentile of the whole
+    envelope minus 10). threshold = max(floor_db, reference - rel_db). This
+    is what lets a blender count while room hum does not, and what the old
+    energy mode's fixed -29dB floor could never do — a quiet pour under a
+    quiet voice stayed "silence" there. Windows already inside speech spans
+    are NOT emitted as events (they are speech evidence, reported separately).
+    """
+    if not db_env:
+        return []
+
+    def _in_speech(t):
+        return any(s <= t < e for s, e in (speech_spans or []))
+
+    speech_vals = [v for i, v in enumerate(db_env) if _in_speech(i * hop_s)]
+    if speech_vals:
+        sv = sorted(speech_vals)
+        ref = sv[len(sv) // 2]
+    else:
+        sv = sorted(db_env)
+        ref = sv[min(len(sv) - 1, int(len(sv) * 0.9))] - 10.0
+    threshold = max(floor_db, ref - rel_db)
+    spans = []
+    for i, v in enumerate(db_env):
+        t = i * hop_s
+        if v < threshold or _in_speech(t):
+            continue
+        if spans and t - spans[-1][1] <= join_gap_s:
+            spans[-1][1] = t + hop_s
+        else:
+            spans.append([t, t + hop_s])
+    return [(s, e) for s, e in spans if e - s >= min_event_s]
+
+
+def _rms_event_spans(wav_path, speech_spans):
+    """dB envelope (50ms windows) of a 16k mono wav -> sound-event spans."""
+    import math
+    import numpy as np
+    import soundfile as sf
+    data, sr = sf.read(str(wav_path), dtype="float32", always_2d=False)
+    if getattr(data, "ndim", 1) > 1:
+        data = data.mean(axis=1)
+    hop = int(sr * 0.05)
+    if hop <= 0 or len(data) < hop:
+        return []
+    n = len(data) // hop
+    env = []
+    for i in range(n):
+        w = data[i * hop:(i + 1) * hop]
+        rms = float(np.sqrt(np.mean(w * w))) if len(w) else 0.0
+        env.append(20.0 * math.log10(rms + 1e-9))
+    return _event_spans_from_envelope(env, hop / sr, speech_spans)
+
+
+def _silero_spans(wav_path):
+    """silero-VAD speech spans (seconds) for a 16k mono wav. Same loading
+    pattern as v773.10.16 (soundfile, not torchaudio)."""
+    from silero_vad import get_speech_timestamps
+    import soundfile as sf
+    import torch
+    data, sr = sf.read(str(wav_path), dtype="float32", always_2d=False)
+    if getattr(data, "ndim", 1) > 1:
+        data = data.mean(axis=1)
+    ts = get_speech_timestamps(
+        torch.from_numpy(data), _ensure_silero_vad(),
+        sampling_rate=sr, min_silence_duration_ms=300, speech_pad_ms=40)
+    return [(t["start"] / float(sr), t["end"] / float(sr)) for t in ts]
+
+
+def _motion_spans(video_path, active_share=0.10, sample_fps=6.0,
+                  min_span_s=0.3, join_gap_s=0.35, pixel_delta=12):
+    """Visual-action spans: times where a large SHARE of the picture changes.
+
+    Share-of-pixels-changed, not mean difference, is the discriminator: a
+    talking head (lips + small gestures) moves ~1-5% of a 160px frame between
+    samples; a throw, a pour, a pan, a person entering moves well over 10%.
+    That is what keeps a quiet physical action while NOT keeping the Veo
+    pad-trailer just because the speaker gestures through it.
+    """
+    import cv2
+    import numpy as np
+    cap = cv2.VideoCapture(str(video_path))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+    step = max(1, int(round(fps / sample_fps)))
+    spans, prev, frame_idx = [], None, 0
+    shares = []
+    while True:
+        ok = cap.grab()
+        if not ok:
+            break
+        if frame_idx % step == 0:
+            ok, frame = cap.retrieve()
+            if not ok:
+                break
+            h, w = frame.shape[:2]
+            small = cv2.resize(frame, (160, max(1, int(h * 160 / w))))
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            if prev is not None and prev.shape == gray.shape:
+                diff = cv2.absdiff(gray, prev)
+                share = float(np.count_nonzero(diff > pixel_delta)) / diff.size
+                shares.append(share)
+                t = frame_idx / fps
+                if share >= active_share:
+                    if spans and t - spans[-1][1] <= join_gap_s:
+                        spans[-1][1] = t
+                    else:
+                        spans.append([t, t])
+            prev = gray
+        frame_idx += 1
+    cap.release()
+    out = [(s, max(e, s) + step / fps) for s, e in spans
+           if (e - s) + step / fps >= min_span_s]
+    if shares:
+        srt = sorted(shares)
+        print(f"[ActionVAD] motion share: median={srt[len(srt)//2]:.3f} "
+              f"p90={srt[int(len(srt)*0.9)]:.3f} max={srt[-1]:.3f} "
+              f"active>={active_share:.2f} -> {len(out)} span(s)", flush=True)
+    return out
+
+
 def merge_action_keep_spans(speech, events, motion, total_duration,
                             min_cut_gap=0.5, breathing_gap=0.3,
                             min_island=0.4, script_word_count=0):

@@ -91,3 +91,38 @@ def test_no_evidence_keeps_full_clip():
         speech=[], events=[], motion=[],
         total_duration=6.0, min_cut_gap=0.5, breathing_gap=0.3)
     assert spans == [(0.0, 6.0)], spans
+
+
+def test_event_threshold_is_relative_to_the_voice():
+    # Synthetic dB envelope at 50ms hop over 10s: floor -60, speech -20 at
+    # 0-2s, blender -25 at 5-7s. The threshold derives from the SPEECH level
+    # (-20 - 18 = -38), so the -25 blender is an event and the -60 floor is
+    # not. A fixed -29dB floor would also pass here; the relative test is
+    # test_quiet_voice below.
+    from video_processor import _event_spans_from_envelope
+    hop = 0.05
+    n = int(10.0 / hop)
+    env = [-60.0] * n
+    for i in range(0, int(2.0 / hop)):
+        env[i] = -20.0
+    for i in range(int(5.0 / hop), int(7.0 / hop)):
+        env[i] = -25.0
+    spans = _event_spans_from_envelope(env, hop, speech_spans=[(0.0, 2.0)])
+    assert any(abs(s - 5.0) < 0.11 and abs(e - 7.0) < 0.11 for s, e in spans), spans
+    assert not any(s >= 7.5 for s, e in spans), spans
+
+
+def test_quiet_voice_lowers_the_event_threshold():
+    # A quiet TTS voice at -35dB: threshold becomes max(-45, -35-18) = -45,
+    # so a -42dB pour still counts as an event. The old energy mode's fixed
+    # -29dB floor would have cut it as silence.
+    from video_processor import _event_spans_from_envelope
+    hop = 0.05
+    n = int(10.0 / hop)
+    env = [-70.0] * n
+    for i in range(0, int(2.0 / hop)):
+        env[i] = -35.0
+    for i in range(int(5.0 / hop), int(6.0 / hop)):
+        env[i] = -42.0
+    spans = _event_spans_from_envelope(env, hop, speech_spans=[(0.0, 2.0)])
+    assert any(s < 5.2 and e > 5.8 for s, e in spans), spans
