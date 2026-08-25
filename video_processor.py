@@ -3208,23 +3208,28 @@ def _silero_spans(wav_path):
     return [(t["start"] / float(sr), t["end"] / float(sr)) for t in ts]
 
 
-def _motion_spans(video_path, active_share=0.10, sample_fps=6.0,
+def _motion_spans(video_path, sample_fps=6.0,
                   min_span_s=0.3, join_gap_s=0.35, pixel_delta=12):
-    """Visual-action spans: times where a large SHARE of the picture changes.
+    """Visual-action spans: times where NOTABLY MORE of the picture changes
+    than this clip's own baseline.
 
-    Share-of-pixels-changed, not mean difference, is the discriminator: a
-    talking head (lips + small gestures) moves ~1-5% of a 160px frame between
-    samples; a throw, a pour, a pan, a person entering moves well over 10%.
-    That is what keeps a quiet physical action while NOT keeping the Veo
-    pad-trailer just because the speaker gestures through it.
+    Measured on real footage (job 732b7f8f, 2026-08-25): an absolute share
+    threshold cannot work — a car scene's moving background sits at 23%
+    median share while the persona just talks, while a kitchen palm-raise
+    action peaks at 34% over a 6% talking baseline. So the threshold is
+    RELATIVE: active = share >= clamp(2.5 x clip median, 0.03, 0.15).
+    The 0.15 ceiling means a constantly-moving background over-KEEPS (its
+    pauses survive) rather than masking real actions — the safe direction.
+    A silent continuous-action clip is not at risk here: clips with no
+    dialogue never enter the VAD loop at all (v691d skips them whole).
     """
     import cv2
     import numpy as np
     cap = cv2.VideoCapture(str(video_path))
     fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
     step = max(1, int(round(fps / sample_fps)))
-    spans, prev, frame_idx = [], None, 0
-    shares = []
+    prev, frame_idx = None, 0
+    samples = []  # (t, share)
     while True:
         ok = cap.grab()
         if not ok:
@@ -3238,24 +3243,30 @@ def _motion_spans(video_path, active_share=0.10, sample_fps=6.0,
             gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
             if prev is not None and prev.shape == gray.shape:
                 diff = cv2.absdiff(gray, prev)
-                share = float(np.count_nonzero(diff > pixel_delta)) / diff.size
-                shares.append(share)
-                t = frame_idx / fps
-                if share >= active_share:
-                    if spans and t - spans[-1][1] <= join_gap_s:
-                        spans[-1][1] = t
-                    else:
-                        spans.append([t, t])
+                samples.append((frame_idx / fps,
+                                float(np.count_nonzero(diff > pixel_delta)) / diff.size))
             prev = gray
         frame_idx += 1
     cap.release()
+    if not samples:
+        return []
+    srt = sorted(s for _, s in samples)
+    median = srt[len(srt) // 2]
+    threshold = min(0.15, max(0.03, 2.5 * median))
+    spans = []
+    for t, share in samples:
+        if share < threshold:
+            continue
+        if spans and t - spans[-1][1] <= join_gap_s:
+            spans[-1][1] = t
+        else:
+            spans.append([t, t])
     out = [(s, max(e, s) + step / fps) for s, e in spans
            if (e - s) + step / fps >= min_span_s]
-    if shares:
-        srt = sorted(shares)
-        print(f"[ActionVAD] motion share: median={srt[len(srt)//2]:.3f} "
-              f"p90={srt[int(len(srt)*0.9)]:.3f} max={srt[-1]:.3f} "
-              f"active>={active_share:.2f} -> {len(out)} span(s)", flush=True)
+    print(f"[ActionVAD] motion share: median={median:.3f} "
+          f"p90={srt[int(len(srt)*0.9)]:.3f} max={srt[-1]:.3f} "
+          f"threshold={threshold:.3f} (2.5x median, clamped) -> {len(out)} span(s)",
+          flush=True)
     return out
 
 
