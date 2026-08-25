@@ -442,8 +442,22 @@ def _whisper_anchor_trim(
     dialogue_texts,
     whisper_model=None,
     language: str = "English",
+    return_details: bool = False,
 ):
+    # return_details=True (action mode, 2026-08-25): returns (spans, details)
+    # where details = {"window": (start, end) | None, "heard_words": [...],
+    # "script_tokens": [...], "wav_path": str | None}. The extracted 16k wav
+    # is KEPT and handed to the caller (who owns cleanup) so the silero + RMS
+    # sensors reuse it instead of extracting again. window=None means the
+    # anchors were not trusted (no match / <30% kept) — the trim spans are
+    # then full-clip exactly as the legacy return, and the caller decides.
     import tempfile, re as _re
+
+    def _result(spans, window, heard=None, tokens=None, wav=None):
+        if not return_details:
+            return spans
+        return spans, {"window": window, "heard_words": heard or [],
+                       "script_tokens": tokens or [], "wav_path": wav}
     # v773.10.13 — tight cut: exactly +1 frame of audio buffer before the
     # first script word and after the last script word. Operator wants the
     # final export trimmed flush to the line boundaries with minimal safety.
@@ -470,7 +484,7 @@ def _whisper_anchor_trim(
             if _t:
                 script_tokens.append(_t)
     if not script_tokens:
-        return [(0.0, total_duration)]
+        return _result([(0.0, total_duration)], None)
 
     # Extract 16kHz mono wav for Whisper
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _tmp:
@@ -485,13 +499,14 @@ def _whisper_anchor_trim(
             _os_ext.unlink(_audio_path)  # v773.10.18 — don't leak the temp wav on the fail path
         except Exception:
             pass
-        return [(0.0, total_duration)]
+        return _result([(0.0, total_duration)], None)
 
     # v773.10.9 — use a dedicated Whisper-base lazy singleton (~150 MB int8).
     # 2-3× lower WER than tiny on the same audio, especially on rare vocab.
     # We IGNORE the caller-supplied tiny model: it's still pre-loaded by the
     # legacy V708/V731 callsite, which wastes ~50 MB while ALIGN_ENABLED=1,
     # but switching the caller is out of scope for this hot-fix.
+    _transcribed_ok = False
     try:
         whisper_model = _ensure_whisper_base()
 
@@ -539,17 +554,25 @@ def _whisper_anchor_trim(
                         })
     except Exception as _e:
         print(f"[WhisperAnchor] transcribe failed: {_e!r} — keeping full clip", flush=True)
-        return [(0.0, total_duration)]
+        _transcribed_ok = False
+        return _result([(0.0, total_duration)], None)
+    else:
+        _transcribed_ok = True
     finally:
-        try:
-            import os as _os2
-            _os2.unlink(_audio_path)
-        except Exception:
-            pass
+        # return_details callers get the wav handed to them (they own the
+        # cleanup) — but only on transcribe success; the fail path above
+        # must not leak it.
+        if not (return_details and _transcribed_ok):
+            try:
+                import os as _os2
+                _os2.unlink(_audio_path)
+            except Exception:
+                pass
 
     if not whisper_words:
         print("[WhisperAnchor] no whisper words — keeping full clip (no trim)", flush=True)
-        return [(0.0, total_duration)]
+        return _result([(0.0, total_duration)], None,
+                       heard=[], tokens=script_tokens, wav=_audio_path)
 
     # v773.10.15 — dump Whisper transcription per clip so operator can
     # see what the model actually heard vs the script. Each entry is
@@ -641,7 +664,8 @@ def _whisper_anchor_trim(
             "(Whisper-base + hotwords couldn't match any of first/last 5 script words)",
             flush=True,
         )
-        return [(0.0, total_duration)]
+        return _result([(0.0, total_duration)], None,
+                       heard=whisper_words, tokens=script_tokens, wav=_audio_path)
     if start_anchor is None:
         # Pseudo-anchor at audio start; effectively disables HEAD_PAD trim
         start_anchor = {"start": 0.0, "end": 0.0, "text": "<KEEP_FROM_0>"}
@@ -686,7 +710,8 @@ def _whisper_anchor_trim(
             f"anchors unreliable, keeping full clip (no trim)",
             flush=True,
         )
-        return [(0.0, total_duration)]
+        return _result([(0.0, total_duration)], None,
+                       heard=whisper_words, tokens=script_tokens, wav=_audio_path)
 
     # v773.10.14 — silero-VAD safety-net: extend the keep window to encompass
     # the actual speech regions that overlap our Whisper anchor window. Silero
@@ -696,11 +721,17 @@ def _whisper_anchor_trim(
     try:
         import tempfile as _tf
         import os as _os3
-        with _tf.NamedTemporaryFile(suffix=".wav", delete=False) as _vt:
-            _vad_audio_path = _vt.name
-        _vc = [FFMPEG_BIN, "-y", "-i", str(video_path), "-ar", "16000",
-               "-ac", "1", "-f", "wav", _vad_audio_path]
-        _vc_code, _, _ = run(_vc)
+        if return_details:
+            # The transcription wav is still on disk (handed to the caller
+            # at the end) — reuse it instead of extracting a second time.
+            _vad_audio_path = _audio_path
+            _vc_code = 0
+        else:
+            with _tf.NamedTemporaryFile(suffix=".wav", delete=False) as _vt:
+                _vad_audio_path = _vt.name
+            _vc = [FFMPEG_BIN, "-y", "-i", str(video_path), "-ar", "16000",
+                   "-ac", "1", "-f", "wav", _vad_audio_path]
+            _vc_code, _, _ = run(_vc)
         if _vc_code == 0:
             try:
                 from silero_vad import get_speech_timestamps as _gst
@@ -792,10 +823,11 @@ def _whisper_anchor_trim(
                         flush=True,
                     )
             finally:
-                try:
-                    _os3.unlink(_vad_audio_path)
-                except Exception:
-                    pass
+                if not return_details:  # caller owns the shared wav's cleanup
+                    try:
+                        _os3.unlink(_vad_audio_path)
+                    except Exception:
+                        pass
     except Exception as _ve:
         print(f"[WhisperAnchor] silero extension skipped: {_ve!r}", flush=True)
 
@@ -807,7 +839,8 @@ def _whisper_anchor_trim(
         f"(orig {total_duration:.2f}s, dropped {total_duration-(keep_end-keep_start):.2f}s)",
         flush=True,
     )
-    return [(keep_start, keep_end)]
+    return _result([(keep_start, keep_end)], (keep_start, keep_end),
+                   heard=whisper_words, tokens=script_tokens, wav=_audio_path)
 
 
 def detect_speech_segments_whisper(
