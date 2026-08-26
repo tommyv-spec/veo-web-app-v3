@@ -159,3 +159,100 @@ def test_resync_import_refreshes_the_spec_too():
     src = _src("image_platform.py")
     resync = src.index("if resync_batch is not None:")
     assert "finishing_spec" in src[resync:resync + 2000]
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — queue_autoedit derives its defaults from the job's spec
+# ---------------------------------------------------------------------------
+
+def test_derive_autoedit_defaults_from_spec():
+    from main import derive_autoedit_defaults
+    spec = {"captions": "none", "overlay": "readcaption", "overlay_age": "I'M 74"}
+    req = {"template": "korella", "captions_enabled": True}   # user sent defaults
+    out = derive_autoedit_defaults(req, spec, request_was_explicit=set())
+    assert out["captions_enabled"] is False
+    assert out["overlay_spec"] == spec
+
+
+def test_explicit_request_beats_the_spec():
+    from main import derive_autoedit_defaults
+    spec = {"captions": "none", "overlay": "none"}
+    out = derive_autoedit_defaults({"captions_enabled": True}, spec,
+                                   request_was_explicit={"captions_enabled"})
+    assert out["captions_enabled"] is True
+
+
+def test_no_spec_changes_nothing():
+    from main import derive_autoedit_defaults
+    req = {"template": "korella", "captions_enabled": True}
+    assert derive_autoedit_defaults(dict(req), None, set()) == {**req, "overlay_spec": None}
+
+
+def test_derive_does_not_mutate_the_request_it_was_given():
+    from main import derive_autoedit_defaults
+    req = {"template": "korella", "captions_enabled": True}
+    derive_autoedit_defaults(req, {"captions": "none", "overlay": "none"}, set())
+    assert req == {"template": "korella", "captions_enabled": True}
+
+
+def test_named_caption_template_turns_captions_on_and_picks_the_style():
+    from main import derive_autoedit_defaults
+    out = derive_autoedit_defaults({"template": "korella", "captions_enabled": False},
+                                   {"captions": "word-focus", "overlay": "none"}, set())
+    assert out["template"] == "word-focus"
+    assert out["captions_enabled"] is True
+    assert out["overlay_spec"] is None
+
+
+def test_explicit_template_beats_the_spec_template():
+    from main import derive_autoedit_defaults
+    out = derive_autoedit_defaults({"template": "korella", "captions_enabled": True},
+                                   {"captions": "word-focus", "overlay": "none"},
+                                   request_was_explicit={"template"})
+    assert out["template"] == "korella"
+
+
+def test_overlay_none_carries_no_overlay_spec():
+    from main import derive_autoedit_defaults
+    out = derive_autoedit_defaults({}, {"captions": "korella", "overlay": "none"}, set())
+    assert out["overlay_spec"] is None
+
+
+def test_queue_autoedit_calls_the_derive_and_rides_repair_json():
+    """The spec travels to the worker INSIDE repair_json — the field that
+    already round-trips (server claim + local worker both hand it back to
+    run_autoedit). No new AutoEditRun column to migrate."""
+    main = _src("main.py")
+    q = main.index("async def queue_autoedit")
+    body = main[q:q + 8000]
+    assert "derive_autoedit_defaults" in body
+    assert "finishing_spec" in body
+    assert "overlay_spec" in body
+    assert "model_fields_set" in body
+
+
+def test_overlay_spec_is_a_known_repair_setting():
+    """normalize_repairs rejects unknown keys outright, so a repair that is not
+    declared in DEFAULT_REPAIRS is a 400 at queue time, not a feature."""
+    from autoedit_qc import DEFAULT_REPAIRS, normalize_repairs
+    assert "overlay_spec" in DEFAULT_REPAIRS
+    assert DEFAULT_REPAIRS["overlay_spec"] is None
+    assert normalize_repairs({})["overlay_spec"] is None
+    spec = {"overlay": "readcaption", "overlay_age": "I'M 74"}
+    assert normalize_repairs({"overlay_spec": spec})["overlay_spec"] == spec
+
+
+def test_bad_overlay_spec_is_rejected_at_queue_time():
+    from autoedit_qc import normalize_repairs
+    with pytest.raises(ValueError):
+        normalize_repairs({"overlay_spec": "readcaption"})       # not a dict
+    with pytest.raises(ValueError):
+        normalize_repairs({"overlay_spec": {"overlay": "stickers"}})
+    with pytest.raises(ValueError):
+        normalize_repairs({"overlay_spec": {"overlay": "readcaption"}})   # no age
+
+
+def test_autoedit_request_accepts_an_overlay_spec():
+    from main import AutoEditRequest
+    assert "overlay_spec" in AutoEditRequest.model_fields
+    assert AutoEditRequest().overlay_spec is None

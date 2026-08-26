@@ -31,6 +31,16 @@ DEFAULT_REPAIRS = {
     # white interview frame behind the corner speaker, and it reads the same as
     # a moving b-roll.
     "hook_bg": None,
+    # v944 — the read-caption text overlay, as the build declared it:
+    #   {"overlay": "readcaption", "overlay_age": "I'M 74",
+    #    "overlay_block": [...], "overlay_footer": "(READ CAPTION)"}
+    # None = no overlay, which is every run that existed before this key.
+    #
+    # It rides HERE, inside repair_json, rather than on a new AutoEditRun
+    # column: repair_json already round-trips to both workers (the server claim
+    # and the local one each hand it straight back to run_autoedit), so there
+    # is nothing to migrate and nothing new to keep in sync.
+    "overlay_spec": None,
 }
 
 HOOK_BG_EXTENSIONS = {".mp4", ".mov", ".png", ".jpg", ".jpeg", ".webp"}
@@ -105,6 +115,37 @@ def normalize_repairs(value=None):
             raise ValueError("Hook background must be a plain output filename ending in "
                              "mp4, mov, png, jpg, jpeg or webp")
         out["hook_bg"] = bg
+
+    # v944 — the text overlay. Validated HERE and not at render time: the
+    # worker is the one place where a bad value costs a full download and
+    # minutes of rendering before it says anything.
+    ov = out.get("overlay_spec")
+    if ov in (None, "", {}):
+        out["overlay_spec"] = None
+    elif not isinstance(ov, dict):
+        raise ValueError("Overlay spec must be an object, or omitted for no overlay")
+    else:
+        engine = str(ov.get("overlay") or "").strip().lower()
+        if engine != "readcaption":
+            raise ValueError(
+                "Overlay engine must be 'readcaption' (the only engine there is)")
+        if not str(ov.get("overlay_age") or "").strip():
+            raise ValueError("A readcaption overlay needs an age line (overlay_age)")
+        block = ov.get("overlay_block") or []
+        if isinstance(block, str):
+            block = [p.strip() for p in block.split(" / ") if p.strip()]
+        if not isinstance(block, list) or not all(isinstance(b, str) for b in block):
+            raise ValueError("Overlay block must be a list of text lines")
+        clean = {
+            "overlay": "readcaption",
+            "overlay_age": str(ov["overlay_age"]).strip(),
+        }
+        if block:
+            clean["overlay_block"] = [b.strip() for b in block if b.strip()]
+        footer = str(ov.get("overlay_footer") or "").strip()
+        if footer:
+            clean["overlay_footer"] = footer
+        out["overlay_spec"] = clean
 
     out["pip_enabled"] = bool(out["pip_enabled"])
     out["captions_enabled"] = bool(out["captions_enabled"])

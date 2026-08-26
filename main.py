@@ -13746,6 +13746,44 @@ class AutoEditRequest(BaseModel):
     music_db: float = -20.0
     hook_corner: Optional[float] = None
     hook_bg: Optional[str] = None
+    # v944 — the text overlay, normally DERIVED from the job's declared
+    # finishing. Sending it explicitly overrides that, which is how a job
+    # imported before v944 (nothing declared, nothing to derive) can still be
+    # re-finished with an overlay without re-importing the build.
+    overlay_spec: Optional[Dict[str, Any]] = None
+
+
+def derive_autoedit_defaults(req_dict, spec, request_was_explicit):
+    """v944 — fold the build's declared FINISHING into an auto-edit request.
+
+    `req_dict` is what the caller asked for, `spec` is the job's declared
+    finishing (or None), and `request_was_explicit` is the set of fields the
+    caller actually sent — pydantic's `model_fields_set`, so a value that only
+    equals the default is NOT treated as a choice.
+
+    The rev-459 inheritance shape: the declaration supplies DEFAULTS, an
+    explicit request always wins. Returns a NEW dict; the caller's is not
+    touched.
+
+    `spec is None` (a build that declared no finishing, which is every build
+    imported before this rule) returns the request unchanged apart from
+    `overlay_spec: None` — that is the regression contract, in one line.
+    """
+    out = dict(req_dict or {})
+    if not spec:
+        out["overlay_spec"] = None
+        return out
+
+    captions = str(spec.get("captions") or "none").lower()
+    if "captions_enabled" not in request_was_explicit:
+        out["captions_enabled"] = captions != "none"
+    if captions != "none" and "template" not in request_was_explicit:
+        out["template"] = captions
+
+    if "overlay_spec" in request_was_explicit:
+        return out
+    out["overlay_spec"] = spec if spec.get("overlay") == "readcaption" else None
+    return out
 
 
 @app.post("/api/jobs/{job_id}/autoedit")
@@ -13762,7 +13800,6 @@ async def queue_autoedit(
 
     job = get_user_job(db, job_id, current_user)
     placement = "constant" if req.offset is not None else req.placement
-    _autoedit_validate(req.template, placement)
     if req.offset is not None and not -0.45 <= req.offset <= 0.45:
         raise HTTPException(
             status_code=400,
@@ -13796,18 +13833,54 @@ async def queue_autoedit(
                           f"bg={hook_bg_req}", flush=True)
             except (ValueError, TypeError):
                 pass
+
+    # v944 — the BUILD's declared finishing supplies the defaults. This is the
+    # whole root cause of the de7f9331 finish: the auto-edit ran with
+    # template=korella / captions_enabled=True because nothing in the job said
+    # otherwise, and the build had agreed on an overlay and no captions.
+    # Same inheritance shape as the hook layout above: declaration = default,
+    # an explicitly-sent field always wins. `model_fields_set` is what makes
+    # "explicit" real — a value that merely equals the default is not a choice.
+    _v944_spec = None
+    if getattr(job, "finishing_spec", None):
+        try:
+            _v944_spec = json.loads(job.finishing_spec)
+        except (ValueError, TypeError):
+            # A corrupt stored value degrades to "declared nothing" rather than
+            # blocking a re-finish. It was validated at import; if it is broken
+            # now, the import is the thing to fix.
+            print(f"[v944] job={job_id[:8]} finishing_spec is not valid JSON — ignored",
+                  flush=True)
+    _v944 = derive_autoedit_defaults(
+        {
+            "template": req.template,
+            "captions_enabled": req.captions_enabled,
+            "overlay_spec": req.overlay_spec,
+        },
+        _v944_spec,
+        request_was_explicit=req.model_fields_set,
+    )
+    template = _v944["template"]
+    if _v944_spec is not None:
+        print(f"[v944] job={job_id[:8]} finishing declared {_v944_spec} -> "
+              f"template={template} captions={_v944['captions_enabled']} "
+              f"overlay={'readcaption' if _v944['overlay_spec'] else 'none'}",
+              flush=True)
+    _autoedit_validate(template, placement)
+
     try:
         repairs = normalize_repairs({
             "trim_start_s": req.trim_start_s,
             "trim_end_s": req.trim_end_s,
             "pip_enabled": req.pip_enabled,
-            "captions_enabled": req.captions_enabled,
+            "captions_enabled": _v944["captions_enabled"],
             "chroma_similarity": req.chroma_similarity,
             "chroma_blend": req.chroma_blend,
             "music_filename": req.music_filename,
             "music_db": req.music_db,
             "hook_corner": hook_corner_req,
             "hook_bg": hook_bg_req,
+            "overlay_spec": _v944["overlay_spec"],
         })
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -13838,13 +13911,13 @@ async def queue_autoedit(
 
     run = AutoEditRun(
         id=str(_uuid.uuid4()), job_id=job_id, user_id=user_id,
-        template=req.template, placement=placement, offset=req.offset,
+        template=template, placement=placement, offset=req.offset,
         repair_json=json.dumps(repairs, sort_keys=True),
     )
     db.add(run)
     db.commit()
     print(f"[AutoEdit/v937 TEMP] queued {run.id} job={job_id} "
-          f"template={req.template} repairs={repairs}", flush=True)
+          f"template={template} repairs={repairs}", flush=True)
     return run.to_dict()
 
 
