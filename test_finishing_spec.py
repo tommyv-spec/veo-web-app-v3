@@ -356,3 +356,88 @@ def test_pil_is_lazy_imported_not_at_module_level():
     head = src[:src.index("class AutoEditError")]
     assert "PIL" not in head and "ultralytics" not in head
     import autoedit_pipeline  # noqa: F401  — proves it imports here too
+
+
+# ---------------------------------------------------------------------------
+# Task 6 — THE LEGACY PATH. A build that declares nothing must behave exactly
+# as it did before v944 existed. This is the same regression contract v943
+# carried, and it is the section that matters most: the feature is optional,
+# so every job that already exists is relying on it.
+# ---------------------------------------------------------------------------
+
+LEGACY_BUILD = """# nuri-korella-something-v1
+
+## §0 Citations Check
+
+- METHOD: FULL-BUILD
+
+## Images
+
+### Image 1
+
+- **Image prompt:**
+
+```
+a woman in a kitchen
+```
+
+## Storyboard
+
+### Scene 1
+
+- **image:** image_1
+- **line:** american men over sixty are getting this wrong
+- **action_note:** she lifts the jar [Start beat]
+"""
+
+
+def test_a_build_with_no_finishing_section_parses_to_none():
+    assert _parse(LEGACY_BUILD) is None
+
+
+def test_a_none_spec_is_stored_as_NULL_not_as_the_string_null():
+    """The importer's own expression. `json.dumps(None)` is the string "null",
+    which is TRUTHY and would read back as a declared spec forever."""
+    import json
+    spec = _parse(LEGACY_BUILD)
+    stored = json.dumps(spec, sort_keys=True) if spec else None
+    assert stored is None
+
+
+def test_derive_with_no_spec_returns_the_request_unchanged():
+    from main import derive_autoedit_defaults
+    req = {"template": "korella", "captions_enabled": True, "trim_start_s": 1.5}
+    out = derive_autoedit_defaults(dict(req), None, set())
+    assert out == {**req, "overlay_spec": None}
+
+
+def test_normalize_repairs_defaults_are_otherwise_untouched():
+    """The only new key is overlay_spec, and it defaults to None. Any other
+    default moving would change every existing job's edit."""
+    from autoedit_qc import normalize_repairs
+    out = normalize_repairs({})
+    assert out["overlay_spec"] is None
+    assert out["captions_enabled"] is True
+    assert out["pip_enabled"] is True
+    assert out["hook_corner"] is None
+    assert out["trim_start_s"] == 0.0 and out["trim_end_s"] == 0.0
+    assert out["chroma_similarity"] == 0.10 and out["chroma_blend"] == 0.02
+    assert out["music_filename"] is None and out["music_db"] == -20.0
+    assert out["hook_bg"] is None
+
+
+def test_the_pipeline_overlay_call_site_is_guarded():
+    """The v943 branch-spy pattern: read the source and prove the new stage
+    cannot run on a run that carries no spec."""
+    src = _src("autoedit_pipeline.py")
+    body = src[src.index("def run_autoedit"):]
+    call = body.index("render_readcaption_overlay(")
+    guard = body[:call]
+    assert 'overlay_stage_plan((repairs or {}).get("overlay_spec"))' in guard
+    assert "if _rc_plan is not None:" in guard
+
+
+def test_overlay_stage_plan_is_none_for_every_legacy_shape():
+    from autoedit_pipeline import overlay_stage_plan
+    for legacy in (None, {}, {"overlay": "none"}, {"captions": "korella", "overlay": "none"}):
+        assert overlay_stage_plan(legacy) is None
