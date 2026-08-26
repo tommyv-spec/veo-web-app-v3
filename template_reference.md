@@ -17986,11 +17986,11 @@ Two problems, one shape: **the build is the only place that knows how this video
 
 v947 lets it say so, and then lets it happen. `## Finishing` now carries every export and auto-edit setting, plus one switch. With that switch on, approving the last clip queues the export; when that export finishes, it queues the auto-edit. Nothing is decided at finish time — everything was decided at authoring time, by the person who knew.
 
-**Publishing is NEVER part of the chain.** The chain ends at the finished auto-edit. Posting still needs an explicit operator go, every single time (root `CLAUDE.md` §14 and the rev-503 directive). That is not an oversight to be tidied up later; it is the point where a human has to look at the video.
+**Publishing is NEVER part of the chain.** The chain ends at the finished auto-edit. Posting still needs an explicit operator go, every single time (`feedback_publishing-needs-an-explicit-go-every-time`, plus the rev-503 explicit-go directive). That is not an oversight to be tidied up later; it is the point where a human has to look at the video.
 
 ### The grammar (exact)
 
-Three new bullets in the same `## Finishing` section v944 defined. The v944 bullets are unchanged and still mean what they meant.
+Three new bullet kinds in the same `## Finishing` section v944 defined. The v944 bullets are unchanged and still mean what they meant.
 
 ```markdown
 ## Finishing
@@ -18017,7 +18017,7 @@ Three new bullets in the same `## Finishing` section v944 defined. The v944 bull
 
 **JSON values are allowed.** `export_beat_pins: {"3": 2.47}` parses as the dictionary it looks like. So do numbers, `true`/`false`, and plain strings.
 
-**The `none` sentinel — omit the field instead.** v944 trains the hand to write `none` for "off" (`captions: none`, `overlay: none`), so people reach for it here too. On a field that can genuinely hold nothing — `export_music_filename`, `export_master_audio_filename`, `export_beat_pins`, `autoedit_offset`, `autoedit_hook_corner`, `autoedit_hook_bg` — writing `none` would store the literal five-letter string `"none"` and die hours later at render. So it hard-fails at import with "omit the bullet instead": **absent already means none.** Where `none` is a real value it passes straight through — `export_transition: none` is a legitimate xfade type and stays legal. The parser decides which case it is from the model's own annotation, not from a list of field names.
+**The `none` sentinel — omit the field instead.** v944 trains the hand to write `none` for "off" (`captions: none`, `overlay: none`), so people reach for it here too. On a field that can genuinely hold nothing — for example `export_music_filename`, `export_master_audio_filename`, `export_beat_pins`, `autoedit_offset`, `autoedit_hook_corner`, `autoedit_hook_bg`, though the parser decides from the model's own annotation and not from any list of names — writing `none` would store the literal five-letter string `"none"` and die hours later at render. So it hard-fails at import with "omit the bullet instead": **absent already means none.** Where `none` is a real value it passes straight through — `export_transition: none` is a legitimate xfade type and stays legal. The parser decides which case it is from the model's own annotation, not from a list of field names.
 
 **Bullets that are not fields.** An unknown key in `## Finishing` hard-fails (typo protection). A **malformed** bullet — a bullet-shaped line that is not `- **key:** value`, e.g. `- **export-music-gain:** -22` with hyphens instead of underscores — also hard-fails, naming the line. That one is worth understanding: the key regex simply cannot read a hyphenated key, so before v947 such a line reached nothing at all and the build rendered as if it had declared nothing, in silence. A wrong setting that shouts is cheap; a wrong setting that is quiet costs a render. **Indented sub-bullets hard-fail too**, deliberately: v944 splits `overlay_block` on ` / ` on ONE line, so a sub-list under a field would be ignored.
 
@@ -18035,10 +18035,10 @@ All faults are reported together, one line each — a build with three bad value
 
 ### The chain, and every guard on it
 
-**Trigger one — the last clip approval.** `approve_clip` calls `_maybe_auto_finish_export`. It fires only when the job's declared spec says `auto_finish: on` AND every clip row on the job is approved. Text-card clips and audio-twin clips are auto-approved when they are created, so "all approved" is genuinely reachable; a job with zero clips never fires.
+**Trigger one — the last clip approval.** `approve_clip` calls `_maybe_auto_finish_export`. It fires only when the job's declared spec says `auto_finish: on` AND every clip row on the job is approved. Text-card clips are auto-approved at creation; audio twins (index 100000+) and composite plates (200000+) are created `pending_review` and must be approved like any other clip — on a v698A job the last approval is theirs. A job with zero clips never fires.
 
 - **A re-click does not re-fire.** The trigger checks the clip's PRIOR state, so clicking approve again on an already-approved clip changes nothing.
-- **A genuine redo DOES re-fire.** Reject → redo → approve produces a new clip, and a new clip means a new final. Re-exporting is the correct answer.
+- **A genuine redo DOES re-fire.** Redo does not make a new row — it mutates the same clip, bumping `generation_attempt` and setting `approval_status = "rejected"`. That is exactly what makes the trigger work again: the next approval sees a non-approved prior state, so it fires. A re-rendered clip means a new final, and re-exporting is the correct answer.
 - **Racing approvals are serialized** by a `FOR UPDATE` lock on the job row, so two people finishing the last two clips at the same instant cannot both queue an export.
 - **An already-running export is joined, never duplicated.**
 - **A trigger error can never fail the approval.** The approval is already committed before the trigger runs; a failure rolls back the trigger's own work and is logged. The operator's click always succeeds.
@@ -18047,14 +18047,16 @@ The export is queued with settings built purely from the declaration laid over t
 
 **Trigger two — the export finishing.** When `_export_runner` reaches DONE it calls `_maybe_auto_finish_autoedit`, on a **fresh** database session opened after the runner's own session has closed. The auto-edit is queued through the same internal body the `/api/jobs/{job_id}/autoedit` endpoint uses, so there is one queueing path, not two.
 
-- The declared `autoedit_*` fields ride as an **explicit** request, which means they beat the job's stored-run hook-layout inheritance. The build wins over the last run.
+- The declared `autoedit_*` fields ride as an **explicit** request. For the two hook fields that matters concretely: the stored-run hook-layout inheritance only runs when neither `hook_corner` nor `hook_bg` is set, so declaring either one suppresses it and the build wins over the last run. That check is on the VALUES, not on `model_fields_set`. The other `autoedit_*` fields never had stored-run inheritance to beat in the first place.
 - `captions` and `overlay` still derive per v944 inside that same body.
 - **A second fire is a logged no-op** — a `can_queue` check plus a job-row lock inside the queueing body, which serializes every caller including plain endpoint clicks.
 - **Corrupt declared settings fail CLOSED.** No queue, and an ERROR in the job log telling the operator to fix and re-import the build. Rendering with defaults the build never declared is exactly the v944 failure that started all of this; producing nothing and saying why is the better outcome.
 
 **A manual export click on an auto_finish job also chains into the declared auto-edit.** The job finishes ONE way, whoever started it. If you want to drive the finish by hand, do not declare `auto_finish: on`.
 
-**Everything that skips or fails writes the JOB LOG** — WARNING or ERROR, not just stdout. This feature runs when nobody is watching; a decision nobody can read afterwards is not a decision.
+**Every skip or failure inside the QUEUEING step writes the JOB LOG** — WARNING or ERROR, not just stdout. This feature runs when nobody is watching; a decision nobody can read afterwards is not a decision. Two earlier skips are stdout-only and deliberately so: a job with no `user_id` (which could never be claimed downstream anyway) and the corrupt-column case below. Neither has reached a point where there is anything to report about a queued run.
+
+**A corrupt `finishing_spec` COLUMN is not the same as corrupt declared settings.** If the stored JSON in the database will not parse at all, `_job_finishing_spec` degrades it to *"declared nothing"* — it logs to stdout and returns `None`, so `auto_finish_on` is false and the chain silently does nothing. That matches `queue_autoedit`'s existing tolerance and it is the right answer: the section was validated at IMPORT, so a value broken in the database means the import is what to fix, not this render. Contrast the corrupt-declared-settings case above, which fails loudly in the job log — there the spec parsed fine and the settings inside it were wrong, which is a build problem the operator can act on.
 
 ### Exports inherit the declaration too (rev-459 shape)
 
@@ -18073,7 +18075,7 @@ A queued auto-edit with nothing to claim it — the server dispatcher off AND no
 
 ### What did NOT change
 
-A build with no `## Finishing` still parses to `None` and behaves byte-for-byte as it did before v944 existed. A v944-only section — captions and overlay, no `auto_finish` — gains nothing new: the chain is off, and the finish is driven by hand exactly as before. An explicitly-sent request field still wins over the declaration, everywhere. And publishing is still a separate, manual, explicitly-requested act (§14 / rev-503) — the chain stops at the finished auto-edit and never posts anything.
+A build with no `## Finishing` still parses to `None` and behaves byte-for-byte as it did before v944 existed. A v944-only section — captions and overlay, no `auto_finish` — gains nothing new: the chain is off, and the finish is driven by hand exactly as before. An explicitly-sent request field still wins over the declaration, everywhere. And publishing is still a separate, manual, explicitly-requested act (`feedback_publishing-needs-an-explicit-go-every-time` / rev-503) — the chain stops at the finished auto-edit and never posts anything.
 
 ### Deployed
 
