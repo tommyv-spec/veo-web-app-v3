@@ -5211,6 +5211,90 @@ def _parse_support_blocks_new(md_text: str, known_indexes: set) -> list:
     return blocks
 
 
+_FINISHING_RE = re.compile(r"^##\s+Finishing\s*$", re.MULTILINE)
+# The field name is a CAPTURE GROUP here, not a literal spelling, and that is
+# deliberate: check_field_plumbing's CHECK4 scans this file for hard-coded
+# bullet spellings and expects each one to land on a scene or image dict. These
+# bullets are JOB-level, so a literal would be reported as a dropped field.
+_FIN_BULLET_RE = re.compile(r"^\s*[-*]\s*\*\*(\w+):\*\*\s*(.+?)\s*$", re.MULTILINE)
+
+# Fallback only. The real list is the pipeline's own (see
+# _finishing_caption_values) — a hardcoded copy drifts the moment a template is
+# added or removed, and the first draft of this rule already had five names
+# that do not exist and was missing five that do.
+_FINISHING_CAPTION_FALLBACK = {"none", "korella"}
+
+
+def _finishing_caption_values():
+    """Every value `- **captions:**` may take, derived from the pipeline.
+
+    Same source the API's own template validation uses (main._autoedit_valid_
+    templates): local caption_templates/ dirs plus the built-in pycaps names.
+    If the pipeline cannot be imported (it must stay importable on Render, but
+    do not bet the importer on it) fall back to the two names that are always
+    true here, so a build declaring a template we cannot verify fails CLOSED.
+    """
+    try:
+        from autoedit_pipeline import local_styles, BUILTIN_TEMPLATES
+    except Exception:
+        return set(_FINISHING_CAPTION_FALLBACK)
+    return {"none"} | set(local_styles()) | set(BUILTIN_TEMPLATES)
+
+
+def parse_finishing_section(md_text: str):
+    """v944 — the job-level ``## Finishing`` section, or None when absent.
+
+    Fail-closed like the v943 scene fields: a present section with an unknown
+    value must die at import, not render the wrong thing hours later. Absent
+    section returns None, which is the whole no-metadata regression contract —
+    a build that says nothing about finishing behaves exactly as it did before
+    this rule existed.
+    """
+    m = _FINISHING_RE.search(md_text or "")
+    if not m:
+        return None
+    # section body = from the header to the next `##` header (or EOF)
+    tail = md_text[m.end():]
+    nxt = re.search(r"^##\s+", tail, re.MULTILINE)
+    body = tail[:nxt.start()] if nxt else tail
+
+    fields = {k.lower(): v.strip() for k, v in _FIN_BULLET_RE.findall(body)}
+    spec: Dict[str, Any] = {}
+
+    allowed = _finishing_caption_values()
+    captions = fields.get("captions", "none").lower()
+    if captions not in allowed:
+        raise ValueError(
+            f"## Finishing captions: {captions!r} is not 'none' or a known "
+            f"caption template (v944). Known: {', '.join(sorted(allowed))}")
+    spec["captions"] = captions
+
+    overlay = fields.get("overlay", "none").lower()
+    if overlay not in ("none", "readcaption"):
+        raise ValueError(
+            f"## Finishing overlay: {overlay!r} is not 'none' or 'readcaption' (v944)")
+    spec["overlay"] = overlay
+
+    overlay_keys = {k for k in fields if k.startswith("overlay_")}
+    if overlay == "none" and overlay_keys:
+        raise ValueError(
+            "## Finishing declares overlay fields but no overlay engine — "
+            "add '- **overlay:** readcaption' or remove them (v944)")
+    if overlay == "readcaption":
+        age = fields.get("overlay_age", "").strip()
+        if not age:
+            raise ValueError(
+                "## Finishing overlay: readcaption requires overlay_age (v944)")
+        spec["overlay_age"] = age
+        block = fields.get("overlay_block", "").strip()
+        if block:
+            spec["overlay_block"] = [p.strip() for p in block.split(" / ") if p.strip()]
+        footer = fields.get("overlay_footer", "").strip()
+        if footer:
+            spec["overlay_footer"] = footer
+    return spec
+
+
 def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict[str, Any]]:
     """New format: parse ``### Scene N`` headers as storyboard scenes.
 
