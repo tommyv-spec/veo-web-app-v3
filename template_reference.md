@@ -17975,3 +17975,106 @@ A build that declares no `## Finishing` parses to `None`, is stored as SQL NULL 
 ### Deployed
 
 `1052563` (parse the section, fail closed) · `087c891` (the columns) · `983780d` (the spec travels import → batch → both promotes → job) · `7c875f9` (`queue_autoedit` derives its defaults) · `97c3417` (the read-caption overlay stage ported into the pipeline; the tool becomes a wrapper) · `0c0877a` (the legacy path proven untouched) · `0d5592d` (an explicit overlay survives a job with no declared finishing) · `5c34474` (v944.1 — the corrected pitch plus the declarable bullet). Plan: `docs/superpowers/plans/2026-08-26-finishing-spec-overlays.md`.
+
+---
+
+## v947 — AUTO-FINISH: the build declares the whole finish, and the last approval runs it (2026-08-27)
+
+**What v944 left undone.** v944 got the build talking about its own finish, but it only ever said two things: the captions and the overlay. Every other knob that shapes the delivered video — whether silence is cut, which music bed rides under it, the transition, the beat pins, whether the picture-in-picture is on — was still decided by whoever happened to click, from whatever the platform's defaults were that day. And nothing ran by itself. A job could sit with all its clips approved for hours because the person who approved the last one did not know they were also the person who had to press export, and then press auto-edit.
+
+Two problems, one shape: **the build is the only place that knows how this video is supposed to finish, and it was not allowed to say so.**
+
+v947 lets it say so, and then lets it happen. `## Finishing` now carries every export and auto-edit setting, plus one switch. With that switch on, approving the last clip queues the export; when that export finishes, it queues the auto-edit. Nothing is decided at finish time — everything was decided at authoring time, by the person who knew.
+
+**Publishing is NEVER part of the chain.** The chain ends at the finished auto-edit. Posting still needs an explicit operator go, every single time (root `CLAUDE.md` §14 and the rev-503 directive). That is not an oversight to be tidied up later; it is the point where a human has to look at the video.
+
+### The grammar (exact)
+
+Three new bullets in the same `## Finishing` section v944 defined. The v944 bullets are unchanged and still mean what they meant.
+
+```markdown
+## Finishing
+
+- **captions:** none
+- **overlay:** readcaption
+- **overlay_age:** I'M 74
+- **auto_finish:** on
+- **export_remove_silence:** true
+- **export_music_gain_db:** -22
+- **export_beat_pins:** {"3": 2.47}
+- **autoedit_pip_enabled:** false
+```
+
+| bullet | values | absent means |
+|---|---|---|
+| `auto_finish:` | `on` or `off`, nothing else | `off` — no chain, exactly as before |
+| `export_<field>:` | any field of `ExportSettings`, with its own real value | that field keeps the platform default of the day the export runs |
+| `autoedit_<field>:` | any field of `AutoEditRequest`, EXCEPT `template` / `captions_enabled` / `overlay_spec` | same — the platform default at run time |
+
+**The field lists are not copied here on purpose**, for the same reason v944 refused to hardcode the caption templates. `export_*` and `autoedit_*` accept whatever the real request models accept; a list written into this document would be wrong the first time somebody adds a field. To see the current fields, read `code/finishing_models.py`, or declare a wrong one and read the error — it names every field it does know.
+
+**The three reserved names.** `template`, `captions_enabled` and `overlay_spec` are already sayable through v944's `captions:` and `overlay*:` bullets, so the `autoedit_` namespace refuses them. One way to say each thing. Declaring one hard-fails, and the message names **all** the offenders at once, not the first.
+
+**JSON values are allowed.** `export_beat_pins: {"3": 2.47}` parses as the dictionary it looks like. So do numbers, `true`/`false`, and plain strings.
+
+**The `none` sentinel — omit the field instead.** v944 trains the hand to write `none` for "off" (`captions: none`, `overlay: none`), so people reach for it here too. On a field that can genuinely hold nothing — `export_music_filename`, `export_master_audio_filename`, `export_beat_pins`, `autoedit_offset`, `autoedit_hook_corner`, `autoedit_hook_bg` — writing `none` would store the literal five-letter string `"none"` and die hours later at render. So it hard-fails at import with "omit the bullet instead": **absent already means none.** Where `none` is a real value it passes straight through — `export_transition: none` is a legitimate xfade type and stays legal. The parser decides which case it is from the model's own annotation, not from a list of field names.
+
+**Bullets that are not fields.** An unknown key in `## Finishing` hard-fails (typo protection). A **malformed** bullet — a bullet-shaped line that is not `- **key:** value`, e.g. `- **export-music-gain:** -22` with hyphens instead of underscores — also hard-fails, naming the line. That one is worth understanding: the key regex simply cannot read a hyphenated key, so before v947 such a line reached nothing at all and the build rendered as if it had declared nothing, in silence. A wrong setting that shouts is cheap; a wrong setting that is quiet costs a render. **Indented sub-bullets hard-fail too**, deliberately: v944 splits `overlay_block` on ` / ` on ONE line, so a sub-list under a field would be ignored.
+
+**HTML comments are stripped first, once, before everything else.** A commented-out bullet is genuinely inert. It was not, briefly: only the malformed scan stripped comments while the field reader worked from the raw body, so `<!-- disabled: - **auto_finish:** on -->` turned auto-finish ON.
+
+### Validated through the REAL model, and at lint too
+
+Every `export_*` and `autoedit_*` value is checked at import by handing it to the actual pydantic request model — the same object the endpoint would receive. There is no second copy of the rules to drift out of date. That is why `ExportSettings` and `AutoEditRequest` moved into `code/finishing_models.py`: one shared home, imported by both the parser and the API. It is the v892.2 lesson applied before it could bite — a hand-maintained mirror of somebody else's fields is a bug with a delay fuse.
+
+If those models cannot be imported at all, the parse **fails closed** rather than waving the section through unverified.
+
+All faults are reported together, one line each — a build with three bad values learns about three bad values.
+
+**Lint parity.** `verify_video_format.py` now runs the same `parse_finishing_section`, so a bad `## Finishing` fails `python tools/run_build_checks.py <build.md>` before import ever sees it. On a machine without the platform's dependencies installed it degrades to a WARN — the import path stays the hard wall. Any exception inside the parse is reported as a FAIL, never as a linter crash.
+
+### The chain, and every guard on it
+
+**Trigger one — the last clip approval.** `approve_clip` calls `_maybe_auto_finish_export`. It fires only when the job's declared spec says `auto_finish: on` AND every clip row on the job is approved. Text-card clips and audio-twin clips are auto-approved when they are created, so "all approved" is genuinely reachable; a job with zero clips never fires.
+
+- **A re-click does not re-fire.** The trigger checks the clip's PRIOR state, so clicking approve again on an already-approved clip changes nothing.
+- **A genuine redo DOES re-fire.** Reject → redo → approve produces a new clip, and a new clip means a new final. Re-exporting is the correct answer.
+- **Racing approvals are serialized** by a `FOR UPDATE` lock on the job row, so two people finishing the last two clips at the same instant cannot both queue an export.
+- **An already-running export is joined, never duplicated.**
+- **A trigger error can never fail the approval.** The approval is already committed before the trigger runs; a failure rolls back the trigger's own work and is logged. The operator's click always succeeds.
+
+The export is queued with settings built purely from the declaration laid over the model defaults (`derive_export_defaults` in `code/auto_finish.py`). Nothing about the clicking context leaks in.
+
+**Trigger two — the export finishing.** When `_export_runner` reaches DONE it calls `_maybe_auto_finish_autoedit`, on a **fresh** database session opened after the runner's own session has closed. The auto-edit is queued through the same internal body the `/api/jobs/{job_id}/autoedit` endpoint uses, so there is one queueing path, not two.
+
+- The declared `autoedit_*` fields ride as an **explicit** request, which means they beat the job's stored-run hook-layout inheritance. The build wins over the last run.
+- `captions` and `overlay` still derive per v944 inside that same body.
+- **A second fire is a logged no-op** — a `can_queue` check plus a job-row lock inside the queueing body, which serializes every caller including plain endpoint clicks.
+- **Corrupt declared settings fail CLOSED.** No queue, and an ERROR in the job log telling the operator to fix and re-import the build. Rendering with defaults the build never declared is exactly the v944 failure that started all of this; producing nothing and saying why is the better outcome.
+
+**A manual export click on an auto_finish job also chains into the declared auto-edit.** The job finishes ONE way, whoever started it. If you want to drive the finish by hand, do not declare `auto_finish: on`.
+
+**Everything that skips or fails writes the JOB LOG** — WARNING or ERROR, not just stdout. This feature runs when nobody is watching; a decision nobody can read afterwards is not a decision.
+
+### Exports inherit the declaration too (rev-459 shape)
+
+The rev-459 rule — the declaration supplies defaults, an explicitly-sent request field always wins — now covers exports as well. On the manual export endpoint, any declared `export_*` field fills in a field the caller did not explicitly send. "Explicitly sent" means pydantic's `model_fields_set`: a value that merely happens to equal the default is not a choice and does not override the build.
+
+### Reading the evidence
+
+Two log prefixes, and they mean different things:
+
+- `[AutoFinish]` — the automatic chain only. This is what `python code/render_logs.py --text AutoFinish` pulls. If you want to know whether the chain fired, this is the needle.
+- `[Finishing/v947]` — the declaration being folded into a request. It can fire on manual paths too, so seeing it does not by itself prove the chain ran.
+
+### Known limit (inherited, not new)
+
+A queued auto-edit with nothing to claim it — the server dispatcher off AND no local worker polling — sits in the queue with no timeout. That is how every queued auto-edit has always behaved; v947 does not fix it and does not make it worse. The visibility rules are the same ones.
+
+### What did NOT change
+
+A build with no `## Finishing` still parses to `None` and behaves byte-for-byte as it did before v944 existed. A v944-only section — captions and overlay, no `auto_finish` — gains nothing new: the chain is off, and the finish is driven by hand exactly as before. An explicitly-sent request field still wins over the declaration, everywhere. And publishing is still a separate, manual, explicitly-requested act (§14 / rev-503) — the chain stops at the finished auto-edit and never posts anything.
+
+### Deployed
+
+`e207592` (`ExportSettings` + `AutoEditRequest` move to `finishing_models.py` — one shared home, no drift copy) · `a773756` (`auto_finish.py`: the pure decisions, `auto_finish_on` / `all_clips_approved` / `derive_export_defaults`) · `7239515` + `236553c` + `1225028` (the parser: the three bullets, the `none` sentinel, malformed and commented bullets) · `ae330db` + `1b206fd` (the last-approval trigger) · `d2b348f` + `dce6ce6` (the export → auto-edit link) · `b8c09db` (comment) · `2066bc4` + `a55ee66` (the lint gate). Tests: 68 in `test_finishing_spec.py`. Plan: `docs/superpowers/plans/2026-08-26-finishing-autofinish-export.md`.

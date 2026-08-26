@@ -994,6 +994,11 @@ Job-level, ONE section per build, anywhere at top level (the parser stops it at 
                                                  # v944 — the denial/count lines, split on " / " (space-slash-space). Optional.
 - **overlay_footer:** (READ CAPTION)             # v944 — optional; the engine defaults to "(READ CAPTION)".
 - **overlay_pitch:** 49                          # v944.1 — optional whole number, 30..120. Default 49, MEASURED from the account's posted winner. Declare it only to run a deliberate spacing test.
+- **auto_finish:** on                            # v947 — on|off, absent = off. on => the LAST clip approval queues the export with the export_* settings below; the finished export then queues the auto-edit with the v944 fields + autoedit_* settings. A manual export click on an auto_finish job ALSO chains. Publishing is NEVER part of the chain (explicit operator go, always).
+- **export_remove_silence:** true                # v947 — ANY ExportSettings field, prefixed `export_`. Validated at import through the real model; unknown name or bad value HARD-FAILS. Only declared fields are stored — everything else keeps the platform default of the day the export runs.
+- **export_music_filename:** bed.mp3             # file must exist in the job at export time (checked then, not at import). Writing `none` on a nullable field HARD-FAILS — omit the field instead.
+- **export_beat_pins:** {"3": 2.47}              # JSON values allowed
+- **autoedit_pip_enabled:** false                # v947 — ANY AutoEditRequest field, prefixed `autoedit_`, EXCEPT template / captions_enabled / overlay_spec (say those via the v944 captions:/overlay*: fields). Declared values beat the job's stored-run inheritance.
 ```
 
 <!-- v944 — NEVER declare placement. Where the text sits is the engine's job: it measures the
@@ -1003,6 +1008,9 @@ Job-level, ONE section per build, anywhere at top level (the parser stops it at 
      a "No Brutal Workouts" denial over heavy dumbbell curls contradicts the frame. Canonical:
      wiki/synthesis/readcaption-caption-engine.md §"Coherence rule".
      Deep-dive: template_reference.md §v944. -->
+
+<!-- v947 — any unrecognized or malformed bullet in ## Finishing HARD-FAILS at import AND at lint
+     (verify_video_format). HTML-commented bullets are inert. Deep-dive: template_reference.md §v947. -->
 
 ---
 
