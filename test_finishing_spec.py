@@ -83,3 +83,40 @@ def test_known_caption_template_is_accepted():
     'korella' is a local style; 'word-focus' is a builtin."""
     assert _parse("## Finishing\n\n- **captions:** korella\n")["captions"] == "korella"
     assert _parse("## Finishing\n\n- **captions:** word-focus\n")["captions"] == "word-focus"
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — the columns and their migrations
+# ---------------------------------------------------------------------------
+
+def _src(name):
+    import pathlib
+    return (pathlib.Path(__file__).parent / name).read_text(encoding="utf-8")
+
+
+def test_both_migration_dialects_register_finishing_spec():
+    src = _src("image_platform.py")
+    assert src.count("finishing_spec") >= 4  # model, to_dict, sqlite mig, pg mig
+    models = _src("models.py")
+    assert "finishing_spec" in models
+
+
+def test_batch_column_and_migrations_exist():
+    """The batch is ImageJobBatch, and production is Postgres — a SQLite-only
+    migration entry means the column never exists live and every write 500s."""
+    from image_platform import ImageJobBatch
+    assert "finishing_spec" in ImageJobBatch.__table__.columns
+    assert ImageJobBatch.__table__.columns["finishing_spec"].nullable
+    src = _src("image_platform.py")
+    assert "ALTER TABLE image_job_batches ADD COLUMN finishing_spec TEXT" in src
+    assert ("ALTER TABLE image_job_batches ADD COLUMN IF NOT EXISTS "
+            "finishing_spec TEXT") in src
+
+
+def test_job_column_and_migrations_exist():
+    from models import Job
+    assert "finishing_spec" in Job.__table__.columns
+    assert Job.__table__.columns["finishing_spec"].nullable
+    src = _src("models.py")
+    assert "ALTER TABLE jobs ADD COLUMN finishing_spec TEXT" in src
+    assert "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS finishing_spec TEXT" in src

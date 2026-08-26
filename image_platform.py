@@ -343,6 +343,11 @@ def run_image_platform_migrations():
          "ALTER TABLE image_scene_assignments ADD COLUMN swap_audio VARCHAR(20)"),
         ("clips", "swap_audio",
          "ALTER TABLE clips ADD COLUMN swap_audio VARCHAR(20)"),
+        # v944: the build's declared finishing (captions + overlay), JSON
+        # string. Nullable, NO default — an old batch stays NULL and the job
+        # it promotes keeps today's auto-edit defaults.
+        ("image_job_batches", "finishing_spec",
+         "ALTER TABLE image_job_batches ADD COLUMN finishing_spec TEXT"),
     ]
     postgres_migrations = [
         ("image_nodes", "claimed_by_worker",
@@ -538,6 +543,11 @@ def run_image_platform_migrations():
          "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS swap_audio VARCHAR(20)"),
         ("clips", "swap_audio",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS swap_audio VARCHAR(20)"),
+        # v944: declared finishing — see the SQLite block above. Production is
+        # Postgres: a SQLite-only entry means the column never exists live and
+        # every write to it 500s.
+        ("image_job_batches", "finishing_spec",
+         "ALTER TABLE image_job_batches ADD COLUMN IF NOT EXISTS finishing_spec TEXT"),
     ]
 
     # v479: widen ImageJobBatch string columns to TEXT. The previous
@@ -1561,6 +1571,11 @@ class ImageJobBatch(Base):
     # `## Anchor-Format Prompts` reference section). Operator-selectable per
     # video in the Batch overview; never auto-changes.
     prompt_variant = Column(String, nullable=False, server_default="omni")
+    # v944 — the build's `## Finishing` section as a JSON string, or NULL when
+    # the build declared none. Parsed and validated at IMPORT (see
+    # parse_finishing_section) so a bad value dies here rather than producing
+    # the wrong finish hours later. Copied verbatim onto the Job at promote.
+    finishing_spec = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1577,6 +1592,8 @@ class ImageJobBatch(Base):
             "promoted_video_job_id": self.promoted_video_job_id,
             "video_mode": self.video_mode or "storyboard",
             "auto_split": bool(self.auto_split) if self.auto_split is not None else False,
+            # v944 — the declared finishing, as the raw JSON string or None.
+            "finishing_spec": getattr(self, "finishing_spec", None),
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 

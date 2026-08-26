@@ -265,6 +265,16 @@ class Job(Base):
     # NULL          = legacy / pre-feature jobs.
     published_via = Column(String(20), nullable=True)
 
+    # v944 — the FINISHING this build declared: which caption style (or none)
+    # and which text overlay. A JSON string, copied verbatim off the
+    # ImageJobBatch at promote time, e.g.
+    #   {"captions": "none", "overlay": "readcaption", "overlay_age": "I'M 74"}
+    # NULL = the build said nothing, which is every job that existed before
+    # this column and means "behave exactly as before" (queue_autoedit derives
+    # no defaults from it). Read it with json.loads inside a try/except: a
+    # corrupt value must degrade to NULL, never break a queue call.
+    finishing_spec = Column(Text, nullable=True)
+
     # Relationships
     user = relationship("User", back_populates="jobs")
     clips = relationship("Clip", back_populates="job", cascade="all, delete-orphan")
@@ -301,6 +311,8 @@ class Job(Base):
             "has_lineup_override": getattr(self, 'clip_order_json', None) is not None,
             # Drive-watch lifecycle path (2026-06-01)
             "published_via": getattr(self, "published_via", None),
+            # v944 — the declared finishing, as the raw JSON string or None.
+            "finishing_spec": getattr(self, "finishing_spec", None),
         }
 
 
@@ -1340,6 +1352,11 @@ def _run_migrations_postgresql(engine):
         # v858 — export basename for filename<->job lookup (stamped at mint, backfilled on probe)
         ("jobs", "export_basename",
          "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS export_basename VARCHAR(120)"),
+        # v944 — the build's declared finishing (JSON string), copied off the
+        # batch at promote. Nullable, NO default: an existing row stays NULL
+        # and every existing job keeps its pre-v944 auto-edit behavior.
+        ("jobs", "finishing_spec",
+         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS finishing_spec TEXT"),
         ("instagram_videos", "audio_fp",
          "ALTER TABLE instagram_videos ADD COLUMN IF NOT EXISTS audio_fp TEXT"),
         ("instagram_videos", "audio_fp_at",
@@ -1569,6 +1586,8 @@ def _run_migrations_sqlite(engine):
         ("jobs", "export_audio_fp", "ALTER TABLE jobs ADD COLUMN export_audio_fp TEXT"),
         # v858 — export basename for filename<->job lookup
         ("jobs", "export_basename", "ALTER TABLE jobs ADD COLUMN export_basename TEXT"),
+        # v944 — declared finishing (JSON string). See the Postgres list above.
+        ("jobs", "finishing_spec", "ALTER TABLE jobs ADD COLUMN finishing_spec TEXT"),
         ("instagram_videos", "audio_fp", "ALTER TABLE instagram_videos ADD COLUMN audio_fp TEXT"),
         ("instagram_videos", "audio_fp_at",
          "ALTER TABLE instagram_videos ADD COLUMN audio_fp_at DATETIME"),
