@@ -4002,6 +4002,10 @@ def _maybe_auto_finish_export(db, job):
     approved, queue the export with the declared export_* settings. Called
     from approve_clip; must never turn the approval red (caller catches).
 
+    This is the FIRST half of the chain. The second half is
+    _maybe_auto_finish_autoedit, fired by _export_runner when that export
+    reaches DONE.
+
     The add_job_log below deliberately runs AFTER the export row is committed:
     losing the log line is better than losing the export. It can throw, and the
     caller's rollback+print is what absorbs that.
@@ -10750,13 +10754,20 @@ async def _export_heartbeat(export_id: str):
 
 def _maybe_auto_finish_autoedit(job_id: str):
     """v947 — after a DONE export on an auto_finish job, queue the auto-edit
-    with the build's declared settings. Sync; runner calls via to_thread with
-    a FRESH session (the runner's own session may be dead by completion).
+    with the build's declared settings. This is the SECOND half of the chain
+    that _maybe_auto_finish_export starts when the last clip is approved.
+    Sync; the runner calls it via to_thread with a FRESH session (the runner's
+    own session may well be dead by the time a long export completes).
 
     Declared autoedit_* fields are passed as an EXPLICIT request, so they beat
     the stored-run hook-layout inheritance; captions/overlay still derive from
-    the same spec inside the impl (v944). can_queue makes a double fire a
-    logged no-op, not a duplicate."""
+    the same spec inside the impl (v944). A double fire is a logged no-op, not
+    a duplicate: _queue_autoedit_impl takes the job row FOR UPDATE before its
+    can_queue read, so a racing caller blocks and then sees the winner's run.
+
+    Every outcome writes a job LOG as well as printing. Nobody is watching
+    stdout on a chain whose whole point is that nobody is watching.
+    """
     from models import get_db, Job
     from auto_finish import auto_finish_on
     with get_db() as db:
@@ -10766,16 +10777,44 @@ def _maybe_auto_finish_autoedit(job_id: str):
         spec = _job_finishing_spec(job)
         if not auto_finish_on(spec):
             return
-        req = AutoEditRequest(**(spec.get("autoedit") or {}))
+        # FAIL CLOSED on a corrupt declaration. Degrading to defaults would
+        # render with settings the build never asked for — the exact v944
+        # failure class this whole feature exists to kill.
+        try:
+            req = AutoEditRequest(**(spec.get("autoedit") or {}))
+        except Exception as _ve:
+            msg = (f"Auto-finish: auto-edit NOT queued — declared autoedit settings "
+                   f"failed validation ({str(_ve)[:200]}); re-import the build")
+            print(f"[AutoFinish] job={job_id[:8]} {msg}", flush=True)
+            try:
+                add_job_log(db, job.id, msg, "ERROR", "auto_finish")
+            except Exception:
+                pass
+            return
         try:
             run = _queue_autoedit_impl(db, job, req, job.user_id)
+        except HTTPException as e:
+            print(f"[AutoFinish] job={job_id[:8]} autoedit not queued: {e.detail}",
+                  flush=True)
+            try:
+                add_job_log(db, job.id,
+                            f"Auto-finish: auto-edit not queued — {e.detail}",
+                            "WARNING", "auto_finish")
+            except Exception as _le:
+                print(f"[AutoFinish] job={job_id[:8]} could not log the skip: {_le}",
+                      flush=True)
+            return
+        print(f"[AutoFinish] job={job_id[:8]} export done -> autoedit "
+              f"run={run.id[:8]} queued", flush=True)
+        # The log write runs AFTER the run row is committed on purpose, and its
+        # failure is swallowed: losing the log line beats losing the run (same
+        # trade as _maybe_auto_finish_export).
+        try:
             add_job_log(db, job.id,
                         f"Auto-finish: export done — auto-edit queued ({run.id[:8]})",
                         "INFO", "auto_finish")
-            print(f"[AutoFinish] job={job_id[:8]} export done -> autoedit "
-                  f"run={run.id[:8]} queued", flush=True)
-        except HTTPException as e:
-            print(f"[AutoFinish] job={job_id[:8]} autoedit not queued: {e.detail}",
+        except Exception as _le:
+            print(f"[AutoFinish] job={job_id[:8]} could not log the queue: {_le}",
                   flush=True)
 
 
@@ -10795,6 +10834,10 @@ async def _export_runner(export_id: str):
         job_id = claim["job_id"]
         print(f"[Export/v850] START run={export_id[:8]} job={job_id[:8]} "
               f"attempt={claim['attempts']}/{_eq.MAX_ATTEMPTS}", flush=True)
+
+        # Set to job_id ONLY on the success path, and acted on AFTER the
+        # session below is closed — see the chain block under the with.
+        chain_after = None
 
         # Its OWN long-lived session: the request-scoped one died with the POST
         # that queued this run.
@@ -10816,13 +10859,7 @@ async def _export_runner(export_id: str):
                 )
                 print(f"[Export/v850] DONE run={export_id[:8]} job={job_id[:8]} "
                       f"→ {result.get('filename')}", flush=True)
-
-                # v947 — the declared finish continues by itself.
-                try:
-                    await asyncio.to_thread(_maybe_auto_finish_autoedit, job_id)
-                except Exception as _af:
-                    print(f"[AutoFinish] job={job_id[:8]} autoedit chain error: "
-                          f"{_af}", flush=True)
+                chain_after = job_id
             except Exception as e:
                 # _do_export_final was a route handler, so it still raises
                 # HTTPException — which subclasses Exception and lands here, but
@@ -10840,6 +10877,28 @@ async def _export_runner(export_id: str):
                 await asyncio.to_thread(
                     _finish_export_run, export_id, _eq.STATE_FAILED, None, _err
                 )
+
+        # v947 — the declared finish continues by itself. Runs OUTSIDE the
+        # with-block on purpose: the chain opens its own session and takes the
+        # job row FOR UPDATE, and doing that while the export's long-lived
+        # session still held an idle transaction on the same row is a hang
+        # waiting to happen. Own try: a chain error must never re-mark the
+        # finished export as failed.
+        if chain_after:
+            try:
+                await asyncio.to_thread(_maybe_auto_finish_autoedit, chain_after)
+            except Exception as _af:
+                print(f"[AutoFinish] job={chain_after[:8]} autoedit chain error: "
+                      f"{_af}", flush=True)
+                # Best effort, fresh session — the operator's only other view of
+                # this failure is a stdout line nobody reads.
+                try:
+                    with get_db() as _ldb:
+                        add_job_log(_ldb, chain_after,
+                                    f"Auto-finish: auto-edit chain error — "
+                                    f"{str(_af)[:200]}", "ERROR", "auto_finish")
+                except Exception:
+                    pass
     finally:
         if hb_task is not None:
             hb_task.cancel()
@@ -14063,6 +14122,14 @@ def _queue_autoedit_impl(db, job, req: AutoEditRequest, user_id):
         })
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    # Serializes concurrent queue attempts (the v947 chain, an operator click,
+    # a sweeper double-completion): the can_queue read below is check-then-act,
+    # and the job row is the mutex — same pattern as _maybe_auto_finish_export.
+    # Postgres emits FOR UPDATE; sqlite ignores it. Deliberately NOT rebinding
+    # `job`: this is taken for the lock only. Released by the commit on the
+    # success path, and by the caller's rollback on every raise below.
+    db.query(Job).filter(Job.id == job.id).with_for_update().first()
 
     exp = db.query(ExportRun).filter(
         ExportRun.job_id == job_id, ExportRun.state == "done"

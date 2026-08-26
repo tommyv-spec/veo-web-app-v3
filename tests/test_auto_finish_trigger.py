@@ -18,8 +18,12 @@
 # Both are checked against a real sqlite session and the real approve_clip, not
 # a mock of it — the bugs live in the interaction with the session, which is
 # exactly what a mocked session would paper over.
+#
+# The second half of the chain (_maybe_auto_finish_autoedit, fired when the
+# export reaches DONE) is covered at the bottom of this file, same way.
 
 import asyncio
+import contextlib
 import json
 import sys
 import pathlib
@@ -32,7 +36,7 @@ from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import image_platform  # noqa: F401 — registers image_nodes for Clip's FK
-from models import Job, Clip, JobLog, ExportRun
+from models import Job, Clip, JobLog, ExportRun, AutoEditRun
 import main
 from models import ClipStatus
 
@@ -169,3 +173,113 @@ def test_unapproved_sibling_holds_the_export():
 
     _approve(db, first)
     assert db.query(ExportRun).filter(ExportRun.job_id == job_id).count() == 0
+
+
+# --------------------------------------------------------------------------
+# The SECOND half of the chain: export DONE -> _maybe_auto_finish_autoedit.
+# --------------------------------------------------------------------------
+
+
+def _done_export(db, job_id, user_id="u1"):
+    """The auto-edit's queue precondition: a finished export to work on."""
+    from datetime import datetime
+    db.add(ExportRun(
+        id=f"exp-{job_id}", job_id=job_id, user_id=user_id,
+        state="done", settings_json="{}", attempts=0,
+        created_at=datetime.utcnow(),
+    ))
+    db.commit()
+
+
+def _chain(db, monkeypatch, job_id):
+    """Run the export-DONE half against THIS session.
+
+    _maybe_auto_finish_autoedit opens its own session on purpose — the runner's
+    is often dead by the time a long export finishes — so the test hands it the
+    in-memory one and keeps it open past the with-block.
+    """
+    import models
+
+    @contextlib.contextmanager
+    def _fake_get_db():
+        yield db
+
+    monkeypatch.setattr(models, "get_db", _fake_get_db)
+    main._maybe_auto_finish_autoedit(job_id)
+
+
+def _runs(db, job_id):
+    return db.query(AutoEditRun).filter(AutoEditRun.job_id == job_id).all()
+
+
+def test_chain_does_nothing_without_auto_finish(monkeypatch):
+    """No declaration means no chain, even with a finished export sitting there."""
+    db = _session()
+    job_id = _job(db, {"captions": "korella"})
+    _done_export(db, job_id)
+
+    _chain(db, monkeypatch, job_id)
+
+    assert _runs(db, job_id) == []
+
+
+def test_chain_queues_with_the_declared_settings(monkeypatch):
+    """The declared finishing must reach the row: `captions: none` flips
+    captions_enabled OFF (its model default is True), and the declared
+    autoedit_* fields ride along in repair_json."""
+    db = _session()
+    job_id = _job(db, {
+        "auto_finish": "on",
+        "captions": "none",
+        "autoedit": {"trim_start_s": 1.25, "pip_enabled": False},
+    })
+    _done_export(db, job_id)
+
+    _chain(db, monkeypatch, job_id)
+
+    runs = _runs(db, job_id)
+    assert len(runs) == 1
+    assert runs[0].template == "korella"
+    assert runs[0].user_id == "u1"
+    repairs = json.loads(runs[0].repair_json)
+    assert repairs["captions_enabled"] is False      # from `captions: none`
+    assert repairs["trim_start_s"] == 1.25           # from autoedit_trim_start_s
+    assert repairs["pip_enabled"] is False           # from autoedit_pip_enabled
+
+
+def test_chain_firing_twice_queues_only_one(monkeypatch):
+    """A double completion (sweeper re-fire, operator click racing the chain)
+    must be a logged no-op — the impl's can_queue 409 is caught, not raised."""
+    db = _session()
+    job_id = _job(db, ON)
+    _done_export(db, job_id)
+
+    _chain(db, monkeypatch, job_id)
+    _chain(db, monkeypatch, job_id)
+
+    assert len(_runs(db, job_id)) == 1
+    warned = db.query(JobLog).filter(
+        JobLog.job_id == job_id, JobLog.level == "WARNING").all()
+    assert len(warned) == 1
+    assert "not queued" in warned[0].message
+
+
+def test_chain_fails_closed_on_a_corrupt_declaration(monkeypatch):
+    """A declared autoedit setting that no longer validates must queue NOTHING.
+
+    Falling back to defaults would render with settings the build never asked
+    for — the exact v944 failure this feature exists to kill. A TYPE-invalid
+    value is what reproduces it; pydantic's extra=ignore would swallow a merely
+    unknown key.
+    """
+    db = _session()
+    job_id = _job(db, {"auto_finish": "on", "autoedit": {"offset": "not-a-number"}})
+    _done_export(db, job_id)
+
+    _chain(db, monkeypatch, job_id)          # must not raise
+
+    assert _runs(db, job_id) == []
+    errs = db.query(JobLog).filter(
+        JobLog.job_id == job_id, JobLog.level == "ERROR").all()
+    assert len(errs) == 1
+    assert "failed validation" in errs[0].message
