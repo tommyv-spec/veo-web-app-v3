@@ -276,6 +276,11 @@ class DialogueLineInput(BaseModel):
     swap_source_r2_key: Optional[str] = None
     swap_mode: Optional[str] = None
     swap_avatar_upload_id: Optional[int] = None
+    # v943.1 — export-time source audio for a swap clip. Declared here for the
+    # same v892.2 reason as the four above: pydantic drops what it is not told
+    # about, and an undeclared field reaches the Clip row as NULL while every
+    # surface upstream of it looks correctly wired.
+    swap_audio: Optional[str] = None
 
 
 class SceneInput(BaseModel):
@@ -2482,6 +2487,11 @@ async def _create_job_impl(
             ),
             swap_avatar_upload_id=(
                 line.get('swap_avatar_upload_id') if isinstance(line, dict) else None
+            ),
+            # v943.1 — export-time source audio. NULL on every normal clip;
+            # only the final export reads it.
+            swap_audio=(
+                line.get('swap_audio') if isinstance(line, dict) else None
             ),
         )
         db.add(clip)
@@ -11502,6 +11512,185 @@ def _requeue_local_autoedits_on_shutdown() -> int:
     return n
 
 
+# =============================================================================
+# v943.1 — SOURCE-ORIGINAL AUDIO on a charswap clip
+# =============================================================================
+# A charswap RENDER is silent by contract: Flow only accepts a muted upload and
+# charswap_prepare_source strips the track on the way in. So the source video's
+# own audio — the thing that made the source worth swapping in the first place —
+# is thrown away before the render, and nothing downstream can put it back.
+#
+# v943.1 puts it back at EXPORT time. A scene declaring `- **audio:**
+# source-original` gets the stored source's audio laid over its segment of the
+# final cut. Done per clip, on the downloaded render file, BEFORE the trim /
+# VAD / concat pipeline runs — that is the only place a clip's segment is still
+# addressable as its own file. After the concat the segment boundaries have
+# moved (VAD removes silence, the speed pass rescales) and there is nothing
+# left to line the audio up against.
+#
+# Nothing here may fail the export. Missing source, no audio stream in it,
+# ffmpeg unhappy — every one of those leaves the clip exactly as silent as it is
+# today and the rest of the video ships.
+
+
+def charswap_export_audio_key(clip) -> Optional[str]:
+    """The R2 key whose audio belongs over this clip's segment, or None.
+
+    THE decision, kept pure so it can be tested without R2, ffmpeg or a
+    database: three facts have to line up — the clip is a charswap render, it
+    asked for source audio, and it actually has a stored source to take it
+    from. A clip that asked for it but carries no source key is not an error
+    here; it just has nothing to mux, which is the same silent outcome.
+
+    Takes a Clip row or a plain dict, so a test does not need the ORM.
+    """
+    def _field(name):
+        if isinstance(clip, dict):
+            return clip.get(name)
+        return getattr(clip, name, None)
+
+    if str(_field("render_method") or "").strip().lower() != "charswap":
+        return None
+    if str(_field("swap_audio") or "").strip().lower() != "source-original":
+        return None
+    key = str(_field("swap_source_r2_key") or "").strip()
+    return key or None
+
+
+def _v943_1_has_audio_stream(path) -> bool:
+    """True when ffprobe finds an audio stream in the file."""
+    info = _v943_probe_source(path)
+    return any(
+        (s.get("codec_type") or "") == "audio"
+        for s in (info.get("streams") or [])
+    )
+
+
+def _v943_1_mux_argv(render_path, source_path, out_path) -> list:
+    """The ffmpeg call that lays the source's audio over the render.
+
+    The video stream is COPIED, never re-encoded — this clip has already been
+    rendered once and a second encode would cost quality for nothing. Only the
+    audio is transcoded, to the aac the concat step expects. `-shortest` keeps
+    the segment at whichever of the two is shorter, so a source that is a
+    fraction longer than the render cannot stretch the timeline.
+    """
+    try:
+        from video_processor import FFMPEG_BIN as _ffmpeg
+    except Exception:
+        _ffmpeg = "ffmpeg"
+    return [
+        _ffmpeg, "-y", "-loglevel", "error", "-nostats",
+        "-i", str(render_path),
+        "-i", str(source_path),
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+        "-shortest",
+        "-movflags", "+faststart",
+        str(out_path),
+    ]
+
+
+def _v943_1_apply_source_audio(clips, rows) -> int:
+    """Mux source audio onto every downloaded clip that asked for it.
+
+    `clips` are the Clip rows; `rows` are the per-clip dicts the download pass
+    produced (they carry `_clip_db_id` and the local `path`). Returns how many
+    segments got audio. Never raises.
+    """
+    import shutil as _shutil
+    import subprocess as _sp
+    import tempfile as _tf
+
+    wanted = {}
+    for c in clips:
+        key = charswap_export_audio_key(c)
+        if key:
+            wanted[c.id] = key
+    if not wanted:
+        return 0
+
+    by_id = {}
+    for r in rows:
+        if isinstance(r, dict) and r.get("_clip_db_id") is not None:
+            by_id[r["_clip_db_id"]] = r
+
+    try:
+        from backends.storage import is_storage_configured, get_storage
+        storage = get_storage() if is_storage_configured() else None
+    except Exception as e:
+        print(f"[v943.1] storage unavailable, every swap clip stays silent: {e}",
+              flush=True)
+        return 0
+    if storage is None:
+        print("[v943.1] storage not configured, every swap clip stays silent",
+              flush=True)
+        return 0
+
+    done = 0
+    for clip_id, key in wanted.items():
+        row = by_id.get(clip_id)
+        if row is None or not row.get("path"):
+            print(f"[v943.1] clip id={clip_id} asked for source audio but is not "
+                  f"in the export lineup — skipped", flush=True)
+            continue
+        render_path = Path(row["path"])
+        if not render_path.exists():
+            print(f"[v943.1] clip id={clip_id} render file missing at "
+                  f"{render_path.name} — stays silent", flush=True)
+            continue
+
+        src_path = None
+        out_path = None
+        try:
+            with _tf.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+                src_path = tmp.name
+            # Streamed to disk by the storage backend, never held in memory —
+            # this runs inside the same 2GB cgroup as the concat that OOMs.
+            storage.download_file(key, src_path)
+            size = os.path.getsize(src_path)
+            if size > SWAP_SOURCE_MAX_BYTES:
+                print(f"[v943.1] source {key} is {size} bytes, over the "
+                      f"{SWAP_SOURCE_MAX_BYTES} cap — clip id={clip_id} stays silent",
+                      flush=True)
+                continue
+            if not _v943_1_has_audio_stream(src_path):
+                # Expected, not a fault: plenty of sources are silent.
+                print(f"[v943.1] source {key} has NO audio stream — clip "
+                      f"id={clip_id} stays silent (export continues)", flush=True)
+                continue
+
+            out_path = str(render_path.with_name(render_path.stem + "_v9431.mp4"))
+            argv = _v943_1_mux_argv(render_path, src_path, out_path)
+            proc = _sp.run(argv, capture_output=True, text=True, timeout=300)
+            if proc.returncode != 0 or not os.path.exists(out_path):
+                print(f"[v943.1] ffmpeg mux failed for clip id={clip_id} "
+                      f"(rc={proc.returncode}): {(proc.stderr or '')[:300]} — "
+                      f"clip stays silent, export continues", flush=True)
+                continue
+            _shutil.move(out_path, str(render_path))
+            out_path = None
+            done += 1
+            # TEMP DIAG [TEMP] (remove once one v943.1 export is confirmed live)
+            print(f"[TEMP][v943.1] muxed source audio onto clip id={clip_id} "
+                  f"file={render_path.name} from key={key}", flush=True)
+        except Exception as e:
+            print(f"[v943.1] source-audio mux skipped for clip id={clip_id}: {e} "
+                  f"— clip stays silent, export continues", flush=True)
+        finally:
+            for p in (src_path, out_path):
+                if p and os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+
+    print(f"[v943.1] source-original audio: {done}/{len(wanted)} swap clip(s) "
+          f"carried their source track into the export", flush=True)
+    return done
+
+
 async def _do_export_final(
     job_id: str,
     settings: ExportSettings,
@@ -11898,6 +12087,17 @@ async def _do_export_final(
         pass
     with _TPE(max_workers=3) as pool:
         results = list(pool.map(_download_clip, list(enumerate(clips))))
+
+    # v943.1 — lay the swap source's own audio back over any clip that asked
+    # for it. Here and not later: the render files are on disk and each one is
+    # still its own segment. ffmpeg + an R2 read are blocking, so this runs off
+    # the event loop. It never raises — a clip that cannot get its audio stays
+    # silent and the export goes on.
+    try:
+        await asyncio.to_thread(
+            _v943_1_apply_source_audio, clips, [r for r in results if r])
+    except Exception as _e9431:
+        print(f"[v943.1] source-audio pass skipped entirely: {_e9431}", flush=True)
 
     # v701n — Sort with audio_pair interleaved next to its visual_pair.
     # Bug: audio_pair Clip rows are written with

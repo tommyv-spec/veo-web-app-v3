@@ -411,6 +411,12 @@ class Clip(Base):
     swap_source_r2_key = Column(String(512), nullable=True)
     swap_mode = Column(String(20), nullable=True)
     swap_avatar_upload_id = Column(Integer, ForeignKey("image_nodes.id"), nullable=True)
+    # v943.1 — swap_audio: NULL / 'none' (silent, the default and what every
+    # pre-existing row is) | 'source-original'. Read ONLY by the final export,
+    # which lays the stored source video's own audio track back over this
+    # clip's segment. It changes nothing about the render: Flow requires a
+    # muted upload and charswap_prepare_source strips the track on the way in.
+    swap_audio = Column(String(20), nullable=True)
 
     # Status
     status = Column(String(20), default=ClipStatus.PENDING.value)
@@ -574,6 +580,8 @@ class Clip(Base):
             "swap_source_r2_key": self.swap_source_r2_key,
             "swap_mode": self.swap_mode,
             "swap_avatar_upload_id": self.swap_avatar_upload_id,
+            # v943.1 — export-time source audio for a swap clip.
+            "swap_audio": self.swap_audio,
         }
 
 

@@ -685,3 +685,209 @@ def test_the_arm_acts_on_the_gate_before_the_shared_bookkeeping():
     assert "update_clip_status(clip['id'], 'failed'" in rejection
     assert "permanently_failed_clips.add(clip_index)" in rejection
     assert "continue" in rejection
+
+
+# =============================================================================
+# 10. v943.1 — SOURCE-ORIGINAL AUDIO
+# =============================================================================
+# The render stays silent (Flow needs a muted upload). This is an EXPORT-time
+# feature: the stored source's own audio is laid back over the swap clip's
+# segment. So the checks are: does the bullet parse and fail closed, does the
+# column reach every surface a Clip row is built at, and does the one decision
+# that drives the mux answer correctly on its own.
+
+CHARSWAP_AUDIO_SCENE = CHARSWAP_SCENE + "- **audio:** source-original\n"
+
+
+def test_legacy_scene_has_no_swap_audio():
+    assert _parse(LEGACY_SCENE)[0]["swap_audio"] is None
+
+
+def test_charswap_scene_without_the_bullet_has_no_swap_audio():
+    assert _parse(CHARSWAP_SCENE)[0]["swap_audio"] is None
+
+
+def test_charswap_scene_takes_source_original():
+    assert _parse(CHARSWAP_AUDIO_SCENE)[0]["swap_audio"] == "source-original"
+
+
+def test_charswap_scene_takes_none_explicitly():
+    md = CHARSWAP_SCENE + "- **audio:** none\n"
+    assert _parse(md)[0]["swap_audio"] == "none"
+
+
+def test_the_value_is_case_and_space_insensitive():
+    md = CHARSWAP_SCENE + "- **audio:**   Source-Original   \n"
+    assert _parse(md)[0]["swap_audio"] == "source-original"
+
+
+def test_an_unknown_audio_value_hard_fails():
+    md = CHARSWAP_SCENE + "- **audio:** original-mix\n"
+    with pytest.raises(ValueError, match="audio"):
+        _parse(md)
+
+
+def test_audio_on_a_non_charswap_scene_hard_fails():
+    """A normal Veo clip has its own audio and no stored source to take a
+    track from, so the bullet there is a mistake, not a no-op."""
+    md = LEGACY_SCENE + "- **audio:** source-original\n"
+    with pytest.raises(ValueError, match="charswap"):
+        _parse(md)
+
+
+def test_even_audio_none_on_a_non_charswap_scene_hard_fails():
+    md = LEGACY_SCENE + "- **audio:** none\n"
+    with pytest.raises(ValueError, match="charswap"):
+        _parse(md)
+
+
+def _function_source(path, name):
+    """Source text of ONE top-level function, so a match cannot leak in."""
+    import ast
+    src = path.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
+            return ast.get_source_segment(src, n) or ""
+    raise AssertionError(f"{name}() not found in {path.name}")
+
+
+# Every surface that builds a per-clip dict or a Clip row already names
+# swap_avatar_upload_id. Deriving the expectation from that, instead of listing
+# the sites here, means a new build path starts being checked the day it lands.
+@pytest.mark.parametrize("filename,func", [
+    ("image_platform.py", "_import_scene_table_impl"),
+    ("image_platform.py", "prepare_batch_for_video"),
+    ("image_platform.py", "promote_batch_to_video"),
+    ("main.py", "_create_job_impl"),
+])
+def test_swap_audio_reaches_every_clip_building_surface(filename, func):
+    src = _function_source(_HERE / filename, func)
+    assert "swap_avatar_upload_id" in src, "fixture is out of date"
+    assert src.count("swap_audio") >= 1, (
+        f"{func}() carries the other charswap fields but drops swap_audio — "
+        f"the column would reach the Clip row as NULL")
+
+
+def test_promote_carries_swap_audio_on_both_dicts_and_the_clip_row():
+    """promote_batch_to_video builds three things per clip: the stored
+    dialogue entry, the clip spec, and the Clip row itself."""
+    src = _function_source(_HERE / "image_platform.py", "promote_batch_to_video")
+    assert src.count('"swap_audio": (') == 2          # dialogue_list + clip_specs
+    assert 'swap_audio=spec.get("swap_audio")' in src  # Clip(...)
+
+
+def test_the_browser_promote_payload_sends_swap_audio_too():
+    """The field-plumbing checker is satisfied by EITHER promote path, so a
+    miss in index.html passes the checker and still arrives NULL on every job
+    promoted from the UI — the v892.2 failure exactly."""
+    src = (_HERE / "static" / "index.html").read_text(encoding="utf-8")
+    assert "swap_avatar_upload_id:" in src, "fixture is out of date"
+    assert "swap_audio: promoteMeta.swap_audio" in src
+
+
+def test_the_column_is_in_the_readback_contract():
+    from image_platform import CHARSWAP_COLUMNS
+    assert "swap_audio" in CHARSWAP_COLUMNS["clips"]
+    assert "swap_audio" in CHARSWAP_COLUMNS["image_scene_assignments"]
+
+
+def test_both_migration_dialects_register_the_column():
+    src = (_HERE / "image_platform.py").read_text(encoding="utf-8")
+    for table in ("image_scene_assignments", "clips"):
+        assert f"ALTER TABLE {table} ADD COLUMN swap_audio VARCHAR(20)" in src
+        assert (f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
+                f"swap_audio VARCHAR(20)") in src
+
+
+# --- the mux decision, on its own, with no ffmpeg and no R2 ------------------
+
+def _clip(**kw):
+    base = {"render_method": None, "swap_audio": None, "swap_source_r2_key": None}
+    base.update(kw)
+    return base
+
+
+def test_a_legacy_clip_never_gets_source_audio():
+    from main import charswap_export_audio_key
+    assert charswap_export_audio_key(_clip()) is None
+
+
+def test_a_swap_clip_that_did_not_ask_stays_silent():
+    from main import charswap_export_audio_key
+    assert charswap_export_audio_key(_clip(
+        render_method="charswap", swap_audio="none",
+        swap_source_r2_key="swap-sources/7/abc.mp4")) is None
+    assert charswap_export_audio_key(_clip(
+        render_method="charswap",
+        swap_source_r2_key="swap-sources/7/abc.mp4")) is None
+
+
+def test_a_swap_clip_that_asked_returns_its_source_key():
+    from main import charswap_export_audio_key
+    assert charswap_export_audio_key(_clip(
+        render_method="charswap", swap_audio="source-original",
+        swap_source_r2_key="swap-sources/7/abc.mp4")
+    ) == "swap-sources/7/abc.mp4"
+
+
+def test_asking_without_a_stored_source_is_silent_not_an_error():
+    from main import charswap_export_audio_key
+    assert charswap_export_audio_key(_clip(
+        render_method="charswap", swap_audio="source-original")) is None
+    assert charswap_export_audio_key(_clip(
+        render_method="charswap", swap_audio="source-original",
+        swap_source_r2_key="   ")) is None
+
+
+def test_a_normal_clip_asking_for_source_audio_is_still_silent():
+    """Belt and braces on the parser's refusal: even if a row somehow carries
+    the flag without render_method, the export must not go looking for a key."""
+    from main import charswap_export_audio_key
+    assert charswap_export_audio_key(_clip(
+        swap_audio="source-original",
+        swap_source_r2_key="swap-sources/7/abc.mp4")) is None
+
+
+def test_the_decision_reads_a_clip_object_too():
+    from main import charswap_export_audio_key
+
+    class _Row:
+        render_method = "charswap"
+        swap_audio = "Source-Original"
+        swap_source_r2_key = "swap-sources/7/abc.mp4"
+
+    assert charswap_export_audio_key(_Row()) == "swap-sources/7/abc.mp4"
+
+
+def test_the_mux_copies_the_video_and_re_encodes_only_the_audio():
+    from main import _v943_1_mux_argv
+    argv = _v943_1_mux_argv("render.mp4", "source.mp4", "out.mp4")
+    assert argv[-1] == "out.mp4"
+    assert argv[argv.index("-i") + 1] == "render.mp4"
+    assert argv[argv.index("-i", argv.index("-i") + 1) + 1] == "source.mp4"
+    # video from the render, audio from the source
+    assert "0:v:0" in argv and "1:a:0" in argv
+    # the render is NOT encoded a second time
+    assert argv[argv.index("-c:v") + 1] == "copy"
+    assert argv[argv.index("-c:a") + 1] == "aac"
+    assert "-shortest" in argv
+
+
+def test_the_export_runs_the_pass_before_the_concat_pipeline():
+    """The mux has to happen while each clip is still its own file. After the
+    concat, VAD and the speed pass have moved every segment boundary."""
+    src = _function_source(_HERE / "main.py", "_do_export_final")
+    download = src.index("pool.map(_download_clip")
+    mux = src.index("_v943_1_apply_source_audio", download)
+    concat = src.index("process_export,", mux)
+    assert download < mux < concat
+
+
+def test_a_source_with_no_audio_never_fails_the_export():
+    """The whole pass is wrapped so one bad clip cannot take the video down."""
+    src = _function_source(_HERE / "main.py", "_v943_1_apply_source_audio")
+    assert "NO audio stream" in src
+    assert "export continues" in src
+    # the temp source and the temp output are both cleaned in `finally`
+    assert "finally:" in src

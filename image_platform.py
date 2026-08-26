@@ -337,6 +337,12 @@ def run_image_platform_migrations():
          "ALTER TABLE clips ADD COLUMN swap_mode VARCHAR(20)"),
         ("clips", "swap_avatar_upload_id",
          "ALTER TABLE clips ADD COLUMN swap_avatar_upload_id INTEGER"),
+        # v943.1: export-time source audio for a swap clip. Nullable, NO
+        # default — NULL means silent, which is what every existing row is.
+        ("image_scene_assignments", "swap_audio",
+         "ALTER TABLE image_scene_assignments ADD COLUMN swap_audio VARCHAR(20)"),
+        ("clips", "swap_audio",
+         "ALTER TABLE clips ADD COLUMN swap_audio VARCHAR(20)"),
     ]
     postgres_migrations = [
         ("image_nodes", "claimed_by_worker",
@@ -527,6 +533,11 @@ def run_image_platform_migrations():
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS swap_mode VARCHAR(20)"),
         ("clips", "swap_avatar_upload_id",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS swap_avatar_upload_id INTEGER"),
+        # v943.1: export-time source audio — see the SQLite block above.
+        ("image_scene_assignments", "swap_audio",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS swap_audio VARCHAR(20)"),
+        ("clips", "swap_audio",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS swap_audio VARCHAR(20)"),
     ]
 
     # v479: widen ImageJobBatch string columns to TEXT. The previous
@@ -677,9 +688,12 @@ def run_image_platform_migrations():
 CHARSWAP_COLUMNS = {
     "image_scene_assignments": [
         "render_method", "swap_source_r2_key", "swap_mode", "swap_avatar_upload_id",
+        # v943.1 — export-time source audio.
+        "swap_audio",
     ],
     "clips": [
         "render_method", "swap_source_r2_key", "swap_mode", "swap_avatar_upload_id",
+        "swap_audio",
     ],
 }
 
@@ -1674,6 +1688,13 @@ class ImageSceneAssignment(Base):
     swap_avatar_upload_id = Column(
         Integer, ForeignKey("image_nodes.id"), nullable=True
     )
+    # v943.1 — `- **audio:** source-original | none`, declared per charswap
+    # scene. NULL (and 'none') mean the exported segment stays silent, which is
+    # what every scene imported before this column does. 'source-original' asks
+    # the final export to lay the stored swap source's own audio track back
+    # over this clip's segment. It never touches the render — Flow uploads are
+    # muted by contract.
+    swap_audio = Column(String(20), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1761,6 +1782,8 @@ class ImageSceneAssignment(Base):
             "swap_source_r2_key": self.swap_source_r2_key,
             "swap_mode": self.swap_mode,
             "swap_avatar_upload_id": self.swap_avatar_upload_id,
+            # v943.1 — export-time audio for a swap clip.
+            "swap_audio": self.swap_audio,
         }
 
 
@@ -5518,9 +5541,41 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 f"render_method / swap_source_video / swap_mode. Declared: "
                 f"{_swap_declared}; missing: {_missing} (v943)"
             )
+
+        # v943.1 — `- **audio:** source-original | none`. The RENDER is always
+        # silent (Flow only accepts a muted upload, and charswap_prepare_source
+        # strips the track on the way in), so this bullet does not change the
+        # render at all: it says whether the FINAL EXPORT lays the original
+        # source video's audio back over this clip's segment.
+        #
+        # Fails closed for the same reason the three bullets above do. It is
+        # only meaningful on a charswap scene — a normal Veo clip already has
+        # its own audio and there is no stored source to take a track from — so
+        # declaring it anywhere else stops the import instead of being quietly
+        # ignored, and an unrecognised value stops it too.
+        swap_audio: Optional[str] = None
+        _sa_raw = _parse_bullet_field(block, "audio")
+        if _sa_raw:
+            _sa = _sa_raw.strip().split()[0].strip().lower()
+            if _sa not in ("source-original", "none"):
+                raise ValueError(
+                    f"Scene {scene_index}: audio {_sa_raw!r} is not "
+                    f"'source-original' or 'none' (v943.1)"
+                )
+            if render_method != "charswap":
+                raise ValueError(
+                    f"Scene {scene_index}: `- **audio:**` only means something "
+                    f"on a charswap scene — it re-muxes the swap source's own "
+                    f"audio track onto the exported segment, and a scene with "
+                    f"no swap_source_video has no track to take. Remove the "
+                    f"bullet, or declare render_method / swap_source_video / "
+                    f"swap_mode too (v943.1)"
+                )
+            swap_audio = _sa
         if render_method:
             print(f"[v943/parse] scene_{scene_index} render_method={render_method} "
-                  f"swap_mode={swap_mode} source={swap_source_video!r}", flush=True)
+                  f"swap_mode={swap_mode} source={swap_source_video!r} "
+                  f"audio={swap_audio or 'none (default)'}", flush=True)
 
         # Parse interleaved `- **line:**` / `- **action_note:**` / `- **pad:**`
         # bullets. Order matters: action_note and pad attach to the closest
@@ -5703,6 +5758,8 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "render_method": render_method,          # None | 'charswap'
             "swap_source_video": swap_source_video,  # None | declared asset name
             "swap_mode": swap_mode,                  # None | 'video-led' | 'image-led'
+            # v943.1 — export-time audio, NOT a render setting.
+            "swap_audio": swap_audio,                # None | 'source-original' | 'none'
         })
 
     if not scenes:
@@ -8782,6 +8839,12 @@ def _import_scene_table_impl(
             swap_avatar_upload_id=(
                 _v943_avatar_node_id if s.get("render_method") == "charswap" else None
             ),
+            # v943.1 — export-time source audio. The parser already refuses the
+            # bullet on a non-charswap scene; this guard keeps the column NULL
+            # on every legacy row the same way the four above stay NULL.
+            swap_audio=(
+                s.get("swap_audio") if s.get("render_method") == "charswap" else None
+            ),
         )
         db.add(assignment)
         assignments_created += 1
@@ -9891,6 +9954,8 @@ def prepare_batch_for_video(
         _v943_source_key = scene.get("swap_source_r2_key")
         _v943_mode = scene.get("swap_mode")
         _v943_avatar = scene.get("swap_avatar_upload_id")
+        # v943.1 — export-time source audio; None on every normal scene.
+        _v943_1_audio = scene.get("swap_audio")
 
         scene_assignments_payload.append({
             "scene_index": scene["scene_index"],
@@ -9943,6 +10008,8 @@ def prepare_batch_for_video(
             "swap_source_r2_key": _v943_source_key,
             "swap_mode": _v943_mode,
             "swap_avatar_upload_id": _v943_avatar,
+            # v943.1 — export-time source audio.
+            "swap_audio": _v943_1_audio,
         })
 
         # v681 — scenes with no `- **line:**` bullets but a real video
@@ -10054,6 +10121,8 @@ def prepare_batch_for_video(
                 "swap_source_r2_key": _v943_source_key,
                 "swap_mode": _v943_mode,
                 "swap_avatar_upload_id": _v943_avatar,
+                # v943.1 — export-time source audio.
+                "swap_audio": _v943_1_audio,
             })
             veo_prompts_flat.append(silent_vp)
             pads_flat.append(None)
@@ -10224,6 +10293,8 @@ def prepare_batch_for_video(
                 "swap_source_r2_key": _v943_source_key,
                 "swap_mode": _v943_mode,
                 "swap_avatar_upload_id": _v943_avatar,
+                # v943.1 — export-time source audio.
+                "swap_audio": _v943_1_audio,
             })
             veo_prompts_flat.append(vp)
             pads_flat.append(pad)
@@ -11739,6 +11810,11 @@ def promote_batch_to_video(
                     getattr(_assignment, "swap_avatar_upload_id", None)
                     if _assignment is not None else None
                 ),
+                # v943.1 — export-time source audio.
+                "swap_audio": (
+                    getattr(_assignment, "swap_audio", None)
+                    if _assignment is not None else None
+                ),
             })
 
             clip_specs.append({
@@ -11776,6 +11852,11 @@ def promote_batch_to_video(
                 ),
                 "swap_avatar_upload_id": (
                     getattr(_assignment, "swap_avatar_upload_id", None)
+                    if _assignment is not None else None
+                ),
+                # v943.1 — export-time source audio.
+                "swap_audio": (
+                    getattr(_assignment, "swap_audio", None)
                     if _assignment is not None else None
                 ),
             })
@@ -11996,6 +12077,8 @@ def promote_batch_to_video(
             swap_source_r2_key=spec.get("swap_source_r2_key"),
             swap_mode=spec.get("swap_mode"),
             swap_avatar_upload_id=spec.get("swap_avatar_upload_id"),
+            # v943.1 — export-time source audio, carried the same way.
+            swap_audio=spec.get("swap_audio"),
         )
         db.add(clip)
 

@@ -10583,6 +10583,12 @@ Ambient: same kitchen room tone, soft pour sound.
                             (promoteMeta.swap_avatar_upload_id !== undefined
                                 ? promoteMeta.swap_avatar_upload_id
                                 : null),
+                        // v943.1 — export-time source audio. Sent for the same
+                        // reason as the four above: the field-plumbing checker
+                        // is satisfied by the SERVER-side promote, so a miss
+                        // here would be silent and only show up as a swap clip
+                        // that exported without its source's audio.
+                        swap_audio: promoteMeta.swap_audio || null,
                         // v892.2 (NEW 2026-08-18) — the composite PLATE
                         // binding, plumbed for exactly the same reason as
                         // the two blocks above. `clip_role` was already
