@@ -145,6 +145,15 @@ def normalize_repairs(value=None):
         footer = str(ov.get("overlay_footer") or "").strip()
         if footer:
             clean["overlay_footer"] = footer
+        pitch = ov.get("overlay_pitch")
+        if pitch not in (None, ""):
+            try:
+                pitch_i = int(pitch)
+            except (TypeError, ValueError):
+                raise ValueError("Overlay pitch must be a whole number of spec units")
+            if not 30 <= pitch_i <= 120:
+                raise ValueError("Overlay pitch must sit between 30 and 120 spec units")
+            clean["overlay_pitch"] = pitch_i
         out["overlay_spec"] = clean
 
     out["pip_enabled"] = bool(out["pip_enabled"])

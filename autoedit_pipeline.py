@@ -1622,7 +1622,12 @@ RC_SPEC = {                                       # size, tracking, at 720x1280
 # the operator rejected: it packs three lines into the height his account gives
 # two. The route line is NOT a separately-spaced element on his account, it is
 # just the next line, so its gap is the same order as the body pitch.
-RC_BODY_PITCH = 84        # was 49
+RC_BODY_PITCH = 49        # MEASURED from the account's own posted winner
+# (Dbn4yKwxCrl seg1, 1080x1920): block line centers 1236/1309/1380/1449 ->
+# pitch 71px at 1080 = 47.3 in spec units; the original 49 renders 73.5px and
+# matches. The 2026-08-24 "84" was a mismeasurement (rendered ~125px, nearly
+# double the reference) and the operator flagged the spacing on two finals
+# before this was traced (2026-08-26).
 RC_GAP_AGE_BODY = 67      # age and block are placed independently anyway
 RC_GAP_BODY_ROUTE = 84    # was 85 measured as a DOUBLE gap; his is one more line
 
@@ -2277,6 +2282,10 @@ def overlay_stage_plan(spec):
         "watermark": spec.get("overlay_watermark", "syntheticperformer"),
         "body_until": spec.get("overlay_body_until"),
         "route_with_body": bool(spec.get("overlay_route_with_body")),
+        # Line pitch in spec units. Default = the account constant, MEASURED
+        # from its own posted winner (49 -> ~73px at 1080); a declared value is
+        # a deliberate spacing test, already range-checked upstream.
+        "pitch": spec.get("overlay_pitch"),
     }
 
 
@@ -2306,6 +2315,16 @@ def render_readcaption_overlay(video_in, video_out, plan):
         print("  head band not measured (no person detector here) — occupancy and "
               "silhouette placement carry it", flush=True)
 
+    # A declared overlay_pitch overrides the account constant FOR THIS RENDER
+    # only. The rc_ helpers read the module constant (they are the tool's
+    # functions, moved verbatim), so the override is scoped set-and-restore —
+    # safe because one worker renders one run at a time.
+    global RC_BODY_PITCH
+    _saved_pitch = RC_BODY_PITCH
+    if plan.get("pitch"):
+        RC_BODY_PITCH = int(plan["pitch"])
+        print(f"  [v944] overlay pitch override: {RC_BODY_PITCH} spec units", flush=True)
+
     args = types.SimpleNamespace(
         src=str(video_in), out=str(video_out), width=width, height=height,
         age=plan["age"], body=list(plan.get("body") or []),
@@ -2321,8 +2340,11 @@ def render_readcaption_overlay(video_in, video_out, plan):
     )
     print(f"overlay: readcaption — age {args.age!r}, {len(args.body)} body line(s)",
           flush=True)
-    ass = rc_build_ass(args)
-    rc_burn_ass(args.src, ass, args.out)
+    try:
+        ass = rc_build_ass(args)
+        rc_burn_ass(args.src, ass, args.out)
+    finally:
+        RC_BODY_PITCH = _saved_pitch
     return Path(video_out)
 
 

@@ -5309,6 +5309,20 @@ def parse_finishing_section(md_text: str):
         footer = fields.get("overlay_footer", "").strip()
         if footer:
             spec["overlay_footer"] = footer
+        pitch = fields.get("overlay_pitch", "").strip()
+        if pitch:
+            # Line pitch in spec units (the engine's reference scale). The
+            # account default is measured from its own posted winner (49);
+            # declare a value only to run a deliberate spacing test.
+            try:
+                pitch_i = int(pitch)
+            except ValueError:
+                raise ValueError(
+                    f"## Finishing overlay_pitch: {pitch!r} is not a whole number (v944)")
+            if not 30 <= pitch_i <= 120:
+                raise ValueError(
+                    f"## Finishing overlay_pitch: {pitch_i} is outside 30..120 (v944)")
+            spec["overlay_pitch"] = pitch_i
     return spec
 
 

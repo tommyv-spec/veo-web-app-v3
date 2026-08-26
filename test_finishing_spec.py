@@ -316,7 +316,11 @@ def test_the_doctrine_constants_survived_the_port():
     assert (p.RC_SAFE_TOP, p.RC_SAFE_BOTTOM) == (0.06, 0.79)  # organic Reels zone
     assert p.RC_SPEC == {"age": (94, 0), "body": (47, 0), "route": (52, 0)}
     assert p.RC_OUTLINE == 10
-    assert (p.RC_BODY_PITCH, p.RC_GAP_AGE_BODY, p.RC_GAP_BODY_ROUTE) == (84, 67, 84)
+    # BODY_PITCH corrected 84 -> 49 on 2026-08-26: measured from the account's
+    # own posted winner (block pitch ~71px at 1080 = 47.3 spec units; 49
+    # renders 73.5px and matches). 84 rendered ~125px — the doubled spacing
+    # the operator flagged on two finals before it was traced.
+    assert (p.RC_BODY_PITCH, p.RC_GAP_AGE_BODY, p.RC_GAP_BODY_ROUTE) == (49, 67, 84)
     assert p.RC_AGE_MAX_W == 0.35 and p.RC_MAX_TEXT_W == 0.90
     assert p.RC_ASS_PIL_WIDTH_RATIO == 0.81
 
@@ -456,3 +460,51 @@ def test_overlay_stage_plan_is_none_for_every_legacy_shape():
     from autoedit_pipeline import overlay_stage_plan
     for legacy in (None, {}, {"overlay": "none"}, {"captions": "korella", "overlay": "none"}):
         assert overlay_stage_plan(legacy) is None
+
+
+# ---------------------------------------------------------------------------
+# v944.1 — the line pitch: measured from the posted winner, declarable per build
+# ---------------------------------------------------------------------------
+
+def test_overlay_pitch_parses_and_rides_the_spec():
+    spec = _parse("## Finishing\n\n- **overlay:** readcaption\n"
+                  "- **overlay_age:** I'M 74\n- **overlay_pitch:** 49\n")
+    assert spec["overlay_pitch"] == 49
+
+
+def test_overlay_pitch_out_of_range_hard_fails():
+    with pytest.raises(ValueError, match="overlay_pitch"):
+        _parse("## Finishing\n\n- **overlay:** readcaption\n"
+               "- **overlay_age:** I'M 74\n- **overlay_pitch:** 200\n")
+    with pytest.raises(ValueError, match="overlay_pitch"):
+        _parse("## Finishing\n\n- **overlay:** readcaption\n"
+               "- **overlay_age:** I'M 74\n- **overlay_pitch:** wide\n")
+
+
+def test_overlay_plan_carries_the_pitch():
+    from autoedit_pipeline import overlay_stage_plan
+    plan = overlay_stage_plan({"overlay": "readcaption", "overlay_age": "I'M 74",
+                               "overlay_pitch": 49})
+    assert plan["pitch"] == 49
+    assert overlay_stage_plan({"overlay": "readcaption",
+                               "overlay_age": "I'M 74"})["pitch"] is None
+
+
+def test_qc_normalizes_and_bounds_the_pitch():
+    from autoedit_qc import normalize_repairs
+    out = normalize_repairs({"overlay_spec": {"overlay": "readcaption",
+                                              "overlay_age": "I'M 74",
+                                              "overlay_pitch": "49"}})
+    assert out["overlay_spec"]["overlay_pitch"] == 49
+    with pytest.raises(ValueError, match="pitch"):
+        normalize_repairs({"overlay_spec": {"overlay": "readcaption",
+                                            "overlay_age": "I'M 74",
+                                            "overlay_pitch": 500}})
+
+
+def test_the_default_pitch_is_the_measured_account_constant():
+    """The reference (posted winner Dbn4yKwxCrl): block pitch ~71px at 1080 =
+    47.3 spec units; 49 renders 73.5px and matches. 84 rendered ~125px — the
+    doubled spacing the operator flagged on two finals."""
+    from autoedit_pipeline import RC_BODY_PITCH
+    assert RC_BODY_PITCH == 49
