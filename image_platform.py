@@ -30,7 +30,7 @@ import html
 import re
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any, Set, Tuple
+from typing import List, Optional, Dict, Any, Set, Tuple, get_args
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Header, Request, Body, Query
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -5260,14 +5260,43 @@ def _finishing_caption_values():
 
 def _finishing_coerce(v: str):
     """Bullet values arrive as strings; JSON-looking ones become JSON, the
-    rest go to pydantic as-is (its lax mode coerces 'true'/'-22' correctly)."""
+    rest go to pydantic as-is (its lax mode coerces 'true'/'-22' correctly).
+
+    A value that OPENS a brace and does not parse is a typo, not a string —
+    falling through would hand pydantic the literal text and produce a
+    confusing type error about the wrong thing.
+    """
     s = v.strip()
-    if s[:1] in "{[":
+    if s.startswith(("{", "[")):
         try:
             return json.loads(s)
-        except ValueError:
-            pass
+        except ValueError as exc:
+            raise ValueError(
+                f"## Finishing value looks like JSON but does not parse: "
+                f"{s!r} — {exc} (v947)")
     return s
+
+
+def _finishing_pydantic_faults(exc, prefix: str) -> str:
+    """One line per fault. pydantic's own dump is multi-line and unreadable
+    inside an import error, and it already reports EVERY fault at once, so
+    keep them all (house rule: checkers report all faults at once)."""
+    try:
+        items = exc.errors()
+    except Exception:
+        return str(exc)
+    return "; ".join(
+        f"{prefix}{'.'.join(str(p) for p in e.get('loc', ())) or '?'}: "
+        f"{e.get('msg', '?')} (got {e.get('input', '?')!r})"
+        for e in items) or str(exc)
+
+
+def _finishing_permits_none(model_cls, field: str) -> bool:
+    """True when the field's annotation allows None (``Optional[...]``)."""
+    info = model_cls.model_fields.get(field)
+    if info is None or info.is_required():
+        return False
+    return type(None) in get_args(info.annotation)
 
 
 def _finishing_validate_prefixed(fields: Dict[str, str], prefix: str,
@@ -5292,7 +5321,8 @@ def _finishing_validate_prefixed(fields: Dict[str, str], prefix: str,
     bad = sorted(set(sub) & set(reserved))
     if bad:
         raise ValueError(
-            f"## Finishing {prefix}{bad[0]} is declared through the v944 "
+            f"## Finishing {', '.join(prefix + b for b in bad)} "
+            f"{'are' if len(bad) > 1 else 'is'} declared through the v944 "
             f"captions:/overlay*: fields, not the {prefix} namespace (v947)")
     unknown = sorted(set(sub) - known)
     if unknown:
@@ -5301,10 +5331,29 @@ def _finishing_validate_prefixed(fields: Dict[str, str], prefix: str,
             f"{', '.join(prefix + u for u in unknown)} (v947). "
             f"Known: {', '.join(sorted(known))}")
     coerced = {k: _finishing_coerce(v) for k, v in sub.items()}
+
+    # v947 — the `none` sentinel. v944 trains `none` = off (captions, overlay),
+    # so an operator reaches for it here too. On a field whose annotation
+    # permits None that would store the literal STRING "none" and die at
+    # render; absent already means none/default, so say so. Where None is NOT
+    # permitted, "none" is a real value (`transition: str = "none"` is a
+    # legitimate xfade literal) and passes straight through.
+    sentinel = sorted(
+        k for k, v in coerced.items()
+        if isinstance(v, str) and v.strip().lower() == "none"
+        and _finishing_permits_none(model_cls, k))
+    if sentinel:
+        raise ValueError(
+            f"## Finishing {', '.join(prefix + s for s in sentinel)}: 'none' — "
+            f"turn an optional field off by OMITTING the bullet, not by "
+            f"declaring 'none' (absent = none/default) (v947)")
+
     try:
         model = model_cls(**coerced)
     except Exception as exc:
-        raise ValueError(f"## Finishing {prefix}* value rejected: {exc} (v947)")
+        raise ValueError(
+            f"## Finishing {prefix}* value rejected: "
+            f"{_finishing_pydantic_faults(exc, prefix)} (v947)")
     return model.model_dump(include=set(coerced))
 
 
@@ -5325,18 +5374,26 @@ def parse_finishing_section(md_text: str):
     nxt = re.search(r"^##\s+", tail, re.MULTILINE)
     body = tail[:nxt.start()] if nxt else tail
 
+    # v947 — drop HTML comments ONCE, before EVERY consumer below. A
+    # commented-out bullet has to be as good as absent, and it was not: only
+    # the malformed-bullet scan stripped comments while `fields` was built
+    # from the raw body, so `<!-- disabled: - **auto_finish:** on -->` turned
+    # auto-finish ON. The skeleton's own trailing v944 note lives in such a
+    # comment (template_new_format.md:999-1005).
+    body = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+
     fields = {k.lower(): v.strip() for k, v in _FIN_BULLET_RE.findall(body)}
 
     # v947 — the leftover check at the bottom can only see keys the bullet
     # regex could READ. A key the regex misses (`- **export-music-gain:** -22`,
     # hyphens, which `(\w+)` cannot match) never reaches `fields` at all, so it
     # is dropped in SILENCE and the build renders as if it had declared
-    # nothing. Scan the raw body for bullet-SHAPED lines that contributed no
-    # key. HTML comments are stripped first: the skeleton's own trailing note
-    # wraps onto a dashed line (template_new_format.md:999-1005) and is not a
-    # field. Prose, blank lines and indented continuation lines never start
-    # with a bullet marker, so they are exempt by shape.
-    for line in re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL).splitlines():
+    # nothing. Scan for bullet-SHAPED lines that contributed no key. Prose and
+    # blank lines are exempt by shape, as is a wrapped continuation line (the
+    # skeleton's overlay_block example wraps onto spaces + `#`). An indented
+    # SUB-bullet is NOT exempt and hard-fails, which is intended: v944 splits
+    # overlay_block on " / " on one line, so a sub-list is silently ignored.
+    for line in body.splitlines():
         if re.match(r"^\s*[-*]\s+\S", line) and not _FIN_BULLET_RE.match(line):
             raise ValueError(
                 f"## Finishing has a malformed bullet (not '- **key:** value'): "

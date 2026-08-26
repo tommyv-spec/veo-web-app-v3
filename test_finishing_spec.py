@@ -527,7 +527,7 @@ def test_auto_finish_parses_on_off_and_defaults_off():
 
 
 def test_auto_finish_bad_value_fails_closed():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="auto_finish"):
         _fin("- **auto_finish:** yes\n")
 
 
@@ -542,14 +542,14 @@ def test_export_only_declared_fields_are_stored():
 
 
 def test_export_unknown_field_fails_closed():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="unknown field"):
         _fin("- **export_does_not_exist:** 1\n")
 
 
 def test_export_bad_value_fails_closed():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="value rejected"):
         _fin("- **export_music_gain_db:** loud\n")     # not a number
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="value rejected"):
         _fin("- **export_frames_to_cut_start:** 99\n")  # outside le=30 bound
 
 
@@ -562,12 +562,12 @@ def test_autoedit_fields_validate_and_reserved_names_rejected():
     spec = _fin("- **autoedit_pip_enabled:** false\n- **autoedit_music_db:** -18\n")
     assert spec["autoedit"] == {"pip_enabled": False, "music_db": -18.0}
     for reserved in ("template", "captions_enabled", "overlay_spec"):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="v944"):
             _fin(f"- **autoedit_{reserved}:** x\n")
 
 
 def test_unknown_bullet_fails_closed():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="unknown field"):
         _fin("- **exprot_music_gain_db:** -22\n")   # the typo class this exists for
 
 
@@ -592,6 +592,55 @@ def test_malformed_bullet_key_fails_closed():
         _fin("- **export-music-gain:** -22\n")
     with pytest.raises(ValueError, match="malformed"):
         _fin("- just some words, no key at all\n")
+
+
+def test_html_commented_bullets_do_not_take_effect():
+    """A commented-out bullet must be as good as absent. It was not: comments
+    were stripped for the malformed-bullet scan but `fields` was still built
+    from the raw body, so this section used to turn auto-finish ON."""
+    spec = parse_finishing_section(
+        "## Finishing\n\n- **captions:** none\n"
+        "<!-- disabled while we test the pilot:\n"
+        "- **auto_finish:** on\n"
+        "- **export_remove_silence:** true -->\n"
+        "\n## Next Section\n")
+    assert spec == {"captions": "none", "overlay": "none"}
+
+
+def test_reserved_names_report_every_offender():
+    """House rule: checkers report ALL faults at once, like the unknown
+    branch already did."""
+    with pytest.raises(ValueError) as excinfo:
+        _fin("- **autoedit_template:** x\n- **autoedit_overlay_spec:** y\n")
+    msg = str(excinfo.value)
+    assert "autoedit_template" in msg and "autoedit_overlay_spec" in msg
+
+
+def test_none_sentinel_on_an_optional_field_says_omit_it():
+    """v944 trains `none` = off, so an operator writes it here too. On a field
+    whose annotation permits None that stores the literal string "none" and
+    dies at render — tell them to omit the field instead."""
+    with pytest.raises(ValueError, match="OMITTING"):
+        _fin("- **export_music_filename:** none\n")
+
+
+def test_none_is_a_real_value_where_none_is_not_permitted():
+    """`transition: str = "none"` — here "none" is a legitimate xfade literal,
+    not a sentinel, so it must pass straight through."""
+    assert _fin("- **export_transition:** none\n")["export"] == {"transition": "none"}
+
+
+def test_models_that_cannot_be_imported_fail_closed(monkeypatch):
+    """A build we cannot verify is never waved through."""
+    monkeypatch.setitem(sys.modules, "finishing_models", None)
+    with pytest.raises(ValueError, match="failing closed"):
+        _fin("- **export_remove_silence:** true\n")
+
+
+def test_broken_json_value_fails_closed():
+    """A value that opens a brace and does not parse is a typo, not a string."""
+    with pytest.raises(ValueError, match="does not parse"):
+        _fin('- **export_beat_pins:** {"3": }\n')
 
 
 def test_prose_and_html_comments_are_not_bullets():
