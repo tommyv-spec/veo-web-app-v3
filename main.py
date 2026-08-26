@@ -3965,47 +3965,33 @@ def _job_finishing_spec(job):
     try:
         return json.loads(raw)
     except (ValueError, TypeError):
-        print(f"[AutoFinish] job={job.id[:8]} finishing_spec is not valid JSON — ignored",
+        print(f"[Finishing/v947] job={job.id[:8]} finishing_spec is not valid JSON — ignored",
               flush=True)
         return None
 
 
-def _queue_export_run(db, job, settings: "ExportSettings", user_id):
-    """QUEUE an export (v850 shape). Factored out of export_final_video so the
-    v947 auto-finish trigger and the endpoint share one body. Idempotent: an
-    active run is joined, not duplicated. Returns (run, created: bool)."""
-    from models import ExportRun
-    existing = db.query(ExportRun).filter(
-        ExportRun.job_id == job.id,
-        ExportRun.state.in_(list(_eq.ACTIVE_STATES)),
-    ).order_by(ExportRun.created_at.desc()).first()
-    if existing:
-        print(f"[Export/v850] job={job.id[:8]} already has run={existing.id[:8]} "
-              f"({existing.state}); joining it", flush=True)
-        return existing, False
-    run = ExportRun(
-        id=str(uuid.uuid4()),
-        job_id=job.id,
-        user_id=user_id,
-        state=_eq.STATE_QUEUED,
-        settings_json=settings.model_dump_json(),
-        attempts=0,
-        created_at=datetime.utcnow(),
-    )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-    print(f"[Export/v850] QUEUED run={run.id[:8]} job={job.id[:8]}", flush=True)
-    return run, True
-
-
-def _maybe_auto_finish(db, job):
+def _maybe_auto_finish_export(db, job):
     """v947 — when the job declares `auto_finish: on` and EVERY clip is
     approved, queue the export with the declared export_* settings. Called
-    from approve_clip; must never turn the approval red (caller catches)."""
+    from approve_clip; must never turn the approval red (caller catches).
+
+    The add_job_log below deliberately runs AFTER the export row is committed:
+    losing the log line is better than losing the export. It can throw, and the
+    caller's rollback+print is what absorbs that.
+    """
     from auto_finish import auto_finish_on, all_clips_approved, derive_export_defaults
     spec = _job_finishing_spec(job)
     if not auto_finish_on(spec):
+        return
+    # Row lock BEFORE the clip-status read, so the check-then-act below is
+    # atomic against a second last-clip approval racing this one: the loser
+    # blocks here, and by the time it reads, _queue_export_run finds the
+    # winner's queued run and joins it instead of starting a second export.
+    # Taken only after the cheap auto_finish_on gate — an ordinary approval on
+    # a job that declared nothing never touches this lock. (sqlite ignores FOR
+    # UPDATE; the tests still run, and --workers 1 makes it moot there anyway.)
+    job = db.query(Job).filter(Job.id == job.id).with_for_update().first()
+    if job is None:
         return
     statuses = [s for (s,) in db.query(Clip.approval_status)
                 .filter(Clip.job_id == job.id).all()]
@@ -6109,7 +6095,15 @@ async def approve_clip(
     
     if clip.status != ClipStatus.COMPLETED.value:
         raise HTTPException(status_code=400, detail="Can only approve completed clips")
-    
+
+    # v947 — capture the PRIOR state before we overwrite it. Re-clicking approve
+    # on an already-approved clip must not re-fire the auto-finish trigger: the
+    # export may already be DONE, and _queue_export_run's join only covers
+    # queued/running, so it would start a second full export. A genuine redo
+    # (reject -> redo -> approve) resets the status, so this stays False there
+    # and the trigger fires as it should.
+    was_approved = clip.approval_status == "approved"
+
     # Update approval status
     clip.approval_status = "approved"
     
@@ -6153,11 +6147,18 @@ async def approve_clip(
 
     # v947 — auto-finish: the build declared its whole finish; the last
     # approval is the go. Never blocks the approval itself.
-    try:
-        _maybe_auto_finish(db, job)
-    except Exception as _af:
-        print(f"[AutoFinish] job={clip.job_id[:8]} trigger error "
-              f"(approval unaffected): {_af}", flush=True)
+    if not was_approved:
+        try:
+            _maybe_auto_finish_export(db, job)
+        except Exception as _af:
+            # The approval is already committed. What is still open is the
+            # TRIGGER's own transaction, and leaving it deactivated would make
+            # the ApprovalResponse below raise PendingRollbackError the moment
+            # it touches an expired attribute — a 500 on an approval that
+            # actually succeeded. Roll back the failed trigger, not the approval.
+            db.rollback()
+            print(f"[AutoFinish] job={clip.job_id[:8]} trigger error "
+                  f"(approval unaffected): {_af}", flush=True)
 
     return ApprovalResponse(
         clip_id=clip.id,
@@ -10552,6 +10553,42 @@ async def _export_dispatcher():
         await asyncio.sleep(_eq.DISPATCH_INTERVAL_S)
 
 
+def _queue_export_run(db, job, settings: "ExportSettings", user_id):
+    """QUEUE an export (v850 shape). Factored out of export_final_video so the
+    v947 auto-finish trigger and the endpoint share one body. Idempotent: an
+    active run is joined, not duplicated. Returns (run, created: bool).
+
+    The join is a plain read, NOT a lock — callers that can race each other
+    serialize upstream on the job row (see _maybe_auto_finish_export). This is
+    also only half the protection: ACTIVE_STATES covers queued/running, so a
+    caller that can re-fire after an export has already finished must not rely
+    on the join to deduplicate it.
+    """
+    from models import ExportRun
+    existing = db.query(ExportRun).filter(
+        ExportRun.job_id == job.id,
+        ExportRun.state.in_(list(_eq.ACTIVE_STATES)),
+    ).order_by(ExportRun.created_at.desc()).first()
+    if existing:
+        print(f"[Export/v850] job={job.id[:8]} already has run={existing.id[:8]} "
+              f"({existing.state}); joining it", flush=True)
+        return existing, False
+    run = ExportRun(
+        id=str(uuid.uuid4()),
+        job_id=job.id,
+        user_id=user_id,
+        state=_eq.STATE_QUEUED,
+        settings_json=settings.model_dump_json(),
+        attempts=0,
+        created_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    print(f"[Export/v850] QUEUED run={run.id[:8]} job={job.id[:8]}", flush=True)
+    return run, True
+
+
 def _claim_export_run(export_id: str):
     """Compare-and-swap claim on an ExportRun. Sync — call via to_thread.
 
@@ -13670,7 +13707,7 @@ async def export_final_video(
     if _spec and _spec.get("export"):
         settings = ExportSettings(**derive_export_defaults(
             settings.model_dump(), _spec, settings.model_fields_set))
-        print(f"[AutoFinish] job={job_id[:8]} export derive applied "
+        print(f"[Finishing/v947] job={job_id[:8]} export derive applied "
               f"({sorted(_spec['export'])})", flush=True)
 
     # Idempotent: a second click (or the browser retrying after a dropped
