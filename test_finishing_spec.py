@@ -221,9 +221,12 @@ def test_overlay_none_carries_no_overlay_spec():
 def test_queue_autoedit_calls_the_derive_and_rides_repair_json():
     """The spec travels to the worker INSIDE repair_json — the field that
     already round-trips (server claim + local worker both hand it back to
-    run_autoedit). No new AutoEditRun column to migrate."""
+    run_autoedit). No new AutoEditRun column to migrate.
+
+    v947 Task 5 moved the body out of the endpoint into _queue_autoedit_impl so
+    the auto-finish chain can reuse it, so that is what this reads now."""
     main = _src("main.py")
-    q = main.index("async def queue_autoedit")
+    q = main.index("def _queue_autoedit_impl")
     body = main[q:q + 8000]
     assert "derive_autoedit_defaults" in body
     assert "finishing_spec" in body

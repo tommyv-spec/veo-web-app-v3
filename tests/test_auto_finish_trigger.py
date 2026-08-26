@@ -124,8 +124,14 @@ def test_reclicking_approve_does_not_queue_a_second_export():
     assert db.query(ExportRun).filter(ExportRun.job_id == job_id).count() == 1
 
 
-def test_redo_after_reject_still_fires():
-    """The guard keys on the PRIOR status, so a real redo is not suppressed."""
+@pytest.mark.parametrize("reset_to", ["rejected", "pending_review", None])
+def test_redo_after_reject_still_fires(reset_to):
+    """The guard keys on the PRIOR status, so a real redo is not suppressed.
+
+    All three values a reset really produces are checked: production writes
+    "rejected" (reject) and "pending_review" (redo); None is the falsy edge a
+    future `if clip.approval_status:` "simplification" would break silently.
+    """
     db = _session()
     job_id = _job(db, ON)
     last = _clip(db, job_id, 0)
@@ -135,9 +141,9 @@ def test_redo_after_reject_still_fires():
     run.state = "done"
     db.commit()
 
-    # A redo resets the clip's approval, exactly as reject/redo does.
+    # A redo/reject resets the clip's approval away from "approved".
     clip = db.query(Clip).filter(Clip.id == last).one()
-    clip.approval_status = None
+    clip.approval_status = reset_to
     db.commit()
 
     _approve(db, last)

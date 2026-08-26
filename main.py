@@ -4023,12 +4023,16 @@ def _maybe_auto_finish_export(db, job):
     statuses = [s for (s,) in db.query(Clip.approval_status)
                 .filter(Clip.job_id == job.id).all()]
     if not all_clips_approved(statuses):
+        # Releases the FOR UPDATE lock; nothing to commit on this path.
+        db.rollback()
         return
     if not job.user_id:
         # A NULL user_id row could never be claimed/served downstream — same
         # invariant queue_autoedit enforces. Loud skip, not a crash.
         print(f"[AutoFinish] job={job.id[:8]} has no user_id — cannot auto-export",
               flush=True)
+        # Releases the FOR UPDATE lock; nothing to commit on this path.
+        db.rollback()
         return
     settings = ExportSettings(**derive_export_defaults({}, spec, set()))
     run, created = _queue_export_run(db, job, settings, job.user_id)
@@ -10744,6 +10748,37 @@ async def _export_heartbeat(export_id: str):
             print(f"[Export/v850] heartbeat error run={export_id[:8]}: {_he}", flush=True)
 
 
+def _maybe_auto_finish_autoedit(job_id: str):
+    """v947 — after a DONE export on an auto_finish job, queue the auto-edit
+    with the build's declared settings. Sync; runner calls via to_thread with
+    a FRESH session (the runner's own session may be dead by completion).
+
+    Declared autoedit_* fields are passed as an EXPLICIT request, so they beat
+    the stored-run hook-layout inheritance; captions/overlay still derive from
+    the same spec inside the impl (v944). can_queue makes a double fire a
+    logged no-op, not a duplicate."""
+    from models import get_db, Job
+    from auto_finish import auto_finish_on
+    with get_db() as db:
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if job is None:
+            return
+        spec = _job_finishing_spec(job)
+        if not auto_finish_on(spec):
+            return
+        req = AutoEditRequest(**(spec.get("autoedit") or {}))
+        try:
+            run = _queue_autoedit_impl(db, job, req, job.user_id)
+            add_job_log(db, job.id,
+                        f"Auto-finish: export done — auto-edit queued ({run.id[:8]})",
+                        "INFO", "auto_finish")
+            print(f"[AutoFinish] job={job_id[:8]} export done -> autoedit "
+                  f"run={run.id[:8]} queued", flush=True)
+        except HTTPException as e:
+            print(f"[AutoFinish] job={job_id[:8]} autoedit not queued: {e.detail}",
+                  flush=True)
+
+
 async def _export_runner(export_id: str):
     """Do the export, detached from any HTTP request."""
     import traceback as _tb
@@ -10781,6 +10816,13 @@ async def _export_runner(export_id: str):
                 )
                 print(f"[Export/v850] DONE run={export_id[:8]} job={job_id[:8]} "
                       f"→ {result.get('filename')}", flush=True)
+
+                # v947 — the declared finish continues by itself.
+                try:
+                    await asyncio.to_thread(_maybe_auto_finish_autoedit, job_id)
+                except Exception as _af:
+                    print(f"[AutoFinish] job={job_id[:8]} autoedit chain error: "
+                          f"{_af}", flush=True)
             except Exception as e:
                 # _do_export_final was a route handler, so it still raises
                 # HTTPException — which subclasses Exception and lands here, but
@@ -13803,8 +13845,6 @@ async def export_final_video(
 ):
     """v850 — QUEUE an export. Returns immediately (202); the work runs
     detached so a Render deploy can't kill it. Poll /export-status."""
-    from models import ExportRun
-
     job = get_user_job(db, job_id, current_user)  # 404/403 if not the caller's
 
     # v947 — the build's declared export_* finishing supplies DEFAULTS; a field
@@ -13927,19 +13967,17 @@ def derive_autoedit_defaults(req_dict, spec, request_was_explicit):
     return out
 
 
-@app.post("/api/jobs/{job_id}/autoedit")
-async def queue_autoedit(
-    job_id: str,
-    req: AutoEditRequest,
-    db: DBSession = Depends(get_db_session),
-    current_user: User = Depends(get_current_user),
-):
-    """Queue an auto-edit for this job. Needs a finished export to work on."""
+def _queue_autoedit_impl(db, job, req: AutoEditRequest, user_id):
+    """The whole queue-an-autoedit body (hook-layout inheritance, v944 derive,
+    normalize_repairs, done-export precondition, can_queue, row creation).
+    Shared by the endpoint and the v947 auto-finish chain. Raises HTTPException
+    exactly as the endpoint did; the auto-chain caller catches. Returns the
+    AutoEditRun."""
     from models import AutoEditRun, ExportRun
     from autoedit_queue import can_queue
     import uuid as _uuid
 
-    job = get_user_job(db, job_id, current_user)
+    job_id = job.id
     placement = "constant" if req.offset is not None else req.placement
     if req.offset is not None and not -0.45 <= req.offset <= 0.45:
         raise HTTPException(
@@ -14043,7 +14081,6 @@ async def queue_autoedit(
     # A NULL user_id can never match the worker's claim filter, so the row would
     # sit queued forever with nothing anywhere reporting a problem. That is a
     # server-side invariant break, not the caller's fault — fail loud, 500.
-    user_id = getattr(current_user, "id", None)
     if not user_id:
         raise HTTPException(
             status_code=500,
@@ -14059,6 +14096,19 @@ async def queue_autoedit(
     db.commit()
     print(f"[AutoEdit/v937 TEMP] queued {run.id} job={job_id} "
           f"template={template} repairs={repairs}", flush=True)
+    return run
+
+
+@app.post("/api/jobs/{job_id}/autoedit")
+async def queue_autoedit(
+    job_id: str,
+    req: AutoEditRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Queue an auto-edit for this job. Needs a finished export to work on."""
+    job = get_user_job(db, job_id, current_user)
+    run = _queue_autoedit_impl(db, job, req, getattr(current_user, "id", None))
     return run.to_dict()
 
 
