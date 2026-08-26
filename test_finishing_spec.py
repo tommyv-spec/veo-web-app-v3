@@ -256,3 +256,103 @@ def test_autoedit_request_accepts_an_overlay_spec():
     from main import AutoEditRequest
     assert "overlay_spec" in AutoEditRequest.model_fields
     assert AutoEditRequest().overlay_spec is None
+
+
+# ---------------------------------------------------------------------------
+# Task 5 — the overlay stage in the pipeline
+# ---------------------------------------------------------------------------
+
+def test_overlay_stage_skipped_without_spec():
+    from autoedit_pipeline import overlay_stage_plan
+    assert overlay_stage_plan(None) is None
+    assert overlay_stage_plan({"overlay": "none"}) is None
+
+
+def test_overlay_stage_runs_for_readcaption():
+    from autoedit_pipeline import overlay_stage_plan
+    plan = overlay_stage_plan({"overlay": "readcaption", "overlay_age": "I'M 74"})
+    assert plan["engine"] == "readcaption"
+    assert plan["age"] == "I'M 74"
+
+
+def test_overlay_plan_carries_block_and_footer():
+    from autoedit_pipeline import overlay_stage_plan
+    plan = overlay_stage_plan({
+        "overlay": "readcaption", "overlay_age": "I'M 74",
+        "overlay_block": ["No supplements", "No gym"],
+        "overlay_footer": "(READ CAPTION)",
+    })
+    assert plan["body"] == ["No supplements", "No gym"]
+    assert plan["route"] == "(READ CAPTION)"
+
+
+def test_overlay_plan_defaults_the_route_line():
+    """The tool's own default. A read-caption overlay with no footer still says
+    (READ CAPTION) — that IS the call to action the format is named after."""
+    from autoedit_pipeline import overlay_stage_plan
+    plan = overlay_stage_plan({"overlay": "readcaption", "overlay_age": "I'M 74"})
+    assert plan["route"] == "(READ CAPTION)"
+    assert plan["body"] == []
+
+
+def test_overlay_plan_rejects_readcaption_without_age():
+    from autoedit_pipeline import overlay_stage_plan, AutoEditError
+    with pytest.raises(AutoEditError):
+        overlay_stage_plan({"overlay": "readcaption"})
+
+
+def test_overlay_plan_rejects_an_unknown_engine():
+    from autoedit_pipeline import overlay_stage_plan, AutoEditError
+    with pytest.raises(AutoEditError):
+        overlay_stage_plan({"overlay": "stickers"})
+
+
+def test_the_doctrine_constants_survived_the_port():
+    """The numbers are measured, not chosen — they carry the whole reason the
+    overlay looks like the reference accounts. A port that quietly rounds them
+    is a port that ships a different overlay."""
+    import autoedit_pipeline as p
+    assert p.RC_FONT.lower().endswith("gothicb.ttf")          # Century Gothic Bold
+    assert (p.RC_SAFE_TOP, p.RC_SAFE_BOTTOM) == (0.06, 0.79)  # organic Reels zone
+    assert p.RC_SPEC == {"age": (94, 0), "body": (47, 0), "route": (52, 0)}
+    assert p.RC_OUTLINE == 10
+    assert (p.RC_BODY_PITCH, p.RC_GAP_AGE_BODY, p.RC_GAP_BODY_ROUTE) == (84, 67, 84)
+    assert p.RC_AGE_MAX_W == 0.35 and p.RC_MAX_TEXT_W == 0.90
+    assert p.RC_ASS_PIL_WIDTH_RATIO == 0.81
+
+
+def test_the_placement_engine_came_across_whole():
+    """Never-cross-face + the subject-relative windows + the separate age/block
+    elements are the doctrine. Assert the functions exist, not their pixels."""
+    import autoedit_pipeline as p
+    for fn in ("rc_head_band", "rc_coverage_profile", "rc_place_min_coverage",
+               "rc_smart_layout", "rc_layout", "rc_occupancy_layout",
+               "rc_fit_scale", "rc_draw_line", "rc_write_ass", "rc_burn_ass",
+               "rc_build_ass", "render_readcaption_overlay"):
+        assert callable(getattr(p, fn)), fn
+
+
+def test_the_age_line_and_the_block_are_separate_elements():
+    """@agelessjudy drops the body block at t=10.2s while the age line stays;
+    @noemi moves the age line while the block holds. One stacked element cannot
+    do either, so the split has to survive the port."""
+    import inspect
+    import autoedit_pipeline as p
+    src = inspect.getsource(p.rc_layout)
+    assert '"split"' in src              # age alone above, block below the chin
+    assert '"all-top"' in src and '"all-low"' in src
+
+
+def test_ass_escaping_survived_the_port():
+    import autoedit_pipeline as p
+    assert p._rc_ass_escape("a{b}c\\d\ne") == r"a\{b\}c\\d\Ne"
+    assert p._rc_ass_time(3725.5) == "1:02:05.50"
+
+
+def test_pil_is_lazy_imported_not_at_module_level():
+    """The module MUST stay importable on Render, where PIL, cv2 and ultralytics
+    are not installed. The port is the easiest way to break that."""
+    src = _src("autoedit_pipeline.py")
+    head = src[:src.index("class AutoEditError")]
+    assert "PIL" not in head and "ultralytics" not in head
+    import autoedit_pipeline  # noqa: F401  — proves it imports here too

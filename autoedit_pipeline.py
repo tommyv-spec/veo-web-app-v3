@@ -1534,6 +1534,798 @@ def _render_caption_pass(nocap: Path, out: Path, template: str, windows, work: P
     _ac.render(nocap, out, template, windows, audio, work)
 
 
+# ===========================================================================
+# v944 — THE READ-CAPTION TEXT OVERLAY.
+#
+# Ported from tools/readcaption_overlay.py, which was the proven local tool and
+# is now a thin wrapper around this. ONE implementation, the flow_charswap
+# precedent: the tool and the platform must never be able to draw a different
+# overlay from the same declaration.
+#
+# The tool's own docstring is the contract, and it is repeated here because it
+# is the reason every number below is what it is:
+#
+#   Type is not guessed. It was matched against @agelessjudy frames on three
+#   terms at once -- band height, x-width and ink density -- and re-calibrated
+#   against @noemi_healthy_men's own live posts. Century Gothic Bold won on all
+#   three; the letterforms agree (single-story 'a', straight-tailed 'y',
+#   tailless 't').
+#
+#   Placement is per clip and must hold for the WHOLE video, because the
+#   overlay is burned for its whole duration. Two hard constraints:
+#     * Reels safe zone y 6%..79% -- the bottom ~420px of 1920 is platform UI.
+#       The same numbers plan_caption_windows above already enforces.
+#     * Never cross the FACE at any moment. Crossing legs, torso, a treadmill
+#       or a chalkboard is fine -- both reference accounts do it constantly.
+#
+#   The age line and the body block are SEPARATE elements, not one stack: on
+#   @agelessjudy the body block disappears at t=10.2s while the age line and
+#   (READ CAPTION) stay to the end, and on @noemi the body block holds a fixed
+#   position while only the age line moves to dodge the runner.
+#
+# THREE DELIBERATE DIFFERENCES FROM THE TOOL, and no others:
+#   1. Names carry an `rc_` / `RC_` prefix. This module is 1600 lines with its
+#      own vocabulary; a bare `layout` or `build` here would read as the
+#      pipeline's own and would collide with the next one added.
+#   2. `SystemExit` becomes `AutoEditError`. This module's docstring forbids
+#      SystemExit in library code for a measured reason: it derives from
+#      BaseException, so a worker's `except Exception` misses it and the
+#      process dies silently instead of reporting the failure.
+#   3. The occupancy engine is called DIRECTLY. The tool importlib-loaded this
+#      file to reach build_occupancy; inside it, that is just a function call.
+#
+# Every heavy import (PIL, ultralytics, cv2, numpy) stays inside a function
+# body, so this module still imports on Render where none of them exist.
+# ===========================================================================
+
+RC_FONT = "C:/Windows/Fonts/GOTHICB.TTF"          # Century Gothic Bold
+RC_SAFE_TOP, RC_SAFE_BOTTOM = 0.06, 0.79          # Reels UI, ORGANIC
+
+# THESE ARE THE ORGANIC NUMBERS, AND THEY ARE NOT THE AD NUMBERS (2026-08-24).
+# Meta's Ads Guide for Reels asks for 0.14 / 0.65 / 0.06 free of text; YouTube
+# publishes 0.15 / 0.65 for Shorts ads. Ours is WIDER than either, and it is
+# kept because it is measured off organic posts that are working:
+# @noemi_healthy_men runs ink down to 0.79 and @niastrong7 to 0.82, and both
+# start above 0.07. Organic Reels has no CTA button, which is what the ad
+# bottom margin reserves. So: correct for organic, and every build in this lane
+# would FAIL an ad review on the bottom margin. Promote one as an ad and the
+# block has to move up to 0.65 with shorter copy.
+#
+# THE SIDE MARGINS ARE THE REAL GAP. Neither number constrains x at all, and
+# the block runs to 0.95. TikTok's own safe-zone template narrows the usable
+# width to x 0.11-0.72 below y=0.44, because the action rail lives there. §13
+# says every winner gets distributed to TikTok, so a block that reads fine on
+# Reels has its right end under the like/comment/share buttons on TikTok.
+RC_TIKTOK_RAIL_X = 0.72       # usable right edge below RC_TIKTOK_RAIL_Y
+RC_TIKTOK_RAIL_Y = 0.44
+
+# RE-CALIBRATED AGAINST @noemi_healthy_men'S OWN LIVE POSTS (2026-08-24).
+# Operator: "i don't like the style and font / and the spacing of the text
+# itself" -- and the rule behind it: "the style should match the vibe of each
+# account and video." Measured against the account we actually post to, three
+# numbers were wrong and they are the three he named: the outline ring was far
+# too thin (0.5-0.7 against his 2.1-2.6), the body line pitch was cramped (49px
+# against his 73-92), and the tag was rendering as wide as a headline.
+RC_OUTLINE = 10                                   # px at 720 wide; was 5
+
+# Sizes re-tuned once the renderer moved to libass: an ASS Fontsize is an em
+# box, a PIL size is not, so the PIL-era numbers came out 15-25% off. These are
+# measured back against the SAME strings in his own post `DcO9hDTonCa`.
+RC_SPEC = {                                       # size, tracking, at 720x1280
+    "age":   (94, 0),                             # tracking was 4; his tag has none
+    "body":  (47, 0),
+    "route": (52, 0),                             # his route is SMALLER than his body
+}
+# Leading, re-measured on his own posts. `DcO9hDTonCa` sets its three lines at
+# y 0.632 / 0.704 / 0.761 of frame height -- pitches of 92px and 73px at 1280.
+# The old 49px came from the judy match and is the "spacing of the text itself"
+# the operator rejected: it packs three lines into the height his account gives
+# two. The route line is NOT a separately-spaced element on his account, it is
+# just the next line, so its gap is the same order as the body pitch.
+RC_BODY_PITCH = 84        # was 49
+RC_GAP_AGE_BODY = 67      # age and block are placed independently anyway
+RC_GAP_BODY_ROUTE = 84    # was 85 measured as a DOUBLE gap; his is one more line
+
+RC_MAX_TEXT_W = 0.90      # reference longest line measures 93% of frame width
+
+# The age tag is a TAG, not a headline. Measured over 77 samples of
+# @ginadrewalowski plus the two live @noemi posts, the top element spans
+# 0.24-0.48 of frame width. Ours was rendering at 0.90 -- roughly double --
+# which was the loudest single difference between our frames and theirs.
+RC_AGE_MAX_W = 0.35       # his own tag measures 0.31 of frame width
+# ...but only when the string is actually a TAG. Every reference top element is
+# short -- `60 years`, `I'M 74`. Forcing a whole hook line into a tag's width
+# just shrinks it to 58% and reads as a mistake, so a longer top element is
+# treated as a LINE and keeps the block's width budget.
+RC_AGE_TAG_CHARS = 10
+
+# PIL PREDICTS a line's width; libass DRAWS it, and the two disagree. Measured
+# on the same string and font at three sizes: libass comes out at 0.81, 0.82
+# and 0.78 of PIL's number. Left uncorrected, rc_fit_scale shrank the body block
+# by 33% to fit a width it was never going to reach.
+RC_ASS_PIL_WIDTH_RATIO = 0.81
+
+# WHERE THE OVERLAY SITS RELATIVE TO THE SUBJECT (2026-08-24).
+# Operator: "it's not the absolute position of the overlays (still outside the
+# danger zone), but where they sit compared to the subject and action."
+#
+# NOT motion. Across 172 text rows in 10 reference reels the median sits at the
+# 38th percentile of the subject's own motion profile -- a weak lean toward
+# quiet, nowhere near strong enough to be the rule.
+#
+# It is the SUBJECT'S BODY. Expressing every text band as a depth -- 0.0 at the
+# crown, 1.0 at the feet, in units of the subject's own height -- the reference
+# lands in two tight clusters and never between them. Their absolute frame
+# numbers are also tight, but that is a CONSEQUENCE: she is framed the same way
+# every time. Our renders inherit whatever framing the source had, so copying
+# her absolute numbers reproduces her look only by accident. Copy the relation.
+RC_AGE_DEPTH = (-0.32, 0.12)      # crown line
+RC_BLOCK_DEPTH = (0.28, 0.82)     # hip line down to the feet
+
+RC_FONT_CANDIDATES = [
+    RC_FONT,
+    "C:/Windows/Fonts/gothicb.ttf",
+]
+
+
+def _rc_font():
+    """The typeface file, resolved LATE and with a real message.
+
+    Deliberately not resolved at import: this module must stay importable on
+    Render, which has no Windows fonts and never runs this stage. A missing
+    font has to be a clear failure of THIS stage, not of the whole module.
+    """
+    for cand in RC_FONT_CANDIDATES:
+        if os.path.exists(cand):
+            return cand
+    raise AutoEditError(
+        f"The read-caption overlay needs Century Gothic Bold and none of "
+        f"{RC_FONT_CANDIDATES} exists on this machine. The overlay is matched to "
+        f"the reference accounts on this exact face — substituting another one "
+        f"changes the look, so this fails instead of guessing.")
+
+
+def rc_age_width_limit(text):
+    return RC_AGE_MAX_W if len(text or "") <= RC_AGE_TAG_CHARS else RC_MAX_TEXT_W
+
+
+def rc_line_width(d, text, size, tracking, scale):
+    from PIL import ImageFont
+    f = ImageFont.truetype(_rc_font(), int(round(size * scale)))
+    ws = [d.textlength(c, font=f) for c in text]
+    return sum(ws) + tracking * scale * (len(text) - 1)
+
+
+def rc_fit_scale(d, lines, size, tracking, W, scale, limit_frac=None, ass=False):
+    """Uniform shrink so the WIDEST line fits. Scaling the block as a whole keeps
+    the type consistent; shrinking one line alone reads as a mistake.
+
+    `ass=True` when the caller renders through libass rather than PIL.
+    """
+    widest = max((rc_line_width(d, t, size, tracking, scale) for t in lines), default=0)
+    if ass:
+        widest *= RC_ASS_PIL_WIDTH_RATIO
+    limit = W * (RC_MAX_TEXT_W if limit_frac is None else limit_frac)
+    if widest <= limit or widest == 0:
+        return 1.0
+    return limit / widest
+
+
+def _rc_warn_side_margins(events, W, H, scale, scales):
+    """Flag text that would sit under TikTok's action rail on a cross-post."""
+    from PIL import Image as _I, ImageDraw as _D
+    d = _D.Draw(_I.new("RGBA", (8, 8)))
+    worst = 0.0
+    for t0, t1, y, text, sty in events:
+        if y / H < RC_TIKTOK_RAIL_Y:
+            continue
+        size, tracking = RC_SPEC[sty]
+        k = scales.get(sty, 1.0)
+        w = rc_line_width(d, text, size, tracking, scale * k) * RC_ASS_PIL_WIDTH_RATIO
+        worst = max(worst, 0.5 + (w / W) / 2)
+    if worst > RC_TIKTOK_RAIL_X:
+        print(f"  NOTE: text reaches x={worst:.2f} below y={RC_TIKTOK_RAIL_Y:.2f}; "
+              f"TikTok's action rail starts at x={RC_TIKTOK_RAIL_X:.2f}. Fine on "
+              f"Reels (the reference accounts do the same), but the right end "
+              f"sits under the buttons on a TikTok cross-post.", flush=True)
+    return worst
+
+
+def rc_head_band(src, samples=12, head_frac=0.20):
+    """Where the FACE lives over the whole clip, on ANY video, with no manual input.
+
+    Person detection, not face detection. build_occupancy above uses a face
+    cascade, which is the right idea and the wrong detector for this material:
+    on these clips it found 1 face in 10 samples (sunglasses, motion, profile
+    turns) and a false positive in the pavement. Background subtraction is worse
+    on GENERATED footage, where foliage, shimmer and camera drift all move.
+
+    YOLO person boxes land 10/10 on the same clips. The head is the top fifth of
+    a standing person box; union that across time and you have the band the
+    overlay must never enter. Returns (top, bottom) as fractions, or None.
+    """
+    try:
+        from ultralytics import YOLO
+    except Exception:
+        return None
+    import tempfile as _tf
+    dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                                "format=duration", "-of", "csv=p=0", str(src)],
+                               capture_output=True, text=True).stdout)
+    model = YOLO("yolov8n.pt")
+    tops, bots = [], []
+    tmp = os.path.join(_tf.gettempdir(), "rc_probe.png")
+    for i in range(samples):
+        t = dur * (i + 0.5) / samples
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{t:.3f}", "-i", str(src),
+                        "-frames:v", "1", tmp], check=True)
+        r = model.predict(tmp, classes=[0], verbose=False, conf=0.35)[0]
+        if not len(r.boxes):
+            continue
+        x0, y0, x1, y1 = max(r.boxes.xyxy.tolist(), key=lambda b: (b[2]-b[0])*(b[3]-b[1]))
+        H = r.orig_shape[0]
+        tops.append(y0 / H)
+        bots.append(y0 / H + head_frac * (y1 - y0) / H)
+    if not tops:
+        return None
+    return min(tops), max(bots)
+
+
+def rc_draw_line(d, text, y, size, tracking, W, scale, align="centre", margin=0.10):
+    from PIL import ImageFont
+    f = ImageFont.truetype(_rc_font(), int(round(size * scale)))
+    tr = tracking * scale
+    ws = [d.textlength(c, font=f) for c in text]
+    total = sum(ws) + tr * (len(text) - 1)
+    x = (W * margin) if align == "left" else (W - total) / 2
+    bw = max(1, int(round(RC_OUTLINE * scale)))
+    # PIL's own stroke, not a hand-rolled offset stamp. The old loop drew the
+    # glyph once per pixel in a disc of radius bw -- fine at bw=7, but the
+    # re-calibrated ring is bw=15 at 1080 wide, ~700 draws per character.
+    # TWO PASSES, and it has to be two. Drawing each character complete (stroke
+    # then fill) in one loop was fine at OUTLINE=5 and shreds the line at
+    # OUTLINE=10: every glyph's black halo is painted ON TOP of the white of the
+    # glyph to its left, so counters fill in and the line came out as
+    # "1he Gcal Was Never To Lcok 30". Lay the whole black slab down first, then
+    # put every white letter on top of it.
+    cx = x
+    for i, c in enumerate(text):
+        d.text((cx, y), c, font=f, fill=(0, 0, 0, 235),
+               stroke_width=bw, stroke_fill=(0, 0, 0, 235))
+        cx += ws[i] + tr
+    cx = x
+    for i, c in enumerate(text):
+        d.text((cx, y), c, font=f, fill=(255, 255, 255, 255))
+        cx += ws[i] + tr
+    return int(round(size * scale))
+
+
+def rc_coverage_profile(src, samples=10):
+    """Per-row share of the frame width occupied by the SUBJECT, unioned over time.
+
+    A bounding box is the wrong shape for this question. A standing man's box
+    covers the empty floor beside him, so box-overlap says text crosses the
+    subject when it passes harmlessly either side of his legs. Measured on the
+    reference accounts, box overlap read a median 4% while the true silhouette
+    overlap was 0-1%.
+
+    Returns a float array of length H, or None.
+    """
+    try:
+        from ultralytics import YOLO
+    except Exception:
+        return None
+    import tempfile as _tf
+    import numpy as _np
+    try:
+        import cv2 as _cv
+    except Exception:
+        return None
+    dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                                "format=duration", "-of", "csv=p=0", str(src)],
+                               capture_output=True, text=True).stdout)
+    model = YOLO("yolov8n-seg.pt")
+    tmp = os.path.join(_tf.gettempdir(), "rc_cov.png")
+    # AVERAGE the per-frame row coverage, do not union the masks. A union answers
+    # "did the subject ever touch this row", which for a running man is every row
+    # at full width, and the profile goes flat and useless. The average answers
+    # "how much of this row is subject, typically", which is what the overlay
+    # actually competes with.
+    profs, H = [], None
+    for i in range(samples):
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss",
+                        f"{dur * (i + 0.5) / samples:.3f}", "-i", str(src),
+                        "-frames:v", "1", tmp], check=True)
+        im = _cv.imread(tmp)
+        if im is None:
+            continue
+        H, W = im.shape[:2]
+        m = _np.zeros((H, W), bool)
+        r = model.predict(tmp, classes=[0], verbose=False, conf=0.35)[0]
+        if r.masks is not None:
+            for mm in r.masks.data.cpu().numpy():
+                m |= _cv.resize(mm, (W, H)) > 0.5
+        profs.append(m.mean(axis=1))
+    if not profs:
+        return None
+    return _np.mean(_np.stack(profs), axis=0)
+
+
+def rc_place_min_coverage(prof, H, need, lo_frac, hi_frac):
+    """Slide a window of `need` px through [lo,hi] and return the y that covers
+    the least subject. Returns (y, mean_coverage) or None if the range is too small."""
+    lo, hi = int(lo_frac * H), int(hi_frac * H)
+    need = int(round(need))
+    if hi - lo < need:
+        return None
+    import numpy as _np
+    c = _np.cumsum(_np.concatenate([[0.0], prof]))
+    best = None
+    for y in range(lo, hi - need + 1):
+        cov = (c[y + need] - c[y]) / need
+        if best is None or cov < best[1]:
+            best = (y, float(cov))
+    return best
+
+
+def rc_smart_layout(prof, H, need_age, need_block, gap):
+    """Place both elements where the SUBJECT IS NARROWEST, not merely where the
+    face is not.
+
+    This is the rule the reference accounts actually follow. Their low text sits
+    at ankle height, where a standing person is two thin legs and centred type
+    slips past on both sides — which is how they reach 0-1% overlap while our
+    block, parked just under the chin at his widest point, reached 13%.
+    """
+    import numpy as _np
+    age = rc_place_min_coverage(prof, H, need_age, RC_SAFE_TOP, RC_SAFE_BOTTOM - 0.30)
+    if age is None:
+        return None
+
+    # The block searches only BELOW the subject's centre of mass. Minimum coverage
+    # on its own is not enough: a head is narrow, so the gap just under the chin
+    # scores well and the block lands across his face region — technically a small
+    # overlap, visually wrong.
+    rows = _np.arange(H)
+    total = prof.sum()
+    centre = float((rows * prof).sum() / total) / H if total > 0 else 0.5
+    lo = max(age[0] / H + (need_age + gap) / H, centre)
+    blk = rc_place_min_coverage(prof, H, need_block, lo, RC_SAFE_BOTTOM)
+    if blk is None:                      # nothing fits below centre — best anywhere
+        blk = rc_place_min_coverage(prof, H, need_block,
+                                    age[0] / H + (need_age + gap) / H, RC_SAFE_BOTTOM)
+    if blk is None:
+        return None
+    return {"age": float(age[0]), "block": float(blk[0]), "mode": "smart",
+            "age_cov": age[1], "block_cov": blk[1]}
+
+
+def rc_layout(head_top, head_bottom, H, need_age, need_block):
+    """Pick y for the age line and for the body+route block.
+
+    head_top/head_bottom are fractions — the union of the face's vertical range
+    over the WHOLE clip.
+    """
+    top_clear = (RC_SAFE_TOP, max(RC_SAFE_TOP, head_top - 0.02))
+    low_clear = (min(RC_SAFE_BOTTOM, head_bottom + 0.03), RC_SAFE_BOTTOM)
+    top_px = (top_clear[1] - top_clear[0]) * H
+    low_px = (low_clear[1] - low_clear[0]) * H
+
+    plan = {}
+    if top_px >= need_age + need_block + RC_GAP_AGE_BODY:
+        # judy layout: the whole thing sits above the subject
+        y = top_clear[0] * H + (top_px - (need_age + RC_GAP_AGE_BODY + need_block)) / 2
+        plan["age"] = y
+        plan["block"] = y + need_age + RC_GAP_AGE_BODY
+        plan["mode"] = "all-top"
+    elif top_px >= need_age and low_px >= need_block:
+        # noemi layout: age alone above, block below the chin — SEPARATE elements
+        plan["age"] = top_clear[0] * H + (top_px - need_age) / 2
+        plan["block"] = low_clear[0] * H + (low_px - need_block) * 0.35
+        plan["mode"] = "split"
+    elif low_px >= need_age + RC_GAP_AGE_BODY + need_block:
+        # no usable band above the head at all: everything goes low
+        y = low_clear[0] * H + (low_px - (need_age + RC_GAP_AGE_BODY + need_block)) / 2
+        plan["age"] = y
+        plan["block"] = y + need_age + RC_GAP_AGE_BODY
+        plan["mode"] = "all-low"
+    else:
+        raise AutoEditError(
+            f"No legal placement: top band {top_px:.0f}px, low band {low_px:.0f}px, "
+            f"need {need_age:.0f}px + {need_block:.0f}px. Shorten the copy or reframe.")
+    return plan, top_clear, low_clear
+
+
+def _rc_frange(lo, hi, step):
+    out, x = [], lo
+    while x <= hi:
+        out.append(round(x, 4))
+        x += step
+    return out
+
+
+def rc_occupancy_layout(src, H, need_age, need_block, gap, block_until=None):
+    """Place both elements with the SAME engine the auto-edit lane uses.
+
+    Operator, 2026-08-21 and again 2026-08-24: captions must never cover the main
+    ACTION or any face, and must respect the platform safe zones. build_occupancy
+    above walks the clip one second at a time and returns, for each second, every
+    detected face box plus a motion figure for each 10% band of frame height.
+    Motion IS the action.
+
+      * a face is vetoed if it appears in ANY second, not on average — our
+        overlay persists, so it must be legal for the whole time it is on screen;
+      * candidates are ranked by SUMMED motion, so the block lands in the calmest
+        part of the frame rather than merely the emptiest.
+
+    Returns the same plan dict the other two layouts return, or None.
+    """
+    dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                                "format=duration", "-of", "csv=p=0", str(src)],
+                               capture_output=True, text=True).stdout or 0)
+    if dur <= 0:
+        return None
+    buckets = build_occupancy(str(src), dur)
+    if not buckets:
+        return None
+
+    # An element is only ever illegal against the seconds it is ON SCREEN FOR.
+    # The block drops at block_until, so judging it against the closing close-ups
+    # (where a face fills half the frame) rejects every position it could legally
+    # have held.
+    b_buckets = buckets if block_until is None else [
+        b for b in buckets if b["t"] <= block_until] or buckets
+
+    def face_free(c, hh, bks=None):
+        """Legal at EVERY second, with the same 0.015 margin the auto-edit lane
+        uses. Only faces overlapping the central 12-88% of width count — centred
+        type slips past a face at the edge of frame, which is what both reference
+        accounts actually do."""
+        y0, y1 = c - hh, c + hh
+        if y0 < RC_SAFE_TOP or y1 > RC_SAFE_BOTTOM:
+            return False
+        for b in (buckets if bks is None else bks):
+            for fx0, fy0, fx1, fy1 in b["faces"]:
+                if fy1 > y0 - 0.015 and fy0 < y1 + 0.015 and fx1 > 0.12 and fx0 < 0.88:
+                    return False
+        return True
+
+    def action(c, hh, bks=None):
+        y0, y1 = c - hh, c + hh
+        tot = 0.0
+        for b in (buckets if bks is None else bks):
+            rows = [m for i, m in enumerate(b["motion"]) if y1 > i / 10 and y0 < (i + 1) / 10]
+            tot += sum(rows) / max(len(rows), 1)
+        return tot
+
+    ha, hb = (need_age / H) / 2, (need_block / H) / 2
+    step = 0.005
+
+    def overlap_px(c, hh, bks):
+        """Vertical pixels of face the band would cover, on a 1920 frame, unioned
+        so two boxes of the same face in consecutive seconds are not counted twice."""
+        y0, y1 = c - hh, c + hh
+        worst = 0.0
+        for b in bks:
+            iv = sorted((f[1], f[3]) for f in b["faces"] if f[2] > 0.12 and f[0] < 0.88)
+            merged = []
+            for s, e in iv:
+                if merged and s <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+                else:
+                    merged.append((s, e))
+            tot = sum(max(0.0, min(y1, e) - max(y0, s)) for s, e in merged)
+            worst = max(worst, tot * 1920)
+        return worst
+
+    # GRACEFUL DEGRADATION. A tall block on a clip with two mid-frame faces can
+    # have NO fully legal position — measured on the wood build, where the
+    # face-free gaps are 0.215 and 0.175 of frame height and the block is 0.234.
+    # Returning None there threw the placement back to the averaged-silhouette
+    # layout, which is the thing being replaced. Instead: prefer legal positions,
+    # and when none exist rank by how few pixels of FACE the band crosses.
+    all_a = _rc_frange(RC_SAFE_TOP + ha, RC_SAFE_BOTTOM - hb - gap / H - hb, step)
+    all_b = _rc_frange(RC_SAFE_TOP + hb, RC_SAFE_BOTTOM - hb, step)
+    ages = [c for c in all_a if face_free(c, ha)] or all_a
+    blocks = [c for c in all_b if face_free(c, hb, b_buckets)] or all_b
+    squeezed = not [c for c in all_b if face_free(c, hb, b_buckets)]
+    if not ages or not blocks:
+        return None
+
+    best = None
+    for a_c in ages:
+        for b_c in blocks:
+            if b_c - hb < a_c + ha + gap / H:
+                continue                      # block must sit below the age line
+            s = action(a_c, ha) + action(b_c, hb, b_buckets)
+            # Face pixels dominate the score, so a legal-ish position always beats
+            # a calm one that sits on his face.
+            s += (overlap_px(a_c, ha, buckets) + overlap_px(b_c, hb, b_buckets)) / 50.0
+            # Tie-break toward the shape both reference banks use on a full-height
+            # subject: age high, block low. Tiny weight.
+            s += 0.02 * (a_c + (1.0 - b_c))
+            if best is None or s < best[0]:
+                best = (s, a_c, b_c)
+    if best is None:
+        return None
+    _, a_c, b_c = best
+    return {"age": (a_c - ha) * H, "block": (b_c - hb) * H, "mode": "occupancy",
+            "age_cov": 0.0, "block_cov": 0.0,
+            "age_action": action(a_c, ha),
+            "block_action": action(b_c, hb, b_buckets),
+            "squeezed": squeezed,
+            "face_px": overlap_px(a_c, ha, buckets) + overlap_px(b_c, hb, b_buckets)}
+
+
+def _rc_ass_time(t):
+    t = max(0.0, float(t))
+    h = int(t // 3600); m = int((t % 3600) // 60); sec = t % 60
+    return f"{h}:{m:02d}:{sec:05.2f}"
+
+
+def _rc_ass_escape(text):
+    # ASS treats a brace as the start of an override block and a backslash as an
+    # escape, so both have to be neutralised before the line reaches libass.
+    return (text.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
+                .replace("\n", r"\N"))
+
+
+def rc_write_ass(path, W, H, scale, events, scales, watermark=None, align="centre"):
+    """One ASS file for the whole overlay: styles, positions and timings.
+
+    PlayResX/PlayResY are set to the real frame size, so every number in here is
+    a PIXEL and the numbers measured off the reference transfer directly. Colours
+    are ASS's &HAABBGGRR (alpha first, and 00 means opaque).
+
+    Alignment 5 is middle-centre, which makes a pos(x, y) override place the
+    CENTRE of the line -- the same anchor the placement engine reasons about.
+    `align="left"` switches to 4 (middle-LEFT) and anchors x at the margin.
+    """
+    an = 4 if align == "left" else 5
+    x = W * 0.06 if align == "left" else W / 2
+
+    def style(name, key, extra_scale=1.0):
+        size, tracking = RC_SPEC[key]
+        k = scales.get(key, 1.0) * extra_scale
+        return (f"Style: {name},Century Gothic,{size * scale * k:.0f},"
+                f"&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,"
+                f"-1,0,0,0,100,100,{tracking * scale * k:.1f},0,"
+                f"1,{RC_OUTLINE * scale * k:.1f},0,{an},0,0,0,1")
+
+    head = [
+        "[Script Info]", "ScriptType: v4.00+", "WrapStyle: 2",
+        "ScaledBorderAndShadow: yes", f"PlayResX: {W}", f"PlayResY: {H}", "",
+        "[V4+ Styles]",
+        "Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,"
+        "BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,"
+        "BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding",
+        style("age", "age"), style("body", "body"), style("route", "route"),
+        # the watermark is the one element that never moves and never resizes
+        (f"Style: wm,Century Gothic,{22 * scale:.0f},&H30FFFFFF,&H30FFFFFF,"
+         f"&H60000000,&H60000000,-1,0,0,0,100,100,0,0,1,{2 * scale:.1f},0,1,"
+         f"{24 * scale:.0f},0,{30 * scale:.0f},1"),
+        "", "[Events]",
+        "Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text",
+    ]
+    body = []
+    for t0, t1, y, text, sty in events:
+        body.append(f"Dialogue: 0,{_rc_ass_time(t0)},{_rc_ass_time(t1)},{sty},,0,0,0,,"
+                    rf"{{\pos({x:.0f},{y:.0f})}}{_rc_ass_escape(text)}")
+    if watermark:
+        body.append(f"Dialogue: 0,{_rc_ass_time(0)},{_rc_ass_time(9999)},wm,,0,0,0,,"
+                    f"{_rc_ass_escape(watermark)}")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(head + body) + "\n")
+    return path
+
+
+def rc_burn_ass(src, ass_path, out):
+    """Burn the ASS track in one ffmpeg pass.
+
+    The `subtitles` filter takes a filtergraph ARGUMENT, so a Windows path has to
+    survive two levels of parsing: the backslashes and the drive colon both need
+    escaping. Running from the file's own directory with a bare filename sidesteps
+    the whole problem, which is why this chdirs instead of building an escape.
+    """
+    d, name = os.path.split(os.path.abspath(ass_path))
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", os.path.abspath(str(src)),
+                    "-vf", f"subtitles={name}", "-c:a", "copy",
+                    os.path.abspath(str(out))],
+                   cwd=d, check=True)
+    print(f"  wrote {out}", flush=True)
+
+
+def rc_build_ass(args):
+    """The static read-caption block: ONE placement, held for the whole video.
+
+    Ported verbatim from the tool's `build()`. `args` is any object carrying the
+    same attributes the CLI produced (src, out, width, height, age, body, route,
+    watermark, occupancy, no_smart, head_top, head_bottom, body_until,
+    route_with_body) — a SimpleNamespace here, an argparse Namespace there.
+    """
+    import tempfile
+    from PIL import Image, ImageDraw
+    W, H = args.width, args.height
+    scale = W / 720.0
+    age_h = RC_SPEC["age"][0] * scale
+    body_lines = [l for l in args.body if l.strip()]
+    block_h = (len(body_lines) - 1) * RC_BODY_PITCH * scale + RC_SPEC["body"][0] * scale \
+        + RC_GAP_BODY_ROUTE * scale + RC_SPEC["route"][0] * scale
+    plan = None
+    if args.occupancy:
+        plan = rc_occupancy_layout(args.src, H, age_h, block_h, RC_GAP_AGE_BODY,
+                                   args.body_until)
+        if plan is not None:
+            print(f"  occupancy placement: age action {plan['age_action']:.3f}, "
+                  f"block action {plan['block_action']:.3f} (lower = calmer)", flush=True)
+            if plan.get("squeezed"):
+                print(f"  !! no fully face-free band for the block — best available "
+                      f"crosses {plan['face_px']:.0f}px of face. Shorten the copy.",
+                      flush=True)
+        else:
+            print("  occupancy placement found no window — falling back", flush=True)
+    if plan is None and not args.no_smart:
+        prof = rc_coverage_profile(args.src)
+        if prof is not None:
+            plan = rc_smart_layout(prof, H, age_h, block_h, RC_GAP_AGE_BODY)
+            if plan is not None:
+                print(f"  smart placement: age covers {100*plan['age_cov']:.0f}% of "
+                      f"subject, block {100*plan['block_cov']:.0f}%", flush=True)
+            else:
+                print("  smart placement found no window — falling back to bands",
+                      flush=True)
+        else:
+            print("  no segmentation available — falling back to bands", flush=True)
+    if plan is None:
+        if args.head_top is None or args.head_bottom is None:
+            raise AutoEditError(
+                "The read-caption overlay could not place itself: neither the "
+                "occupancy engine nor the silhouette profile produced a window, "
+                "and no head band was measured to fall back on. The overlay must "
+                "never cross the face, so this stops rather than guessing.")
+        plan, top_clear, low_clear = rc_layout(args.head_top, args.head_bottom, H,
+                                               age_h, block_h)
+        print(f"  clear top  {100*top_clear[0]:.0f}%..{100*top_clear[1]:.0f}%"
+              f"   clear low {100*low_clear[0]:.0f}%..{100*low_clear[1]:.0f}%", flush=True)
+
+    print(f"  frame {W}x{H}", flush=True)
+    print(f"  layout: {plan['mode']}   age y={plan['age']:.0f} ({100*plan['age']/H:.1f}%)"
+          f"   block y={plan['block']:.0f} ({100*plan['block']/H:.1f}%)", flush=True)
+
+    # Two INDEPENDENT TIMINGS, not two bitmap layers. The age line and the body
+    # block expire separately on the reference (judy's body lines vanish at
+    # t=10.2s of 13.1s while the age line and the route stay to the end). An ASS
+    # event carries its own start and end, so the timing is a field, not a layer.
+    d = ImageDraw.Draw(Image.new("RGBA", (W, H)))          # measuring only
+
+    age_k = rc_fit_scale(d, [args.age], *RC_SPEC["age"], W, scale,
+                         limit_frac=rc_age_width_limit(args.age), ass=True)
+    body_k = rc_fit_scale(d, body_lines, *RC_SPEC["body"], W, scale, ass=True) \
+        if body_lines else 1.0
+    route_k = rc_fit_scale(d, [args.route], *RC_SPEC["route"], W, scale, ass=True) \
+        if args.route else 1.0
+    for nm, k in (("age", age_k), ("body", body_k), ("route", route_k)):
+        if k < 0.999:
+            print(f"  {nm}: shrunk to {100*k:.0f}% so the widest line fits "
+                  f"{100*RC_MAX_TEXT_W:.0f}% of frame width", flush=True)
+
+    END = 9999.0
+    blk_end = args.body_until if args.body_until else END
+    events = [(0.0, END, plan["age"] + RC_SPEC["age"][0] * scale * age_k / 2,
+               args.age, "age")]
+    y = plan["block"] + RC_SPEC["body"][0] * scale * body_k / 2
+    for line in body_lines:
+        events.append((0.0, blk_end, y, line, "body"))
+        y += RC_BODY_PITCH * scale
+    y += RC_GAP_BODY_ROUTE * scale - RC_BODY_PITCH * scale
+    # The route line normally persists to the end, as the reference does. But a
+    # clip whose framing CHANGES — a swap render inherits every cut in its source
+    # — can start wide and end on a close-up, and a line that was sitting on the
+    # sky at t=1 is sitting on the subject's face at t=8. `route_with_body` drops
+    # the route on the same timer as the block. It is a framing question, not a
+    # preference.
+    if args.route:
+        events.append((0.0, blk_end if args.route_with_body else END,
+                       y + RC_SPEC["route"][0] * scale * route_k / 2, args.route, "route"))
+        bottom = y + RC_SPEC["route"][0] * scale
+        print(f"  lowest ink {100*bottom/H:.1f}%  (safe limit {100*RC_SAFE_BOTTOM:.0f}%)"
+              + ("  OK" if bottom / H <= RC_SAFE_BOTTOM else "  !! CROSSES THE REELS UI"),
+              flush=True)
+
+    if args.body_until:
+        print(f"  body block drops at t={args.body_until}s; age persists"
+              + ("" if args.route_with_body else ", route persists"), flush=True)
+    ks = {"age": age_k, "body": body_k, "route": route_k}
+    _rc_warn_side_margins(events, W, H, scale, ks)
+    ass = os.path.join(tempfile.gettempdir(), "rc_overlay.ass")
+    return rc_write_ass(ass, W, H, scale, events, scales=ks, watermark=args.watermark)
+
+
+def overlay_stage_plan(spec):
+    """v944 — decide whether the overlay stage runs, and with what.
+
+    Pure: no files, no ffmpeg. `None` in, `None` out; `overlay: none` likewise —
+    the run is then byte-identical to a pre-v944 run, which is the whole
+    regression contract. Anything else is validated hard HERE rather than
+    halfway through a render.
+    """
+    if not spec:
+        return None
+    engine = str(spec.get("overlay") or "none").strip().lower()
+    if engine == "none":
+        return None
+    if engine != "readcaption":
+        raise AutoEditError(
+            f"Unknown overlay engine {engine!r} — 'readcaption' is the only one "
+            f"there is (v944)")
+    age = str(spec.get("overlay_age") or "").strip()
+    if not age:
+        raise AutoEditError(
+            "A readcaption overlay needs an age line (overlay_age) — it is the "
+            "element the mentor calls non-negotiable (v944)")
+    body = spec.get("overlay_block") or []
+    if isinstance(body, str):
+        body = [p.strip() for p in body.split(" / ") if p.strip()]
+    return {
+        "engine": "readcaption",
+        "age": age,
+        "body": [str(b).strip() for b in body if str(b).strip()],
+        # The tool's own default, and the reason the format has this name: a
+        # read-caption post without the route line is not asking anyone to read
+        # the caption.
+        "route": str(spec.get("overlay_footer") or "(READ CAPTION)").strip(),
+        "watermark": spec.get("overlay_watermark", "syntheticperformer"),
+        "body_until": spec.get("overlay_body_until"),
+        "route_with_body": bool(spec.get("overlay_route_with_body")),
+    }
+
+
+def render_readcaption_overlay(video_in, video_out, plan):
+    """Burn the read-caption overlay onto a finished cut.
+
+    ONE placement for the whole video, because the overlay is burned for its
+    whole duration and the reference posts hold it pixel-identical frame to
+    frame. The engine picks the pixels: occupancy first (per-second face vetoes
+    plus per-band motion — the auto-edit lane's own map), the silhouette profile
+    second, the measured head band last.
+    """
+    import types
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=width,height", "-of", "csv=p=0", str(video_in)],
+        capture_output=True, text=True).stdout.strip().split(",")
+    try:
+        width, height = int(probe[0]), int(probe[1])
+    except (IndexError, ValueError):
+        raise AutoEditError(
+            f"Could not read the frame size of {video_in} — the overlay is placed "
+            f"in pixels, so it cannot run without one")
+
+    band = rc_head_band(str(video_in))
+    if band is None:
+        print("  head band not measured (no person detector here) — occupancy and "
+              "silhouette placement carry it", flush=True)
+
+    args = types.SimpleNamespace(
+        src=str(video_in), out=str(video_out), width=width, height=height,
+        age=plan["age"], body=list(plan.get("body") or []),
+        route=plan.get("route") or "",
+        watermark=plan.get("watermark"),
+        body_until=plan.get("body_until"),
+        route_with_body=bool(plan.get("route_with_body")),
+        # The occupancy engine IS this module's own, so it is always available
+        # and is the right default for any clip where the subject moves.
+        occupancy=True, no_smart=False,
+        head_top=band[0] if band else None,
+        head_bottom=band[1] if band else None,
+    )
+    print(f"overlay: readcaption — age {args.age!r}, {len(args.body)} body line(s)",
+          flush=True)
+    ass = rc_build_ass(args)
+    rc_burn_ass(args.src, ass, args.out)
+    return Path(video_out)
+
+
 def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
                  placement: str = "dynamic", offset: float | None = None,
                  progress=lambda stage: None, repairs=None) -> Path:
@@ -1584,6 +2376,24 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
     else:
         out.unlink(missing_ok=True)
         shutil.copy2(nocap, out)
+
+    # v944 — the declared TEXT OVERLAY, the last video stage of the run.
+    #
+    # Guarded on the spec being there at all: no spec, no stage, and the run is
+    # what it was before this feature existed. It burns AFTER the caption pass
+    # (or after the plain copy when captions are off) so the quality check below
+    # measures the DELIVERED artifact and not a pre-overlay version of it —
+    # §v938.1, a stage log proves a stage RAN, never that its output shipped.
+    _rc_plan = overlay_stage_plan((repairs or {}).get("overlay_spec"))
+    if _rc_plan is not None:
+        progress("overlay")
+        pre = work / "overlay_input.mp4"
+        pre.unlink(missing_ok=True)
+        shutil.copy2(out, pre)
+        try:
+            render_readcaption_overlay(pre, out, _rc_plan)
+        finally:
+            pre.unlink(missing_ok=True)      # disk-bounded: one temp, deleted
 
     if repairs["captions_enabled"] and not buckets:
         buckets = build_occupancy(occ_src, dur)
