@@ -508,3 +508,76 @@ def test_the_default_pitch_is_the_measured_account_constant():
     doubled spacing the operator flagged on two finals."""
     from autoedit_pipeline import RC_BODY_PITCH
     assert RC_BODY_PITCH == 49
+
+
+# ---- v947: auto_finish + export_* + autoedit_* + unknown-key fail-closed ----
+from image_platform import parse_finishing_section
+
+BASE = "## Finishing\n\n- **captions:** none\n"
+
+
+def _fin(extra: str):
+    return parse_finishing_section(BASE + extra + "\n## Next Section\n")
+
+
+def test_auto_finish_parses_on_off_and_defaults_off():
+    assert _fin("- **auto_finish:** on\n")["auto_finish"] == "on"
+    assert "auto_finish" not in _fin("- **auto_finish:** off\n")
+    assert "auto_finish" not in _fin("")
+
+
+def test_auto_finish_bad_value_fails_closed():
+    with pytest.raises(ValueError):
+        _fin("- **auto_finish:** yes\n")
+
+
+def test_export_fields_validate_through_the_real_model():
+    spec = _fin("- **export_remove_silence:** true\n- **export_music_gain_db:** -22\n")
+    assert spec["export"] == {"remove_silence": True, "music_gain_db": -22.0}
+
+
+def test_export_only_declared_fields_are_stored():
+    spec = _fin("- **export_smart_trim:** false\n")
+    assert set(spec["export"]) == {"smart_trim"}   # sparse — no frozen defaults
+
+
+def test_export_unknown_field_fails_closed():
+    with pytest.raises(ValueError):
+        _fin("- **export_does_not_exist:** 1\n")
+
+
+def test_export_bad_value_fails_closed():
+    with pytest.raises(ValueError):
+        _fin("- **export_music_gain_db:** loud\n")     # not a number
+    with pytest.raises(ValueError):
+        _fin("- **export_frames_to_cut_start:** 99\n")  # outside le=30 bound
+
+
+def test_export_json_value_beat_pins():
+    spec = _fin('- **export_beat_pins:** {"3": 2.47}\n')
+    assert spec["export"]["beat_pins"] == {"3": 2.47}
+
+
+def test_autoedit_fields_validate_and_reserved_names_rejected():
+    spec = _fin("- **autoedit_pip_enabled:** false\n- **autoedit_music_db:** -18\n")
+    assert spec["autoedit"] == {"pip_enabled": False, "music_db": -18.0}
+    for reserved in ("template", "captions_enabled", "overlay_spec"):
+        with pytest.raises(ValueError):
+            _fin(f"- **autoedit_{reserved}:** x\n")
+
+
+def test_unknown_bullet_fails_closed():
+    with pytest.raises(ValueError):
+        _fin("- **exprot_music_gain_db:** -22\n")   # the typo class this exists for
+
+
+def test_v944_only_section_is_unchanged():
+    spec = parse_finishing_section(
+        "## Finishing\n\n- **captions:** none\n- **overlay:** readcaption\n"
+        "- **overlay_age:** I'M 74\n")
+    assert spec["captions"] == "none" and spec["overlay"] == "readcaption"
+    assert "export" not in spec and "autoedit" not in spec and "auto_finish" not in spec
+
+
+def test_absent_section_still_none():
+    assert parse_finishing_section("# build\n\n## Storyboard\n") is None

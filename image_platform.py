@@ -5258,6 +5258,56 @@ def _finishing_caption_values():
     return {"none"} | set(local_styles()) | set(BUILTIN_TEMPLATES)
 
 
+def _finishing_coerce(v: str):
+    """Bullet values arrive as strings; JSON-looking ones become JSON, the
+    rest go to pydantic as-is (its lax mode coerces 'true'/'-22' correctly)."""
+    s = v.strip()
+    if s[:1] in "{[":
+        try:
+            return json.loads(s)
+        except ValueError:
+            pass
+    return s
+
+
+def _finishing_validate_prefixed(fields: Dict[str, str], prefix: str,
+                                 model_name: str,
+                                 reserved: frozenset = frozenset()):
+    """v947 — validate `<prefix><field>` bullets through the REAL request
+    model (finishing_models), so the declaration can never say something the
+    endpoint would not accept and there is no second validation list to drift.
+    Returns the sparse dict of declared fields only, or None if none declared.
+    Fails CLOSED if the models cannot be imported."""
+    sub = {k[len(prefix):]: v for k, v in fields.items() if k.startswith(prefix)}
+    if not sub:
+        return None
+    try:
+        import finishing_models
+        model_cls = getattr(finishing_models, model_name)
+    except Exception as exc:
+        raise ValueError(
+            f"## Finishing {prefix}* fields cannot be verified "
+            f"(finishing_models import failed: {exc}) — failing closed (v947)")
+    known = set(model_cls.model_fields) - set(reserved)
+    bad = sorted(set(sub) & set(reserved))
+    if bad:
+        raise ValueError(
+            f"## Finishing {prefix}{bad[0]} is declared through the v944 "
+            f"captions:/overlay*: fields, not the {prefix} namespace (v947)")
+    unknown = sorted(set(sub) - known)
+    if unknown:
+        raise ValueError(
+            f"## Finishing unknown field(s): "
+            f"{', '.join(prefix + u for u in unknown)} (v947). "
+            f"Known: {', '.join(sorted(known))}")
+    coerced = {k: _finishing_coerce(v) for k, v in sub.items()}
+    try:
+        model = model_cls(**coerced)
+    except Exception as exc:
+        raise ValueError(f"## Finishing {prefix}* value rejected: {exc} (v947)")
+    return model.model_dump(include=set(coerced))
+
+
 def parse_finishing_section(md_text: str):
     """v944 — the job-level ``## Finishing`` section, or None when absent.
 
@@ -5323,6 +5373,35 @@ def parse_finishing_section(md_text: str):
                 raise ValueError(
                     f"## Finishing overlay_pitch: {pitch_i} is outside 30..120 (v944)")
             spec["overlay_pitch"] = pitch_i
+
+    # ---- v947: the rest of the finish is declarable too ----
+    auto = fields.get("auto_finish", "off").lower()
+    if auto not in ("on", "off"):
+        raise ValueError(
+            f"## Finishing auto_finish: {auto!r} is not 'on' or 'off' (v947)")
+    if auto == "on":
+        spec["auto_finish"] = "on"
+
+    exp = _finishing_validate_prefixed(fields, "export_", "ExportSettings")
+    if exp:
+        spec["export"] = exp
+    ae = _finishing_validate_prefixed(
+        fields, "autoedit_", "AutoEditRequest",
+        reserved=frozenset({"template", "captions_enabled", "overlay_spec"}))
+    if ae:
+        spec["autoedit"] = ae
+
+    # v947 — a bullet nobody recognizes fails at import, not at render time.
+    recognized = {"captions", "overlay", "auto_finish",
+                  "overlay_age", "overlay_block", "overlay_footer", "overlay_pitch"}
+    leftovers = sorted(
+        k for k in fields
+        if k not in recognized
+        and not k.startswith("export_") and not k.startswith("autoedit_"))
+    if leftovers:
+        raise ValueError(
+            f"## Finishing unknown field(s): {', '.join(leftovers)} (v947) — "
+            f"typo, or a field this platform version does not know")
     return spec
 
 
