@@ -14128,7 +14128,11 @@ def _queue_autoedit_impl(db, job, req: AutoEditRequest, user_id):
     # and the job row is the mutex — same pattern as _maybe_auto_finish_export.
     # Postgres emits FOR UPDATE; sqlite ignores it. Deliberately NOT rebinding
     # `job`: this is taken for the lock only. Released by the commit on the
-    # success path, and by the caller's rollback on every raise below.
+    # success path; on a raise there is NO explicit rollback anywhere — the
+    # release is the session close (endpoint: get_db_session teardown; chain:
+    # the get_db context exit), both bounded by the same request/call.
+    # NOTE: the mutex itself has no test coverage — sqlite ignores FOR UPDATE,
+    # so the passing double-fire test proves can_queue, not this lock.
     db.query(Job).filter(Job.id == job.id).with_for_update().first()
 
     exp = db.query(ExportRun).filter(
