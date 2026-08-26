@@ -401,6 +401,17 @@ def lint(path: str) -> int:
         for _e in lint_promptb_gate(_pb_clips):
             fails.append(f"v821: {_e} — reworded Prompt B mandatory on every dialogue clip (see template_reference §v821)")
 
+    # v944/v947 — the ## Finishing section must parse exactly as import will
+    # parse it. Same function, so lint-pass == import-pass by construction.
+    try:
+        from image_platform import parse_finishing_section
+        parse_finishing_section(t)
+    except ValueError as _fe:
+        fails.append(f"v947 finishing: {_fe}")
+    except ImportError as _fe:
+        warns.append(f"v947 finishing: image_platform not importable here ({_fe}) — "
+                     f"section NOT checked; import will still enforce it")
+
     # --- report ---
     print(f"FILE: {path}")
     print(f"  Images={len(images)}  Scenes={len(scenes)}  Clips={len(clips)}  Lines={line_count}")
