@@ -956,6 +956,54 @@ The main character, same [setting anchor] as image 2, same framing — shot on i
 - **bg_color:** black                          # required when scene_type=text_card; CSS color name OR hex (`#000000`)
 - **duration:** 1.0s                           # optional; defaults to 1.0s when omitted
 
+### Scene 5 — example charswap scene (v945)
+- **image:** image_1                             # the clip's start frame; in swap_mode=image-led this is the frame the source's movement is applied to
+- **scene_type:** shot
+- **speaker:** silent                            # a charswap scene may carry AT MOST ONE `- **line:**` (clips are 1:1 with lines; two lines would fan ONE source into two renders → hard fail)
+- **render_method:** charswap                    # v945 — only value. Any other value HARD-FAILS at import. Omit the bullet entirely for the normal render path.
+- **swap_source_video:** source-muted-9.8s.mp4   # v945 — the declared asset name. Uploaded by `send_to_platform.py --swap-source NAME=path`, or the name resolves as a path (beside the build → repo root → cwd). ≤12.0s, mp4 with a video stream, ≤80MB.
+- **swap_mode:** video-led                       # v945 — video-led | image-led. video-led = replace the character in the real video. image-led = apply the source's movement to the CHOSEN start frame (refused without one).
+- **audio:** source-original                     # v945.1 — source-original | none (default none). CHARSWAP SCENES ONLY (hard-fails elsewhere, even as `none`). The render is ALWAYS silent; this re-muxes the stored source's own track at EXPORT, so point swap_source_video at the WITH-audio cut.
+- **target_duration_s:** 10
+- **clip_duration_s:** 10
+- **clip_mode:** fresh
+- **transition:** cut
+- **action_note:** [what the swapped character does across the clip, with the beat markers]
+
+<!-- v945 — the three swap bullets are all-or-nothing: declaring one or two of them HARD-FAILS at
+     import naming what is missing. `## Ingredients` must resolve to EXACTLY ONE character row bound
+     to an upload — that face is the swap; zero or several is a 400 ("a swap never guesses a face").
+     The Veo prompt for a swap clip states the INTENTION of the swap, not a performance.
+     NOTE ON THE NUMBER: the shipped code, its error messages and its tests all say `v943`; that
+     number was claimed a day earlier by a different rule, so canon is v945. Do not rename the code.
+     Deep-dive: template_reference.md §v945. -->
+
+---
+
+## Finishing
+
+Job-level, ONE section per build, anywhere at top level (the parser stops it at the next `##` header). **Absent section = exactly the pre-v944 behavior** — the auto-edit runs its defaults (template `korella`, captions ON). Every value is validated hard at import.
+
+```markdown
+## Finishing
+
+- **captions:** none                             # v944 — `none`, or a caption template name validated against the PIPELINE's own list (local caption_templates/ styles + built-in pycaps names; e.g. `korella`, `word-focus`). Unknown value HARD-FAILS and the message lists the known ones. Absent → none.
+- **overlay:** readcaption                       # v944 — none | readcaption. Absent → none. Any `overlay_*` field with no engine declared HARD-FAILS.
+- **overlay_age:** I'M 74                        # v944 — REQUIRED when overlay=readcaption.
+- **overlay_block:** No Steroids / No Peptides / 7 Boring Things / I do daily to move like I'm 35
+                                                 # v944 — the denial/count lines, split on " / " (space-slash-space). Optional.
+- **overlay_footer:** (READ CAPTION)             # v944 — optional; the engine defaults to "(READ CAPTION)".
+- **overlay_pitch:** 49                          # v944.1 — optional whole number, 30..120. Default 49, MEASURED from the account's posted winner. Declare it only to run a deliberate spacing test.
+```
+
+<!-- v944 — NEVER declare placement. Where the text sits is the engine's job: it measures the
+     subject, never crosses the face, keeps to the organic 6-79% zone, and moves the age line and
+     the block as separate elements. The build says WHAT the overlay says, not where.
+     The rotating content (the denials, and caption item #1) must COHERE with what the clip shows —
+     a "No Brutal Workouts" denial over heavy dumbbell curls contradicts the frame. Canonical:
+     wiki/synthesis/readcaption-caption-engine.md §"Coherence rule".
+     Deep-dive: template_reference.md §v944. -->
+
 ---
 
 ## Comprehension

@@ -17756,3 +17756,222 @@ The earlier lines above stay verbatim because this master is append-only. They a
 - **v941 correction — only ONE checker gap.** Grouped multi-raw pages must be `type: synthesis`, not `source`, and that page-job distinction remains unenforced. Duplicate `raw_path` ownership is already enforced: `_find_pointer()` in `tools/check_ingest.py` gathers every exact claimant and fails unless there is exactly one. It has done so since 2026-08-10. The earlier claim that neither clause was checked was false.
 - **v942 correction — staged names are not staged content.** Anything the commit owns — a staged raw source, pointer-page change or route-registry change — is now checked from exact Git INDEX blobs, including routes and owners. A staged broken pointer followed by an unstaged working-tree repair fails. Pointer/route deletions trigger a check of the whole indexed raw set they can affect. Unrelated working-tree orphans still report as `NOT YOURS`; an unreadable index fails closed.
 - **v943 correction — the live check is `gemini_decode_worker.signed_in()`.** The earlier `session_is_live()` name points at a function that was deleted. `signed_in()` requires a non-Flash-Lite model pill plus a completed scan showing no visible Sign-in control; if the negative scan raises, it fails closed and `ensure_session()` retries. The deleted dangerous probe was a non-browser requests-based cookie-replay LIVENESS test at myaccount. The existing real-browser resolver may render myaccount to identify which address a profile carries; that is identity evidence only and never substitutes for Gemini's `signed_in()` result.
+
+## v945 — CHARSWAP RENDER METHOD: the build says a clip is a character swap (2026-08-26)
+
+**Read the number before anything else.** The shipped code says **`v943`** everywhere — the parser's own error text (*"see template_reference.md §v943"*), the column comments, the function names (`_v943_maybe_charswap`, `_v943_swap_source_response`), the test file, and HANDOFF revs 471-494. That number was already spent: `§v943 — PROVE A LIVE SESSION` was written into this master on 2026-08-25 by a session running in parallel, hours before the swap feature landed. **One v-number cannot hold two unrelated rules here.** `check_rule_index.py` folds `v943.1` onto `v943`, and `wiki/meta/build-rule-index.md` gives a rule exactly ONE bucket — but the swap rule is a build-authoring rule (§A, the author must write bullets) while the session rule is platform-internal (§C, no artifact action). Both cannot be v943. This master is append-only, so the earlier claim keeps the number and **the swap family is canonically v945 / v945.1**.
+
+Nothing in `code/` was renamed. A `(v943)` in a parser error, a log line, a column comment or a test name means **this section**. Do not "fix" the strings — they are deployed and live, and renaming them is a separate, deliberate job with its own deploy.
+
+### What it is
+
+A charswap clip is not rendered from a prompt. It takes a REAL video you already have and replaces the person in it with your uploaded avatar, through Flow. So the build stops describing a performance and starts naming two inputs: the source mp4, and the one character upload whose face goes in.
+
+Everything about it fails CLOSED, and that is the whole design. This parser ignores bullets it does not recognise — the right default for a note, the wrong one for a field that decides how a clip renders. A typo in `render_method` would import cleanly, render the ordinary way, and nobody would find out until they watched the result hours later. So an unknown value, a half-declared set, or a shape that cannot produce exactly one clip stops the import instead.
+
+### The grammar (exact)
+
+Three bullets on a `### Scene N` block inside `## Storyboard`. They only mean anything together:
+
+```markdown
+- **render_method:** charswap
+- **swap_source_video:** source-muted-9.8s.mp4
+- **swap_mode:** video-led
+```
+
+- **`render_method`** — the only accepted value is `charswap`. Leave the bullet out entirely for the normal render path.
+- **`swap_source_video`** — the asset name the build declares. `send_to_platform.py` turns the name into an uploaded file (see below).
+- **`swap_mode`** — `video-led` or `image-led`.
+
+Values are read as the first whitespace-separated token, lowercased, so ` Video-Led ` and `video-led` are the same thing. The scene's other bullets (`image:`, `speaker:`, `action_note:`, `clip_duration_s:` …) are unchanged and still apply.
+
+**Every way it hard-fails at import** (each one is pinned by a test in `code/test_charswap_render_method.py`):
+
+| what you wrote | what happens |
+|---|---|
+| `render_method: faceswap` (or any non-`charswap` value) | `ValueError` naming `render_method` |
+| any ONE or TWO of the three bullets | `ValueError` listing what was declared and what is missing |
+| `swap_source_video` on a scene with no `render_method` | `ValueError` naming `render_method` |
+| `swap_mode: sideways` | `ValueError` naming `swap_mode` |
+| a charswap scene with TWO `- **line:**` bullets | `ValueError` — *"renders exactly one clip"* |
+| the declared source name never uploaded | HTTP 400 at import, listing the names that WERE supplied |
+| a source R2 key not under your own `swap-sources/<your id>/` prefix | HTTP 400 — v945 owner scoping |
+| zero, or two-plus, character rows in `## Ingredients` | HTTP 400 — *"a swap never guesses a face"* |
+| the character row resolves to something that is not an upload | HTTP 400 — bind it to an UPLOAD |
+
+One `- **line:**` is fine. The two-line refusal exists because clip rows are 1:1 with lines, so a two-line charswap scene would quietly fan the SAME source video into two swap renders. Split it into one scene per swap clip.
+
+### The avatar: exactly ONE character upload
+
+The face is not named on the scene. It comes from `## Ingredients`: the build must resolve to **exactly one** `character` row bound to a real upload, and the import refuses zero or several before a single assignment row is written — so a build that cannot be rendered is refused whole instead of half-imported. Ambiguity is the one thing a swap must never improvise.
+
+```markdown
+| Name | Type | Source | Attached to |
+|---|---|---|---|
+| elder | character | upload elder52 | image_1 |
+```
+
+The row must be `kind='upload'` and belong to you. Both are checked at import, where the message can still be read, rather than at render time hours later.
+
+### The source video: how the mp4 gets there
+
+```bash
+python code/send_to_platform.py <build.md> --swap-source "source-muted-9.8s.mp4=raw/decode_work/noemi-curls-DbRQvAkSQ1f/source-muted-9.8s.mp4"
+```
+
+`--swap-source NAME=PATH` is repeatable, once per declared name. It can also be left out: the declared name is tried as a path itself, relative to the build file first, then the repo root, then the current directory. The pilot build sits beside its own mp4, so `- **swap_source_video:** source-muted-9.8s.mp4` resolves with no flag at all. A build that declares no charswap scene uploads nothing and sends a byte-identical payload.
+
+Each file is uploaded once and stored under `swap-sources/<your user id>/`, and the import requires that exact prefix — which is what stops one account binding another account's clip into its build and then having a worker fetch it quite legitimately.
+
+**The upload refuses, before storing anything:** over **80 MB** (413) · not an mp4 container, or no video stream (415) · unreadable by `ffprobe` (415) · longer than **12.0 s** (422). A rejected upload leaves no temp file behind.
+
+**The render cap is 10 s and it is a TRIM, not a rejection.** A 10.2 s cut is a correct cut the worker shortens, not a wrong file — the 12 s upload cap sits above it deliberately so a slightly-long cut is still accepted.
+
+### The two modes
+
+- **`video-led`** — replace the character IN the real video. The source's own motion, background and framing survive; the avatar upload rides along as the reference. This is the default shape and the one the pilot proved.
+- **`image-led`** — apply the source video's MOVEMENT to the clip's chosen start frame. It needs a start frame, because the operator-approved chosen start frame **is** the pose-matched composite this mode runs on. A clip in `image-led` with no start frame is refused by the worker — and refused **before** it downloads anything, so a refusal costs nothing.
+
+An unknown mode never reaches the worker (the parser stops it), and the worker refuses it anyway. Belt and braces on purpose.
+
+The mode is a real choice, not a label: the same source, the same avatar and the same approved start frame, one clip each way, is a genuine one-variable comparison. Which way to lean is measured per source — see `tools/swap_route.py` and `docs/experiments/swap-technique-matrix-2026-08-23.md`.
+
+### v945.1 — SOURCE-ORIGINAL AUDIO: the markdown describes the sound too
+
+```markdown
+- **audio:** source-original
+```
+
+`source-original` or `none`. Absent means `none`. **Only on a charswap scene** — on a normal Veo scene the bullet hard-fails, even with the value `none`, because a Veo clip already has its own audio and there is no stored source to take a track from. Case- and space-insensitive like the others.
+
+**This does not change the render at all.** The render is ALWAYS silent: Flow only accepts a muted upload, and the worker strips the track on the way in regardless of what the build says. `audio: source-original` is an **export-time** instruction — at final export the stored source's own audio is laid back over that clip's segment, per clip, **before** the concat (after concat, the VAD and speed passes have moved every segment boundary). Video stream copied, audio-only aac, `-shortest`, disk-bounded temps. A source with no audio track degrades to silent; the export never fails over it.
+
+Because the worker mutes on the way in anyway, **reference the WITH-audio cut in the build** when you want the track. The pilot has both cuts on disk (`source-with-audio-9.8s.mp4` beside `source-muted-9.8s.mp4`) for exactly this reason.
+
+**OPEN RISK, flagged rather than buried (rev 494):** the first sounded swap export meets a VAD/trim pass that has only ever seen silent swap clips. Eyeball one real export before treating this as settled.
+
+### Worked example — the pilot, complete
+
+`raw/decode_work/noemi-curls-DbRQvAkSQ1f/noemi-curls-swap-v1.md`, the build that rendered the first live swap:
+
+````markdown
+## Ingredients
+
+| Name | Type | Source | Attached to |
+|---|---|---|---|
+| elder | character | upload elder52 | image_1 |
+
+## Storyboard
+
+### Scene 1
+
+- **image:** image_1
+- **scene_type:** shot
+- **speaker:** silent
+- **render_method:** charswap
+- **swap_source_video:** source-muted-9.8s.mp4
+- **swap_mode:** video-led
+- **target_duration_s:** 10
+- **clip_duration_s:** 10
+- **clip_mode:** fresh
+- **transition:** cut
+- **action_note:** the seated man performs slow alternating dumbbell curls into the gym mirror, mid-effort, breathing hard [Start beat] he keeps curling at the same steady cadence [Mid-clip beat] he finishes a rep and holds the dumbbell at the top [End beat]
+
+## Veo 3.1 Final Prompts (per clip)
+
+### Clip 1.1 — Scene 1 (the swap)
+**Start frame:** Image 1
+**Text prompt:**
+```
+change the character in the video with the character in the image, keep the gym
+exactly as it is, and remove all the text: there is no writing anywhere in the
+video, no captions, no watermark, rebuild whatever is behind the words
+```
+````
+
+`### Image 1` still carries a normal image prompt — it is the clip's start frame, and in `image-led` it is the frame the movement is applied to. The Veo prompt on a swap clip states the INTENTION of the swap, not a performance.
+
+### What did NOT change
+
+A build with none of these bullets parses to all-None on every new field and its pending-clip payload is unchanged, field for field. That is the contract the whole feature rests on, and it is tested directly rather than asserted: the legacy scene, the legacy payload, and the worker branch that must NOT be selected (`render_method` NULL, empty, `CHARSWAP` in capitals, or any other value) all have their own checks.
+
+### Deployed
+
+`e414c2e` (the feature end to end — build fields → worker branch, 2048 insertions, seven files) · `07dcbfe` (log the payload's clip index, not the loop position) · `3d08ca7` (flip the composer to the Ingredients tab before the attach — found by the live pilot) · `b9565f1` (image-led made real: it rides the clip's chosen start frame) · `6937bbf` (v945.1 source-original audio). All DEPLOY CONFIRMED against `/api/health`, with `GET /api/admin/verify-charswap-columns` reading the new columns back off production.
+
+**General lesson:** *a field that changes how something renders may never fail silently.* Every other bullet in this grammar is safe to ignore when misspelled. These are not, because the wrong render looks like a finished one.
+
+## v944 — THE FINISHING SECTION: the build declares its own captions and overlay (2026-08-26)
+
+**The failure that caused it.** The first swap pilot came back with captions nobody asked for and none of the agreed overlays. Measured, not guessed: the auto-edit ran with a default `AutoEditRequest` — template `korella`, `captions_enabled=True` — because **nothing in the job said anything about finishing**. `captions_enabled=False` already existed as a field. The read-caption overlay engine already existed, with its whole doctrine, in `tools/readcaption_overlay.py`. The gap was declaration and wiring, nothing else.
+
+So the build now says how it finishes, in one job-level section.
+
+### The grammar (exact)
+
+A top-level `## Finishing` section, anywhere in the build. It ends at the next `##` header — a bullet under the following section is not a finishing field.
+
+```markdown
+## Finishing
+
+- **captions:** none
+- **overlay:** readcaption
+- **overlay_age:** I'M 74
+- **overlay_block:** No Steroids / No Peptides / 7 Boring Things / I do daily to move like I'm 35
+- **overlay_footer:** (READ CAPTION)
+- **overlay_pitch:** 49
+```
+
+| bullet | values | absent means |
+|---|---|---|
+| `captions:` | `none`, or a caption template name | `none` |
+| `overlay:` | `none` or `readcaption` | `none` |
+| `overlay_age:` | free text, REQUIRED when `overlay: readcaption` | — (hard fail) |
+| `overlay_block:` | the denial lines, split on ` / ` (space-slash-space) | no block |
+| `overlay_footer:` | free text | the engine's own `(READ CAPTION)` |
+| `overlay_pitch:` | whole number, 30..120 (v944.1) | the measured account default, 49 |
+
+**The caption template list is not written down here on purpose.** It is derived from the pipeline's own templates — the local `caption_templates/` styles plus the built-in pycaps names, the same source the API's template validation uses. `korella` is a local style, `word-focus` is a builtin; both are real. A hardcoded copy drifts the moment a template is added or removed, and the first draft of this rule carried five names that do not exist while missing five that do. If the pipeline cannot be imported, the parser falls back to the two names that are always true here, so an unverifiable template fails CLOSED.
+
+**Hard fails at import:** an unknown `captions:` value (the message lists the known ones) · an `overlay:` engine that is not `none` or `readcaption` · `overlay: readcaption` with no `overlay_age` · any `overlay_*` field with no overlay engine declared · an `overlay_pitch` that is not a whole number, or sits outside 30..120.
+
+### Where the spec travels
+
+Import parses the section onto `image_job_batches.finishing_spec`, it rides **both** promote paths to `jobs.finishing_spec`, and `queue_autoedit` derives its defaults from it. A re-import of a corrected build moves the stored value, so a build that ADDS or REMOVES its `## Finishing` does not leave the batch on the old finish forever.
+
+What the derive does:
+
+- `captions: none` → `captions_enabled=False`.
+- `captions: <template>` → `template=<that name>` AND `captions_enabled=True`.
+- `overlay: readcaption` → the spec rides to the worker as `overlay_spec` inside the repair settings.
+- `overlay: none` → no `overlay_spec` at all.
+
+**An explicitly-sent request field always wins over the declaration** (the rev-459 inheritance rule). That cut both ways in practice: a pre-v944 job with no stored spec, whose caller sent the overlay explicitly, had its overlay eaten by the no-spec branch until it was fixed and pinned (`0d5592d`).
+
+The browser promote deliberately gained NO new field — the request already carries the batch id and the server already loads that batch row, so the spec is copied there. A hand-maintained payload enumeration is exactly what drifted in v892.2.
+
+### Placement is the ENGINE's job — never declare it
+
+The build says WHAT the overlay says. It never says where the text sits. The engine measures the subject and places around them: never crossing the face, an organic Reels safe zone of 6%-79%, the age line and the block as **separate** elements that can move independently (one account drops the block while the age line stays; another moves the age line while the block holds — one stacked element cannot do either).
+
+The constants came across from the tool unchanged and they are measured, not chosen: Century Gothic Bold, outline 10, spec sizes age 94 / body 47 / route 52, age max width 0.35, max text width 0.90. A port that quietly rounds them ships a different overlay, so they are pinned by test.
+
+### v944.1 — the line pitch, and why our own outputs are not a reference
+
+The operator flagged the block spacing twice and it survived both times. Traced 2026-08-26: the account's posted winner (`Dbn4yKwxCrl`, segment 1) runs its block at **~71 px pitch at 1080**; our renders ran **~125 px** because the constant said 84. The 2026-08-24 measurement that produced 84 was simply wrong — and it survived two complaints because the checking was done by **comparing our own outputs to each other**, which is circular. **49** renders 73.5 px and matches the reference; the re-rendered pilot measured 71/76/70 px.
+
+The default is now 49, and `- **overlay_pitch:**` exists so a deliberate spacing test can move it per build — not so every build picks a number.
+
+**General lesson:** *a measured constant is calibrated against the account's posted winners, never against our own prior outputs.* Our outputs all share the defect being investigated.
+
+### Content coherence — the overlay and the caption adapt to the footage
+
+The structure is locked; the rotating CONTENT must cohere with what the clip actually shows. The pilot burned "No Brutal Workouts" over a man doing heavy dumbbell curls — a contradiction on screen. Denials name what a viewer actually suspects watching THIS clip, and caption item #1 names the on-screen action. **Canonical: [[readcaption-caption-engine]] §"Coherence rule"** — read it there, it is not duplicated here.
+
+### What did NOT change
+
+A build that declares no `## Finishing` parses to `None`, is stored as SQL NULL (never as the string `"null"`, which is truthy and would read back as a declared spec forever), adds exactly one key at derive time and moves nothing else. Every other repair default is unmoved, and the pipeline's overlay call site is guarded so the stage cannot run on a job with no spec. Each of those was negative-tested — the guard test was run against a copy with the guard removed, and it fails there.
+
+### Deployed
+
+`1052563` (parse the section, fail closed) · `087c891` (the columns) · `983780d` (the spec travels import → batch → both promotes → job) · `7c875f9` (`queue_autoedit` derives its defaults) · `97c3417` (the read-caption overlay stage ported into the pipeline; the tool becomes a wrapper) · `0c0877a` (the legacy path proven untouched) · `0d5592d` (an explicit overlay survives a job with no declared finishing) · `5c34474` (v944.1 — the corrected pitch plus the declarable bullet). Plan: `docs/superpowers/plans/2026-08-26-finishing-spec-overlays.md`.
