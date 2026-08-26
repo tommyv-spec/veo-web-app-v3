@@ -21302,7 +21302,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 update_clip_status(clip['id'], 'flow_redo_queued',
                                    error_message="charswap ingredients did not attach")
                 continue
-            click_generate_button(page, f"v943 clip {i+1}")
+            click_generate_button(page, f"v943 clip {clip_index+1}")
             _cs_seen, _cs_both = charswap_submit_body_verdict(page)
             print(f"{_cs_ctx} submit seen={_cs_seen} both_media_in_body={_cs_both}",
                   flush=True)
