@@ -7174,12 +7174,24 @@ def _import_scene_table_impl(
             },
         )
 
+    # v944 — the job-level `## Finishing` section. Parsed HERE, at import, so a
+    # bad value dies with the import instead of producing the wrong finish
+    # hours later. None (no section) is stored as NULL, which is what every
+    # pre-v944 batch holds and what the derive step reads as "change nothing".
+    _v944_spec = parse_finishing_section(req.markdown or "")
+    _v944_json = _json.dumps(_v944_spec, sort_keys=True) if _v944_spec else None
+    print(f"[v944/import] finishing_spec={_v944_spec or 'none (default)'}", flush=True)
+
     if resync_batch is not None:
         # v891 — the batch row already exists; refresh the fields a corrected
         # build can legitimately change (the stored markdown above all, since
         # "Promote to video" replays it) instead of inserting a duplicate key.
         batch = resync_batch
         batch.source_markdown = req.markdown
+        # v944 — a corrected build that ADDS or REMOVES the section must move
+        # the stored value; assigning unconditionally covers the removal case
+        # too (the parser returns None and the column goes back to NULL).
+        batch.finishing_spec = _v944_json
         batch.persona = doc_meta.get("persona")
         batch.setting = doc_meta.get("setting")
         batch.duration_seconds = doc_meta.get("duration_seconds")
@@ -7204,6 +7216,8 @@ def _import_scene_table_impl(
             # Video-tab hints parsed from md (None → frontend uses defaults)
             video_mode=doc_meta.get("video_mode"),
             auto_split=bool(doc_meta.get("auto_split") or False),
+            # v944 — declared finishing, or NULL when the build declared none.
+            finishing_spec=_v944_json,
         )
         db.add(batch)
         db.flush()
@@ -12048,6 +12062,10 @@ def promote_batch_to_video(
         # here so the video worker, image-serving endpoint, and clone-job
         # config endpoint can all rehydrate from R2 after Render redeploy.
         frames_storage_keys=_json.dumps(frames_storage_keys) if frames_storage_keys else None,
+        # v944 — the declared finishing rides across the promote boundary
+        # VERBATIM. It was validated at import; re-parsing it here would be a
+        # second place for the rule to drift.
+        finishing_spec=getattr(batch, "finishing_spec", None),
     )
     db.add(job)
     db.flush()

@@ -2521,8 +2521,16 @@ async def _create_job_impl(
             ).first()
             if batch:
                 batch.promoted_video_job_id = job_id
+                # v944 — the build's declared finishing (captions + overlay)
+                # crosses here, read off the OWNED batch row the server already
+                # loaded. Deliberately NOT a new field in the promote payload:
+                # every hand-enumerated payload list in this platform has
+                # drifted at least once (v892.2 / v892.5 / v892.8), and the
+                # batch id the browser already sends is enough to fetch it.
+                job.finishing_spec = getattr(batch, "finishing_spec", None)
                 db.commit()
-                print(f"[main.py] Stamped batch {request.image_batch_id} with promoted_video_job_id={job_id[:8]}", flush=True)
+                print(f"[main.py] Stamped batch {request.image_batch_id} with promoted_video_job_id={job_id[:8]} "
+                      f"finishing_spec={'set' if job.finishing_spec else 'none'}", flush=True)
             else:
                 print(f"[main.py] Batch {request.image_batch_id} not found or not owned by user — skipping link", flush=True)
         except Exception as e:
