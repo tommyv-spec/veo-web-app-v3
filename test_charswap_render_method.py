@@ -593,7 +593,7 @@ def test_a_rejected_upload_leaves_no_temp_file_behind(monkeypatch, storage):
 # pipeline does not have. So the mode fails closed rather than rendering
 # video-led under a second name and calling the pair a comparison.
 
-def test_video_led_is_the_mode_that_runs():
+def test_video_led_is_the_default_mode_that_runs():
     refusal = _worker_function("charswap_mode_refusal")
     assert refusal({"swap_mode": "video-led"}) is None
     assert refusal({"swap_mode": None}) is None      # default
@@ -601,12 +601,20 @@ def test_video_led_is_the_mode_that_runs():
     assert refusal({"swap_mode": " Video-Led "}) is None
 
 
-def test_image_led_is_refused_with_a_clear_reason():
+def test_image_led_runs_when_the_clip_has_a_start_frame():
+    """Operator 2026-08-26: the technique is proven (A-E split test + the
+    mountain final); the composite = the clip's chosen start frame."""
+    refusal = _worker_function("charswap_mode_refusal")
+    assert refusal({"swap_mode": "image-led",
+                    "start_frame_url": "https://x/frame.png"}) is None
+    assert refusal({"swap_mode": "image-led", "start_frame": "jobs/x.png"}) is None
+
+
+def test_image_led_without_a_start_frame_is_refused():
     refusal = _worker_function("charswap_mode_refusal")
     msg = refusal({"swap_mode": "image-led"})
     assert msg is not None
-    assert "image-led not implemented in worker" in msg
-    assert "render video-led or wait" in msg
+    assert "start frame" in msg
 
 
 def test_an_unknown_mode_is_refused_too():

@@ -19808,9 +19808,11 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
 #
 # Nothing here runs unless a clip's render_method is exactly 'charswap'.
 #
-# ONE technique ships: video-led. 'image-led' parses and imports, and is
-# refused here with a named blocker rather than silently rendered as video-led
-# — see charswap_mode_refusal for what it would take to be real.
+# BOTH techniques ship (operator 2026-08-26 — image-led was proven in the A-E
+# split test + the mountain final): video-led rides the avatar reference,
+# image-led rides the clip's chosen start frame (the operator-approved
+# pose-matched composite). Same attach mechanics, different image + prompt.
+# image-led without a start frame is refused — see charswap_mode_refusal.
 
 CHARSWAP_MAX_SOURCE_S = 10
 
@@ -19859,20 +19861,21 @@ def charswap_selected(clip):
 def charswap_mode_refusal(clip):
     """Why this clip's swap_mode cannot be rendered here, or None if it can.
 
-    Only 'video-led' is a real technique in this worker. The import path
-    accepts 'image-led' because the build grammar is settled and a later
-    version will render it — but accepting the WORD is not the same as having
-    the technique, and shipping a mode that quietly renders the other one
-    would put two labels on one mechanism and call it a comparison.
+    Both techniques are proven in the standalone lane
+    (wiki/synthesis/real-video-character-swap-lane.md: the A-E split test and
+    the mountain final ran image-led end to end) and both now run here. What
+    tells them apart is WHICH image rides with the muted source video:
 
-    What image-led actually needs, per the proven mechanics in
-    wiki/synthesis/real-video-character-swap-lane.md 'Direction 2': the avatar
-    composited INTO the source's first frame, pose-matched ("do not just throw
-    in the face"), and THAT composite attached as image 1 with the muted
-    source as video 2 plus motion-transfer wording. The composite is an image
-    generation step against a frame nothing in this pipeline extracts. Until
-    that step exists, image-led has no distinct mechanics to run, so the
-    worker refuses it out loud instead of pretending.
+        video-led -> the raw avatar reference; the prompt says replace the
+                     person in the video, the real footage stays.
+        image-led -> the clip's CHOSEN START FRAME — the pose-matched
+                     composite the image lane builds (source frame + avatar)
+                     and the operator approves; the prompt applies the
+                     video's movement to that frame.
+
+    image-led therefore has one hard precondition: the clip must carry a
+    start frame. Without it there is no composite to animate, so the worker
+    refuses rather than quietly rendering video-led under the other name.
     """
     try:
         mode = (clip.get('swap_mode') or 'video-led').strip().lower()
@@ -19881,8 +19884,11 @@ def charswap_mode_refusal(clip):
     if mode == 'video-led':
         return None
     if mode == 'image-led':
-        return ("image-led not implemented in worker; render video-led or wait "
-                "(needs the pose-matched first-frame composite step)")
+        if clip.get('start_frame_url') or clip.get('start_frame'):
+            return None
+        return ("image-led needs the clip's chosen start frame (the "
+                "pose-matched composite) and this clip has none; choose a "
+                "start frame or render video-led")
     return f"unknown swap_mode {mode!r}; render video-led or wait"
 
 
@@ -20108,21 +20114,29 @@ def charswap_attach_source_video(page, video_path, context="[v943]", timeout_s=3
 
 
 def charswap_fetch_inputs(clip, temp_dir, context="[v943]"):
-    """Download this swap clip's two inputs. Returns (avatar_path, video_path).
+    """Download this swap clip's two inputs. Returns (image_path, video_path).
 
-    Both come from the platform over the same authenticated proxy the frames
-    use, so no worker ever holds R2 credentials. The source is muted and cut to
-    the cap on the way in.
+    Which IMAGE rides along is the whole difference between the modes:
+    video-led takes the avatar reference, image-led takes the clip's chosen
+    start frame (the operator-approved pose-matched composite). Both come from
+    the platform over the same authenticated proxy the frames use, so no
+    worker ever holds R2 credentials. The source is muted and cut to the cap
+    on the way in.
     """
-    avatar_url = clip.get("swap_avatar_url")
+    mode = (clip.get('swap_mode') or 'video-led').strip().lower()
+    if mode == 'image-led':
+        image_url = clip.get("swap_start_frame_url") or clip.get("start_frame_url")
+    else:
+        image_url = clip.get("swap_avatar_url")
     source_url = clip.get("swap_source_url")
-    if not avatar_url or not source_url:
-        print(f"{context} clip {clip.get('clip_index')} is charswap but is missing "
-              f"avatar_url={bool(avatar_url)} source_url={bool(source_url)}", flush=True)
+    if not image_url or not source_url:
+        print(f"{context} clip {clip.get('clip_index')} is charswap ({mode}) but is "
+              f"missing image_url={bool(image_url)} source_url={bool(source_url)}",
+              flush=True)
         return None, None
 
     idx = clip.get("clip_index", 0)
-    avatar_path = download_frame(avatar_url, os.path.join(temp_dir, f"swap_avatar_{idx}.png"))
+    avatar_path = download_frame(image_url, os.path.join(temp_dir, f"swap_avatar_{idx}.png"))
     raw_video = download_frame(source_url, os.path.join(temp_dir, f"swap_source_raw_{idx}.mp4"))
     if not avatar_path or not raw_video:
         return None, None
@@ -20137,11 +20151,11 @@ def charswap_attach_and_prompt(page, avatar_path, video_path, prompt,
                                context="[v943]", swap_mode="video-led"):
     """Attach both ingredients and type the prompt. Returns (ok, chip_ids).
 
-    This is the video-led mechanic and only that one: the avatar image plus
-    the muted source video, the video carrying the motion and the image
-    carrying the face. `swap_mode` is here to be PRINTED next to the chip ids
-    in the log, not to switch anything — image-led is refused before this
-    function is reached (see charswap_mode_refusal).
+    The attach mechanics are shared by BOTH modes; what differs arrived in
+    `avatar_path` (video-led: the avatar reference; image-led: the clip's
+    chosen start frame — charswap_fetch_inputs picked it) and in the authored
+    prompt (replace-the-person vs apply-the-movement). `swap_mode` is printed
+    next to the chip ids so the log says which cell rendered.
     """
     ok, reason = attach_ingredient_image_with_check(
         page, avatar_path, context=f"{context}-avatar", clear_existing=True)
