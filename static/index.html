@@ -6216,7 +6216,10 @@ Ambient: same kitchen room tone, soft pour sound.
 
         function parseModeFromURL() {
           const p = new URLSearchParams(window.location.search);
-          const mode = MODE_VALUES.includes(p.get("mode")) ? p.get("mode") : DEFAULT_MODE;
+          // v946 — ?job=<id> alone is a deep link: it means review-that-job,
+          // no ?mode=review required. An explicit mode still wins.
+          const mode = MODE_VALUES.includes(p.get("mode")) ? p.get("mode")
+                     : (p.get("job") ? "review" : DEFAULT_MODE);
           const stage = p.get("stage") || "all";
           const job = p.get("job") || null;
           const q = p.get("q") || "";
@@ -6390,6 +6393,13 @@ Ambient: same kitchen room tone, soft pour sound.
           const _nodeParam = new URLSearchParams(window.location.search).get("node");
           if (_nodeParam && /^\d+$/.test(_nodeParam)) {
             window._pendingDeepLinkNode = Number(_nodeParam);
+            switchMainTab('images');
+          }
+          // v946 — ?batch=<uuid> opens the Images tab on that batch's job
+          // overview (the "Back to job" view: markdown, scenes, prompts).
+          const _batchParam = new URLSearchParams(window.location.search).get("batch");
+          if (_batchParam && /^[0-9a-f-]{8,}$/i.test(_batchParam)) {
+            window._pendingDeepLinkBatch = _batchParam;
             switchMainTab('images');
           }
           const explicitMode = new URLSearchParams(window.location.search).get("mode");
@@ -19534,13 +19544,20 @@ async function renderAutoEditCard(jobId, hasExport) {
 
         function imgOnEnterTab() {
             const _refresh = imgRefreshNodes();
-            // v946 — a ?node= deep link waits for the list, then selects.
-            if (window._pendingDeepLinkNode) {
+            // v946 — a ?node= or ?batch= deep link waits for the list, then selects.
+            if (window._pendingDeepLinkNode || window._pendingDeepLinkBatch) {
                 Promise.resolve(_refresh).then(() => {
                     const nid = window._pendingDeepLinkNode;
+                    const bid = window._pendingDeepLinkBatch;
                     window._pendingDeepLinkNode = null;
+                    window._pendingDeepLinkBatch = null;
                     if (nid && imgState.nodesById && imgState.nodesById[nid]) {
                         imgSelectNode(nid);
+                    } else if (bid && imgState.nodesById) {
+                        const hit = Object.values(imgState.nodesById)
+                            .find(n => n && n.batch_id === bid);
+                        const gk = hit && imgGroupKeyForNode(hit);
+                        if (gk) imgSelectJob(gk);
                     }
                 });
             }
