@@ -21295,6 +21295,17 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     permanently_failed_clips.add(clip_index)
                     continue
                 first_submission_in_project = False
+            # A charswap attaches TWO ingredients (avatar image + source video),
+            # so the composer must sit on the INGREDIENTS tab — on the Frames
+            # tab there is no add_2 Create button and the attach dies with
+            # "dialog btns = []" (measured live on the first pilot run,
+            # job de7f9331). Two chips = the same shape as start+end frame,
+            # which is exactly what set_clip_input_mode flips the tab for.
+            _cs_mode = set_clip_input_mode(page, True, True, context=_cs_ctx)
+            if _cs_mode != 'Ingredients':
+                print(f"{_cs_ctx} ⚠ composer stayed on {_cs_mode} "
+                      f"(model={getattr(page, '_veo_model', '-')}) — the "
+                      f"ingredient attach will not find add_2", flush=True)
             _cs_ok, _cs_chips = charswap_attach_and_prompt(
                 page, _cs_avatar, _cs_video, prompt, context=_cs_ctx,
                 swap_mode=(clip.get('swap_mode') or 'video-led'))
