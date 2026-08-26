@@ -411,6 +411,21 @@ def test_derive_with_no_spec_returns_the_request_unchanged():
     assert out == {**req, "overlay_spec": None}
 
 
+def test_explicit_overlay_spec_survives_a_specless_job():
+    """The live bug (run ef707c39): a pre-v944 job has no finishing_spec, the
+    caller sends the overlay explicitly, and the no-spec branch ate it. An
+    explicit request field must ALWAYS win — that is the whole rev-459 rule."""
+    from main import derive_autoedit_defaults
+    overlay = {"overlay": "readcaption", "overlay_age": "I'M 74"}
+    out = derive_autoedit_defaults(
+        {"template": "korella", "captions_enabled": False, "overlay_spec": overlay},
+        None,
+        request_was_explicit={"captions_enabled", "overlay_spec"},
+    )
+    assert out["overlay_spec"] == overlay
+    assert out["captions_enabled"] is False
+
+
 def test_normalize_repairs_defaults_are_otherwise_untouched():
     """The only new key is overlay_spec, and it defaults to None. Any other
     default moving would change every existing job's edit."""

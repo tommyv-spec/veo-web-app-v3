@@ -13771,7 +13771,14 @@ def derive_autoedit_defaults(req_dict, spec, request_was_explicit):
     """
     out = dict(req_dict or {})
     if not spec:
-        out["overlay_spec"] = None
+        # The regression contract protects jobs that declared nothing — it must
+        # not eat an overlay the caller EXPLICITLY sent (the pilot re-finish:
+        # a pre-v944 job with the spec passed in the request). Measured live on
+        # run ef707c39: the explicit overlay came back None from this line.
+        if "overlay_spec" not in request_was_explicit:
+            out["overlay_spec"] = None
+        else:
+            out.setdefault("overlay_spec", None)
         return out
 
     captions = str(spec.get("captions") or "none").lower()
