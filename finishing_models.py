@@ -1,0 +1,89 @@
+"""The two finish-request models, in one importable home.
+
+Moved out of main.py (2026-08-26, v947) so image_platform.py can validate the
+build markdown's declared ## Finishing export_*/autoedit_* fields against the
+REAL models instead of a hand-maintained copy that would drift (the v892.2
+lesson). main.py imports them from here; behavior is unchanged.
+"""
+from typing import Any, Dict, Optional
+from pydantic import BaseModel, Field
+
+
+class ExportSettings(BaseModel):
+    frames_to_cut_start: int = Field(default=7, ge=0, le=30)
+    frames_to_cut_end: int = Field(default=7, ge=0, le=30)
+    smart_trim: bool = True  # Don't trim first clip / cut-to scenes
+    remove_silence: bool = False
+    silence_mode: str = "energy"  # "energy" = ffmpeg silencedetect, "whisper" = speech-based detection
+    silence_trigger: float = Field(default=1.5, ge=0.3, le=5.0)   # Gaps >= this are trimmed (seconds)
+    silence_keep: float = Field(default=0.3, ge=0.0, le=2.0)       # Silence to preserve at each cut (seconds)
+    silence_threshold: float = Field(default=0.75, ge=0.1, le=1.0) # VAD confidence: higher = only clear speech kept
+    # Individual audio enhancement toggles
+    remove_laughter: bool = False  # noisereduce (treats laughter as noise)
+    denoise_strength: float = Field(default=0.75, ge=0.0, le=1.0)
+    apply_deepfilter: bool = False  # DeepFilterNet (removes hiss/static)
+    apply_voice_filter: bool = False  # Compressor, gate, limiter
+    apply_loudnorm: bool = False  # EBU R128 -16 LUFS
+    # Master audio alignment (assemble jobs only)
+    master_audio_filename: Optional[str] = None  # If set, align clips to this master audio
+    max_clip_speed: float = Field(default=1.5, ge=0.9, le=5.0)  # Max speed multiplier for clip alignment (0.9=slight slowdown, 5.0=very fast)
+    min_gap_for_black: float = Field(default=2.0, ge=0.0, le=10.0)  # Gaps shorter than this (seconds) are filled by extending the previous clip instead of black
+    # v888 music bed — lay a track under the finished cut. Distinct from
+    # master_audio_filename above, which ALIGNS clips to a spoken master and
+    # routes to a different export path entirely. This is a score, not a guide.
+    # music_start_s must be the beatplan's `music_source_start`, or the bar
+    # phase is wrong and every cut sits off the grid even with perfect lengths.
+    music_filename: Optional[str] = None
+    music_start_s: float = Field(default=0.0, ge=0.0)
+    music_gain_db: float = Field(default=0.0, ge=-40.0, le=10.0)
+    music_mode: str = "replace"  # "replace" (silent builds) | "mix" (duck under dialogue)
+    # v890 beat alignment. OFF => the md's authored target_duration_s drives the
+    # cut, untouched (operator 2026-08-04: "default is keep my timings if any in
+    # the md"). ON => each authored cut NUDGES to the nearest strong beat.
+    beat_align: bool = False
+    beat_tol_beats: float = Field(default=0.6, ge=0.1, le=2.0)  # max nudge, in beats
+    # v890.6 — the beat_drop_aligner_v5 controls.
+    #   snap  = keep the authored clip lengths, nudge each cut to a beat.
+    #   solve = the MUSIC picks every length inside [min,max], clips accelerate
+    #           into the drop, and beat_drop_clip lands ON it. Authored lengths
+    #           are discarded, so this is for montages, not narrative builds.
+    beat_mode: str = "snap"
+    beat_min_s: float = Field(default=0.5, ge=0.1, le=10.0)
+    beat_max_s: float = Field(default=2.0, ge=0.2, le=20.0)
+    beat_drop_clip: Optional[int] = None     # 1-based clip that starts on the drop
+    beat_drop_rank: int = Field(default=1, ge=1, le=8)
+    beat_drop_time: Optional[float] = None   # exact seconds, bypasses detection
+    beat_pre_drop_speed: float = Field(default=1.0, ge=0.5, le=3.0)
+    beat_post_drop_speed: float = Field(default=1.0, ge=0.5, le=3.0)
+    beat_clip_speed: float = Field(default=1.0, ge=0.5, le=3.0)   # global multiplier
+    beat_beats_per_bar: int = Field(default=4, ge=2, le=12)
+    # v5 --pin-clip: {"3": 2.47} forces clip 3 to ~2.47s, beat-snapped, ignoring
+    # min/max for that clip only. Does not backtrack (same limit as v5).
+    beat_pins: Optional[dict] = None
+    # Transitions (assemble jobs only)
+    transition: str = "none"  # xfade transition type: none, fade, fadeblack, fadewhite, slideleft, slideright, slideup, slidedown, dissolve, circlecrop, wipeleft, wiperight, smoothleft, smoothright, radial, zoomin, pixelize
+    transition_duration: float = Field(default=0.5, ge=0.2, le=1.5)
+    # Legacy (backwards compatibility)
+    playback_speed: float = Field(default=1.0, ge=1.0, le=1.5)  # 1.0 = normal, up to 1.5×
+    enhance_audio: bool = False
+
+
+class AutoEditRequest(BaseModel):
+    template: str = "korella"
+    placement: str = "dynamic"     # dynamic|constant
+    offset: Optional[float] = None
+    trim_start_s: float = 0.0
+    trim_end_s: float = 0.0
+    pip_enabled: bool = True
+    captions_enabled: bool = True
+    chroma_similarity: float = 0.10
+    chroma_blend: float = 0.02
+    music_filename: Optional[str] = None
+    music_db: float = -20.0
+    hook_corner: Optional[float] = None
+    hook_bg: Optional[str] = None
+    # v944 — the text overlay, normally DERIVED from the job's declared
+    # finishing. Sending it explicitly overrides that, which is how a job
+    # imported before v944 (nothing declared, nothing to derive) can still be
+    # re-finished with an overlay without re-importing the build.
+    overlay_spec: Optional[Dict[str, Any]] = None
