@@ -18017,7 +18017,7 @@ Three new bullet kinds in the same `## Finishing` section v944 defined. The v944
 
 **JSON values are allowed.** `export_beat_pins: {"3": 2.47}` parses as the dictionary it looks like. So do numbers, `true`/`false`, and plain strings.
 
-**The `none` sentinel — omit the field instead.** v944 trains the hand to write `none` for "off" (`captions: none`, `overlay: none`), so people reach for it here too. On a field that can genuinely hold nothing — for example `export_music_filename`, `export_master_audio_filename`, `export_beat_pins`, `autoedit_offset`, `autoedit_hook_corner`, `autoedit_hook_bg`, though the parser decides from the model's own annotation and not from any list of names — writing `none` would store the literal five-letter string `"none"` and die hours later at render. So it hard-fails at import with "omit the bullet instead": **absent already means none.** Where `none` is a real value it passes straight through — `export_transition: none` is a legitimate xfade type and stays legal. The parser decides which case it is from the model's own annotation, not from a list of field names.
+**The `none` sentinel — omit the field instead.** v944 trains the hand to write `none` for "off" (`captions: none`, `overlay: none`), so people reach for it here too. On a field that can genuinely hold nothing — for example `export_music_filename`, `export_master_audio_filename`, `export_beat_pins`, `autoedit_offset`, `autoedit_hook_corner`, `autoedit_hook_bg` — writing `none` would store the literal five-letter string `"none"` and die hours later at render. So it hard-fails at import with "omit the bullet instead": **absent already means none.** Where `none` is a real value it passes straight through — `export_transition: none` is a legitimate xfade type and stays legal. The parser decides which case it is from the model's own annotation, not from a list of field names.
 
 **Bullets that are not fields.** An unknown key in `## Finishing` hard-fails (typo protection). A **malformed** bullet — a bullet-shaped line that is not `- **key:** value`, e.g. `- **export-music-gain:** -22` with hyphens instead of underscores — also hard-fails, naming the line. That one is worth understanding: the key regex simply cannot read a hyphenated key, so before v947 such a line reached nothing at all and the build rendered as if it had declared nothing, in silence. A wrong setting that shouts is cheap; a wrong setting that is quiet costs a render. **Indented sub-bullets hard-fail too**, deliberately: v944 splits `overlay_block` on ` / ` on ONE line, so a sub-list under a field would be ignored.
 
@@ -18035,13 +18035,13 @@ All faults are reported together, one line each — a build with three bad value
 
 ### The chain, and every guard on it
 
-**Trigger one — the last clip approval.** `approve_clip` calls `_maybe_auto_finish_export`. It fires only when the job's declared spec says `auto_finish: on` AND every clip row on the job is approved. Text-card clips are auto-approved at creation; audio twins (index 100000+) and composite plates (200000+) are created `pending_review` and must be approved like any other clip — on a v698A job the last approval is theirs. A job with zero clips never fires.
+**Trigger one — the last clip approval.** `approve_clip` calls `_maybe_auto_finish_export`. It fires only when the job's declared spec says `auto_finish: on` AND every clip row on the job is approved. Text-card clips are auto-approved at creation; audio twins (index 100000+) and composite plates (200000+) are created `pending_review` and must be approved like any other clip — which on a v698A or v892 job usually means the twins and plates are the last ones left. A job with zero clips never fires.
 
 - **A re-click does not re-fire.** The trigger checks the clip's PRIOR state, so clicking approve again on an already-approved clip changes nothing.
 - **A genuine redo DOES re-fire.** Redo does not make a new row — it mutates the same clip, bumping `generation_attempt` and setting `approval_status = "rejected"`. That is exactly what makes the trigger work again: the next approval sees a non-approved prior state, so it fires. A re-rendered clip means a new final, and re-exporting is the correct answer.
 - **Racing approvals are serialized** by a `FOR UPDATE` lock on the job row, so two people finishing the last two clips at the same instant cannot both queue an export.
 - **An already-running export is joined, never duplicated.**
-- **A trigger error can never fail the approval.** The approval is already committed before the trigger runs; a failure rolls back the trigger's own work and is logged. The operator's click always succeeds.
+- **A trigger error can never fail the approval.** The approval is already committed before the trigger runs; a failure rolls back the trigger's own work and is printed to the server log. The operator's click always succeeds.
 
 The export is queued with settings built purely from the declaration laid over the model defaults (`derive_export_defaults` in `code/auto_finish.py`). Nothing about the clicking context leaks in.
 
@@ -18054,7 +18054,7 @@ The export is queued with settings built purely from the declaration laid over t
 
 **A manual export click on an auto_finish job also chains into the declared auto-edit.** The job finishes ONE way, whoever started it. If you want to drive the finish by hand, do not declare `auto_finish: on`.
 
-**Every skip or failure inside the QUEUEING step writes the JOB LOG** — WARNING or ERROR, not just stdout. This feature runs when nobody is watching; a decision nobody can read afterwards is not a decision. Two earlier skips are stdout-only and deliberately so: a job with no `user_id` (which could never be claimed downstream anyway) and the corrupt-column case below. Neither has reached a point where there is anything to report about a queued run.
+**Every skip or failure that reaches the QUEUEING step writes the JOB LOG** — WARNING or ERROR, not just stdout. This feature runs when nobody is watching; a decision nobody can read afterwards is not a decision. Two earlier skips are stdout-only and deliberately so: a job with no `user_id` (which could never be claimed downstream anyway) and the corrupt-column case below. Neither has reached a point where there is anything to report about a queued run.
 
 **A corrupt `finishing_spec` COLUMN is not the same as corrupt declared settings.** If the stored JSON in the database will not parse at all, `_job_finishing_spec` degrades it to *"declared nothing"* — it logs to stdout and returns `None`, so `auto_finish_on` is false and the chain silently does nothing. That matches `queue_autoedit`'s existing tolerance and it is the right answer: the section was validated at IMPORT, so a value broken in the database means the import is what to fix, not this render. Contrast the corrupt-declared-settings case above, which fails loudly in the job log — there the spec parsed fine and the settings inside it were wrong, which is a build problem the operator can act on.
 
@@ -18067,7 +18067,7 @@ The rev-459 rule — the declaration supplies defaults, an explicitly-sent reque
 Two log prefixes, and they mean different things:
 
 - `[AutoFinish]` — the automatic chain only. This is what `python code/render_logs.py --text AutoFinish` pulls. If you want to know whether the chain fired, this is the needle.
-- `[Finishing/v947]` — the declaration being folded into a request. It can fire on manual paths too, so seeing it does not by itself prove the chain ran.
+- `[Finishing/v947]` — the declaration being folded into a request. It can fire on manual paths too, so seeing it does not by itself prove the chain ran. It is also the prefix on the corrupt-column warning — the one place a silent no-chain explains itself, so if `AutoFinish` finds nothing, grep this next.
 
 ### Known limit (inherited, not new)
 
