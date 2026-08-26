@@ -406,11 +406,14 @@ def lint(path: str) -> int:
     try:
         from image_platform import parse_finishing_section
         parse_finishing_section(t)
-    except ValueError as _fe:
-        fails.append(f"v947 finishing: {_fe}")
     except ImportError as _fe:
         warns.append(f"v947 finishing: image_platform not importable here ({_fe}) — "
                      f"section NOT checked; import will still enforce it")
+    except Exception as _fe:
+        # Any raise = FAIL, same convention as the v821 gate above: a broken
+        # parse must never crash the linter mid-run (that would swallow every
+        # earlier gate's output) nor let a build slip past the gate.
+        fails.append(f"v947 finishing: {_fe}")
 
     # --- report ---
     print(f"FILE: {path}")
