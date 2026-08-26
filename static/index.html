@@ -6384,6 +6384,14 @@ Ambient: same kitchen room tone, soft pour sound.
             const inp = document.getElementById("lifecycleSearch");
             if (inp) inp.value = params.q;
           }
+          // v946 — image deep link: ?node=<id> opens the Images tab on that
+          // exact node, so "here is what you have to approve" can be a URL,
+          // the same way ?mode=review&job=<id> already is for video jobs.
+          const _nodeParam = new URLSearchParams(window.location.search).get("node");
+          if (_nodeParam && /^\d+$/.test(_nodeParam)) {
+            window._pendingDeepLinkNode = Number(_nodeParam);
+            switchMainTab('images');
+          }
           const explicitMode = new URLSearchParams(window.location.search).get("mode");
           if (!explicitMode) {
             // No ?mode= in URL — fetch once to decide default mode.
@@ -19525,7 +19533,17 @@ async function renderAutoEditCard(jobId, hasExport) {
         }
 
         function imgOnEnterTab() {
-            imgRefreshNodes();
+            const _refresh = imgRefreshNodes();
+            // v946 — a ?node= deep link waits for the list, then selects.
+            if (window._pendingDeepLinkNode) {
+                Promise.resolve(_refresh).then(() => {
+                    const nid = window._pendingDeepLinkNode;
+                    window._pendingDeepLinkNode = null;
+                    if (nid && imgState.nodesById && imgState.nodesById[nid]) {
+                        imgSelectNode(nid);
+                    }
+                });
+            }
             imgRefreshWorkerStatus();
             imgStartPolling();
             if (imgState.parentSlots.length === 0) {
