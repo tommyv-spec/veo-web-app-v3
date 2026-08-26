@@ -19981,17 +19981,14 @@ LAUNCHER
 chmod +x "$DIR/start-autoedit.command"
 
 echo ""
-echo "  Done. Start it whenever you want this machine to do the finishing:"
+echo "  Done. Starting the worker now - leave this window open. Every"
+echo "  \"Finish video\" you press in the platform is picked up here instead"
+echo "  of the server. Close it to go back to normal."
+echo ""
+echo "  Start it again any time with:"
 echo "      $DIR/start-autoedit.command"
 echo ""
-echo "  Leave that window open. Every \"Finish video\" you press in the platform"
-echo "  is picked up here instead of the server. Close it to go back to normal."
-echo ""
-printf "  Start it now? [y/N] "
-read -r ans
-case "$ans" in
-  [yY]*) exec "$DIR/start-autoedit.command" ;;
-esac
+exec "$DIR/start-autoedit.command"
 '''
     return script.replace("__APP__", app_url).replace("__FETCHES__", fetches)
 
@@ -20074,16 +20071,15 @@ echo   [4/4] writing the start script
 >> "%WORKER_DIR%\\start-autoedit.bat" echo pause
 
 echo.
-echo   Done. Start it whenever you want this pc to do the finishing:
+echo   Done. Starting the worker in its own window now - leave that window
+echo   open. Every "Finish video" you press in the platform is picked up
+echo   there instead of the server. Close it to go back to normal.
+echo.
+echo   Start it again any time with:
 echo       %WORKER_DIR%\\start-autoedit.bat
 echo.
-echo   Leave that window open. Every "Finish video" you press in the platform
-echo   is picked up here instead of the server. Close it to go back to normal.
-echo.
-choice /c YN /n /m "   Start it now? [Y/N] "
-if errorlevel 2 goto :done
 start "" "%WORKER_DIR%\\start-autoedit.bat"
-goto :done
+exit /b 0
 
 :dlfail
 echo.
@@ -20096,10 +20092,6 @@ echo.
 echo   [X] installing the python packages failed - the message above says why.
 pause
 exit /b 1
-
-:done
-echo.
-pause
 """
 
 
