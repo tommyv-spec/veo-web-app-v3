@@ -581,3 +581,29 @@ def test_v944_only_section_is_unchanged():
 
 def test_absent_section_still_none():
     assert parse_finishing_section("# build\n\n## Storyboard\n") is None
+
+
+def test_malformed_bullet_key_fails_closed():
+    """The leftover check can only see keys the bullet regex could READ.
+    `(\\w+)` cannot read a hyphenated key, so this line never reaches `fields`
+    and would be dropped in silence — the same wrong-render-hours-later class
+    the unknown-key check exists to kill, one regex miss upstream of it."""
+    with pytest.raises(ValueError, match="malformed"):
+        _fin("- **export-music-gain:** -22\n")
+    with pytest.raises(ValueError, match="malformed"):
+        _fin("- just some words, no key at all\n")
+
+
+def test_prose_and_html_comments_are_not_bullets():
+    """Only bullet-SHAPED lines are candidates. Prose, blank lines and the
+    skeleton's trailing HTML comment (which wraps onto a dashed line) must
+    still parse — see code/template_new_format.md:999-1005."""
+    spec = parse_finishing_section(
+        "## Finishing\n\n"
+        "Job-level, ONE section per build.\n\n"
+        "- **captions:** none\n"
+        "<!-- v944 note about placement,\n"
+        "     - and a dashed line inside the comment -->\n"
+        "\n"
+        "## Next Section\n")
+    assert spec == {"captions": "none", "overlay": "none"}

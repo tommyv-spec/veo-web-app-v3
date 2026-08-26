@@ -5326,6 +5326,22 @@ def parse_finishing_section(md_text: str):
     body = tail[:nxt.start()] if nxt else tail
 
     fields = {k.lower(): v.strip() for k, v in _FIN_BULLET_RE.findall(body)}
+
+    # v947 — the leftover check at the bottom can only see keys the bullet
+    # regex could READ. A key the regex misses (`- **export-music-gain:** -22`,
+    # hyphens, which `(\w+)` cannot match) never reaches `fields` at all, so it
+    # is dropped in SILENCE and the build renders as if it had declared
+    # nothing. Scan the raw body for bullet-SHAPED lines that contributed no
+    # key. HTML comments are stripped first: the skeleton's own trailing note
+    # wraps onto a dashed line (template_new_format.md:999-1005) and is not a
+    # field. Prose, blank lines and indented continuation lines never start
+    # with a bullet marker, so they are exempt by shape.
+    for line in re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL).splitlines():
+        if re.match(r"^\s*[-*]\s+\S", line) and not _FIN_BULLET_RE.match(line):
+            raise ValueError(
+                f"## Finishing has a malformed bullet (not '- **key:** value'): "
+                f"{line.strip()!r} (v947)")
+
     spec: Dict[str, Any] = {}
 
     allowed = _finishing_caption_values()
