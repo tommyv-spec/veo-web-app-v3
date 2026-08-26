@@ -3955,6 +3955,78 @@ def _count_approved_clips(db, job_id: str) -> int:
     ).count()
 
 
+def _job_finishing_spec(job):
+    """The job's declared ## Finishing as a dict, or None. A corrupt stored
+    value degrades to 'declared nothing' — same tolerance as queue_autoedit
+    (it was validated at import; if it is broken now, the import is what to fix)."""
+    raw = getattr(job, "finishing_spec", None)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        print(f"[AutoFinish] job={job.id[:8]} finishing_spec is not valid JSON — ignored",
+              flush=True)
+        return None
+
+
+def _queue_export_run(db, job, settings: "ExportSettings", user_id):
+    """QUEUE an export (v850 shape). Factored out of export_final_video so the
+    v947 auto-finish trigger and the endpoint share one body. Idempotent: an
+    active run is joined, not duplicated. Returns (run, created: bool)."""
+    from models import ExportRun
+    existing = db.query(ExportRun).filter(
+        ExportRun.job_id == job.id,
+        ExportRun.state.in_(list(_eq.ACTIVE_STATES)),
+    ).order_by(ExportRun.created_at.desc()).first()
+    if existing:
+        print(f"[Export/v850] job={job.id[:8]} already has run={existing.id[:8]} "
+              f"({existing.state}); joining it", flush=True)
+        return existing, False
+    run = ExportRun(
+        id=str(uuid.uuid4()),
+        job_id=job.id,
+        user_id=user_id,
+        state=_eq.STATE_QUEUED,
+        settings_json=settings.model_dump_json(),
+        attempts=0,
+        created_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    print(f"[Export/v850] QUEUED run={run.id[:8]} job={job.id[:8]}", flush=True)
+    return run, True
+
+
+def _maybe_auto_finish(db, job):
+    """v947 — when the job declares `auto_finish: on` and EVERY clip is
+    approved, queue the export with the declared export_* settings. Called
+    from approve_clip; must never turn the approval red (caller catches)."""
+    from auto_finish import auto_finish_on, all_clips_approved, derive_export_defaults
+    spec = _job_finishing_spec(job)
+    if not auto_finish_on(spec):
+        return
+    statuses = [s for (s,) in db.query(Clip.approval_status)
+                .filter(Clip.job_id == job.id).all()]
+    if not all_clips_approved(statuses):
+        return
+    if not job.user_id:
+        # A NULL user_id row could never be claimed/served downstream — same
+        # invariant queue_autoedit enforces. Loud skip, not a crash.
+        print(f"[AutoFinish] job={job.id[:8]} has no user_id — cannot auto-export",
+              flush=True)
+        return
+    settings = ExportSettings(**derive_export_defaults({}, spec, set()))
+    run, created = _queue_export_run(db, job, settings, job.user_id)
+    add_job_log(db, job.id,
+                f"Auto-finish: all {len(statuses)} clips approved — export "
+                f"{'queued' if created else 'already active, joined'} "
+                f"({run.id[:8]})", "INFO", "auto_finish")
+    print(f"[AutoFinish] job={job.id[:8]} all {len(statuses)} clips approved -> "
+          f"export run={run.id[:8]} created={created}", flush=True)
+
+
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
 async def get_job(
     job_id: str,
@@ -6078,7 +6150,15 @@ async def approve_clip(
         db.commit()
         add_job_log(db, clip.job_id, f"Clip {clip.clip_index + 2} now pending (was waiting for clip {clip.clip_index + 1} approval)", "INFO", "approval")
         next_clip_triggered = True
-    
+
+    # v947 — auto-finish: the build declared its whole finish; the last
+    # approval is the go. Never blocks the approval itself.
+    try:
+        _maybe_auto_finish(db, job)
+    except Exception as _af:
+        print(f"[AutoFinish] job={clip.job_id[:8]} trigger error "
+              f"(approval unaffected): {_af}", flush=True)
+
     return ApprovalResponse(
         clip_id=clip.id,
         status="approved",
@@ -13581,40 +13661,25 @@ async def export_final_video(
     detached so a Render deploy can't kill it. Poll /export-status."""
     from models import ExportRun
 
-    get_user_job(db, job_id, current_user)  # 404/403 if not the caller's
+    job = get_user_job(db, job_id, current_user)  # 404/403 if not the caller's
+
+    # v947 — the build's declared export_* finishing supplies DEFAULTS; a field
+    # the caller explicitly sent always wins (rev-459 shape, model_fields_set).
+    from auto_finish import derive_export_defaults
+    _spec = _job_finishing_spec(job)
+    if _spec and _spec.get("export"):
+        settings = ExportSettings(**derive_export_defaults(
+            settings.model_dump(), _spec, settings.model_fields_set))
+        print(f"[AutoFinish] job={job_id[:8]} export derive applied "
+              f"({sorted(_spec['export'])})", flush=True)
 
     # Idempotent: a second click (or the browser retrying after a dropped
     # connection) joins the export already in flight instead of starting a
-    # duplicate 15-minute ffmpeg run.
-    existing = db.query(ExportRun).filter(
-        ExportRun.job_id == job_id,
-        ExportRun.state.in_(list(_eq.ACTIVE_STATES)),
-    ).order_by(ExportRun.created_at.desc()).first()
-    if existing:
-        print(f"[Export/v850] job={job_id[:8]} already has run={existing.id[:8]} "
-              f"({existing.state}); joining it", flush=True)
-        # v855: no rescue-spawn needed here any more — the dispatcher picks up
-        # ANY queued run within DISPATCH_INTERVAL_S, including one a dead
-        # container left behind.
-        return JSONResponse(status_code=202, content=existing.to_dict())
-
-    run = ExportRun(
-        id=str(uuid.uuid4()),
-        job_id=job_id,
-        user_id=current_user.id,
-        state=_eq.STATE_QUEUED,
-        settings_json=settings.model_dump_json(),  # pydantic v2 (2.12.5); .json() is deprecated
-        attempts=0,
-        created_at=datetime.utcnow(),
-    )
-    db.add(run)
-    db.commit()
-    db.refresh(run)
-
-    # v855 — do NOT spawn here. The dispatcher is the only spawn path, and it is
-    # what enforces the concurrency cap. It picks this up within
-    # DISPATCH_INTERVAL_S (2s), which is nothing next to a 10-minute export.
-    print(f"[Export/v850] QUEUED run={run.id[:8]} job={job_id[:8]}", flush=True)
+    # duplicate 15-minute ffmpeg run. v855: no rescue-spawn needed on the join
+    # path — the dispatcher picks up ANY queued run within DISPATCH_INTERVAL_S,
+    # including one a dead container left behind, and it is the only spawn path
+    # (it is what enforces the concurrency cap).
+    run, created = _queue_export_run(db, job, settings, current_user.id)
     return JSONResponse(status_code=202, content=run.to_dict())
 
 
