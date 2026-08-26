@@ -10570,6 +10570,19 @@ Ambient: same kitchen room tone, soft pour sound.
                             (promoteMeta.end_frame_image_local_index !== undefined
                                 ? promoteMeta.end_frame_image_local_index
                                 : null),
+                        // v943 — character swap. Same plumbing lesson as the
+                        // two blocks above and as v892.2 below: a field the
+                        // payload does not send arrives NULL, and a swap clip
+                        // with a NULL render_method renders the ordinary way
+                        // while looking correctly configured everywhere else.
+                        // All four are null on every normal clip.
+                        render_method: promoteMeta.render_method || null,
+                        swap_source_r2_key: promoteMeta.swap_source_r2_key || null,
+                        swap_mode: promoteMeta.swap_mode || null,
+                        swap_avatar_upload_id:
+                            (promoteMeta.swap_avatar_upload_id !== undefined
+                                ? promoteMeta.swap_avatar_upload_id
+                                : null),
                         // v892.2 (NEW 2026-08-18) — the composite PLATE
                         // binding, plumbed for exactly the same reason as
                         // the two blocks above. `clip_role` was already

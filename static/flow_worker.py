@@ -19792,6 +19792,380 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
     return project_url
 
 
+# =============================================================================
+# v943 — CHARACTER SWAP (charswap)
+# =============================================================================
+# A swap render is an ordinary Flow render with a second ingredient: the source
+# video. Everything below is the mechanics that were proven by
+# tools/flow_charswap.py over eight probe runs — the 'Upload media' chooser,
+# the rights-consent dialog, the videocam badge that is the only reliable proof
+# a VIDEO chip attached, and the mediaId read that proves BOTH chips are on the
+# composer before Generate is clicked.
+#
+# It lives here, in the worker, and the standalone probe now calls these
+# functions instead of keeping its own copy. One implementation: a bug found by
+# the probe is fixed for production, and the worker keeps its one-file shape.
+#
+# Nothing here runs unless a clip's render_method is exactly 'charswap'.
+#
+# ONE technique ships: video-led. 'image-led' parses and imports, and is
+# refused here with a named blocker rather than silently rendered as video-led
+# — see charswap_mode_refusal for what it would take to be real.
+
+CHARSWAP_MAX_SOURCE_S = 10
+
+_CHARSWAP_VIDEO_CHIP_JS = """() => {
+  // A VIDEO chip in the composer carries a 'videocam' badge icon. Require it
+  // OUTSIDE any open dialog and in the composer band (bottom of viewport).
+  const dlg = document.querySelector('[role="dialog"]');
+  for (const i of document.querySelectorAll('i')) {
+    if ((i.textContent||'').trim() !== 'videocam') continue;
+    if (dlg && dlg.contains(i)) continue;
+    const r = i.getBoundingClientRect();
+    if (r.width > 0 && r.top > (window.innerHeight - 280)) return true;
+  }
+  return false;
+}"""
+
+_CHARSWAP_CHIP_IDS_JS = """() => {
+  // mediaId uuids from the composer chips' thumbnail URLs (outside any dialog,
+  // bottom band). Endpoint-agnostic: works however the media was uploaded.
+  const dlg = document.querySelector('[role="dialog"]');
+  const out = new Set();
+  for (const img of document.querySelectorAll('img')) {
+    if (dlg && dlg.contains(img)) continue;
+    const r = img.getBoundingClientRect();
+    if (!(r.width > 20 && r.top > (window.innerHeight - 280))) continue;
+    const m = (img.src||'').match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+    if (m) out.add(m[0].toLowerCase());
+  }
+  return Array.from(out);
+}"""
+
+
+def charswap_selected(clip):
+    """True only for a clip whose render_method is exactly 'charswap'.
+
+    The single place the swap branch is chosen. Anything else — the key
+    missing, None, empty, or some other word — is a normal render, and a
+    normal render must keep taking the code path it always took.
+    """
+    try:
+        return (clip.get('render_method') or '') == 'charswap'
+    except AttributeError:
+        return False
+
+
+def charswap_mode_refusal(clip):
+    """Why this clip's swap_mode cannot be rendered here, or None if it can.
+
+    Only 'video-led' is a real technique in this worker. The import path
+    accepts 'image-led' because the build grammar is settled and a later
+    version will render it — but accepting the WORD is not the same as having
+    the technique, and shipping a mode that quietly renders the other one
+    would put two labels on one mechanism and call it a comparison.
+
+    What image-led actually needs, per the proven mechanics in
+    wiki/synthesis/real-video-character-swap-lane.md 'Direction 2': the avatar
+    composited INTO the source's first frame, pose-matched ("do not just throw
+    in the face"), and THAT composite attached as image 1 with the muted
+    source as video 2 plus motion-transfer wording. The composite is an image
+    generation step against a frame nothing in this pipeline extracts. Until
+    that step exists, image-led has no distinct mechanics to run, so the
+    worker refuses it out loud instead of pretending.
+    """
+    try:
+        mode = (clip.get('swap_mode') or 'video-led').strip().lower()
+    except AttributeError:
+        mode = 'video-led'
+    if mode == 'video-led':
+        return None
+    if mode == 'image-led':
+        return ("image-led not implemented in worker; render video-led or wait "
+                "(needs the pose-matched first-frame composite step)")
+    return f"unknown swap_mode {mode!r}; render video-led or wait"
+
+
+def charswap_submit_gate(seen, both):
+    """Turn the submit-body verdict into a decision, failing CLOSED.
+
+    The probe exists to PROVE both media ids (avatar image + source video)
+    reached Flow's generate body. Without that proof the render is not a
+    charswap — an avatar-only or source-only submit must never be accepted as
+    one. Returns (accept, count_tile, reason):
+
+    - seen and both      -> (True,  True,  None): a proven submit.
+    - seen but not both  -> (False, True,  reason): the request went out with a
+      wrong body, so Flow most likely created a tile anyway. The tile is
+      COUNTED so later tile indexing stays aligned, but the clip is failed so
+      that orphan is never harvested as a valid output.
+    - not seen           -> (False, False, reason): no generate request was
+      observed after the click, so most likely no tile exists; do not count.
+    """
+    if seen and both:
+        return True, True, None
+    if seen:
+        return False, True, "generate request missing both media ids"
+    return False, False, "no generate request observed after click"
+
+
+def charswap_video_chip_present(page):
+    """True when a VIDEO chip is sitting in the composer.
+
+    The image-chip selector used elsewhere in this file matches images only —
+    probe run 5 showed a video chip attaching without matching it, so the badge
+    is what gets asked.
+    """
+    try:
+        return bool(page.evaluate(_CHARSWAP_VIDEO_CHIP_JS))
+    except Exception:
+        return False
+
+
+def charswap_composer_chip_media_ids(page):
+    """mediaId uuids of every chip currently on the composer."""
+    try:
+        return page.evaluate(_CHARSWAP_CHIP_IDS_JS) or []
+    except Exception:
+        return []
+
+
+def charswap_install_submit_probe(page, chip_ids):
+    """Watch the next generate request and record whether it carried the chips.
+
+    Both media have to reach the submit body or Flow renders the avatar alone
+    and the result looks like an ordinary animation of a still. The check is a
+    request listener because the body is the only place that fact exists.
+    """
+    state = {"seen": False, "hits": 0, "want": len(chip_ids or [])}
+    ids = [i for i in (chip_ids or []) if i]
+
+    def _on_request(req):
+        try:
+            if "batchAsyncGenerateVideo" not in req.url:
+                return
+            body = req.post_data or ""
+            state["seen"] = True
+            state["hits"] = sum(1 for i in ids if i in body)
+        except Exception:
+            pass
+
+    try:
+        page.on("request", _on_request)
+    except Exception as e:
+        print(f"[v943] submit probe not installed: {e}", flush=True)
+    page._charswap_submit_probe = state
+    return state
+
+
+def charswap_submit_body_verdict(page):
+    """(saw_a_submit, both_media_present) from the probe installed above."""
+    state = getattr(page, "_charswap_submit_probe", None) or {}
+    return bool(state.get("seen")), int(state.get("hits", 0)) >= 2
+
+
+def charswap_prepare_source(src_path, out_path, max_s=CHARSWAP_MAX_SOURCE_S):
+    """Mute the source clip and cut it to the cap. Returns out_path, or src_path.
+
+    The cap is enforced here rather than trusted from the file: a longer source
+    should become a short render, not a refused job. Falls back to the original
+    file when ffmpeg is unavailable — a swap that runs long beats no swap.
+    """
+    import subprocess
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", src_path, "-t", str(max_s), "-an",
+             "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+             out_path],
+            capture_output=True, timeout=300,
+        )
+        if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            print(f"[v943] source prepared: muted, capped at {max_s}s -> {out_path}",
+                  flush=True)
+            return out_path
+    except Exception as e:
+        print(f"[v943] source prepare failed ({e}) — using the file as-is", flush=True)
+    return src_path
+
+
+def charswap_attach_source_video(page, video_path, context="[v943]", timeout_s=300):
+    """Put the source video on the composer as a second ingredient.
+
+    Route (probe rounds 2-8): the add-ingredient dialog is a media browser
+    whose only <input type=file> accepts images, so the mp4 goes through the
+    native chooser behind 'Upload media'. The upload then lands in the project
+    LIBRARY, not in the prompt — the last inch is selecting its tile and
+    clicking an ENABLED 'Add to Prompt' (clicking it while still disabled was
+    probe run 6's silent no-op). A rights-consent dialog can block all of this
+    and is agreed to once.
+
+    Returns True when the videocam badge confirms a video chip.
+    """
+    check_and_dismiss_popup(page)
+    add_btn = page.locator(
+        "button[aria-haspopup='dialog']:has(i:text-is('add_2')), "
+        "button[aria-haspopup='dialog']:has-text('Create')").first
+    add_btn.wait_for(state="visible", timeout=10000)
+    human_click_locator(page, add_btn, f"{context} add ingredient (add_2)")
+    time.sleep(1.5)
+    dialog = page.locator('[role="dialog"]').first
+    dialog.wait_for(state="visible", timeout=8000)
+
+    upload_btn = dialog.locator(
+        "button:has(i:text-is('upload')), button:has-text('Upload media')").first
+    upload_btn.wait_for(state="visible", timeout=8000)
+    try:
+        with page.expect_file_chooser(timeout=10000) as fc_info:
+            human_click_locator(page, upload_btn, f"{context} Upload media")
+        fc_info.value.set_files(video_path)
+        print(f"{context} mp4 handed to the native file chooser", flush=True)
+    except Exception as e:
+        # 'Upload media' may instead mount a fresh, video-accepting input.
+        print(f"{context} file-chooser route failed ({e}) — scanning for a fresh input",
+              flush=True)
+        human_click_locator(page, upload_btn, f"{context} Upload media (2nd)")
+        time.sleep(1)
+        found = False
+        inputs = page.locator("input[type='file']")
+        for i in range(inputs.count()):
+            acc = (inputs.nth(i).get_attribute("accept") or "").lower()
+            if "video" in acc or acc in ("", "*", "*/*") or "mp4" in acc:
+                inputs.nth(i).set_input_files(video_path)
+                found = True
+                print(f"{context} mp4 set on input #{i}", flush=True)
+                break
+        if not found:
+            print(f"{context} no video-accepting input found", flush=True)
+            return False
+
+    clicked_rights = False
+    selected_tile = False
+    for t in range(timeout_s):
+        time.sleep(1)
+        if charswap_video_chip_present(page):
+            print(f"{context} VIDEO chip confirmed by videocam badge after {t}s",
+                  flush=True)
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return True
+        if not clicked_rights:
+            try:
+                ria = page.locator("button:has-text('I agree, Do not show again')").first
+                if ria.count() == 0 or not ria.is_visible():
+                    ria = page.locator("button:has-text('I agree')").first
+                if ria.count() > 0 and ria.is_visible():
+                    human_click_locator(page, ria, f"{context} rights consent: I agree")
+                    clicked_rights = True
+                    time.sleep(1)
+            except Exception:
+                pass
+        try:
+            dlg = page.locator('[role="dialog"]').first
+            dlg_open = dlg.count() > 0 and dlg.is_visible()
+        except Exception:
+            dlg_open = False
+        if not dlg_open and t % 5 == 4:
+            try:
+                add_btn2 = page.locator(
+                    "button[aria-haspopup='dialog']:has(i:text-is('add_2')), "
+                    "button[aria-haspopup='dialog']:has-text('Create')").first
+                if add_btn2.count() > 0 and add_btn2.is_visible():
+                    human_click_locator(page, add_btn2, f"{context} reopen add_2")
+                    time.sleep(1.5)
+            except Exception:
+                pass
+            continue
+        if dlg_open and not selected_tile:
+            try:
+                vtab = dlg.locator(
+                    "button:has-text('Videos'), [role='tab']:has-text('Videos')").first
+                if vtab.count() > 0 and vtab.is_visible():
+                    if (vtab.get_attribute("aria-selected") or "") != "true":
+                        human_click_locator(page, vtab, f"{context} dialog Videos tab")
+                        time.sleep(1.5)
+                items = dlg.locator("img, video")
+                if items.count() > 0:
+                    items.first.click(timeout=4000)
+                    selected_tile = True
+                    time.sleep(1)
+            except Exception as e:
+                print(f"{context} tile select attempt: {e}", flush=True)
+        if selected_tile:
+            try:
+                atp = page.locator("button:has-text('Add to Prompt')").last
+                if atp.count() > 0 and atp.is_visible():
+                    dis = atp.get_attribute("disabled")
+                    aria = atp.get_attribute("aria-disabled") or ""
+                    if dis is None and aria != "true":
+                        human_click_locator(page, atp, f"{context} Add to Prompt (enabled)")
+                        time.sleep(1.5)
+            except Exception:
+                pass
+    print(f"{context} video chip never appeared ({timeout_s}s)", flush=True)
+    return False
+
+
+def charswap_fetch_inputs(clip, temp_dir, context="[v943]"):
+    """Download this swap clip's two inputs. Returns (avatar_path, video_path).
+
+    Both come from the platform over the same authenticated proxy the frames
+    use, so no worker ever holds R2 credentials. The source is muted and cut to
+    the cap on the way in.
+    """
+    avatar_url = clip.get("swap_avatar_url")
+    source_url = clip.get("swap_source_url")
+    if not avatar_url or not source_url:
+        print(f"{context} clip {clip.get('clip_index')} is charswap but is missing "
+              f"avatar_url={bool(avatar_url)} source_url={bool(source_url)}", flush=True)
+        return None, None
+
+    idx = clip.get("clip_index", 0)
+    avatar_path = download_frame(avatar_url, os.path.join(temp_dir, f"swap_avatar_{idx}.png"))
+    raw_video = download_frame(source_url, os.path.join(temp_dir, f"swap_source_raw_{idx}.mp4"))
+    if not avatar_path or not raw_video:
+        return None, None
+
+    cap = int(clip.get("swap_max_source_s") or CHARSWAP_MAX_SOURCE_S)
+    video_path = charswap_prepare_source(
+        raw_video, os.path.join(temp_dir, f"swap_source_{idx}.mp4"), max_s=cap)
+    return avatar_path, video_path
+
+
+def charswap_attach_and_prompt(page, avatar_path, video_path, prompt,
+                               context="[v943]", swap_mode="video-led"):
+    """Attach both ingredients and type the prompt. Returns (ok, chip_ids).
+
+    This is the video-led mechanic and only that one: the avatar image plus
+    the muted source video, the video carrying the motion and the image
+    carrying the face. `swap_mode` is here to be PRINTED next to the chip ids
+    in the log, not to switch anything — image-led is refused before this
+    function is reached (see charswap_mode_refusal).
+    """
+    ok, reason = attach_ingredient_image_with_check(
+        page, avatar_path, context=f"{context}-avatar", clear_existing=True)
+    if not ok:
+        print(f"{context} avatar attach failed ({reason})", flush=True)
+        return False, []
+
+    if not charswap_attach_source_video(page, video_path, context=context):
+        print(f"{context} source video attach failed", flush=True)
+        return False, []
+
+    chip_ids = charswap_composer_chip_media_ids(page)
+    print(f"{context} mode={swap_mode} composer chips: {chip_ids}", flush=True)
+    if len(chip_ids) < 2:
+        print(f"{context} fewer than 2 chip mediaIds on the composer — not generating",
+              flush=True)
+        return False, chip_ids
+
+    charswap_install_submit_probe(page, chip_ids)
+    fill_prompt_textarea(page, prompt)
+    time.sleep(2)
+    return True, chip_ids
+
+
 def process_job_submission(page, job, cache, download_queue, clip_submit_times_shared=None, frames_busy_flag=None, http_dl_queue=None, captured_media_urls=None, session_refresh_callback=None):
     """Submit all clips for a job"""
     global _policy_retried_tiles
@@ -20886,7 +21260,66 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 permanently_failed_clips.add(clip_index)
                 continue
 
-        if first_submission_in_project:
+        # v943 — CHARACTER SWAP ARM. Selected by render_method == 'charswap' and
+        # by nothing else: a clip with the field absent or NULL falls straight
+        # through to the three arms below, which are unchanged.
+        if charswap_selected(clip):
+            print(f"[v943] clip {clip_index+1}: charswap "
+                  f"(mode={clip.get('swap_mode') or 'video-led'})", flush=True)
+            _cs_ctx = f"[v943 clip {clip_index+1}]"
+            # Fail CLOSED on a mode this worker does not actually implement.
+            # Before the inputs are fetched: a refusal should cost nothing.
+            _cs_refusal = charswap_mode_refusal(clip)
+            if _cs_refusal:
+                print(f"{_cs_ctx} REFUSED: {_cs_refusal}", flush=True)
+                update_clip_status(clip['id'], 'failed', error_message=_cs_refusal)
+                permanently_failed_clips.add(clip_index)
+                continue
+            _cs_avatar, _cs_video = charswap_fetch_inputs(clip, temp_dir, context=_cs_ctx)
+            if not _cs_avatar or not _cs_video:
+                update_clip_status(clip['id'], 'failed',
+                                   error_message="charswap inputs unavailable")
+                permanently_failed_clips.add(clip_index)
+                continue
+            if first_submission_in_project:
+                # A swap still needs the project's render settings applied once.
+                check_and_dismiss_popup(page)
+                try:
+                    select_frames_to_video_mode(
+                        page, variants_count=job.get('flow_variants_count', 2))
+                    page._duration_applied = page._duration
+                except Exception as _cs_serr:
+                    print(f"{_cs_ctx} settings failed: {_cs_serr}", flush=True)
+                    update_clip_status(clip['id'], 'failed',
+                                       error_message=f"Settings failed: {str(_cs_serr)[:100]}")
+                    permanently_failed_clips.add(clip_index)
+                    continue
+                first_submission_in_project = False
+            _cs_ok, _cs_chips = charswap_attach_and_prompt(
+                page, _cs_avatar, _cs_video, prompt, context=_cs_ctx,
+                swap_mode=(clip.get('swap_mode') or 'video-led'))
+            if not _cs_ok:
+                update_clip_status(clip['id'], 'flow_redo_queued',
+                                   error_message="charswap ingredients did not attach")
+                continue
+            click_generate_button(page, f"v943 clip {i+1}")
+            _cs_seen, _cs_both = charswap_submit_body_verdict(page)
+            print(f"{_cs_ctx} submit seen={_cs_seen} both_media_in_body={_cs_both}",
+                  flush=True)
+            _cs_accept, _cs_count_tile, _cs_gate_why = charswap_submit_gate(
+                _cs_seen, _cs_both)
+            if not _cs_accept:
+                if _cs_count_tile:
+                    _tiles_in_this_project += 1
+                print(f"{_cs_ctx} FAILED CLOSED: {_cs_gate_why}", flush=True)
+                update_clip_status(clip['id'], 'failed',
+                                   error_message=f"charswap submit not proven: {_cs_gate_why}")
+                permanently_failed_clips.add(clip_index)
+                continue
+            human_delay(1, 2)
+            _tiles_in_this_project += 1
+
+        elif first_submission_in_project:
             # First clip actually being submitted to this project — needs frames and full setup.
             # NOTE: after restore, clips_done may skip clips 0..N, so i>0 here but the project
             # is still empty. has_new_frames may be False (same image as skipped clips) but

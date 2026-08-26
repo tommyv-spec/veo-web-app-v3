@@ -267,6 +267,15 @@ class DialogueLineInput(BaseModel):
     # NULL on every non-Option-C dialogue line (legacy sequential default).
     end_frame_image_node_id: Optional[int] = None
     end_frame_image_local_index: Optional[int] = None
+    # v943 — character-swap binding. Declared here for the same reason v892.2
+    # had to declare the plate node id: pydantic drops what it is not told
+    # about, so an undeclared field reaches the Clip row as NULL and the whole
+    # chain looks wired while doing nothing. All four are NULL on every clip
+    # that renders the normal way.
+    render_method: Optional[str] = None
+    swap_source_r2_key: Optional[str] = None
+    swap_mode: Optional[str] = None
+    swap_avatar_upload_id: Optional[int] = None
 
 
 class SceneInput(BaseModel):
@@ -2458,6 +2467,22 @@ async def _create_job_impl(
             # v718i (NEW 2026-05-18) — explicit end-frame image binding for
             # Veo native end-frame interpolation. NULL = sequential auto-inference.
             end_frame_image_node_id=end_frame_image_node_id_val,
+            # v943 — charswap binding, carried from the ImageSceneAssignment
+            # through prepare_batch_for_video's per-line metadata. All four
+            # stay NULL on a clip that renders the normal way, and the worker
+            # branches on render_method alone.
+            render_method=(
+                line.get('render_method') if isinstance(line, dict) else None
+            ),
+            swap_source_r2_key=(
+                line.get('swap_source_r2_key') if isinstance(line, dict) else None
+            ),
+            swap_mode=(
+                line.get('swap_mode') if isinstance(line, dict) else None
+            ),
+            swap_avatar_upload_id=(
+                line.get('swap_avatar_upload_id') if isinstance(line, dict) else None
+            ),
         )
         db.add(clip)
     db.commit()
@@ -10219,9 +10244,28 @@ def _v864_mem():
         return None, None
 
 
-def _spool_upload_to_path(upload_file, dst_path, chunk_bytes=1 << 20) -> int:
+class UploadTooLarge(Exception):
+    """Raised by _spool_upload_to_path when a capped upload runs past its cap.
+
+    A plain exception rather than an HTTPException because the spooler is
+    shared by routes that answer with different status codes; the route that
+    set the cap decides what the caller is told.
+    """
+
+    def __init__(self, limit_bytes):
+        super().__init__(f"upload exceeds {limit_bytes} bytes")
+        self.limit_bytes = limit_bytes
+
+
+def _spool_upload_to_path(upload_file, dst_path, chunk_bytes=1 << 20,
+                          max_bytes=None) -> int:
     """v872 — stream an UploadFile to disk. Returns bytes written. SYNC: call
     via asyncio.to_thread.
+
+    v943 — `max_bytes` caps the copy. It is checked WHILE copying, not after:
+    a cap that only looks at the finished file has already let the whole
+    upload onto the disk, which is the thing the cap exists to prevent. Left
+    at None the copy is the original unbounded one, byte for byte.
 
     `await file.read()` materialises the ENTIRE upload as one bytes object.
     Starlette has already spooled anything over 1MB to a temp file, so that
@@ -10239,7 +10283,18 @@ def _spool_upload_to_path(upload_file, dst_path, chunk_bytes=1 << 20) -> int:
     except Exception:
         pass
     with open(dst_path, "wb") as out:
-        shutil.copyfileobj(src, out, chunk_bytes)
+        if max_bytes is None:
+            shutil.copyfileobj(src, out, chunk_bytes)
+        else:
+            written = 0
+            while True:
+                chunk = src.read(chunk_bytes)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    raise UploadTooLarge(max_bytes)
+                out.write(chunk)
     return os.path.getsize(dst_path)
 
 
@@ -15938,7 +15993,11 @@ async def local_worker_get_pending_job(
             # falls back to the job-level duration (legacy / manual jobs).
             "veo_render_duration_s": clip.veo_render_duration_s,
         }
-        
+
+        # v943 — charswap keys. Added only when the clip really is a swap, so a
+        # legacy clip's payload keeps the exact shape it had before.
+        clip_data = _v943_maybe_charswap(clip_data, clip, base_url, "local-worker")
+
         clips_data.append(clip_data)
     
     print(f"[LocalWorker] Returning job {job.id[:8]} with {len(clips_data)} clips to worker", flush=True)
@@ -16494,6 +16553,356 @@ async def local_worker_download_frame(
     except Exception as e:
         print(f"[LocalWorker] Frame download error: {e}", flush=True)
         raise HTTPException(status_code=404, detail=f"Frame not found: {filename}")
+
+
+# =============================================================================
+# v943 — character-swap source videos
+# =============================================================================
+# The build names an asset; the platform stores an opaque R2 key. These three
+# endpoints are the whole transport: one to put the mp4 in R2, two for the
+# worker to fetch what a swap clip needs (the source video and the one avatar
+# image it swaps in). Everything is prefix-locked to swap-sources/ so a worker
+# key can never be used to read arbitrary storage.
+
+SWAP_SOURCE_PREFIX = "swap-sources/"
+
+# v943 — what the upload route will accept. The route is authenticated, but
+# "authenticated" is not "bounded": before these existed the handler copied an
+# UploadFile until EOF and pushed whatever came out to R2, so one wrong path on
+# a command line could have parked a feature film in the bucket.
+#
+# 80MB is the byte cap. A 10s 1080p30 h264 clip off a phone or a reel ripper is
+# 3-25MB; 80MB leaves room for a high-bitrate or ProRes-ish export of the same
+# length while still refusing anything of a different order.
+SWAP_SOURCE_MAX_BYTES = 80 * 1024 * 1024
+# The worker trims every source to this before rendering (CHARSWAP_MAX_SOURCE_S
+# in flow_worker.py). It is the render cap, not the upload cap.
+SWAP_SOURCE_RENDER_CAP_S = 10
+# The upload cap carries 2s of slack on top of it on purpose: a 10.2s cut is
+# a correct source that the worker trims, while a 30s reel is someone sending
+# the wrong file. Refuse the second, accept the first.
+SWAP_SOURCE_MAX_DURATION_S = 12.0
+
+
+def _v943_probe_source(path):
+    """ffprobe a spooled upload. Separate function so tests can replace it."""
+    from video_processor import ffprobe_json
+    return ffprobe_json(Path(path))
+
+
+def _v943_validate_swap_source(tmp_path, name=""):
+    """Refuse anything that is not a short mp4. Returns the duration in seconds.
+
+    Checked on the spooled temp file, before a single byte reaches R2. The
+    caller deletes the temp file either way — this only decides the verdict.
+    """
+    try:
+        info = _v943_probe_source(tmp_path)
+    except Exception as e:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Swap source {name!r} is not readable video ({e})")
+
+    fmt = ((info.get("format") or {}).get("format_name") or "").lower()
+    streams = info.get("streams") or []
+    has_video = any(s.get("codec_type") == "video" for s in streams)
+    # ffprobe reports the mp4 family as 'mov,mp4,m4a,3gp,3g2,mj2'.
+    if "mp4" not in fmt or not has_video:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Swap source {name!r} must be an mp4 with a video stream "
+                   f"(ffprobe says format={fmt or 'unknown'}, "
+                   f"video_stream={has_video})")
+
+    try:
+        duration = float((info.get("format") or {}).get("duration") or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if duration <= 0:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Swap source {name!r} reports no duration")
+    if duration > SWAP_SOURCE_MAX_DURATION_S:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Swap source {name!r} is {duration:.1f}s; the charswap "
+                   f"route takes clips up to {SWAP_SOURCE_MAX_DURATION_S:.0f}s "
+                   f"(the worker renders the first "
+                   f"{SWAP_SOURCE_RENDER_CAP_S}s). Cut it first.")
+    return duration
+
+
+@app.post("/api/images/swap-sources")
+async def upload_swap_source_video(
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    current_user: User = Depends(get_current_user),
+):
+    """Store one source mp4 for a charswap scene and hand back its R2 key.
+
+    Streamed to a temp file and then to R2 — never held in memory. A source
+    clip is small but these land while renders and exports are running, which
+    is exactly when a 10-40MB transient allocation hurts (same reason as v872
+    on the clip-upload path).
+
+    v943 — bounded on the way in: the copy stops at SWAP_SOURCE_MAX_BYTES, and
+    the spooled file must ffprobe as a short mp4 before it is stored. A
+    rejected upload leaves nothing behind on disk or in R2.
+    """
+    from backends.storage import is_storage_configured, get_storage
+    import tempfile
+    import uuid as _uuid
+    import re  # main.py has no module-level bare `re`
+
+    if not is_storage_configured():
+        raise HTTPException(status_code=503, detail="Storage not configured")
+
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", (name or "source")).strip("-") or "source"
+    r2_key = f"{SWAP_SOURCE_PREFIX}{current_user.id}/{_uuid.uuid4().hex}_{safe_name}.mp4"
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            tmp_path = tmp.name
+        try:
+            size = await asyncio.to_thread(
+                _spool_upload_to_path, file, tmp_path,
+                1 << 20, SWAP_SOURCE_MAX_BYTES)
+        except UploadTooLarge:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Swap source {name!r} is larger than "
+                       f"{SWAP_SOURCE_MAX_BYTES // (1 << 20)} MB")
+        duration = await asyncio.to_thread(
+            _v943_validate_swap_source, tmp_path, name)
+        storage = get_storage()
+        await asyncio.to_thread(storage.upload_file, tmp_path, r2_key, "video/mp4")
+        # TEMP DIAG [TEMP] (remove once one charswap render is confirmed live)
+        print(f"[v943] swap source stored: name={name!r} bytes={size} "
+              f"duration={duration:.1f}s key={r2_key}", flush=True)
+        return {"success": True, "name": name, "r2_key": r2_key,
+                "bytes": size, "duration_s": round(duration, 2)}
+    except HTTPException as e:
+        # A refusal is the route working. Say why, with the status it earned,
+        # instead of laundering it into a 500.
+        print(f"[v943] swap source refused for {name!r}: "
+              f"{e.status_code} {e.detail}", flush=True)
+        raise
+    except Exception as e:
+        print(f"[v943] swap source upload failed for {name!r}: {e}", flush=True)
+        raise HTTPException(status_code=500, detail=f"Swap source upload failed: {e}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+
+def _v943_swap_source_key_owner(key: str):
+    """The user id a swap-source key belongs to, or None if it is not one.
+
+    Ownership is IN the key: the upload route writes every source to
+    `swap-sources/{user_id}/…` and the import refuses a key outside the
+    importing user's prefix, so the segment after the prefix is the owner.
+    """
+    if not key or not key.startswith(SWAP_SOURCE_PREFIX) or ".." in key:
+        return None
+    rest = key[len(SWAP_SOURCE_PREFIX):]
+    owner, sep, remainder = rest.partition("/")
+    if not owner or not sep or not remainder:
+        return None
+    return owner
+
+
+def _v943_swap_source_owned_by(key: str, user_id) -> bool:
+    """True when `key` is a swap-source key belonging to `user_id`."""
+    return _v943_swap_source_key_owner(key) == str(user_id)
+
+
+async def _v943_swap_source_response(key: str, user_id=None):
+    """Stream a charswap source video out of R2.
+
+    The key arrives from the clip payload, so it is checked against the
+    swap-sources/ prefix before anything is read: a worker credential must not
+    turn into a way to read any object in the bucket.
+
+    v943 owner scoping — a user-worker token authenticates ONE user, and this
+    is where that fact is spent. Pass `user_id` and the key must sit under that
+    user's prefix, so a token cannot read another account's source clip. The
+    shared local-worker key belongs to no user and passes None; it is the
+    operator's own admin credential, not a per-account one.
+
+    The temp file is deleted when the response finishes, not only when the
+    download fails — see the BackgroundTask below.
+    """
+    from fastapi.responses import FileResponse
+    from starlette.background import BackgroundTask
+    from backends.storage import is_storage_configured, get_storage
+    import tempfile
+
+    if not key.startswith(SWAP_SOURCE_PREFIX) or ".." in key:
+        raise HTTPException(status_code=400, detail="Not a swap-source key")
+    if user_id is not None and not _v943_swap_source_owned_by(key, user_id):
+        print(f"[v943] swap source DENIED: key={key} not owned by {user_id}",
+              flush=True)
+        raise HTTPException(status_code=404, detail="Swap source not found")
+    if not is_storage_configured():
+        raise HTTPException(status_code=503, detail="Storage not configured")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+        tmp_path = tmp.name
+    try:
+        await asyncio.to_thread(get_storage().download_file, key, tmp_path)
+    except Exception as e:
+        _v943_unlink(tmp_path)
+        print(f"[v943] swap source download failed key={key}: {e}", flush=True)
+        raise HTTPException(status_code=404, detail="Swap source not found")
+    # FileResponse streams from disk and then runs `background`. Deleting the
+    # file here instead of at the next failure is the difference between a
+    # night of worker retries costing nothing and it filling Render's temp
+    # disk — every successful download used to leave its copy behind.
+    return FileResponse(tmp_path, media_type="video/mp4",
+                        filename=key.rsplit("/", 1)[-1],
+                        background=BackgroundTask(_v943_unlink, tmp_path))
+
+
+def _v943_unlink(path):
+    """Delete a served temp file. Never raises — it runs after the response."""
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[v943] temp cleanup failed for {path}: {e}", flush=True)
+
+
+async def _v943_swap_avatar_response(node_id: int, user_id=None):
+    """Stream the chosen image of the ONE upload a swap clip swaps in.
+
+    Bound at import (image_platform resolves exactly one character upload and
+    refuses the import otherwise), so this only ever serves a node the build
+    already named.
+
+    v943 owner scoping — `user_id` narrows the query to that user's nodes, so
+    a worker token cannot walk the id space and pull faces out of other
+    accounts. The node must also be `kind='upload'`: a swap swaps in a real
+    uploaded face, and import already refuses anything else, so a generated
+    node arriving here means the id came from somewhere it should not have.
+    """
+    from fastapi.responses import Response as _Resp
+    from image_platform import (
+        ImageNode as _Node, ImageVariant as _Variant,
+        images_root as _images_root, _storage_download_to_local as _pull,
+    )
+    from models import get_db as _get_db
+
+    with _get_db() as db:
+        q = db.query(_Node).filter(_Node.id == node_id, _Node.kind == "upload")
+        if user_id is not None:
+            q = q.filter(_Node.user_id == str(user_id))
+        node = q.first()
+        if node is None or node.chosen_variant_id is None:
+            if user_id is not None:
+                print(f"[v943] swap avatar DENIED or missing: node={node_id} "
+                      f"user={user_id}", flush=True)
+            raise HTTPException(status_code=404, detail=f"Upload {node_id} has no chosen image")
+        variant = db.query(_Variant).filter(_Variant.id == node.chosen_variant_id).first()
+        if variant is None:
+            raise HTTPException(status_code=404, detail=f"Upload {node_id} variant missing")
+        rel_path = variant.image_path
+
+    local_path = _images_root() / rel_path
+    if not local_path.exists():
+        await asyncio.to_thread(_pull, rel_path)
+    if not local_path.exists():
+        raise HTTPException(status_code=404, detail=f"Upload {node_id} image unavailable")
+    data = await asyncio.to_thread(local_path.read_bytes)
+    media_type = "image/png" if str(rel_path).lower().endswith(".png") else "image/jpeg"
+    return _Resp(content=data, media_type=media_type)
+
+
+def _v943_maybe_charswap(clip_data: dict, clip, base_url: str, lane: str) -> dict:
+    """Add the charswap keys to a clip payload, but only for a swap clip.
+
+    A legacy clip comes back with the dict it went in with — same keys, same
+    values. That is the whole regression contract for the no-metadata path:
+    a Veo render is stochastic and can never be byte-compared, but the JSON
+    the worker is handed can.
+    """
+    if (getattr(clip, "render_method", None) or "") != "charswap":
+        return clip_data
+    clip_data.update(_v943_charswap_payload(clip, base_url, lane))
+    return clip_data
+
+
+def _v943_charswap_payload(clip, base_url: str, lane: str) -> dict:
+    """The extra job-payload keys a charswap clip needs, and nothing else.
+
+    `lane` picks which authenticated download path the worker should call —
+    the two worker lanes carry different credentials, so they get their own
+    URLs even though the bytes behind them are identical.
+    """
+    from urllib.parse import quote
+
+    avatar_id = clip.swap_avatar_upload_id
+    src_key = clip.swap_source_r2_key
+    return {
+        "render_method": clip.render_method,
+        "swap_mode": clip.swap_mode or "video-led",
+        "swap_source_key": src_key,
+        "swap_source_url": (
+            f"{base_url}/api/{lane}/swap-source?key={quote(src_key, safe='')}"
+            if src_key else None
+        ),
+        "swap_avatar_upload_id": avatar_id,
+        "swap_avatar_url": (
+            f"{base_url}/api/{lane}/swap-avatar/{avatar_id}"
+            if avatar_id else None
+        ),
+        # v943 — the cap the swap route was measured against. The worker trims
+        # to it rather than trusting the file, so a longer source degrades to a
+        # short render instead of a refused one.
+        "swap_max_source_s": 10,
+    }
+
+
+@app.get("/api/local-worker/swap-source")
+async def local_worker_download_swap_source(
+    key: str = Query(..., description="R2 key from the clip's swap_source_r2_key"),
+    authorized: bool = Depends(verify_local_worker_key),
+):
+    """Charswap source video, for a worker holding the local-worker key."""
+    return await _v943_swap_source_response(key)
+
+
+@app.get("/api/local-worker/swap-avatar/{node_id}")
+async def local_worker_download_swap_avatar(
+    node_id: int,
+    authorized: bool = Depends(verify_local_worker_key),
+):
+    """Charswap avatar image, for a worker holding the local-worker key."""
+    return await _v943_swap_avatar_response(node_id)
+
+
+# The user-worker twins of these two live further down the file, next to
+# verify_user_worker_token — the dependency has to exist before they are
+# declared.
+
+
+@app.get("/api/admin/verify-charswap-columns")
+async def verify_charswap_columns_endpoint(
+    current_user: User = Depends(get_current_user),
+):
+    """Prove the v943 columns exist and can be read on the live database.
+
+    Startup catches a failed image migration and keeps serving, so a healthy
+    deploy is not evidence the columns landed. This is the evidence.
+    """
+    from image_platform import verify_charswap_columns as _verify
+    result = await asyncio.to_thread(_verify)
+    print(f"[v943] column readback: {result}", flush=True)
+    return result
 
 
 class EnhanceFrameRequest(BaseModel):
@@ -17183,6 +17592,35 @@ async def autoedit_fail(
     return {"ok": True, "state": run.state}
 
 
+@app.get("/api/user-worker/swap-source")
+async def user_worker_download_swap_source(
+    key: str = Query(..., description="R2 key from the clip's swap_source_r2_key"),
+    user_id: str = Depends(verify_user_worker_token),
+):
+    """v943 — charswap source video, for a worker holding a user worker token.
+
+    Declared here because the token dependency is defined further up in this
+    section. Unlike the local-worker twin, the token names a user, so the key
+    is checked against THAT user's prefix — the token authenticates one
+    account and must only read that account's sources.
+    """
+    return await _v943_swap_source_response(key, user_id=user_id)
+
+
+@app.get("/api/user-worker/swap-avatar/{node_id}")
+async def user_worker_download_swap_avatar(
+    node_id: int,
+    user_id: str = Depends(verify_user_worker_token),
+):
+    """v943 — charswap avatar image, for a worker holding a user worker token.
+
+    Scoped to the token's user: an ImageNode id is a small integer, so an
+    unscoped lookup here would serve any account's uploaded face to anyone
+    holding any worker token.
+    """
+    return await _v943_swap_avatar_response(node_id, user_id=user_id)
+
+
 # v899 — per-worker liveness for the Flow worker: user_id -> (worker_id, ts).
 # UserWorkerToken.last_seen is refreshed by ANY authenticated call on that token,
 # and the operator runs image_worker.py and chatgpt_image_worker.py on the SAME
@@ -17516,7 +17954,7 @@ async def user_worker_get_pending_job(
         start_filename = start_frame_key.split('/')[-1] if start_frame_key else None
         end_filename = end_frame_key.split('/')[-1] if end_frame_key else None
         
-        clips_data.append({
+        _clip_data = {
             "id": clip.id,
             "clip_index": clip.clip_index,
             "dialogue_text": clip.dialogue_text,
@@ -17532,7 +17970,10 @@ async def user_worker_get_pending_job(
             # v861 — per-clip render duration (4|6|8|10). NULL → the worker
             # falls back to the job-level duration (legacy / manual jobs).
             "veo_render_duration_s": clip.veo_render_duration_s,
-        })
+        }
+        # v943 — see the local-worker payload; keys appear only on a swap clip.
+        _clip_data = _v943_maybe_charswap(_clip_data, clip, base_url, "user-worker")
+        clips_data.append(_clip_data)
     
     return {
         "job": {

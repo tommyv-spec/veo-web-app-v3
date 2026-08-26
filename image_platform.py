@@ -318,6 +318,25 @@ def run_image_platform_migrations():
         # v871: which per-clip prompt set the render uses (omni | anchor).
         ("image_job_batches", "prompt_variant",
          "ALTER TABLE image_job_batches ADD COLUMN prompt_variant TEXT NOT NULL DEFAULT 'omni'"),
+        # v943: character-swap render method. Nullable, NO default — an old
+        # row stays legacy and the worker keeps taking its old path. See
+        # models.py Clip for what each column holds.
+        ("image_scene_assignments", "render_method",
+         "ALTER TABLE image_scene_assignments ADD COLUMN render_method VARCHAR(20)"),
+        ("image_scene_assignments", "swap_source_r2_key",
+         "ALTER TABLE image_scene_assignments ADD COLUMN swap_source_r2_key VARCHAR(512)"),
+        ("image_scene_assignments", "swap_mode",
+         "ALTER TABLE image_scene_assignments ADD COLUMN swap_mode VARCHAR(20)"),
+        ("image_scene_assignments", "swap_avatar_upload_id",
+         "ALTER TABLE image_scene_assignments ADD COLUMN swap_avatar_upload_id INTEGER"),
+        ("clips", "render_method",
+         "ALTER TABLE clips ADD COLUMN render_method VARCHAR(20)"),
+        ("clips", "swap_source_r2_key",
+         "ALTER TABLE clips ADD COLUMN swap_source_r2_key VARCHAR(512)"),
+        ("clips", "swap_mode",
+         "ALTER TABLE clips ADD COLUMN swap_mode VARCHAR(20)"),
+        ("clips", "swap_avatar_upload_id",
+         "ALTER TABLE clips ADD COLUMN swap_avatar_upload_id INTEGER"),
     ]
     postgres_migrations = [
         ("image_nodes", "claimed_by_worker",
@@ -489,6 +508,25 @@ def run_image_platform_migrations():
         # v871: which per-clip prompt set the render uses (omni | anchor).
         ("image_job_batches", "prompt_variant",
          "ALTER TABLE image_job_batches ADD COLUMN IF NOT EXISTS prompt_variant TEXT NOT NULL DEFAULT 'omni'"),
+        # v943: character-swap render method — see the SQLite block above.
+        # Production is Postgres: a SQLite-only entry means the column never
+        # exists live and every write to it 500s.
+        ("image_scene_assignments", "render_method",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS render_method VARCHAR(20)"),
+        ("image_scene_assignments", "swap_source_r2_key",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS swap_source_r2_key VARCHAR(512)"),
+        ("image_scene_assignments", "swap_mode",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS swap_mode VARCHAR(20)"),
+        ("image_scene_assignments", "swap_avatar_upload_id",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS swap_avatar_upload_id INTEGER"),
+        ("clips", "render_method",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS render_method VARCHAR(20)"),
+        ("clips", "swap_source_r2_key",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS swap_source_r2_key VARCHAR(512)"),
+        ("clips", "swap_mode",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS swap_mode VARCHAR(20)"),
+        ("clips", "swap_avatar_upload_id",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS swap_avatar_upload_id INTEGER"),
     ]
 
     # v479: widen ImageJobBatch string columns to TEXT. The previous
@@ -632,6 +670,64 @@ def run_image_platform_migrations():
 
     # v447: backfill user_id on existing rows after the column exists
     _backfill_user_id_ownership()
+
+
+# v943 — the columns a charswap job cannot work without. Named once so the
+# readback check and the migration list can never drift apart by hand.
+CHARSWAP_COLUMNS = {
+    "image_scene_assignments": [
+        "render_method", "swap_source_r2_key", "swap_mode", "swap_avatar_upload_id",
+    ],
+    "clips": [
+        "render_method", "swap_source_r2_key", "swap_mode", "swap_avatar_upload_id",
+    ],
+}
+
+
+def verify_charswap_columns() -> Dict[str, Any]:
+    """Prove the v943 columns really exist, and can really be read.
+
+    Startup swallows a failed migration and keeps serving (main.py ~495-503),
+    so "the deploy came up" is not evidence that these columns landed. This
+    does both halves: asks the inspector what columns exist, then runs an
+    actual SELECT of each one, because a column can be listed and still be
+    unreadable through the ORM (name typo, stale mapping).
+
+    Returns {"ok": bool, "missing": [...], "readback": {...}, "error": str|None}.
+    """
+    from models import engine
+    from sqlalchemy import text, inspect
+
+    out: Dict[str, Any] = {"ok": False, "missing": [], "readback": {}, "error": None}
+    if engine is None:
+        out["error"] = "no engine"
+        return out
+    try:
+        insp = inspect(engine)
+        tables = set(insp.get_table_names())
+        for table, cols in CHARSWAP_COLUMNS.items():
+            if table not in tables:
+                out["missing"].append(f"{table} (table absent)")
+                continue
+            have = {c["name"] for c in insp.get_columns(table)}
+            for col in cols:
+                if col not in have:
+                    out["missing"].append(f"{table}.{col}")
+        if not out["missing"]:
+            with engine.connect() as conn:
+                for table, cols in CHARSWAP_COLUMNS.items():
+                    sel = ", ".join(cols)
+                    row = conn.execute(
+                        text(f"SELECT {sel} FROM {table} LIMIT 1")
+                    ).fetchone()
+                    out["readback"][table] = (
+                        "empty table (columns selectable)" if row is None
+                        else "row read"
+                    )
+            out["ok"] = True
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    return out
 
 
 def _backfill_user_id_ownership():
@@ -1563,6 +1659,21 @@ class ImageSceneAssignment(Base):
     end_frame_image_node_id = Column(
         Integer, ForeignKey("image_nodes.id"), nullable=True
     )
+    # v943 — character-swap render method, declared per scene in the build:
+    #   `- **render_method:** charswap`
+    #   `- **swap_source_video:** <asset name declared in the build>`
+    #   `- **swap_mode:** video-led | image-led`
+    # render_method NULL = the scene renders the normal way, which is what
+    # every scene imported before this column does. swap_source_r2_key holds
+    # the opaque R2 key the declared asset name was uploaded to;
+    # swap_avatar_upload_id is the ONE character upload whose face gets swapped
+    # in, resolved at import so the worker never has to guess a face.
+    render_method = Column(String(20), nullable=True)
+    swap_source_r2_key = Column(String(512), nullable=True)
+    swap_mode = Column(String(20), nullable=True)
+    swap_avatar_upload_id = Column(
+        Integer, ForeignKey("image_nodes.id"), nullable=True
+    )
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1645,6 +1756,11 @@ class ImageSceneAssignment(Base):
             # non-Option-C assignments (default = sequential auto-inference
             # of end_frame from next clip's start image).
             "end_frame_image_node_id": self.end_frame_image_node_id,
+            # v943 — charswap binding. All four are None on a legacy scene.
+            "render_method": self.render_method,
+            "swap_source_r2_key": self.swap_source_r2_key,
+            "swap_mode": self.swap_mode,
+            "swap_avatar_upload_id": self.swap_avatar_upload_id,
         }
 
 
@@ -5348,6 +5464,64 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 flush=True,
             )
 
+        # v943 — character-swap render method. Three bullets, parsed together
+        # because they only mean anything together:
+        #   - **render_method:** charswap
+        #   - **swap_source_video:** <asset name declared in the build>
+        #   - **swap_mode:** video-led | image-led
+        #
+        # Everything here fails CLOSED. This parser ignores bullets it does not
+        # know, which is the right default for notes and the wrong one for a
+        # field that changes how a clip is rendered: a typo would import
+        # cleanly and render the ordinary way, and nobody would find out until
+        # they watched the result. So an unknown render_method, a half-declared
+        # set, or a charswap scene that would fan out into more than one clip
+        # all stop the import instead.
+        render_method: Optional[str] = None
+        swap_source_video: Optional[str] = None
+        swap_mode: Optional[str] = None
+        _rm_raw = _parse_bullet_field(block, "render_method")
+        if _rm_raw:
+            _rm = _rm_raw.strip().split()[0].strip().lower()
+            if _rm != "charswap":
+                raise ValueError(
+                    f"Scene {scene_index}: render_method {_rm_raw!r} is not a "
+                    f"known method (expected 'charswap', or leave the bullet "
+                    f"out for the normal render path — see "
+                    f"template_reference.md §v943)"
+                )
+            render_method = _rm
+        _ssv_raw = _parse_bullet_field(block, "swap_source_video")
+        if _ssv_raw:
+            swap_source_video = _ssv_raw.strip() or None
+        _sm_raw = _parse_bullet_field(block, "swap_mode")
+        if _sm_raw:
+            _sm = _sm_raw.strip().split()[0].strip().lower()
+            if _sm not in ("video-led", "image-led"):
+                raise ValueError(
+                    f"Scene {scene_index}: swap_mode {_sm_raw!r} is not "
+                    f"'video-led' or 'image-led' (v943)"
+                )
+            swap_mode = _sm
+        _swap_declared = [
+            n for n, v in (
+                ("render_method", render_method),
+                ("swap_source_video", swap_source_video),
+                ("swap_mode", swap_mode),
+            ) if v
+        ]
+        if _swap_declared and len(_swap_declared) != 3:
+            _missing = [n for n in ("render_method", "swap_source_video", "swap_mode")
+                        if n not in _swap_declared]
+            raise ValueError(
+                f"Scene {scene_index}: a charswap scene declares all three of "
+                f"render_method / swap_source_video / swap_mode. Declared: "
+                f"{_swap_declared}; missing: {_missing} (v943)"
+            )
+        if render_method:
+            print(f"[v943/parse] scene_{scene_index} render_method={render_method} "
+                  f"swap_mode={swap_mode} source={swap_source_video!r}", flush=True)
+
         # Parse interleaved `- **line:**` / `- **action_note:**` / `- **pad:**`
         # bullets. Order matters: action_note and pad attach to the closest
         # preceding line within the same scene.
@@ -5491,6 +5665,18 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 f"lowercase per v693, see template_reference.md §v698A Gate 11)"
             )
 
+        # v943 — one source video, one output clip. Clip rows are 1:1 with
+        # `- **line:**` bullets, so a two-line charswap scene would quietly fan
+        # the SAME source video into two swap renders. That is never what the
+        # author meant; split it into two scenes with their own sources.
+        if render_method == "charswap" and len(lines_list) > 1:
+            raise ValueError(
+                f"Scene {scene_index}: render_method=charswap renders exactly "
+                f"one clip, but this scene has {len(lines_list)} '- **line:**' "
+                f"bullets (each line becomes its own clip). Split it into one "
+                f"scene per swap clip (v943)."
+            )
+
         scenes.append({
             "scene_index": scene_index,
             "image_index": image_index,
@@ -5513,6 +5699,10 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "voiceover_anchor_image": voiceover_anchor_image,  # v698A — None | int
             "composite_plate_image": composite_plate_image,  # v892 — None | int; background layer of an assembled frame
             "end_frame_image": end_frame_image,  # v718i (NEW 2026-05-18) — None | int; explicit end-frame image for Veo native interpolation
+            # v943 — charswap declaration. All three None on a normal scene.
+            "render_method": render_method,          # None | 'charswap'
+            "swap_source_video": swap_source_video,  # None | declared asset name
+            "swap_mode": swap_mode,                  # None | 'video-led' | 'image-led'
         })
 
     if not scenes:
@@ -6014,6 +6204,13 @@ class ImportSceneTableRequest(BaseModel):
     # Keys accept "image_N" (preferred) or "N". Each referenced node must be a
     # ready upload owned by the caller, and every item must state what it controls.
     external_references: Optional[Dict[str, List[ExternalReferenceRef]]] = None
+
+    # v943: {declared asset name -> R2 key} for every `- **swap_source_video:**`
+    # a scene names. send_to_platform uploads the local mp4 once per batch and
+    # passes the mapping here; the build keeps the readable name, the DB keeps
+    # the opaque key. A charswap scene whose name is missing from this map
+    # fails the import — a swap with no source is not a render, it is a guess.
+    swap_source_videos: Optional[Dict[str, str]] = None
 
 
 # v510: helpers for auto-bootstrapping ingredient nodes from the markdown
@@ -8320,6 +8517,87 @@ def _import_scene_table_impl(
     # ImageNode (the image to display) and captures the per-scene video
     # metadata (clip_mode, transition, lines, action_notes).
 
+    # v943 — resolve the charswap bindings ONCE for the whole batch, before any
+    # assignment row is written, so a build that cannot be rendered is refused
+    # whole instead of half-imported.
+    #
+    # Two things have to be nailed down here rather than at render time:
+    #   the SOURCE video — the build names an asset, the caller supplies the
+    #   R2 key it was uploaded to, and a name with no key is a hard failure;
+    #   the AVATAR — exactly one character upload from the Ingredients table.
+    #   Zero uploads or several is ambiguous, and an ambiguous face is the one
+    #   thing a swap must never improvise.
+    _v943_scenes = [s for s in storyboard_scenes if s.get("render_method") == "charswap"]
+    _v943_source_keys: Dict[str, str] = {}
+    _v943_avatar_node_id: Optional[int] = None
+    if _v943_scenes:
+        _declared_map = dict(getattr(req, "swap_source_videos", None) or {})
+        # The R2 key comes from the request body, so it is a caller-supplied
+        # string, not a fact. The upload route writes every source under
+        # swap-sources/{user_id}/, so requiring that exact prefix here is what
+        # stops one account from binding another account's clip into its build
+        # (and then having a worker fetch it quite legitimately).
+        _v943_own_prefix = f"swap-sources/{current_user.id}/"
+        for s in _v943_scenes:
+            _name = s.get("swap_source_video")
+            _key = _declared_map.get(_name)
+            if not _key:
+                raise HTTPException(
+                    400,
+                    f"Scene {s['scene_index']}: render_method=charswap declares "
+                    f"swap_source_video {_name!r}, but no uploaded source video "
+                    f"was supplied under that name. Known names: "
+                    f"{sorted(_declared_map) or 'none'} (v943 — send_to_platform "
+                    f"uploads the mp4 and passes swap_source_videos)"
+                )
+            if not str(_key).startswith(_v943_own_prefix) or ".." in str(_key):
+                raise HTTPException(
+                    400,
+                    f"Scene {s['scene_index']}: swap source key for {_name!r} "
+                    f"is not one of yours. A charswap source must be uploaded "
+                    f"through POST /api/images/swap-sources, which stores it "
+                    f"under {_v943_own_prefix!r} (v943 owner scoping)."
+                )
+            _v943_source_keys[_name] = _key
+
+        _char_nodes = {
+            name: node for name, node in (ingredient_nodes or {}).items()
+            if (ingredient_types or {}).get(name) == "character"
+        }
+        _char_ids = {n.id for n in _char_nodes.values()}
+        if len(_char_ids) != 1:
+            raise HTTPException(
+                400,
+                f"render_method=charswap needs exactly ONE character upload to "
+                f"swap in, and this build resolves {len(_char_ids)}: "
+                f"{sorted(_char_nodes)}. Bind one character row in "
+                f"## Ingredients to an upload (v943 — a swap never guesses a face)."
+            )
+        _v943_avatar_node_id = next(iter(_char_ids))
+        # The worker download for this node requires kind='upload' and the
+        # owning user, so anything else would fail at render time, hours
+        # later. Refuse it here, where the message can still be read.
+        _v943_avatar_node = next(
+            n for n in _char_nodes.values() if n.id == _v943_avatar_node_id)
+        if _v943_avatar_node.kind != "upload":
+            raise HTTPException(
+                400,
+                f"render_method=charswap swaps in a real uploaded face, but the "
+                f"character it resolves to (node {_v943_avatar_node_id}) is "
+                f"kind={_v943_avatar_node.kind!r}. Bind the ## Ingredients "
+                f"character row to an UPLOAD (v943)."
+            )
+        if _v943_avatar_node.user_id and _v943_avatar_node.user_id != current_user.id:
+            raise HTTPException(
+                400,
+                f"render_method=charswap character upload {_v943_avatar_node_id} "
+                f"belongs to another user (v943 owner scoping)."
+            )
+        print(f"[v943/import] charswap scenes="
+              f"{[s['scene_index'] for s in _v943_scenes]} "
+              f"avatar_upload={_v943_avatar_node_id} "
+              f"sources={sorted(_v943_source_keys)}", flush=True)
+
     assignments_created = 0
     for s in storyboard_scenes:
         img_idx = s["image_index"]
@@ -8491,6 +8769,19 @@ def _import_scene_table_impl(
             # v718h-C Option C Veo native end-frame interpolation; NULL on
             # all non-Option-C assignments (default = sequential auto-inference).
             end_frame_image_node_id=end_frame_node_id_resolved,
+            # v943 — charswap binding, resolved for the whole batch above.
+            # All four stay NULL on every scene that renders the normal way.
+            render_method=s.get("render_method"),
+            swap_source_r2_key=(
+                _v943_source_keys.get(s.get("swap_source_video"))
+                if s.get("render_method") == "charswap" else None
+            ),
+            swap_mode=(
+                s.get("swap_mode") if s.get("render_method") == "charswap" else None
+            ),
+            swap_avatar_upload_id=(
+                _v943_avatar_node_id if s.get("render_method") == "charswap" else None
+            ),
         )
         db.add(assignment)
         assignments_created += 1
@@ -9593,6 +9884,14 @@ def prepare_batch_for_video(
             else None
         )
 
+        # v943 — charswap binding for this scene. None on every normal scene,
+        # which is what makes the legacy payload unchanged apart from four
+        # null-valued keys.
+        _v943_method = scene.get("render_method")
+        _v943_source_key = scene.get("swap_source_r2_key")
+        _v943_mode = scene.get("swap_mode")
+        _v943_avatar = scene.get("swap_avatar_upload_id")
+
         scene_assignments_payload.append({
             "scene_index": scene["scene_index"],
             "image_local_index": local_idx,
@@ -9639,6 +9938,11 @@ def prepare_batch_for_video(
             # binds it to cfg.last_frame instead of sequential auto-inference.
             "end_frame_image_node_id": _end_frame_node_id,
             "end_frame_image_local_index": _end_frame_local_idx,
+            # v943 — charswap binding; None on every normal scene.
+            "render_method": _v943_method,
+            "swap_source_r2_key": _v943_source_key,
+            "swap_mode": _v943_mode,
+            "swap_avatar_upload_id": _v943_avatar,
         })
 
         # v681 — scenes with no `- **line:**` bullets but a real video
@@ -9744,6 +10048,12 @@ def prepare_batch_for_video(
                 # branch below.
                 "end_frame_image_node_id": _end_frame_node_id,
                 "end_frame_image_local_index": _end_frame_local_idx,
+                # v943 — a silent scene can be a swap too (a swap clip has no
+                # spoken line of its own more often than not).
+                "render_method": _v943_method,
+                "swap_source_r2_key": _v943_source_key,
+                "swap_mode": _v943_mode,
+                "swap_avatar_upload_id": _v943_avatar,
             })
             veo_prompts_flat.append(silent_vp)
             pads_flat.append(None)
@@ -9908,6 +10218,12 @@ def prepare_batch_for_video(
                 # array). Closes A→Z chain Stage 4b → 5 gap.
                 "end_frame_image_node_id": _end_frame_node_id,
                 "end_frame_image_local_index": _end_frame_local_idx,
+                # v943 — charswap binding, denormed onto the line so main.py's
+                # Clip writer can read it straight off the dialogue payload.
+                "render_method": _v943_method,
+                "swap_source_r2_key": _v943_source_key,
+                "swap_mode": _v943_mode,
+                "swap_avatar_upload_id": _v943_avatar,
             })
             veo_prompts_flat.append(vp)
             pads_flat.append(pad)
@@ -11405,6 +11721,24 @@ def promote_batch_to_video(
                 # 226 of 322 existing builds.
                 "veo_prompt_b": (vp_i or {}).get("prompt_b") or None,
                 "veo_prompt_b_line": (vp_i or {}).get("prompt_b_line") or None,
+                # v943 — charswap binding, so this path's stored dialogue says
+                # the same thing the Clip row does. None on a normal line.
+                "render_method": (
+                    getattr(_assignment, "render_method", None)
+                    if _assignment is not None else None
+                ),
+                "swap_source_r2_key": (
+                    getattr(_assignment, "swap_source_r2_key", None)
+                    if _assignment is not None else None
+                ),
+                "swap_mode": (
+                    getattr(_assignment, "swap_mode", None)
+                    if _assignment is not None else None
+                ),
+                "swap_avatar_upload_id": (
+                    getattr(_assignment, "swap_avatar_upload_id", None)
+                    if _assignment is not None else None
+                ),
             })
 
             clip_specs.append({
@@ -11426,6 +11760,24 @@ def promote_batch_to_video(
                     if _assignment is not None else None
                 ),
                 "composite_plate_prompt": ((vp_i or {}).get("plate_prompt") or None),
+                # v943 — charswap binding straight off the assignment row.
+                # None on every scene that renders the normal way.
+                "render_method": (
+                    getattr(_assignment, "render_method", None)
+                    if _assignment is not None else None
+                ),
+                "swap_source_r2_key": (
+                    getattr(_assignment, "swap_source_r2_key", None)
+                    if _assignment is not None else None
+                ),
+                "swap_mode": (
+                    getattr(_assignment, "swap_mode", None)
+                    if _assignment is not None else None
+                ),
+                "swap_avatar_upload_id": (
+                    getattr(_assignment, "swap_avatar_upload_id", None)
+                    if _assignment is not None else None
+                ),
             })
 
             clips_in_this_scene.append(current_clip_index)
@@ -11639,6 +11991,11 @@ def promote_batch_to_video(
                 if _v892_10_plate_frames.get(spec.get("composite_plate_image_node_id"))
                 else None
             ),
+            # v943 — charswap binding copied assignment -> clip at promotion.
+            render_method=spec.get("render_method"),
+            swap_source_r2_key=spec.get("swap_source_r2_key"),
+            swap_mode=spec.get("swap_mode"),
+            swap_avatar_upload_id=spec.get("swap_avatar_upload_id"),
         )
         db.add(clip)
 

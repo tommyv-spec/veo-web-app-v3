@@ -394,6 +394,24 @@ class Clip(Base):
     # Migration registered in image_platform.py (mirrors voiceover_anchor_image_node_id).
     end_frame_image_node_id = Column(Integer, ForeignKey("image_nodes.id"), nullable=True)
 
+    # v943 — character-swap render method. NULL on every clip that renders the
+    # normal way, which is every clip that existed before this column. The
+    # worker branches on render_method == 'charswap' and on nothing else, so a
+    # NULL row takes the exact code path it took before.
+    #   render_method:         NULL (legacy Veo render) | 'charswap'
+    #   swap_source_r2_key:    opaque R2 key of the muted source mp4 the swap
+    #                          drives from. The build declares an asset NAME;
+    #                          the key is what the DB stores.
+    #   swap_mode:             'video-led' (avatar image + source video) |
+    #                          'image-led' (start-frame image + motion transfer)
+    #   swap_avatar_upload_id: the ONE character upload whose face is swapped in.
+    #                          Resolved at import; never guessed at render time.
+    # Migrations registered in image_platform.py next to the other clip columns.
+    render_method = Column(String(20), nullable=True)
+    swap_source_r2_key = Column(String(512), nullable=True)
+    swap_mode = Column(String(20), nullable=True)
+    swap_avatar_upload_id = Column(Integer, ForeignKey("image_nodes.id"), nullable=True)
+
     # Status
     status = Column(String(20), default=ClipStatus.PENDING.value)
     retry_count = Column(Integer, default=0)
@@ -551,6 +569,11 @@ class Clip(Base):
             "caption": self.caption,
             "scene_type": self.scene_type,
             "bg_color": self.bg_color,
+            # v943 — charswap binding. All four are None on a legacy clip.
+            "render_method": self.render_method,
+            "swap_source_r2_key": self.swap_source_r2_key,
+            "swap_mode": self.swap_mode,
+            "swap_avatar_upload_id": self.swap_avatar_upload_id,
         }
 
 

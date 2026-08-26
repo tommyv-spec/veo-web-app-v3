@@ -503,6 +503,20 @@ class Client:
         except self._rq.exceptions.Timeout:
             raise PlatformError(EXIT_WORKER, f"STALL: upload timed out: {path}")
 
+    def upload_swap_source(self, path, name):
+        """v943 — store one charswap source mp4 and get back its opaque R2 key."""
+        try:
+            with open(path, "rb") as fh:
+                resp = self.s.post(
+                    self.base + "/api/images/swap-sources",
+                    files={"file": (Path(path).name, fh, "video/mp4")},
+                    data={"name": name},
+                    timeout=600,
+                )
+            return self._check(resp)
+        except self._rq.exceptions.Timeout:
+            raise PlatformError(EXIT_WORKER, f"STALL: swap-source upload timed out: {path}")
+
     def download(self, path, dest_path):
         """Stream a binary file (e.g. an autoedit result mp4) to dest_path.
         Not routed through get() — get() calls resp.json(), which chokes on
@@ -555,6 +569,10 @@ def do_import(client, md_text, args, report):
         payload["product_node_id"] = args.product_node
     if getattr(args, "external_reference_nodes", None):
         payload["external_references"] = args.external_reference_nodes
+    if getattr(args, "swap_source_keys", None):
+        # v943 — {declared asset name -> R2 key}. Absent on every build that
+        # declares no charswap scene, so the import payload is unchanged there.
+        payload["swap_source_videos"] = args.swap_source_keys
     res = client.post("/api/images/import-scene-table", payload)
     _rs = res.get("resync")
     if _rs:
@@ -567,6 +585,77 @@ def do_import(client, md_text, args, report):
                          "waiting_on_parent", "scene_assignments_created")}
     report["scene_nodes"] = res.get("scene_nodes", {})
     return res["batch_id"]
+
+
+SWAP_SOURCE_RE = re.compile(
+    r"^\s*[-*]\s*\*\*swap_source_video:\*\*\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE)
+
+
+def declared_swap_sources(md_text):
+    """Every distinct `- **swap_source_video:**` name the build declares."""
+    seen = []
+    for name in SWAP_SOURCE_RE.findall(md_text or ""):
+        name = name.strip()
+        if name and name not in seen:
+            seen.append(name)
+    return seen
+
+
+def resolve_swap_source_path(name, overrides, md_file):
+    """Local mp4 for one declared source name, or None.
+
+    Two ways to say where the file is, in order: an explicit
+    `--swap-source NAME=path`, or the declared name being a usable path itself
+    (relative to the build file, then to the repo root, then to the cwd).
+    """
+    if name in overrides:
+        return Path(overrides[name]).expanduser()
+    repo_root = Path(__file__).resolve().parent.parent
+    for base in (Path(md_file).resolve().parent, repo_root, Path.cwd()):
+        candidate = (base / name).expanduser()
+        if candidate.exists():
+            return candidate
+    direct = Path(name).expanduser()
+    return direct if direct.exists() else None
+
+
+def upload_swap_sources(client, md_text, args, report):
+    """Upload every declared charswap source once and map name -> R2 key.
+
+    Returns {} for a build with no charswap scene, which is what keeps the
+    import payload identical for every existing build.
+    """
+    names = declared_swap_sources(md_text)
+    if not names:
+        return {}
+    overrides = {}
+    for item in getattr(args, "swap_source", None) or []:
+        key, sep, val = item.partition("=")
+        if not sep or not val:
+            raise PlatformError(EXIT_UNKNOWN,
+                                f"--swap-source wants NAME=path, got: {item}")
+        overrides[key.strip()] = val.strip()
+
+    keys = {}
+    for name in names:
+        path = resolve_swap_source_path(name, overrides, args.md_file)
+        if path is None:
+            raise PlatformError(
+                EXIT_PARSE,
+                f"SWAP SOURCE: the build declares swap_source_video '{name}' but "
+                f"no such file was found. Point at it with "
+                f"--swap-source \"{name}=<path to the mp4>\".",
+            )
+        res = client.upload_swap_source(str(path), name)
+        r2_key = res.get("r2_key")
+        if not r2_key:
+            raise PlatformError(EXIT_UNKNOWN,
+                                f"SWAP SOURCE: upload of {path} returned no key")
+        keys[name] = r2_key
+        print(f"swap source '{name}' -> {r2_key} ({res.get('bytes', '?')} bytes)",
+              flush=True)
+    report["swap_sources"] = keys
+    return keys
 
 
 def load_external_reference_selection(md_file, plan_path=None):
@@ -1142,6 +1231,10 @@ def main(argv=None):
     p.add_argument("--ingredient", action="append", default=[], metavar="NAME=NODEID")
     p.add_argument("--product-node", type=int, help="upload node id of the product (v583 shortcut)")
     p.add_argument(
+        "--swap-source", action="append", default=[], metavar="NAME=PATH",
+        help="v943: local mp4 for a `- **swap_source_video:** NAME` bullet. "
+             "Only needed when the declared name is not itself a usable path.")
+    p.add_argument(
         "--external-refs",
         action="store_true",
         help="opt in to selected_refs from raw/refs/<build>/refs_plan.json (default: off)",
@@ -1383,6 +1476,9 @@ def main(argv=None):
                         f"same as choosing a variant); scenes hold in draft until then",
                         flush=True,
                     )
+            # v943 — a charswap scene needs its source clip in R2 BEFORE the
+            # import runs, because the import binds the key onto the scene row.
+            args.swap_source_keys = upload_swap_sources(client, md_text, args, report)
             batch_id = do_import(client, md_text, args, report)
             print(f"import: batch {batch_id}", flush=True)
         report["batch_id"] = batch_id
