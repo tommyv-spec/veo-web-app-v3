@@ -206,6 +206,13 @@ def _bootstrap_browser_driver():
         return None
 
 
+# --firefox must take effect BEFORE the driver import below: BROWSER_MODE is
+# resolved when this module loads, so the flag parsed later in main() could
+# never change the engine — the worker only warned and silently ran on Chrome.
+# Pre-scan argv here so `--firefox` alone is enough (no env var needed).
+if __name__ == "__main__" and "--firefox" in sys.argv:
+    os.environ["BROWSER_MODE"] = "firefox"
+
 _bd = _bootstrap_browser_driver()
 BROWSER_MODE = _bd.resolve_browser_mode() if _bd else os.environ.get("BROWSER_MODE", "stealth")
 FIREFOX_MODE = bool(_bd and _bd.is_firefox_mode(BROWSER_MODE))
@@ -11431,18 +11438,18 @@ Examples:
              'and an account-specific worker session/golden.')
     parser.add_argument('--firefox', action='store_true',
         help="run on Firefox (Camoufox) instead of Chrome — the engine that mints "
-             "accepted reCAPTCHA tokens. Set BROWSER_MODE=firefox in the environment "
-             "as well: the browser driver is chosen when this module is imported, "
-             "which happens before this flag can be read.")
+             "accepted reCAPTCHA tokens. The flag alone is enough when running "
+             "this file directly (argv is pre-scanned before the driver import); "
+             "BROWSER_MODE=firefox in the environment also works.")
     parser.add_argument('--no-warmup', action='store_true',
         help='Skip Chrome warmup (faster but may trigger reCAPTCHA)')
     
     args = parser.parse_args()
 
-    # --firefox cannot change which sync_playwright was imported (that happened
-    # at module load), so it only reports the mismatch and picks the right
-    # profile. Setting BROWSER_MODE=firefox in the environment is what actually
-    # selects the engine.
+    # Normally unreachable: the argv pre-scan at module load already set
+    # BROWSER_MODE=firefox for a direct `python image_worker.py --firefox` run.
+    # Can still fire if main() is called from another entry script that built
+    # its own argv — the driver import happened before this flag was read.
     if args.firefox and not FIREFOX_MODE:
         print("[IMAGE] ⚠ --firefox was passed but the module imported the Chrome driver. "
               "Relaunch with BROWSER_MODE=firefox set in the environment.", flush=True)
