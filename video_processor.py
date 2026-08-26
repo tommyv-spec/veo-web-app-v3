@@ -5698,6 +5698,35 @@ def export_support_track(support_clips: list, master_duration: float,
     }
 
 
+def _v943_1_atempo_chain(speed: float) -> str:
+    """An atempo filter chain that retimes audio by `speed`.
+
+    ffmpeg's atempo only accepts 0.5-100.0 in one step, and the v888 slot fill
+    can ask for well under 0.5 when a short clip is stretched into a long slot.
+    Chaining multiplies: 0.25x = atempo=0.5,atempo=0.5.
+    """
+    try:
+        s = float(speed)
+    except (TypeError, ValueError):
+        return "atempo=1.000000"
+    if s <= 0:
+        return "atempo=1.000000"
+    parts = []
+    # Guard the loops: 0.5**16 and 100**8 are far outside any real slot fill.
+    for _ in range(16):
+        if s >= 0.5:
+            break
+        parts.append("atempo=0.5")
+        s /= 0.5
+    for _ in range(8):
+        if s <= 100.0:
+            break
+        parts.append("atempo=100.0")
+        s /= 100.0
+    parts.append(f"atempo={s:.6f}")
+    return ",".join(parts)
+
+
 def export_final_video(
     clip_info: List[dict],
     output_path: Path,
@@ -5932,15 +5961,44 @@ def export_final_video(
                             f"@ {_speed:.3f}x ({'slow-mo' if _speed < 1 else 'speed-up'})",
                             flush=True,
                         )
+                        # v943.1 — KEEP A RESTORED SOURCE TRACK. The retime
+                        # branch mapped video only and passed `-an`, which was
+                        # harmless while every clip here was silent by
+                        # contract. A charswap clip that declared
+                        # `audio: source-original` arrives with its source
+                        # track already muxed on, and `-an` threw it away
+                        # after the export had said it applied it. Clips
+                        # without swap_audio keep the old video-only command
+                        # exactly, so nothing else changes.
+                        _v9431_audio = bool(info.get("swap_audio_restored"))
+                        _fc = (
+                            f"[0:v]trim=start=0:duration={_used:.6f},"
+                            f"setpts=(PTS-STARTPTS)/{_speed:.6f}[v]"
+                        )
+                        if _v9431_audio:
+                            _fc += (
+                                f";[0:a]atrim=start=0:duration={_used:.6f},"
+                                f"asetpts=PTS-STARTPTS,"
+                                f"{_v943_1_atempo_chain(_speed)}[a]"
+                            )
                         cmd = [
                             FFMPEG_BIN, "-y",
                             "-i", str(clip_path),
-                            "-filter_complex",
-                            f"[0:v]trim=start=0:duration={_used:.6f},"
-                            f"setpts=(PTS-STARTPTS)/{_speed:.6f}[v]",
-                            "-map", "[v]", "-an",
+                            "-filter_complex", _fc,
+                            "-map", "[v]",
+                        ]
+                        if _v9431_audio:
+                            cmd += ["-map", "[a]"]
+                        else:
+                            cmd += ["-an"]
+                        cmd += [
                             "-t", f"{td:.6f}",
                             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                        ]
+                        if _v9431_audio:
+                            cmd += ["-c:a", "aac", "-b:a", "192k",
+                                    "-ar", "48000", "-ac", "2"]
+                        cmd += [
                             "-movflags", "+faststart",
                             str(trimmed_file),
                         ]

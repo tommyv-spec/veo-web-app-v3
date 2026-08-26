@@ -19876,6 +19876,13 @@ def charswap_mode_refusal(clip):
     image-led therefore has one hard precondition: the clip must carry a
     start frame. Without it there is no composite to animate, so the worker
     refuses rather than quietly rendering video-led under the other name.
+
+    The precondition is checked on the SAME two fields charswap_fetch_inputs
+    reads — `swap_start_frame_url` / `start_frame_url`. A local `start_frame`
+    path used to pass here, which promised a case the fetcher could not run:
+    it would clear this gate and then die at the download with "missing
+    image_url". Accepting only what the fetcher consumes keeps the two in one
+    contract.
     """
     try:
         mode = (clip.get('swap_mode') or 'video-led').strip().lower()
@@ -19884,9 +19891,9 @@ def charswap_mode_refusal(clip):
     if mode == 'video-led':
         return None
     if mode == 'image-led':
-        if clip.get('start_frame_url') or clip.get('start_frame'):
+        if clip.get('swap_start_frame_url') or clip.get('start_frame_url'):
             return None
-        return ("image-led needs the clip's chosen start frame (the "
+        return ("image-led needs the clip's chosen start frame URL (the "
                 "pose-matched composite) and this clip has none; choose a "
                 "start frame or render video-led")
     return f"unknown swap_mode {mode!r}; render video-led or wait"
@@ -21315,11 +21322,29 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # "dialog btns = []" (measured live on the first pilot run,
             # job de7f9331). Two chips = the same shape as start+end frame,
             # which is exactly what set_clip_input_mode flips the tab for.
+            #
+            # FAIL CLOSED when the tab did not flip. _omni_ingredients_mode
+            # returns False for every model that is not Omni, so on any other
+            # model set_clip_input_mode lands on Frames — where there is no
+            # add_2 Create button at all. Proceeding from here burned a real
+            # render slot on a guaranteed "dialog btns = []" failure and left
+            # the clip looking like a Flow flake. Until a forced-Ingredients
+            # path exists that can VERIFY the selected tab, charswap runs on
+            # the Omni model only.
             _cs_mode = set_clip_input_mode(page, True, True, context=_cs_ctx)
             if _cs_mode != 'Ingredients':
-                print(f"{_cs_ctx} ⚠ composer stayed on {_cs_mode} "
-                      f"(model={getattr(page, '_veo_model', '-')}) — the "
-                      f"ingredient attach will not find add_2", flush=True)
+                _cs_tab_why = (
+                    f"charswap needs the Ingredients tab; the composer stayed "
+                    f"on {_cs_mode} because model="
+                    f"{getattr(page, '_veo_model', None) or '-'} does not offer "
+                    f"it — charswap requires the Omni model until a forced-"
+                    f"Ingredients path exists"
+                )
+                print(f"{_cs_ctx} FAILED CLOSED: {_cs_tab_why}", flush=True)
+                update_clip_status(clip['id'], 'failed',
+                                   error_message=_cs_tab_why[:200])
+                permanently_failed_clips.add(clip_index)
+                continue
             _cs_ok, _cs_chips = charswap_attach_and_prompt(
                 page, _cs_avatar, _cs_video, prompt, context=_cs_ctx,
                 swap_mode=(clip.get('swap_mode') or 'video-led'))

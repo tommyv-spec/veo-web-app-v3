@@ -607,7 +607,32 @@ def test_image_led_runs_when_the_clip_has_a_start_frame():
     refusal = _worker_function("charswap_mode_refusal")
     assert refusal({"swap_mode": "image-led",
                     "start_frame_url": "https://x/frame.png"}) is None
-    assert refusal({"swap_mode": "image-led", "start_frame": "jobs/x.png"}) is None
+    assert refusal({"swap_mode": "image-led",
+                    "swap_start_frame_url": "https://x/frame.png"}) is None
+
+
+def test_the_refusal_accepts_only_what_the_fetcher_consumes():
+    """rev 503 contract mismatch: the refusal used to pass a clip carrying a
+    local `start_frame` path, but charswap_fetch_inputs reads only
+    swap_start_frame_url / start_frame_url — so that clip cleared the gate and
+    then died at the download. The two must agree on the same fields."""
+    refusal = _worker_function("charswap_mode_refusal")
+    msg = refusal({"swap_mode": "image-led", "start_frame": "jobs/x.png"})
+    assert msg is not None, "a local start_frame path is not something the fetcher can use"
+    assert "start frame" in msg
+
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    fetch = src[src.index("\ndef charswap_fetch_inputs("):]
+    fetch = fetch[:fetch.index("\ndef ", 1)]
+    consumed = [f for f in ("swap_start_frame_url", "start_frame_url")
+                if f in fetch]
+    assert consumed == ["swap_start_frame_url", "start_frame_url"]
+    gate = src[src.index("\ndef charswap_mode_refusal("):]
+    gate = gate[:gate.index("\ndef ", 1)]
+    accepted = gate[gate.index("if mode == 'image-led':"):]
+    for field in consumed:
+        assert f"clip.get('{field}')" in accepted
+    assert "clip.get('start_frame')" not in accepted
 
 
 def test_image_led_without_a_start_frame_is_refused():
@@ -810,34 +835,34 @@ def _clip(**kw):
 
 def test_a_legacy_clip_never_gets_source_audio():
     from main import charswap_export_audio_key
-    assert charswap_export_audio_key(_clip()) is None
+    assert charswap_export_audio_key(_clip(), "7") is None
 
 
 def test_a_swap_clip_that_did_not_ask_stays_silent():
     from main import charswap_export_audio_key
     assert charswap_export_audio_key(_clip(
         render_method="charswap", swap_audio="none",
-        swap_source_r2_key="swap-sources/7/abc.mp4")) is None
+        swap_source_r2_key="swap-sources/7/abc.mp4"), "7") is None
     assert charswap_export_audio_key(_clip(
         render_method="charswap",
-        swap_source_r2_key="swap-sources/7/abc.mp4")) is None
+        swap_source_r2_key="swap-sources/7/abc.mp4"), "7") is None
 
 
 def test_a_swap_clip_that_asked_returns_its_source_key():
     from main import charswap_export_audio_key
     assert charswap_export_audio_key(_clip(
         render_method="charswap", swap_audio="source-original",
-        swap_source_r2_key="swap-sources/7/abc.mp4")
+        swap_source_r2_key="swap-sources/7/abc.mp4"), "7"
     ) == "swap-sources/7/abc.mp4"
 
 
 def test_asking_without_a_stored_source_is_silent_not_an_error():
     from main import charswap_export_audio_key
     assert charswap_export_audio_key(_clip(
-        render_method="charswap", swap_audio="source-original")) is None
+        render_method="charswap", swap_audio="source-original"), "7") is None
     assert charswap_export_audio_key(_clip(
         render_method="charswap", swap_audio="source-original",
-        swap_source_r2_key="   ")) is None
+        swap_source_r2_key="   "), "7") is None
 
 
 def test_a_normal_clip_asking_for_source_audio_is_still_silent():
@@ -846,7 +871,7 @@ def test_a_normal_clip_asking_for_source_audio_is_still_silent():
     from main import charswap_export_audio_key
     assert charswap_export_audio_key(_clip(
         swap_audio="source-original",
-        swap_source_r2_key="swap-sources/7/abc.mp4")) is None
+        swap_source_r2_key="swap-sources/7/abc.mp4"), "7") is None
 
 
 def test_the_decision_reads_a_clip_object_too():
@@ -857,7 +882,8 @@ def test_the_decision_reads_a_clip_object_too():
         swap_audio = "Source-Original"
         swap_source_r2_key = "swap-sources/7/abc.mp4"
 
-    assert charswap_export_audio_key(_Row()) == "swap-sources/7/abc.mp4"
+    assert charswap_export_audio_key(_Row(), "7") == "swap-sources/7/abc.mp4"
+    assert charswap_export_audio_key(_Row(), 7) == "swap-sources/7/abc.mp4"
 
 
 def test_the_mux_copies_the_video_and_re_encodes_only_the_audio():
@@ -891,3 +917,400 @@ def test_a_source_with_no_audio_never_fails_the_export():
     assert "export continues" in src
     # the temp source and the temp output are both cleaned in `finally`
     assert "finally:" in src
+
+
+# =============================================================================
+# 11. rev 503 — the five blockers Codex found in the live swap/audio code
+# =============================================================================
+# Each block below pins ONE of them. They are grouped by blocker, not by file,
+# because that is how the review reads: "this cannot happen again", not "this
+# line says the right thing".
+
+
+# --- 11.1 a charswap on a non-Omni model must stop BEFORE the attach --------
+# _omni_ingredients_mode returns False for every model that is not Omni, so
+# set_clip_input_mode lands on Frames — a tab with no add_2 Create button at
+# all. The arm used to print a warning and walk into that known failure,
+# burning a render slot on a certainty.
+
+def test_a_composer_left_on_frames_never_reaches_the_attach():
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    arm = src.index("if charswap_selected(clip):")
+    mode = src.index("_cs_mode = set_clip_input_mode(", arm)
+    guard = src.index("if _cs_mode != 'Ingredients':", mode)
+    attach = src.index("charswap_attach_and_prompt(", guard)
+    assert mode < guard < attach
+
+    # everything between the guard and the attach is the refusal, and it has
+    # to end the iteration rather than fall through
+    refusal = src[guard:attach]
+    assert "FAILED CLOSED" in refusal
+    assert "update_clip_status(clip['id'], 'failed'" in refusal
+    assert "permanently_failed_clips.add(clip_index)" in refusal
+    assert "continue" in refusal
+    # and it has to say WHY, naming the model restriction
+    assert "Omni" in refusal
+    assert "Ingredients" in refusal
+
+
+def test_the_non_omni_models_are_the_ones_that_land_on_frames():
+    """The guard is only worth anything because this is still true: no model
+    other than Omni gets the Ingredients tab, whatever the clip asks for."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    ns = {}
+    for name in ("is_omni", "_omni_ingredients_mode"):
+        start = src.index(f"\ndef {name}(")
+        rest = src[start + 1:]
+        exec(rest[:rest.index("\ndef ", 1)], ns)  # noqa: S102 — our own file
+    omni = ns["_omni_ingredients_mode"]
+
+    class _Page:
+        def __init__(self, model):
+            self._veo_model = model
+            # what the charswap arm's set_clip_input_mode(page, True, True) sets
+            self._clip_has_end_frame = True
+
+    assert omni(_Page("Veo 3.1 - Omni Flash")) is True
+    for other in ("Veo 3.1 - Quality", "Veo 3.1 - Fast", "Veo 2", "", None):
+        assert omni(_Page(other)) is False, other
+
+
+# --- 11.2a a foreign swap source is refused at JOB CREATION -----------------
+
+def test_job_creation_refuses_a_swap_source_key_from_another_user():
+    """POST /api/jobs takes swap_source_r2_key from the request body, so it is
+    caller input. The image import already guards it; this route did not."""
+    src = _function_source(_HERE / "main.py", "_create_job_impl")
+    guard = src.index('_v943_own_prefix = f"swap-sources/{current_user.id}/"')
+    creation = src.index("job = Job(")
+    assert guard < creation, "the guard has to run before anything persists"
+    block = src[guard:creation]
+    assert "swap_source_r2_key" in block
+    assert "status_code=400" in block
+    assert "v943 owner scoping" in block
+    assert '".." in _key' in block
+
+
+def test_the_two_owner_guards_use_the_same_prefix_wording():
+    """Same rule in both places, so one cannot drift into a different shape."""
+    import inspect
+
+    import image_platform
+    ip = inspect.getsource(image_platform._import_scene_table_impl)
+    mn = _function_source(_HERE / "main.py", "_create_job_impl")
+    needle = 'f"swap-sources/{current_user.id}/"'
+    assert needle in ip and needle in mn
+
+
+# --- 11.2b and independently at the EXPORT read ----------------------------
+# The worker download route is owner-scoped; this export read was not. The
+# check lives inside the pure decision function on purpose: it lands before
+# storage.download_file is ever called.
+
+def test_the_export_refuses_a_source_stored_under_another_user():
+    from main import charswap_export_audio_key
+    row = _clip(render_method="charswap", swap_audio="source-original",
+                swap_source_r2_key="swap-sources/u1/abc.mp4")
+    assert charswap_export_audio_key(row, "u1") == "swap-sources/u1/abc.mp4"
+    assert charswap_export_audio_key(row, "u2") is None
+    assert charswap_export_audio_key(row, None) is None
+    # a key outside the swap-sources prefix is not ownable at all
+    assert charswap_export_audio_key(
+        _clip(render_method="charswap", swap_audio="source-original",
+              swap_source_r2_key="jobs/u1/outputs/a.mp4"), "u1") is None
+    assert charswap_export_audio_key(
+        _clip(render_method="charswap", swap_audio="source-original",
+              swap_source_r2_key="swap-sources/u1/../u2/a.mp4"), "u1") is None
+
+
+def test_a_foreign_key_is_refused_before_any_storage_read(tmp_path):
+    """The end-to-end shape of the same thing: run the real pass with a real
+    fake storage and prove it was never asked for the file."""
+    import backends.storage as bs
+    import main as _main
+
+    fake = _FakeStorage()
+    original = (bs.is_storage_configured, bs.get_storage)
+    bs.is_storage_configured = lambda: True
+    bs.get_storage = lambda: fake
+    try:
+        class _Row:
+            id = 1
+            render_method = "charswap"
+            swap_audio = "source-original"
+            swap_source_r2_key = "swap-sources/u1/abc.mp4"
+
+        clip_file = tmp_path / "clip.mp4"
+        clip_file.write_bytes(b"not-really-a-render")
+        rows = [{"_clip_db_id": 1, "path": clip_file}]
+        done = _main._v943_1_apply_source_audio(
+            [_Row()], rows, "u2", str(tmp_path))
+        assert done == 0
+        assert fake.downloaded_to == [], "storage was read for a foreign key"
+        assert rows[0]["path"] == clip_file      # lineup untouched
+    finally:
+        bs.is_storage_configured, bs.get_storage = original
+
+
+def test_the_export_passes_the_jobs_user_into_the_audio_pass():
+    src = _function_source(_HERE / "main.py", "_do_export_final")
+    call = src.index("_v943_1_apply_source_audio,")
+    tail = src[call:call + 300]
+    assert "job.user_id" in tail
+
+
+# --- 11.3 the export must not rewrite the canonical clip file ---------------
+# _download_clip writes output_dir/clip.output_filename and re-downloads only
+# when it is missing, and the per-clip output endpoint serves that same file
+# under an immutable URL. Muxing over it changed what a clip URL returned and
+# poisoned every later export on the instance.
+
+def _make_silent_video(path, seconds, size="128x128"):
+    import subprocess
+    from video_processor import FFMPEG_BIN
+    subprocess.run([
+        FFMPEG_BIN, "-y", "-loglevel", "error",
+        "-f", "lavfi", "-i", f"color=c=blue:s={size}:d={seconds}:r=24",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-t", f"{seconds}",
+        str(path)], check=True)
+    return path
+
+
+def _make_sounded_video(path, seconds, size="128x128"):
+    import subprocess
+    from video_processor import FFMPEG_BIN
+    subprocess.run([
+        FFMPEG_BIN, "-y", "-loglevel", "error",
+        "-f", "lavfi", "-i", f"color=c=green:s={size}:d={seconds}:r=24",
+        "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-shortest", "-t", f"{seconds}",
+        str(path)], check=True)
+    return path
+
+
+def _probe(path):
+    from video_processor import ffprobe_json
+    return ffprobe_json(pathlib.Path(str(path)))
+
+
+def _duration(path):
+    from video_processor import get_duration
+    return float(get_duration(_probe(path)))
+
+
+def _has_audio(path):
+    return any((s.get("codec_type") or "") == "audio"
+               for s in (_probe(path).get("streams") or []))
+
+
+def _mean_volume_db(path):
+    """Mean volume of the file's audio, or None when it has no audio at all.
+
+    Stream presence alone cannot answer "did the track survive": concat_videos
+    gives every output an audio stream, so a dropped track comes back as a
+    SILENT one, not a missing one. A 440Hz sine reads around -3dB; digital
+    silence reads -91dB.
+    """
+    import re
+    import subprocess
+    from video_processor import FFMPEG_BIN
+    if not _has_audio(path):
+        return None
+    proc = subprocess.run(
+        [FFMPEG_BIN, "-hide_banner", "-i", str(path),
+         "-af", "volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True)
+    m = re.search(r"mean_volume:\s*(-?[\d.]+) dB", (proc.stderr or ""))
+    assert m, f"volumedetect said nothing: {(proc.stderr or '')[-400:]}"
+    return float(m.group(1))
+
+
+def test_the_mux_leaves_the_canonical_clip_byte_identical(tmp_path):
+    import hashlib
+
+    import backends.storage as bs
+    import main as _main
+
+    canonical_dir = tmp_path / "outputs"
+    canonical_dir.mkdir()
+    canonical = _make_silent_video(canonical_dir / "clip_0.mp4", 2)
+    before = hashlib.sha256(canonical.read_bytes()).hexdigest()
+
+    source = _make_sounded_video(tmp_path / "source.mp4", 2)
+    payload = source.read_bytes()
+
+    export_dir = tmp_path / "export_scoped"
+    export_dir.mkdir()
+
+    fake = _FakeStorage(payload=payload)
+    original = (bs.is_storage_configured, bs.get_storage)
+    bs.is_storage_configured = lambda: True
+    bs.get_storage = lambda: fake
+    try:
+        class _Row:
+            id = 42
+            render_method = "charswap"
+            swap_audio = "source-original"
+            swap_source_r2_key = "swap-sources/u1/abc.mp4"
+
+        rows = [{"_clip_db_id": 42, "path": canonical}]
+        done = _main._v943_1_apply_source_audio(
+            [_Row()], rows, "u1", str(export_dir))
+    finally:
+        bs.is_storage_configured, bs.get_storage = original
+
+    assert done == 1
+    # the canonical file is untouched, byte for byte
+    assert hashlib.sha256(canonical.read_bytes()).hexdigest() == before
+    assert not _has_audio(canonical)
+    # and only THIS export run's lineup follows the muxed copy
+    muxed = pathlib.Path(rows[0]["path"])
+    assert muxed != canonical
+    assert muxed.parent == export_dir
+    assert _has_audio(muxed)
+    assert rows[0]["swap_audio_restored"] is True
+
+
+def test_the_export_copies_are_cleaned_up_after_the_run():
+    src = _function_source(_HERE / "main.py", "_do_export_final")
+    made = src.index("_v9431_dir = ")
+    cleanup = src.index("rmtree(_v9431_dir", made)
+    assert made < cleanup
+    # the cleanup sits in the function's finally, so a failed export cleans too
+    assert "finally:" in src[:cleanup]
+    assert src.rindex("finally:", 0, cleanup) > src.index("process_export,")
+
+
+# --- 11.4 short source audio must not truncate the picture -----------------
+
+def test_the_mux_pads_the_audio_and_cuts_at_the_render_length():
+    from main import _v943_1_mux_argv
+    argv = _v943_1_mux_argv("render.mp4", "source.mp4", "out.mp4",
+                            render_duration=4.0)
+    assert argv[argv.index("-af") + 1] == "apad"
+    assert argv[argv.index("-t") + 1] == "4.000000"
+    # with an explicit length, -shortest would defeat the padding
+    assert "-shortest" not in argv
+    # the video is still copied, never re-encoded
+    assert argv[argv.index("-c:v") + 1] == "copy"
+
+
+def test_an_unprobeable_render_still_stops_the_pad_somewhere():
+    """apad without a length runs forever. When the duration could not be
+    read, -shortest is the only stop left — worse output, never a hang."""
+    from main import _v943_1_mux_argv
+    for bad in (None, 0, 0.0, "", "nonsense"):
+        argv = _v943_1_mux_argv("r.mp4", "s.mp4", "o.mp4", render_duration=bad)
+        assert "-shortest" in argv, bad
+        assert "-t" not in argv, bad
+
+
+def test_two_seconds_of_audio_over_a_four_second_render_keeps_four_seconds(tmp_path):
+    """The real thing, through ffmpeg. `-shortest` alone cut this to 2s."""
+    import subprocess
+
+    render = _make_silent_video(tmp_path / "render.mp4", 4)
+    source = _make_sounded_video(tmp_path / "source.mp4", 2)
+    out = tmp_path / "out.mp4"
+
+    from main import _v943_1_mux_argv, _v943_1_render_duration
+    dur = _v943_1_render_duration(render)
+    assert 3.8 < dur < 4.2, dur
+    proc = subprocess.run(
+        _v943_1_mux_argv(render, source, out, render_duration=dur),
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-500:]
+    assert 3.8 < _duration(out) < 4.2, "the picture was truncated to the audio"
+    assert _has_audio(out)
+
+
+def test_longer_audio_than_the_render_is_trimmed_not_stretched(tmp_path):
+    import subprocess
+
+    render = _make_silent_video(tmp_path / "render.mp4", 2)
+    source = _make_sounded_video(tmp_path / "source.mp4", 5)
+    out = tmp_path / "out.mp4"
+
+    from main import _v943_1_mux_argv, _v943_1_render_duration
+    proc = subprocess.run(
+        _v943_1_mux_argv(render, source, out,
+                         render_duration=_v943_1_render_duration(render)),
+        capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr[-500:]
+    assert 1.8 < _duration(out) < 2.3
+
+
+# --- 11.5 timeline retiming must not throw the restored track away ----------
+
+def test_the_atempo_chain_covers_speeds_ffmpeg_will_not_take_in_one_step():
+    from video_processor import _v943_1_atempo_chain
+    assert _v943_1_atempo_chain(1.0) == "atempo=1.000000"
+    assert _v943_1_atempo_chain(2.0) == "atempo=2.000000"
+    # below 0.5 ffmpeg refuses a single atempo, so it has to chain
+    assert _v943_1_atempo_chain(0.25) == "atempo=0.5,atempo=0.500000"
+    assert _v943_1_atempo_chain(0.1).count("atempo=") >= 2
+    # nonsense in, a harmless pass-through out
+    for bad in (0, -1, None, "x"):
+        assert _v943_1_atempo_chain(bad) == "atempo=1.000000"
+
+
+def test_a_clip_without_restored_audio_keeps_the_old_video_only_retime():
+    """Nothing changes for the clips this feature does not touch."""
+    src = _function_source(_HERE / "video_processor.py", "export_final_video")
+    branch = src.index("[VideoProcessor/v888] clip ")
+    block = src[branch:branch + 2500]
+    assert 'info.get("swap_audio_restored")' in block
+    assert '"-an"' in block, "the silent path must still pass -an"
+    assert '"-map", "[a]"' in block
+
+
+def test_a_retimed_clip_with_restored_audio_keeps_its_track(tmp_path):
+    """Integration: run the real export trim pass over a sounded clip that has
+    to be stretched into a longer timeline slot, and probe the result."""
+    import video_processor as vp
+
+    sounded = _make_sounded_video(tmp_path / "clip.mp4", 2)
+    out = tmp_path / "final.mp4"
+
+    info = {
+        "path": sounded,
+        "clip_index": 0,
+        "cut_mode": "timeline",
+        "target_duration_s": 3.0,     # longer than the source -> v888 retime
+        "swap_audio_restored": True,
+        "dialogue_text": "",
+        "skip_start_trim": True,
+    }
+    vp.export_final_video(
+        clip_info=[info], output_path=out,
+        frames_to_cut_start=0, frames_to_cut_end=0,
+        remove_silence=False, dialogue_texts=[""])
+
+    assert out.exists()
+    assert 2.7 < _duration(out) < 3.3, _duration(out)
+    assert _has_audio(out), "the retime branch dropped the restored track"
+    vol = _mean_volume_db(out)
+    assert vol is not None and vol > -50, f"the track is there but silent ({vol} dB)"
+
+
+def test_the_same_retime_without_the_flag_is_still_silent(tmp_path):
+    """Proves the previous test measured the flag, not ffmpeg being generous.
+
+    The final file always HAS an audio stream — concat_videos gives every
+    output one. Without the flag that stream is digital silence."""
+    import video_processor as vp
+
+    sounded = _make_sounded_video(tmp_path / "clip.mp4", 2)
+    out = tmp_path / "final.mp4"
+    vp.export_final_video(
+        clip_info=[{
+            "path": sounded, "clip_index": 0, "cut_mode": "timeline",
+            "target_duration_s": 3.0, "dialogue_text": "",
+            "skip_start_trim": True,
+        }],
+        output_path=out, frames_to_cut_start=0, frames_to_cut_end=0,
+        remove_silence=False, dialogue_texts=[""])
+    assert out.exists()
+    vol = _mean_volume_db(out)
+    assert vol is None or vol < -60, f"expected silence, measured {vol} dB"

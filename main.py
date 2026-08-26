@@ -2330,7 +2330,34 @@ async def _create_job_impl(
     # Convert dialogue lines to dict, preserving all clip settings
     dialogue_list = [d.model_dump() for d in request.dialogue_lines]
     print(f"[main.py] Dialogue lines with clip settings: {json.dumps(dialogue_list, indent=2)}")
-    
+
+    # v943 owner scoping — POST /api/jobs takes swap_source_r2_key straight
+    # from the request body, so it is caller input, not a fact. The image
+    # import already refuses a key outside the caller's own prefix
+    # (image_platform.py `_v943_own_prefix`); this route had no such guard, so
+    # any authenticated user could bind another account's stored source into a
+    # job and have the export read it. Same rule, same wording family, checked
+    # BEFORE the Job row is written so nothing persists on refusal.
+    _v943_own_prefix = f"swap-sources/{current_user.id}/"
+    for _i, _line in enumerate(dialogue_list):
+        if not isinstance(_line, dict):
+            continue
+        _key = _line.get('swap_source_r2_key')
+        if _key is None:
+            continue
+        _key = str(_key)
+        if not _key.startswith(_v943_own_prefix) or ".." in _key:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Clip {_i}: swap_source_r2_key is not one of yours. A "
+                    f"charswap source must be uploaded through POST "
+                    f"/api/images/swap-sources, which stores it under "
+                    f"{_v943_own_prefix!r} (v943 owner scoping)."
+                ),
+            )
+
+
     # Convert scenes if provided (storyboard mode)
     scenes_list = None
     if request.scenes:
@@ -11601,14 +11628,22 @@ def _requeue_local_autoedits_on_shutdown() -> int:
 # today and the rest of the video ships.
 
 
-def charswap_export_audio_key(clip) -> Optional[str]:
+def charswap_export_audio_key(clip, owner_user_id) -> Optional[str]:
     """The R2 key whose audio belongs over this clip's segment, or None.
 
     THE decision, kept pure so it can be tested without R2, ffmpeg or a
-    database: three facts have to line up — the clip is a charswap render, it
-    asked for source audio, and it actually has a stored source to take it
-    from. A clip that asked for it but carries no source key is not an error
-    here; it just has nothing to mux, which is the same silent outcome.
+    database: FOUR facts have to line up — the clip is a charswap render, it
+    asked for source audio, it actually has a stored source to take it from,
+    and that source belongs to the job's own user. A clip that asked for it
+    but carries no source key is not an error here; it just has nothing to
+    mux, which is the same silent outcome.
+
+    `owner_user_id` is REQUIRED, and it is the job's user id, never anything
+    from the clip row. The export read used to trust the stored key outright:
+    the worker download route is owner-scoped, but this one was not, so a key
+    written under another account's prefix would have been fetched here. The
+    ownership check happens in this pure function precisely so it lands BEFORE
+    any storage read.
 
     Takes a Clip row or a plain dict, so a test does not need the ORM.
     """
@@ -11622,7 +11657,13 @@ def charswap_export_audio_key(clip) -> Optional[str]:
     if str(_field("swap_audio") or "").strip().lower() != "source-original":
         return None
     key = str(_field("swap_source_r2_key") or "").strip()
-    return key or None
+    if not key:
+        return None
+    if owner_user_id is None or not _v943_swap_source_owned_by(key, owner_user_id):
+        print(f"[v943.1] REFUSED: source key {key!r} is not under "
+              f"swap-sources/{owner_user_id}/ — clip stays silent", flush=True)
+        return None
+    return key
 
 
 def _v943_1_has_audio_stream(path) -> bool:
@@ -11634,46 +11675,85 @@ def _v943_1_has_audio_stream(path) -> bool:
     )
 
 
-def _v943_1_mux_argv(render_path, source_path, out_path) -> list:
+def _v943_1_render_duration(path) -> float:
+    """The render's own duration in seconds, or 0.0 when it cannot be read."""
+    try:
+        from video_processor import get_duration
+        return float(get_duration(_v943_probe_source(path)) or 0.0)
+    except Exception as e:
+        print(f"[v943.1] could not probe render duration for "
+              f"{os.path.basename(str(path))}: {e}", flush=True)
+        return 0.0
+
+
+def _v943_1_mux_argv(render_path, source_path, out_path,
+                     render_duration=None) -> list:
     """The ffmpeg call that lays the source's audio over the render.
 
     The video stream is COPIED, never re-encoded — this clip has already been
     rendered once and a second encode would cost quality for nothing. Only the
-    audio is transcoded, to the aac the concat step expects. `-shortest` keeps
-    the segment at whichever of the two is shorter, so a source that is a
-    fraction longer than the render cannot stretch the timeline.
+    audio is transcoded, to the aac the concat step expects.
+
+    THE VIDEO SETS THE LENGTH. The first version used `-shortest` alone, which
+    cuts to whichever input is shorter — so a source audio one second short of
+    the render silently chopped a second off the PICTURE. Now the audio is
+    padded with silence (`apad`) and the output is cut at the render's own
+    duration (`-t`), so short audio ends in silence and long audio is trimmed;
+    the visual segment keeps every frame either way. `-shortest` stays as the
+    belt-and-braces stop for the case where the duration could not be probed
+    (render_duration falsy) — apad would otherwise run forever.
     """
     try:
         from video_processor import FFMPEG_BIN as _ffmpeg
     except Exception:
         _ffmpeg = "ffmpeg"
-    return [
+    argv = [
         _ffmpeg, "-y", "-loglevel", "error", "-nostats",
         "-i", str(render_path),
         "-i", str(source_path),
         "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        "-shortest",
-        "-movflags", "+faststart",
-        str(out_path),
+        "-af", "apad",
     ]
+    try:
+        _dur = float(render_duration or 0.0)
+    except (TypeError, ValueError):
+        _dur = 0.0
+    if _dur > 0:
+        argv += ["-t", f"{_dur:.6f}"]
+    else:
+        argv += ["-shortest"]
+    argv += ["-movflags", "+faststart", str(out_path)]
+    return argv
 
 
-def _v943_1_apply_source_audio(clips, rows) -> int:
+def _v943_1_apply_source_audio(clips, rows, owner_user_id, export_dir) -> int:
     """Mux source audio onto every downloaded clip that asked for it.
 
     `clips` are the Clip rows; `rows` are the per-clip dicts the download pass
     produced (they carry `_clip_db_id` and the local `path`). Returns how many
     segments got audio. Never raises.
+
+    `owner_user_id` is the JOB's user id. Every key is checked against
+    swap-sources/{owner_user_id}/ inside charswap_export_audio_key, so a
+    foreign key never reaches storage.download_file at all.
+
+    `export_dir` is a temp directory that belongs to THIS export run, and the
+    muxed file is written there — never over the canonical clip. The first
+    version moved the muxed file onto `output_dir / clip.output_filename`,
+    which is the same path the per-clip output endpoint serves under an
+    immutable URL: one export silently changed what a clip URL returned and
+    poisoned every later export on that instance. Now only this run's row
+    `path` points at the copy; the canonical file stays byte-identical and the
+    copy dies with the export.
     """
-    import shutil as _shutil
     import subprocess as _sp
     import tempfile as _tf
 
     wanted = {}
     for c in clips:
-        key = charswap_export_audio_key(c)
+        key = charswap_export_audio_key(c, owner_user_id)
         if key:
             wanted[c.id] = key
     if not wanted:
@@ -11729,20 +11809,30 @@ def _v943_1_apply_source_audio(clips, rows) -> int:
                       f"id={clip_id} stays silent (export continues)", flush=True)
                 continue
 
-            out_path = str(render_path.with_name(render_path.stem + "_v9431.mp4"))
-            argv = _v943_1_mux_argv(render_path, src_path, out_path)
+            # EXPORT-SCOPED destination. Same name, different directory: the
+            # canonical render under output_dir/ is only ever READ here.
+            out_path = str(Path(export_dir) /
+                           f"{render_path.stem}_v9431_{clip_id}.mp4")
+            argv = _v943_1_mux_argv(
+                render_path, src_path, out_path,
+                render_duration=_v943_1_render_duration(render_path))
             proc = _sp.run(argv, capture_output=True, text=True, timeout=300)
             if proc.returncode != 0 or not os.path.exists(out_path):
                 print(f"[v943.1] ffmpeg mux failed for clip id={clip_id} "
                       f"(rc={proc.returncode}): {(proc.stderr or '')[:300]} — "
                       f"clip stays silent, export continues", flush=True)
                 continue
-            _shutil.move(out_path, str(render_path))
-            out_path = None
+            # Only THIS export run's lineup follows the muxed copy.
+            row["path"] = Path(out_path)
+            # v943.1 + the timeline retime: tells video_processor this segment
+            # now carries a restored track that must survive a speed change.
+            row["swap_audio_restored"] = True
+            out_path = None       # handed to the lineup; do not delete below
             done += 1
             # TEMP DIAG [TEMP] (remove once one v943.1 export is confirmed live)
-            print(f"[TEMP][v943.1] muxed source audio onto clip id={clip_id} "
-                  f"file={render_path.name} from key={key}", flush=True)
+            print(f"[TEMP][v943.1] muxed source audio for clip id={clip_id} "
+                  f"into export copy {Path(row['path']).name} from key={key} "
+                  f"(canonical {render_path.name} untouched)", flush=True)
         except Exception as e:
             print(f"[v943.1] source-audio mux skipped for clip id={clip_id}: {e} "
                   f"— clip stays silent, export continues", flush=True)
@@ -12161,9 +12251,17 @@ async def _do_export_final(
     # still its own segment. ffmpeg + an R2 read are blocking, so this runs off
     # the event loop. It never raises — a clip that cannot get its audio stays
     # silent and the export goes on.
+    # The muxed segments land in a directory that belongs to THIS export run
+    # (see _v943_1_apply_source_audio) and are deleted in this function's
+    # `finally`, after the concat and after every later pass that reads
+    # clip_info. The canonical clip files under output_dir/ are never written.
+    _v9431_dir = None
     try:
+        import tempfile as _tf9431
+        _v9431_dir = _tf9431.mkdtemp(prefix=f"v9431_{job_id[:8]}_")
         await asyncio.to_thread(
-            _v943_1_apply_source_audio, clips, [r for r in results if r])
+            _v943_1_apply_source_audio, clips, [r for r in results if r],
+            job.user_id, _v9431_dir)
     except Exception as _e9431:
         print(f"[v943.1] source-audio pass skipped entirely: {_e9431}", flush=True)
 
@@ -13664,6 +13762,15 @@ async def _do_export_final(
         print(f"[Export] Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
     finally:
+        # v943.1 — drop this export run's muxed clip copies. They exist only
+        # so the source audio never had to be written over the canonical
+        # render; nothing outside this call may still be reading them.
+        if _v9431_dir:
+            try:
+                import shutil as _sh9431
+                _sh9431.rmtree(_v9431_dir, ignore_errors=True)
+            except Exception as _c9431:
+                print(f"[v943.1] export copy cleanup skipped: {_c9431}", flush=True)
         # v872 — HAND THE MEMORY BACK, on the failure path too.
         #
         # Before this, an export left its Whisper models, its torch/soundfile
