@@ -1475,10 +1475,11 @@ def test_the_submit_body_gate_is_still_the_last_line():
     click = src.index("click_generate_button(page,", arm)
     gate = src.index("charswap_submit_gate(", click)
     assert click < gate
-    # v945.4 widened this window: post-click forensics (state dump, toast
-    # scrape, button census, screenshot) now sit between the gate and the
-    # FAILED CLOSED line. The ordering claim is unchanged.
-    assert "FAILED CLOSED" in src[gate:gate + 3500]
+    # v945.4/v945.5 widened this window: post-click forensics AND the
+    # tile-proof override now sit between the gate and the FAILED CLOSED
+    # line. The ordering claim is unchanged: the fail-closed exit still
+    # exists downstream of the gate, inside the same charswap branch.
+    assert "FAILED CLOSED" in src[gate:gate + 8000]
 
 
 def test_the_refusal_reason_reaches_the_clip_status():

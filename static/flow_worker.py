@@ -21648,6 +21648,39 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             _cs_accept, _cs_count_tile, _cs_gate_why = charswap_submit_gate(
                 _cs_seen, _cs_both)
             if not _cs_accept:
+                # v945.5 — THE TILE IS THE GROUND TRUTH, the probe is not.
+                # Proven by screenshot on job 6005732f (2026-08-27): the submit
+                # gate said "no generate request observed" while the project
+                # visibly held our prompt as a created generation with two
+                # tiles rendering and the composer cleared. Flow's submit no
+                # longer passes through this page's request listener (agent-
+                # mode/service-worker path), so a silent probe must not
+                # abandon a REAL render. A NEW tile beyond the count this
+                # session already made is proof the click submitted.
+                try:
+                    time.sleep(8)
+                    _cs_tile_state = page.evaluate(
+                        "() => { const tiles = Array.from(document"
+                        ".querySelectorAll('[data-index]'));"
+                        " let generating = 0, video = 0;"
+                        " for (const t of tiles) {"
+                        "   if (/\\d+%/.test(t.textContent || '')) generating++;"
+                        "   if (t.querySelector('video')) video++; }"
+                        " return {total: tiles.length, generating, video}; }")
+                    print(f"{_cs_ctx} [tile-proof] {_cs_tile_state} vs "
+                          f"already-made {_tiles_in_this_project}", flush=True)
+                    if (int(_cs_tile_state.get('total', 0)) >
+                            _tiles_in_this_project):
+                        print(f"{_cs_ctx} [tile-proof] NEW tile present — the "
+                              f"submit was REAL, the probe was blind. "
+                              f"Proceeding; media-binding unverified, check "
+                              f"the render visually.", flush=True)
+                        _cs_accept, _cs_count_tile = True, False
+                        _cs_gate_why = "tile-proven submit (probe blind)"
+                except Exception as _cs_tp_e:
+                    print(f"{_cs_ctx} [tile-proof] probe failed: {_cs_tp_e}",
+                          flush=True)
+            if not _cs_accept:
                 if _cs_count_tile:
                     _tiles_in_this_project += 1
                 # v945.4 — post-click forensics. The 2026-08-27 runs proved the
