@@ -18142,3 +18142,38 @@ Result on that job: platform-produced final, 47.6s, **zero** `silencedetect` det
 ### Deployed
 
 `cfef1c5` (the stage: `plan_silence_cuts` / `detect_silence_holes` / `sweep_silence_holes` in `video_processor.py`, the `ExportSettings.max_silence_s` field, the export-stage wiring in `main.py`) · `5b34b03` (v948.1, the single-keep edge). Both deploy-confirmed. Tests: 10 in `code/tests/test_v948_silence_sweep.py`, including real-ffmpeg verification on planted holes. Operator rule + the three-layer gate: `wiki/meta/generate-video-checklist.md` §"No dead air"; machine memory `feedback_no-dead-air-in-finals`.
+
+### v948.2 — the third audio mode, because "off" turns off four things
+
+**The bug this rule is made of.** The sweep above forced `audio_enhance: "off"` on the finish, to stop the denoiser re-creating the holes. Two hours later a peer session's QC read caught what that cost: the delivered file failed `audio_levels` at −28.9 dB mean. Measured independently: **−25.1 LUFS integrated, against −14.3 LUFS on the published reference video from the same account.** About 11 dB quiet — on a phone it reads as broken next to anything else in the feed.
+
+The cause is that `enhance_audio()` bundles four separate jobs behind one switch:
+
+| | what it does | wanted after a sweep? |
+|---|---|---|
+| DeepFilter denoise | removes noise — and crushes quiet room tone into digital silence | **NO** — this is what re-creates the holes |
+| CapCut-matched EQ | voice body and top end | yes |
+| acompressor + alimiter | steadier level, peaks caught | yes |
+| two-pass loudnorm to −15 LUFS | the whole video's loudness | **yes — and this is the one that got lost** |
+
+So a v948-swept export could not ship on either existing value. `voice` gives the holes back; `off` gives a quiet file. **The switch had no setting for what the feature needed.**
+
+**`audio_enhance: "level"`** is that setting: everything except the denoiser. It deliberately runs the chain the Modal-unavailable fallback already runs — a 90 Hz cut instead of the +7 dB 110 Hz shelf (that shelf exists to put back what DeepFilter removes, so it is wrong when DeepFilter did not run), then the same tone, compressor, limiter and two-pass loudness. The audio path is therefore proven, shipped code; only the choosing and the caching are new.
+
+- **The denoiser is never ATTEMPTED in level mode**, not merely allowed to fail. A network call you did not want is still a network call.
+- **The cache distinction is the subtle part.** A FALLBACK result is still never reused — a transient Modal outage must not leave a job permanently serving degraded audio — but a DELIBERATE no-denoise result is a correct result and IS cached. And a `voice` run never picks up a `level` result, because the two carry opposite low-end corrections.
+- Default unchanged (`voice`), the value set stays closed, and it is declarable as `- **autoedit_audio_enhance:** level` with no parser edit — the same v947 proof the sweep field used.
+
+**Verified on the video that caused it** (job `29d45418`, measured on the downloaded file, not the log): −25.1 → **−14.2 LUFS** with silences still at **zero**, same 47.625s; the platform's own `audio_levels` check flipped from FAIL to pass at −14.4 dB mean / −1.2 dB peak, and the overall verdict to READY.
+
+**One expected side effect, flagged not tuned.** `audio_tone_match` reads 4.59 dB off CapCut's curve (info-level; under ~2.5 is normal). That curve was fitted to DENOISED audio, so the no-denoise chain lands further from it by construction. Re-fitting it for this chain is real work belonging to v938.13's owner. Note the previous file scored *better* on tone (3.54) while FAILING outright on levels — which is the general point: **a passing secondary metric next to a failing primary one is not a tie.**
+
+**General lesson worth more than the feature:** when one switch turns off several things, the first feature that needs exactly one of them off will ship a regression, and it will pass every check aimed at the thing you were thinking about. This one passed silence and failed loudness.
+
+### Deploying this code has TWO targets, and `git push` reaches one
+
+The first `level` run failed three times with `ValueError: audio_enhance must be 'voice' or 'off'` — raised from the INSTALLED worker's own `autoedit_qc.py` under `%USERPROFILE%\veo-worker\autoedit\`, not from the server. **The auto-edit runs on a LOCAL worker that keeps its own copy of `autoedit_pipeline.py`, `autoedit_qc.py`, `autoedit_captions.py`, `autoedit_queue.py`, `audio_processor.py`, `config.py` and the caption templates**, laid down at install time from `/api/user-worker/download/autoedit/<name>`.
+
+So a change to any `autoedit_*` module is deployed twice or not at all: push to Render, then refresh the worker's copy through that same route and restart it. Verify by diffing with `--strip-trailing-cr` — the installed copies use CRLF, so a plain `diff` reports whole-file differences that are not real, and you cannot tell a stale file from a line-ending difference without it. A change that reaches only the server does not fail loudly: it fails inside the worker, in a traceback the operator sees as an ordinary job failure. A second session hit the same wall the same day with a new caption template, which is how you know it is the shape of the mistake and not one person's slip.
+
+**Deployed:** `3fce991` (the `level` mode + 10 tests in `code/tests/test_v948_2_audio_level_mode.py`), pushed and deploy-confirmed, worker copies refreshed and restarted the same turn.
