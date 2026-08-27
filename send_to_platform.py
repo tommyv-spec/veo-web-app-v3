@@ -1273,6 +1273,18 @@ def cmd_update_finishing(client, args, report):
     else:
         print(f"job {args.job_id} finishing CLEARED "
               f"(no ## Finishing section in {args.finishing_md})")
+    # v947.1 — on a job whose clips are already all approved, the update
+    # itself fires the auto-finish chain; say what happened either way.
+    fired = resp.get("auto_finish_fired")
+    if fired and not args.as_json:
+        verb = "queued" if fired.get("created") else "joined (already active)"
+        print(f"auto-finish FIRED: export {verb} ({str(fired.get('export_id'))[:8]}) "
+              f"-> the auto-edit follows when it completes; "
+              f"watch: python code/render_logs.py --text AutoFinish")
+    elif spec and str(spec.get("auto_finish", "")).lower() == "on" and not fired \
+            and not args.as_json:
+        print("auto-finish declared ON but not fired now (clips not all "
+              "approved yet) — the last clip approval will fire it.")
     return EXIT_OK
 
 

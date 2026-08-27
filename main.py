@@ -4000,7 +4000,9 @@ def _job_finishing_spec(job):
 def _maybe_auto_finish_export(db, job):
     """v947 — when the job declares `auto_finish: on` and EVERY clip is
     approved, queue the export with the declared export_* settings. Called
-    from approve_clip; must never turn the approval red (caller catches).
+    from approve_clip AND from update_job_finishing (v947.1); must never turn
+    the caller's own work red (both callers catch). Returns (export_id,
+    created) when the chain fired, None on every skip path.
 
     This is the FIRST half of the chain. The second half is
     _maybe_auto_finish_autoedit, fired by _export_runner when that export
@@ -4013,7 +4015,7 @@ def _maybe_auto_finish_export(db, job):
     from auto_finish import auto_finish_on, all_clips_approved, derive_export_defaults
     spec = _job_finishing_spec(job)
     if not auto_finish_on(spec):
-        return
+        return None
     # Row lock BEFORE the clip-status read, so the check-then-act below is
     # atomic against a second last-clip approval racing this one: the loser
     # blocks here, and by the time it reads, _queue_export_run finds the
@@ -4023,13 +4025,13 @@ def _maybe_auto_finish_export(db, job):
     # UPDATE; the tests still run, and --workers 1 makes it moot there anyway.)
     job = db.query(Job).filter(Job.id == job.id).with_for_update().first()
     if job is None:
-        return
+        return None
     statuses = [s for (s,) in db.query(Clip.approval_status)
                 .filter(Clip.job_id == job.id).all()]
     if not all_clips_approved(statuses):
         # Releases the FOR UPDATE lock; nothing to commit on this path.
         db.rollback()
-        return
+        return None
     if not job.user_id:
         # A NULL user_id row could never be claimed/served downstream — same
         # invariant queue_autoedit enforces. Loud skip, not a crash.
@@ -4037,7 +4039,7 @@ def _maybe_auto_finish_export(db, job):
               flush=True)
         # Releases the FOR UPDATE lock; nothing to commit on this path.
         db.rollback()
-        return
+        return None
     settings = ExportSettings(**derive_export_defaults({}, spec, set()))
     run, created = _queue_export_run(db, job, settings, job.user_id)
     add_job_log(db, job.id,
@@ -4046,6 +4048,7 @@ def _maybe_auto_finish_export(db, job):
                 f"({run.id[:8]})", "INFO", "auto_finish")
     print(f"[AutoFinish] job={job.id[:8]} all {len(statuses)} clips approved -> "
           f"export run={run.id[:8]} created={created}", flush=True)
+    return run.id, created
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
@@ -14313,7 +14316,25 @@ async def update_job_finishing(
     db.commit()
     print(f"[Finishing/v947] job={job_id[:8]} finishing_spec updated via API: "
           f"{spec if spec else 'CLEARED (no section)'}", flush=True)
-    return {"job_id": job_id, "finishing_spec": spec}
+
+    # v947.1 — the already-approved case (operator 2026-08-27: "do it"). A job
+    # whose clips are ALL approved will never see another approve_clip, so a
+    # spec stored now would be a dead letter. Fire the same trigger the
+    # approval path uses; every one of its gates applies (auto_finish on,
+    # every clip approved, idempotent join, job-row lock), so on any other
+    # job state this is a no-op. The spec is already committed above — a
+    # trigger error rolls back only the trigger's own work.
+    auto_finish_fired = None
+    try:
+        fired = _maybe_auto_finish_export(db, job)
+        if fired:
+            auto_finish_fired = {"export_id": fired[0], "created": fired[1]}
+    except Exception as _af:
+        db.rollback()
+        print(f"[AutoFinish] job={job_id[:8]} update-finishing trigger error "
+              f"(spec stored): {_af}", flush=True)
+    return {"job_id": job_id, "finishing_spec": spec,
+            "auto_finish_fired": auto_finish_fired}
 
 
 @app.get("/api/autoedit/templates")

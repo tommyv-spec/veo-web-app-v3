@@ -30,7 +30,7 @@ from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import image_platform  # noqa: F401 — registers image_nodes for the FKs
-from models import Job
+from models import Job, Clip, ExportRun, ClipStatus
 import main
 
 
@@ -135,3 +135,64 @@ def test_another_users_job_is_refused():
     # get_user_job: 404 when the job does not exist, 403 when it is not yours.
     assert exc.value.status_code == 403
     assert json.loads(_stored(db, job_id)) == {"auto_finish": "on"}
+
+
+# ---- v947.1: the already-approved case fires the chain from the update ----
+# A fully-approved job never sees another approve_clip, so without this the
+# stored spec would be a dead letter (operator 2026-08-27: "do it").
+
+def _clip(db, job_id, index, approval="approved"):
+    c = Clip(
+        job_id=job_id, clip_index=index,
+        dialogue_id=f"d{index}", dialogue_text=f"line {index}",
+        status=ClipStatus.COMPLETED.value, approval_status=approval,
+    )
+    db.add(c)
+    db.commit()
+    return c.id
+
+
+def _export_runs(db, job_id):
+    return db.query(ExportRun).filter(ExportRun.job_id == job_id).all()
+
+
+def test_update_on_fully_approved_job_fires_the_chain():
+    db = _session()
+    job_id = _job(db)
+    _clip(db, job_id, 0)
+    _clip(db, job_id, 1)
+
+    resp = _update(db, job_id, GOOD_MD)
+
+    assert resp["auto_finish_fired"] is not None
+    assert resp["auto_finish_fired"]["created"] is True
+    runs = _export_runs(db, job_id)
+    assert len(runs) == 1
+    # The queued export carries the DECLARED settings, not the defaults.
+    assert json.loads(runs[0].settings_json)["remove_silence"] is True
+
+
+def test_update_on_partially_approved_job_does_not_fire():
+    db = _session()
+    job_id = _job(db)
+    _clip(db, job_id, 0)
+    _clip(db, job_id, 1, approval=None)   # one clip still undecided
+
+    resp = _update(db, job_id, GOOD_MD)
+
+    assert resp["auto_finish_fired"] is None
+    assert _export_runs(db, job_id) == []
+    # The spec still landed — the LAST approval will fire it later.
+    assert json.loads(_stored(db, job_id))["auto_finish"] == "on"
+
+
+def test_update_without_auto_finish_does_not_fire():
+    db = _session()
+    job_id = _job(db)
+    _clip(db, job_id, 0)
+
+    md = "# b\n\n## Finishing\n\n- **captions:** none\n\n## Storyboard\n"
+    resp = _update(db, job_id, md)
+
+    assert resp["auto_finish_fired"] is None
+    assert _export_runs(db, job_id) == []
