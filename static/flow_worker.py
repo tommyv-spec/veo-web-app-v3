@@ -21650,6 +21650,46 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             if not _cs_accept:
                 if _cs_count_tile:
                     _tiles_in_this_project += 1
+                # v945.4 — post-click forensics. The 2026-08-27 runs proved the
+                # prompt registered AND Generate read enabled AND the click
+                # fired, yet zero network requests followed — so the remaining
+                # suspects (wrong element matched by the Generate locator, or a
+                # silent frontend validation abort) can only be told apart by
+                # looking at the page AFTER the click. Capture everything cheap.
+                _dump_generate_disabled_state(page, f"{_cs_ctx} [post-click] ")
+                try:
+                    _cs_toasts = page.evaluate(
+                        "() => Array.from(document.querySelectorAll("
+                        "'[role=\"alert\"], [role=\"status\"], [aria-live]'))"
+                        ".map(e => (e.innerText || '').trim()).filter(Boolean)")
+                    print(f"{_cs_ctx} [post-click] toasts/alerts: {_cs_toasts}",
+                          flush=True)
+                except Exception as _cs_te:
+                    print(f"{_cs_ctx} [post-click] toast scrape failed: {_cs_te}",
+                          flush=True)
+                try:
+                    _cs_gen_btns = page.evaluate(
+                        "() => Array.from(document.querySelectorAll('button'))"
+                        ".filter(b => /generate/i.test(b.innerText || ''))"
+                        ".map(b => ({text: (b.innerText||'').trim().slice(0, 40),"
+                        " disabled: b.disabled,"
+                        " aria: b.getAttribute('aria-disabled'),"
+                        " visible: !!(b.offsetWidth || b.offsetHeight)}))")
+                    print(f"{_cs_ctx} [post-click] generate-ish buttons: "
+                          f"{_cs_gen_btns}", flush=True)
+                except Exception as _cs_ge:
+                    print(f"{_cs_ctx} [post-click] button census failed: {_cs_ge}",
+                          flush=True)
+                try:
+                    _cs_shot = os.path.join(
+                        tempfile.gettempdir(),
+                        f"charswap_submit_fail_{clip.get('id', 'x')}.png")
+                    page.screenshot(path=_cs_shot, full_page=False)
+                    print(f"{_cs_ctx} [post-click] screenshot -> {_cs_shot}",
+                          flush=True)
+                except Exception as _cs_se:
+                    print(f"{_cs_ctx} [post-click] screenshot failed: {_cs_se}",
+                          flush=True)
                 print(f"{_cs_ctx} FAILED CLOSED: {_cs_gate_why}", flush=True)
                 update_clip_status(clip['id'], 'failed',
                                    error_message=f"charswap submit not proven: {_cs_gate_why}")
