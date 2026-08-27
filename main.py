@@ -8015,7 +8015,20 @@ async def request_clip_redo(
     For API backend jobs: sets status to 'redo_queued' (handled by API worker)
     """
     clip = get_user_clip(db, clip_id, current_user)
-    
+
+    # v945.8 (Codex rev 536 blocker 5) — charswap clips must NEVER be redone.
+    # Every redo lane rebuilds the prompt/payload WITHOUT the charswap
+    # metadata and submits a plain image-to-video render of the start frame —
+    # a wrong-path render that looks completed (measured twice, 2026-08-27,
+    # both hand-cancelled mid-race). Refuse at the door; the correct move is
+    # recreating the job (prepare-for-video -> POST /api/jobs).
+    if (getattr(clip, "render_method", None) or "").strip().lower() == "charswap":
+        raise HTTPException(
+            400,
+            "This is a charswap clip — redo would re-render it WITHOUT the "
+            "swap (wrong-path render). Recreate the job instead "
+            "(Prepare for video -> create job); v945.8.")
+
     # Get the job early for backend detection
     job = db.query(Job).filter(Job.id == clip.job_id).first()
     is_flow = job and job.backend == 'flow'

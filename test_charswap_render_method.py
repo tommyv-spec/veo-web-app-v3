@@ -2237,3 +2237,25 @@ def test_a_stamped_mode_still_short_circuits_when_it_was_confirmed():
     page._input_mode_observed = "Ingredients"
     assert ns["set_clip_input_mode"](page, True, True) == "Ingredients"
     assert calls == []
+
+
+# =============================================================================
+# 19. v945.8 — the redo ENDPOINT refuses charswap clips (Codex rev 536 b5)
+# =============================================================================
+# Every redo lane rebuilds the payload without charswap metadata and submits a
+# wrong-path i2v render. v945.6 made the worker's fresh pre-click failure
+# terminal; this pins the front door too: POST /api/clips/{id}/redo is a 400
+# for a charswap clip, and the message names the recreate-the-job path.
+
+def test_redo_endpoint_refuses_charswap_clips():
+    src = (_HERE / "main.py").read_text(encoding="utf-8")
+    ep = src.index('@app.post("/api/clips/{clip_id}/redo"')
+    body_end = src.index("# Get the job early for backend detection", ep)
+    guard = src[ep:body_end]
+    assert '"charswap"' in guard
+    assert "raise HTTPException" in guard
+    assert "Recreate the job" in guard
+    # the guard runs BEFORE any status mutation (the endpoint DOCSTRING may
+    # name the statuses; no status-setting CALL may precede the guard)
+    assert "update_clip_status" not in guard
+    assert "clip.status =" not in guard
