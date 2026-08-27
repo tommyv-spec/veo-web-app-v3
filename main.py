@@ -14260,7 +14260,9 @@ async def update_job_finishing(
     try:
         spec = parse_finishing_section(req.markdown or "")
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        # "Parse error:" prefix = the send_to_platform CLI classifies this as
+        # EXIT_PARSE (2), same as every other parse failure it can receive.
+        raise HTTPException(status_code=400, detail=f"Parse error: {exc}")
     job.finishing_spec = json.dumps(spec) if spec else None
     db.commit()
     print(f"[Finishing/v947] job={job_id[:8]} finishing_spec updated via API: "

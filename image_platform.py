@@ -7344,7 +7344,12 @@ def _import_scene_table_impl(
     # bad value dies with the import instead of producing the wrong finish
     # hours later. None (no section) is stored as NULL, which is what every
     # pre-v944 batch holds and what the derive step reads as "change nothing".
-    _v944_spec = parse_finishing_section(req.markdown or "")
+    try:
+        _v944_spec = parse_finishing_section(req.markdown or "")
+    except ValueError as _fe:
+        # Same convention as parse_scene_table above (:7210): a parse failure
+        # is the CALLER's 400 with the exact message, never a generic 500.
+        raise HTTPException(400, f"Parse error: {_fe}")
     _v944_json = _json.dumps(_v944_spec, sort_keys=True) if _v944_spec else None
     print(f"[v944/import] finishing_spec={_v944_spec or 'none (default)'}", flush=True)
 
