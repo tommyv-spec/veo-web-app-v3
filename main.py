@@ -13648,6 +13648,83 @@ async def _do_export_final_impl(
                 _tb_broll.print_exc()
                 stats["v698a_broll_error"] = str(_broll_err)[:500]
 
+        # === v948 — POST-CONCAT SILENCE-HOLE SWEEP ===
+        #
+        # The per-clip whisper VAD trims each clip's own edges. It cannot see
+        # a pause in the middle of a clip, and it cannot see the stack-up at a
+        # clip boundary (clip N's kept tail + clip N+1's kept head), so both
+        # survive into the assembled final as dead air. Operator rule
+        # (wiki/meta/generate-video-checklist.md "No dead air"): a selling
+        # final ships with ZERO silences >= 0.9s and every hole is cut to a
+        # ~0.3s breath — jump cuts are native to the format. Done by hand on
+        # job 29d45418 (50.3s -> 44.0s, zero detections after); this is that
+        # procedure as a stage.
+        #
+        # WHERE IT SITS. Last thing before the file is stored/uploaded, so it
+        # runs on the timeline that actually ships: after concat, after audio
+        # enhancement, after the speed pass, after the v925 b-roll pass.
+        # Anything earlier would sweep a file that later stages then change.
+        #
+        # OFF unless settings.max_silence_s is set — absent means the export
+        # is byte-identical to pre-v948.
+        #
+        # NEVER fatal: on any error the pre-sweep file ships untouched. An
+        # export that survived the whole pipeline is not worth losing to a
+        # cosmetic pass.
+        _v948_max = getattr(settings, "max_silence_s", None)
+        if _v948_max and _v948_max > 0:
+            try:
+                import os as _os948
+                from video_processor import sweep_silence_holes as _sweep948
+                _swept_path = output_dir / f"swept_{output_filename}"
+                _sweep = await asyncio.to_thread(
+                    _sweep948, output_path, _swept_path, float(_v948_max),
+                )
+                if _sweep.get("applied"):
+                    _os948.replace(_swept_path, output_path)
+                    stats["v948_holes_cut"] = _sweep["holes_cut"]
+                    stats["v948_removed_s"] = round(_sweep["removed_s"], 3)
+                    stats["v948_residual"] = _sweep["residual"]
+                    stats["pre_sweep_duration"] = _sweep["original_duration"]
+                    stats["final_duration"] = _sweep["final_duration"]
+                print(
+                    f"[Export/v948] hole sweep: {_sweep['holes_cut']} holes cut, "
+                    f"{_sweep['removed_s']:.1f}s removed, "
+                    f"residual detections={_sweep['residual']}",
+                    flush=True,
+                )
+                if _sweep.get("residual"):
+                    # Say it out loud rather than reporting a clean sweep that
+                    # the file does not support. Usually means a hole sits
+                    # inside a segment the plan kept whole (detector floor /
+                    # threshold mismatch), not that the cut failed.
+                    print(
+                        f"[Export/v948] ⚠ {_sweep['residual']} silence(s) >= "
+                        f"{_v948_max}s STILL in the shipped file: "
+                        f"{_sweep.get('residual_holes')}",
+                        flush=True,
+                    )
+                if _sweep.get("applied") and stats.get("v698a_broll_duration"):
+                    # The v925 b-roll track was measured against the speaker
+                    # file as it stood BEFORE this cut, so it is now longer
+                    # than what ships. Surface it — do not pretend the pair
+                    # still lines up.
+                    print(
+                        f"[Export/v948] ⚠ b-roll was built against the "
+                        f"pre-sweep speaker file; it is now "
+                        f"{_sweep['removed_s']:.1f}s longer than the shipped "
+                        f"master. Re-run the b-roll pass if you need the pair.",
+                        flush=True,
+                    )
+                    stats["v948_broll_stale"] = True
+            except Exception as _sweep_err:
+                print(
+                    f"[Export/v948] hole sweep FAILED ({_sweep_err}) — "
+                    f"shipping the unswept final",
+                    flush=True,
+                )
+                stats["v948_error"] = str(_sweep_err)[:500]
+
         # Upload to R2 for persistence (voice swap needs this as input after Render restarts)
         try:
             import video_processor as _vp872c

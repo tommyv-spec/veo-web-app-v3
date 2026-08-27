@@ -294,6 +294,256 @@ def detect_speech_segments(
     return speech_segments
 
 
+# ===========================================================================
+# v948 — POST-CONCAT SILENCE-HOLE SWEEP
+# ===========================================================================
+#
+# WHY THIS EXISTS. The per-clip whisper VAD (apply_vad above) runs on each
+# clip in isolation, so it only ever trims that clip's own head and tail. Two
+# kinds of dead air survive it:
+#
+#   1. a pause in the MIDDLE of a clip (the VAD keeps the clip contiguous),
+#   2. the stack-up at a clip BOUNDARY — clip N's kept tail plus clip N+1's
+#      kept head, each individually fine, adding up to something that reads
+#      as a stall.
+#
+# Neither is visible until after the concat, which is the only place where
+# the finished timeline exists. Operator rule (wiki/meta/generate-video-
+# checklist.md "No dead air"): a selling final ships with ZERO silences
+# >= 0.9s, and every hole is cut to a ~0.3s breath. Jump cuts are native to
+# this format, so a hard cut is the right shape — no crossfade, no ramp.
+#
+# Done by hand once on job 29d45418 (silencedetect + trim/concat, 50.3s ->
+# 44.0s, zero detections afterwards). This makes that procedure a stage.
+#
+# The logic is split in two on purpose: plan_silence_cuts() is pure
+# arithmetic over intervals and is unit-tested; sweep_silence_holes() is the
+# ffmpeg wrapper around it.
+
+
+def plan_silence_cuts(
+    holes: List[Tuple[float, float]],
+    total: float,
+    max_silence_s: float,
+    keep_breath: float = 0.3,
+    lead_max: float = 0.7,
+) -> List[Tuple[float, float]]:
+    """Turn a list of detected silence holes into the list of KEEP segments.
+
+    Args:
+        holes:         (silence_start, silence_end) pairs, in seconds, as
+                       reported by ffmpeg silencedetect. Order does not
+                       matter; overlaps and out-of-range values are handled.
+        total:         duration of the file, in seconds.
+        max_silence_s: only holes at least this long are cut. Anything
+                       shorter is left exactly as it is.
+        keep_breath:   what a cut hole is reduced to. The FIRST keep_breath
+                       seconds of the hole survive; the rest is dropped. Kept
+                       at the front so the breath sits right after the word
+                       that just ended, which is where a real pause lives.
+        lead_max:      special case for a hole that starts at the very top of
+                       the file. There is no preceding word to breathe after,
+                       so instead the LAST lead_max seconds survive — i.e.
+                       the run-up to the first word is capped, not the
+                       silence after nothing.
+
+    Returns:
+        A list of (start, end) keep-segments in ascending order whose union
+        is the whole file minus the removed silence. No holes at all (or no
+        hole long enough) returns the identity [(0.0, total)].
+
+    Refuses to return an empty plan: if the arithmetic would remove
+    everything, the identity is returned instead. A silence sweep may make a
+    file shorter; it may never make it nothing.
+    """
+    total = float(total)
+    if total <= 0:
+        return []
+    identity = [(0.0, total)]
+    if not holes or not max_silence_s or max_silence_s <= 0:
+        return identity
+
+    # What to DELETE, derived hole by hole.
+    removals: List[Tuple[float, float]] = []
+    for raw_start, raw_end in holes:
+        start = max(0.0, float(raw_start))
+        end = min(total, float(raw_end))
+        if end - start < max_silence_s:
+            continue  # short enough to be a real pause — leave it alone
+        if start <= 1e-6:
+            # Leading hole: cap the lead-in, keep the END of the silence.
+            cut_from, cut_to = 0.0, max(0.0, end - lead_max)
+        else:
+            # Mid / trailing hole: keep the breath, drop the rest.
+            cut_from, cut_to = start + keep_breath, end
+        if cut_to - cut_from > 1e-6:
+            removals.append((cut_from, cut_to))
+
+    if not removals:
+        return identity
+
+    # Merge overlapping / touching removals so the complement is clean even
+    # if silencedetect hands back back-to-back or nested holes.
+    removals.sort()
+    merged: List[List[float]] = [list(removals[0])]
+    for cut_from, cut_to in removals[1:]:
+        if cut_from <= merged[-1][1] + 1e-9:
+            merged[-1][1] = max(merged[-1][1], cut_to)
+        else:
+            merged.append([cut_from, cut_to])
+
+    # Complement: everything the removals do not cover.
+    keeps: List[Tuple[float, float]] = []
+    cursor = 0.0
+    for cut_from, cut_to in merged:
+        if cut_from - cursor > 1e-3:
+            keeps.append((cursor, cut_from))
+        cursor = max(cursor, cut_to)
+    if total - cursor > 1e-3:
+        keeps.append((cursor, total))
+
+    return keeps or identity
+
+
+def detect_silence_holes(
+    video_path: Path,
+    noise_db: float = -35.0,
+    min_silence_s: float = 0.7,
+) -> List[Tuple[float, float]]:
+    """v948 — list the silence holes in a file, via ffmpeg silencedetect.
+
+    Deliberately its own detector rather than a call into
+    detect_speech_segments(): that one maps a 0-1 "threshold" onto a dB floor
+    and inverts to SPEECH spans with padding. Here the holes themselves are
+    the subject and the dB floor is stated outright, so what the operator
+    measured by hand is the same number the code uses.
+    """
+    total = get_duration(ffprobe_json(video_path))
+    cmd = [
+        FFMPEG_BIN, "-i", str(video_path),
+        "-af", f"silencedetect=noise={noise_db:.1f}dB:d={min_silence_s:.3f}",
+        "-f", "null", "-",
+    ]
+    _, _, stderr = run(cmd)
+
+    starts: List[float] = []
+    ends: List[float] = []
+    for line in (stderr or "").splitlines():
+        if "silence_start:" in line:
+            try:
+                starts.append(float(line.split("silence_start:")[-1].strip()))
+            except ValueError:
+                pass
+        elif "silence_end:" in line:
+            try:
+                ends.append(float(line.split("silence_end:")[1].split("|")[0].strip()))
+            except (ValueError, IndexError):
+                pass
+
+    holes: List[Tuple[float, float]] = []
+    for i, start in enumerate(starts):
+        # A silence that runs to EOF gets a start with no end. Close it at
+        # the file duration rather than dropping it — trailing dead air is
+        # exactly the thing being swept.
+        end = ends[i] if i < len(ends) else total
+        holes.append((max(0.0, start), min(total, end)))
+    return holes
+
+
+def sweep_silence_holes(
+    src: Path,
+    out: Path,
+    max_silence_s: float,
+    keep_breath: float = 0.3,
+    lead_max: float = 0.7,
+    noise_db: float = -35.0,
+    detect_min_s: float = 0.7,
+) -> dict:
+    """v948 — detect the holes, re-render without them, then re-measure.
+
+    Returns a stats dict. ``applied`` is False when there was nothing to cut,
+    in which case ``out`` is not written and the caller keeps ``src``.
+
+    Raises on ffmpeg failure — the caller decides what a failed sweep means
+    (main.py keeps the unswept export).
+    """
+    original_duration = get_duration(ffprobe_json(src))
+    holes = detect_silence_holes(src, noise_db=noise_db, min_silence_s=detect_min_s)
+    keeps = plan_silence_cuts(
+        holes, original_duration, max_silence_s,
+        keep_breath=keep_breath, lead_max=lead_max,
+    )
+    holes_cut = sum(1 for s, e in holes if (e - s) >= max_silence_s)
+
+    if holes_cut == 0 or len(keeps) <= 1:
+        return {
+            "applied": False,
+            "holes_detected": len(holes),
+            "holes_cut": 0,
+            "removed_s": 0.0,
+            "original_duration": original_duration,
+            "final_duration": original_duration,
+            "residual": len([
+                (s, e) for s, e in holes if (e - s) >= max_silence_s
+            ]),
+            "keep_segments": keeps,
+        }
+
+    # Same single-pass trim+concat graph v617 uses for the VAD cut: one
+    # decode, frame-accurate PTS ranges at 9 decimals, one encode. No
+    # per-segment temp files and no encoder-visible boundaries, so no
+    # dup/drop ghost frames at the joins.
+    filter_parts = []
+    concat_inputs = []
+    for idx, (start, end) in enumerate(keeps):
+        filter_parts.append(
+            f"[0:v]trim=start={start:.9f}:end={end:.9f},setpts=PTS-STARTPTS[v{idx}]"
+        )
+        filter_parts.append(
+            f"[0:a]atrim=start={start:.9f}:end={end:.9f},asetpts=PTS-STARTPTS[a{idx}]"
+        )
+        concat_inputs.append(f"[v{idx}][a{idx}]")
+    filter_parts.append(
+        f"{''.join(concat_inputs)}concat=n={len(keeps)}:v=1:a=1[outv][outa]"
+    )
+
+    cmd = [
+        FFMPEG_BIN, "-y", "-loglevel", "error", "-nostats",
+        "-i", str(src),
+        "-filter_complex", ";".join(filter_parts),
+        "-map", "[outv]",
+        "-map", "[outa]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-video_track_timescale", "90000",
+        str(out),
+    ]
+    code, _, err = run(cmd)
+    if code != 0:
+        raise RuntimeError(f"v948 silence-sweep render failed: {(err or '')[:500]}")
+
+    final_duration = get_duration(ffprobe_json(out))
+    # Re-measure the DELIVERED file, not the plan. A plan that says the holes
+    # are gone is a prediction; this is the check.
+    residual = [
+        (s, e) for s, e in
+        detect_silence_holes(out, noise_db=noise_db, min_silence_s=detect_min_s)
+        if (e - s) >= max_silence_s
+    ]
+    return {
+        "applied": True,
+        "holes_detected": len(holes),
+        "holes_cut": holes_cut,
+        "removed_s": original_duration - final_duration,
+        "original_duration": original_duration,
+        "final_duration": final_duration,
+        "residual": len(residual),
+        "residual_holes": [(round(s, 3), round(e, 3)) for s, e in residual],
+        "keep_segments": keeps,
+    }
+
+
 # v773.10.9 — module-level Whisper-base singleton (lazy).
 # faster-whisper int8 base: ~150 MB resident, 2-3× lower WER than tiny.
 # Loaded once per worker process; reused across all clips in all exports.

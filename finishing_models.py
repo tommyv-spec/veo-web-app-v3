@@ -18,6 +18,14 @@ class ExportSettings(BaseModel):
     silence_trigger: float = Field(default=1.5, ge=0.3, le=5.0)   # Gaps >= this are trimmed (seconds)
     silence_keep: float = Field(default=0.3, ge=0.0, le=2.0)       # Silence to preserve at each cut (seconds)
     silence_threshold: float = Field(default=0.75, ge=0.1, le=1.0) # VAD confidence: higher = only clear speech kept
+    # v948 — post-concat silence-hole sweep. The per-clip VAD above trims each
+    # clip's OWN edges; it cannot see a pause that only exists once the clips
+    # are stacked, and it cannot see a pause in the middle of a clip. Those
+    # holes survive into the assembled final. Set this (e.g. 0.9) and every
+    # silence >= this many seconds in the FINISHED file is cut down to a ~0.3s
+    # breath. None/absent = the sweep never runs and the export is
+    # byte-identical to before v948.
+    max_silence_s: Optional[float] = None
     # Individual audio enhancement toggles
     remove_laughter: bool = False  # noisereduce (treats laughter as noise)
     denoise_strength: float = Field(default=0.75, ge=0.0, le=1.0)

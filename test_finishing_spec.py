@@ -673,3 +673,20 @@ def test_autoedit_audio_enhance_declarable_with_zero_parser_change():
         parse_finishing_section(
             "## Finishing\n\n- **captions:** none\n"
             "- **autoedit_audio_enhance:** loud\n## Next\n")
+
+
+def test_v948_export_max_silence_s_is_declarable_with_no_parser_edit():
+    """v948 — the new post-concat silence-sweep threshold rides the same v947
+    design point as the test above: validation runs against the real
+    ExportSettings, so adding the field to the model is the whole change."""
+    spec = _fin("- **export_max_silence_s:** 0.9\n")
+    assert spec["export"] == {"max_silence_s": 0.9}
+    # sparse — declaring it does not freeze any other export default
+    assert set(spec["export"]) == {"max_silence_s"}
+    # absent = the sweep never runs
+    assert "export" not in _fin("")
+    with pytest.raises(ValueError, match="value rejected"):
+        _fin("- **export_max_silence_s:** loud\n")
+    # v947's `none` sentinel: turn an optional field off by omitting the bullet
+    with pytest.raises(ValueError, match="max_silence_s"):
+        _fin("- **export_max_silence_s:** none\n")
