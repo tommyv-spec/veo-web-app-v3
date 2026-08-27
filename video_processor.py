@@ -5884,6 +5884,32 @@ def export_final_video(
                 skip_start = info.get("skip_start_trim", False)
                 trimmed_file = temp_path / f"trimmed_{idx:04d}.mp4"
                 actual_start_trim = 0 if skip_start else frames_to_cut_start
+                # v947.3 — when whisper/action VAD will cut this clip, VAD owns
+                # BOTH edges: it trims leading/trailing silence aligned to the
+                # measured speech, padded by silence_keep. A fixed frame trim in
+                # front of that is redundant where speech starts late and
+                # DESTRUCTIVE where it starts early. Measured 2026-08-27 on job
+                # 63097756: per-clip speech onsets of 0-3 frames exist, so the
+                # 7-frame start trim cut the words "three" and "korella", and
+                # the fixed end trim cut "reach you" — while the VAD's own
+                # speech-aligned edge cut removes the Veo lead-in garbage
+                # wherever removing it is actually possible.
+                _vad_owns_edges = (
+                    _user_remove_silence
+                    and (_user_silence_mode or "").lower() in ("whisper", "action")
+                    and (info.get("cut_mode") or "").lower() != "timeline"
+                    and (info.get("scene_type") or "").lower() != "text_card"
+                    and bool((info.get("dialogue_text") or "").strip())
+                )
+                actual_end_trim = frames_to_cut_end
+                if _vad_owns_edges:
+                    if actual_start_trim or actual_end_trim:
+                        logger.info(
+                            f"Clip {info.get('clip_index', idx)}: VAD owns edges — "
+                            f"fixed frame trims deferred to the speech-aligned cut")
+                    actual_start_trim = 0
+                    actual_end_trim = 0
+                    info["_vad_owns_edges"] = True
 
                 # v681 — text_card scenes: render via ffmpeg drawtext.
                 # NO Veo source video for these clips; clip_path is a
@@ -6029,10 +6055,10 @@ def export_final_video(
                             f"Clip {info.get('clip_index', idx)}: timeline trim failed "
                             f"({err[:200]}); falling back to frame trim"
                         )
-                        trim_video(clip_path, trimmed_file, actual_start_trim, frames_to_cut_end)
+                        trim_video(clip_path, trimmed_file, actual_start_trim, actual_end_trim)
                 else:
-                    logger.info(f"Clip {info.get('clip_index', idx)}: start_trim={actual_start_trim}, end_trim={frames_to_cut_end}")
-                    trim_video(clip_path, trimmed_file, actual_start_trim, frames_to_cut_end)
+                    logger.info(f"Clip {info.get('clip_index', idx)}: start_trim={actual_start_trim}, end_trim={actual_end_trim}")
+                    trim_video(clip_path, trimmed_file, actual_start_trim, actual_end_trim)
                     # v691d — per-clip Whisper-VAD MOVED out of this parallel
                     # path to a serial post-loop below. Pre-v691d two parallel
                     # workers each loaded the Whisper-small model
@@ -6579,6 +6605,18 @@ def export_final_video(
                         stats["v708_audit_script_words"] = sum_script
                         stats["v708_audit_heard_words"] = sum_heard
                         stats["v708_audit_error"] = None
+                        # v947.3 — a DEAF audit must not report green. Zero heard
+                        # words against a non-empty script means the transcriber
+                        # heard nothing, so "no missing words" is vacuously true
+                        # and the verdict is meaningless — the 2026-08-27 export
+                        # that cut "three"/"korella"/"reach you" sailed through
+                        # exactly this way (11 clips, trust=1.00, matched=0).
+                        # None = "not verified": distinct from True AND False.
+                        if sum_script > 0 and sum_heard == 0:
+                            stats["v708_audit_ok"] = None
+                            print(f"[v709-AUDIT] DEAF: script has {sum_script} "
+                                  f"words but 0 were heard — the audit verdict "
+                                  f"is MEANINGLESS, not a pass", flush=True)
                         stats["v708_per_clip_audit"] = per_clip_audit
                         # v773 — log summary works for both legacy + aligned audit shapes
                         for _i, _a in enumerate(per_clip_audit or []):
