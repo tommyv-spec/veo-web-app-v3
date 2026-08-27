@@ -475,7 +475,10 @@ def sweep_silence_holes(
     )
     holes_cut = sum(1 for s, e in holes if (e - s) >= max_silence_s)
 
-    if holes_cut == 0 or len(keeps) <= 1:
+    # v948.1 (review fix): a single-keep plan is a VALID sweep — it happens
+    # exactly when a leading/trailing hole was cut. Only "no hole met the
+    # threshold" or "nothing left to keep" skip the apply.
+    if holes_cut == 0 or not keeps:
         return {
             "applied": False,
             "holes_detected": len(holes),

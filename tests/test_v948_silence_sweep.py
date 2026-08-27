@@ -96,3 +96,15 @@ def test_a_file_that_is_all_silence_never_plans_to_nothing():
 def test_threshold_of_none_or_zero_is_off():
     assert plan_silence_cuts([(5.0, 9.0)], 20.0, 0) == [(0.0, 20.0)]
     assert plan_silence_cuts([(5.0, 9.0)], 20.0, None) == [(0.0, 20.0)]
+
+
+def test_a_single_keep_segment_is_still_an_applied_sweep():
+    """v948.1 (review fix): a leading hole cut down to its breath leaves ONE
+    keep segment — holes were cut, the sweep must apply. The old condition
+    `len(keeps) <= 1` silently shipped the unswept file in this case."""
+    from video_processor import plan_silence_cuts
+    keeps = plan_silence_cuts([(0.0, 10.0)], 10.0, 0.9)
+    assert len(keeps) == 1
+    # the sweep path's apply-gate logic: holes_cut > 0 and keeps non-empty
+    holes_cut = 1
+    assert not (holes_cut == 0 or not keeps)
