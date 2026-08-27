@@ -18177,3 +18177,43 @@ The first `level` run failed three times with `ValueError: audio_enhance must be
 So a change to any `autoedit_*` module is deployed twice or not at all: push to Render, then refresh the worker's copy through that same route and restart it. Verify by diffing with `--strip-trailing-cr` — the installed copies use CRLF, so a plain `diff` reports whole-file differences that are not real, and you cannot tell a stale file from a line-ending difference without it. A change that reaches only the server does not fail loudly: it fails inside the worker, in a traceback the operator sees as an ordinary job failure. A second session hit the same wall the same day with a new caption template, which is how you know it is the shape of the mistake and not one person's slip.
 
 **Deployed:** `3fce991` (the `level` mode + 10 tests in `code/tests/test_v948_2_audio_level_mode.py`), pushed and deploy-confirmed, worker copies refreshed and restarted the same turn.
+
+## v949 — THE MAP MUST BE TRUE, NOT JUST WELL-FORMED: the SCRIPT DECISION MAP is checked against the parent and the build (2026-08-27)
+
+Sources: operator complaint 2026-08-27 (*"we really need to improve the scripting skills you have on how to adapt a script — you don't follow what's in the raw files and what's said by the mentors"*) · Codex diagnosis HANDOFF rev 595 · the measurement that corrected the first hypothesis, rev 597 · back-test record `docs/experiments/script-map-backtest-2026-08-27.md`.
+
+**Why this rule exists.** §6.9 requires a beat-by-beat `SCRIPT DECISION MAP` before drafting an adapt, and the authoring auditor enforced it — but only its SHAPE. `audit_build.py:2182-2264` checks that the map exists and that its header carries the seven column names, then returns PASS. **It never reads a row.** So a map whose cells quote lines nobody ever says reached 0 FAIL and looked audited.
+
+The first hypothesis for the operator complaint was that the mentor method was missing from the loaded canon (the big teaching docs are compressed ~10:1 into their wiki pages). **That hypothesis was wrong and is recorded as wrong.** Codex''s read (rev 595) was right: the method IS in the canon; the gap is that **the audit trusted declarations instead of checking them.** The measurement then corrected the fix''s own shape (rev 597): across 122 mapped builds the tables are mostly not fabricated — they go STALE, which is cheaper to test and changes what the check should say.
+
+**The rule.** A `SCRIPT DECISION MAP` is a claim about two documents that exist. Both sides are now checked by `tools/check_script_map.py`, wired into `tools/run_build_checks.py`:
+
+| Side | Verdict | What it means |
+|---|---|---|
+| **Build words** | **FAIL** | every Build-words cell must be a string the build really delivers — a `- **line:**` or a `- **caption:**` field. A cell quoting a line the build never says is a fabricated map. |
+| **Drift** | WARN | the cell is a word off the real line (`quietly left` vs `quietly left you`) — a stale map, not an invented one. |
+| **Source words** | WARN | the cell is missing from every declared parent, reported with the closest parent line and a similarity ratio. WARN not FAIL on measured evidence: trims, placeholders and rule-mandated swaps are legitimate (v808 forces `kid` → `young person`). |
+| **Beat binding** | WARN | a real line lives in a scene the row does not name. |
+
+**The threshold is measured, not chosen.** True drift scores **0.97–0.98**; rewrites and inventions score **0.65 and below**. `DRIFT_ENOUGH = 0.90` sits in the empty gap between the two populations.
+
+**Three checker bugs the back-test caught — each is a general trap.** The run went 247 → 37 → 33 → 30 failures, and every drop was a fault in the checker, not a discovery. The plan said to treat a large deviation from the ~32 probe baseline as a checker fault; it was, three times.
+1. **Bare prose in a cell is two different things wearing one coat.** In a caption-only build the cell IS the wording; in a spoken build it is prose ABOUT the wording (`Scene 1 keeps the v8 line byte for byte`). Reading the second kind as wording produced **202 false failures on its own**.
+2. **`...` is the map''s abbreviation mark**, not a difference.
+3. **Drift is not fabrication** — see the threshold above.
+
+**Unicode-aware normalisation is load-bearing.** An ASCII-only class such as `[^a-z0-9]+` deletes accented letters themselves, mangling every non-English source line in the corpus. NFKD then dropping combining marks folds an accented spelling onto its plain one. Punctuation must also COLLAPSE to one space, or `no, i am 63` and a comma-free copy stop matching for no real reason.
+
+**What it found on the corpus: 30 failures across 14 builds, ZERO false positives, hand-read.** The headline is the `cookout-fatman…selling-v12` build — 20 spoken lines and **7 map cells quoting lines nobody says**; its two siblings carry the same fabricated cells. The rest are stale maps. Full table in the back-test record.
+
+**Forward-only by design.** Those 14 builds are frozen in `tools/script_map_baseline.txt`, so `--all` exits 0 and the §9.1 Stop gate does not go permanently red; they print as `[BASE]`. `--strict` shows them on demand. A NEW break still fails — proved in both directions.
+
+**What it deliberately does NOT do, and why that is the point.** It cannot judge whether an adapt is still relevant to the new audience, whether the causal chain holds, or whether a line reads clean aloud (§5.4). Those stay the human pass. It also does not hide what it cannot see: **41** cells state their change in prose and are counted unverifiable, **18** builds declare a parent that cannot be opened, **26** declare several different parents — 43 builds whose stated lineage cannot be followed, surfaced as real editorial debt rather than guessed at.
+
+**The general lesson, worth more than the feature:** *a checker that verifies a declaration EXISTS teaches the writer to produce declarations, not truth.* The same shape appears wherever a gate reads structure instead of content — this is the §9 "checkers verify declarations" principle turned into a working example.
+
+**Scope:** GENERATE side, forward-only, every build carrying a `SCRIPT DECISION MAP`. Enforcement: `tools/check_script_map.py` (48 tests in `tools/test_check_script_map.py`), run by `tools/run_build_checks.py` on every build, and therefore by the §9.1 Stop gate.
+
+**Open question this does not answer (rev 596, still open):** does the hooks masterclass or the Part 9 Loom teach a PROCEDURE for the adapted-side judgment that the wiki flattened into a principle? A text checker can never do that part.
+
+**Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/meta/generate-video-checklist.md`, root `CLAUDE.md` §9, `wiki/log.md`.
