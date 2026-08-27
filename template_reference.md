@@ -18206,6 +18206,16 @@ The first hypothesis for the operator complaint was that the mentor method was m
 
 **What it found on the corpus: 30 failures across 14 builds, ZERO false positives, hand-read.** The headline is the `cookout-fatman…selling-v12` build — 20 spoken lines and **7 map cells quoting lines nobody says**; its two siblings carry the same fabricated cells. The rest are stale maps. Full table in the back-test record.
 
+**CORRECTION to the paragraph above, measured 2026-08-27 by a third session: those cells are INHERITED, not fabricated — and the difference decides the repair.** The two headline quotes were grepped against the whole corpus: `hey, brother. i saw what happened.` and `what did you do? nothing ever worked for me.` are both real `- **line:**` fields — in `...backyard-cookout-betrayal-patiocam-...v8` / `...v9` and the `...boardwalk-betrayal-...v1/v2/v7` siblings, i.e. **v12's own ancestors**. One of the flagged cells even announces it: `Scene 1 (byte-locked from v7): "your soldier has been like this soft, small banana for too long."` Nobody invented anything. **A derivative build copied its parent's map wholesale and never re-pointed it at its own rewritten script**, which is exactly why v10, v11 and v12 all carry the same cells.
+
+The CHECK is unaffected and stays right — from v12's own point of view the cell is false, which is all a FAIL needs to mean. What changes is everything downstream of the word:
+
+- **The repair** is mechanical ("re-point these rows at this build's lines"), not a trust problem.
+- **The prevention** has an address: the LOCKED PRODUCTION / derivative route (§7.2.1). A `vN+1` inherits the parent byte-for-byte and the SCRIPT DECISION MAP is a section nobody thinks to list under CHANGED SECTIONS — so it silently ships describing the parent. **Any derivative whose lines move must list the map as a changed section.**
+- **The corpus reading** stays as rev 597 measured it: across 122 mapped builds this is maintenance debt at scale, not authors making things up. Calling it fabrication would send us auditing intent when the fault is a missing step in a workflow.
+
+Both wordings are kept here on purpose, the same way §8.1.1 keeps its wrong versions: the mis-naming is instructive, because "nobody says this line" and "nobody says this line *in this build*" look identical until you grep the siblings.
+
 **Forward-only by design.** Those 14 builds are frozen in `tools/script_map_baseline.txt`, so `--all` exits 0 and the §9.1 Stop gate does not go permanently red; they print as `[BASE]`. `--strict` shows them on demand. A NEW break still fails — proved in both directions.
 
 **What it deliberately does NOT do, and why that is the point.** It cannot judge whether an adapt is still relevant to the new audience, whether the causal chain holds, or whether a line reads clean aloud (§5.4). Those stay the human pass. It also does not hide what it cannot see: **41** cells state their change in prose and are counted unverifiable, **18** builds declare a parent that cannot be opened, **26** declare several different parents — 43 builds whose stated lineage cannot be followed, surfaced as real editorial debt rather than guessed at.
