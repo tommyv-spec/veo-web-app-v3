@@ -1508,7 +1508,9 @@ def test_tile_proof_never_overrides_a_seen_half_attached_submit():
     regression — and a tile count must never resurrect it."""
     src = WORKER_SRC.read_text(encoding="utf-8")
     arm = src.index("_cs_ok, _cs_chips = charswap_attach_and_prompt(")
-    tile = src.index("[tile-proof]", arm)
+    # v945.7 added a pre-click "[tile-proof] pre-click" log line that sits
+    # BEFORE this guard, so the anchor is the post-click block's own line.
+    tile = src.index("[tile-proof] {_cs_tile_state}", arm)
     guard_start = src.rindex("if not _cs_accept", arm, tile)
     guard_line = src[guard_start:src.index(":", guard_start)]
     assert "not _cs_seen" in guard_line, (
@@ -1656,8 +1658,11 @@ def test_the_observation_is_taken_while_the_dropdown_is_still_open():
     start = src.index("\ndef _click_input_mode_tab(")
     body = src[start:src.index("\ndef ", start + 1)]
     assert body.count("observe_input_mode_tab(page)") == 2  # both branches
-    assert body.index("_input_mode_applied = 'Ingredients'") < body.index(
-        "observe_input_mode_tab(page)")
+    # v945.7 (Codex rev 532 finding 4b) — this assertion USED to read `<`: the
+    # stamp was written before anyone looked at the tabs. That ordering is the
+    # bug, so the check is inverted on purpose. See section 15.
+    assert body.index("observe_input_mode_tab(page)") < body.index(
+        "_input_mode_applied = 'Ingredients'")
 
 
 def test_the_arm_still_fails_closed_on_anything_but_ingredients():
@@ -1818,3 +1823,417 @@ def test_the_runner_still_calls_the_wrapper_and_not_the_body():
     src = (_HERE / "main.py").read_text(encoding="utf-8")
     assert src.count("await _do_export_final(") == 1
     assert src.count("await _do_export_final_impl(") == 1
+
+
+# =============================================================================
+# 16. v945.7 — the tile fallback proves an ID DELTA, not a bigger count
+# =============================================================================
+# Codex rev 532 finding 2. v945.5 accepted the submit when the number of
+# `[data-index]` tiles on the page exceeded `_tiles_in_this_project`, a counter
+# seeded from len(clips_done) rather than from the DOM. A count rises for
+# things the click did not do, and the two sides were not even measuring the
+# same population. The fallback now snapshots the exact identifier set before
+# the click and requires an identifier that was not there before.
+#
+# Every case below is written as the SHAPE OF THE PAGE the scenario produces,
+# because that is the only thing the verdict can see.
+
+
+def _tile_verdict():
+    return _worker_function("charswap_tile_delta_verdict")
+
+
+def test_a_page_that_did_not_change_is_not_proof():
+    """The plain no-delta case: the click did nothing and the grid says so."""
+    new_ids, accepted = _tile_verdict()(
+        ["tile:a", "media:11111111-1111-1111-1111-111111111111"],
+        ["tile:a", "media:11111111-1111-1111-1111-111111111111"])
+    assert (new_ids, accepted) == ([], False)
+
+
+def test_a_stale_tile_from_an_earlier_clip_is_not_proof():
+    """The old count check passed on this: three tiles on the page against a
+    counter that said two. The ids are identical, so the delta says no."""
+    pre = ["tile:old1", "tile:old2", "tile:old3"]
+    assert _tile_verdict()(pre, list(reversed(pre))) == ([], False)
+
+
+def test_a_tile_that_finished_rendering_is_not_proof():
+    """A completed tile keeps its data-tile-id and only changes its pixels.
+    Its media uuid was already in the pre set, because the snapshot reads the
+    same img/video src the finished tile shows."""
+    uuid = "22222222-2222-2222-2222-222222222222"
+    pre = ["tile:t7", f"media:{uuid}"]
+    post = ["tile:t7", f"media:{uuid}"]  # 0% -> 100%, same identifiers
+    assert _tile_verdict()(pre, post) == ([], False)
+
+
+def test_a_delayed_tile_from_a_prior_submit_is_not_proof():
+    """It was already on the page when the snapshot was taken — that is what
+    makes the snapshot the right instrument. If it was NOT on the page yet it
+    was not in the old count either, which is precisely the hole this closes:
+    see the honest limit in the next test."""
+    pre = ["tile:earlier_submit_still_generating", "tile:done"]
+    post = ["tile:earlier_submit_still_generating", "tile:done"]
+    assert _tile_verdict()(pre, post) == ([], False)
+
+
+def test_a_concurrent_tile_in_the_same_project_is_STILL_accepted():
+    """Documented honestly rather than papered over.
+
+    A tile created by a DIFFERENT submitter into the SAME project during our
+    8-second window is a genuinely new identifier, and nothing in the DOM says
+    who clicked. So the verdict accepts it, and this test pins that it does —
+    a test that pretended otherwise would be a lie about the mechanism.
+
+    Why that is acceptable in this lane, and only in this lane: a charswap job
+    owns its project for the length of its run (one submitter thread per
+    account, one project per job), so a second submitter into the same project
+    is not a state this code path produces. If that assumption ever breaks,
+    the fix is a real submit receipt, not a cleverer DOM heuristic. The
+    docstring of charswap_tile_delta_verdict says the same thing in the source
+    so nobody has to find this test to learn it."""
+    fn = _tile_verdict()
+    new_ids, accepted = fn(["tile:mine"], ["tile:mine", "tile:someone_elses"])
+    assert accepted is True and new_ids == ["tile:someone_elses"]
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    doc = src[src.index("def charswap_tile_delta_verdict("):]
+    doc = doc[:doc.index("\n    if pre_ids is None")]
+    assert "CANNOT SEE" in doc, "the limit must be stated in the source"
+
+
+def test_a_genuinely_new_tile_is_the_only_thing_that_proves_the_submit():
+    fn = _tile_verdict()
+    new_ids, accepted = fn(["tile:a", "tile:b"], ["tile:a", "tile:b", "tile:c"])
+    assert accepted is True
+    assert new_ids == ["tile:c"]
+
+
+def test_a_new_media_uuid_counts_as_a_new_identifier():
+    """A tile can mount its media before (or without) a readable tile id."""
+    fn = _tile_verdict()
+    new_ids, accepted = fn(
+        ["media:33333333-3333-3333-3333-333333333333"],
+        ["media:33333333-3333-3333-3333-333333333333",
+         "media:44444444-4444-4444-4444-444444444444"])
+    assert accepted is True
+    assert new_ids == ["media:44444444-4444-4444-4444-444444444444"]
+
+
+def test_an_unread_snapshot_can_never_prove_anything():
+    """None is 'the DOM would not answer', not 'the project was empty'. If it
+    were treated as an empty set every tile on the page would look new."""
+    fn = _tile_verdict()
+    assert fn(None, ["tile:a"]) == ([], False)
+    assert fn(["tile:a"], None) == ([], False)
+    assert fn(None, None) == ([], False)
+
+
+def _tile_reader():
+    """charswap_project_tile_ids plus the JS constant it evaluates — the
+    single-function extractor cannot see module-level names."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    ns = {}
+    js = src.index("_CHARSWAP_TILE_IDS_JS = ")
+    exec(src[js:src.index('}"""', js) + 4], ns)  # noqa: S102 — our own file
+    start = src.index("\ndef charswap_project_tile_ids(")
+    rest = src[start + 1:]
+    exec(rest[:rest.index("\ndef ", 1)], ns)  # noqa: S102 — our own file
+    return ns["charswap_project_tile_ids"]
+
+
+def test_the_tile_id_reader_fails_closed_when_the_page_throws():
+    read = _tile_reader()
+
+    class _Boom:
+        def evaluate(self, _js):
+            raise RuntimeError("execution context destroyed")
+
+    class _Null:
+        def evaluate(self, _js):
+            return None
+
+    class _Fine:
+        def evaluate(self, _js):
+            return ["tile:a", "media:b"]
+
+    assert read(_Boom()) is None      # not [] — see the docstring
+    assert read(_Null()) is None
+    assert read(_Fine()) == ["tile:a", "media:b"]
+
+
+def test_the_snapshot_is_taken_before_the_generate_click():
+    """A snapshot taken after the click cannot tell the click's tile from the
+    ones already there, which is the whole mechanism."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    arm = src.index("_cs_ok, _cs_chips = charswap_attach_and_prompt(")
+    click = src.index("click_generate_button(page,", arm)
+    assert "_cs_pre_tile_ids = charswap_project_tile_ids(page)" in src[arm:click]
+
+
+def test_the_fallback_accepts_on_the_delta_and_not_on_a_count():
+    """The count comparison against _tiles_in_this_project must be gone from
+    the accept decision — it is the exact weakness Codex named."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    tile = src.index("[tile-proof] pre-click")
+    block = src[tile:src.index("if not _cs_accept:", tile)]
+    assert "charswap_tile_delta_verdict(" in block
+    assert "_tiles_in_this_project" not in block, (
+        "acceptance must not read the session tile counter any more")
+    # (c) the result stays PROVISIONAL and says so.
+    assert "media-binding unverified" in block
+
+
+def test_the_delta_fallback_is_still_gated_on_the_probe_being_blind():
+    """v945.6 must survive v945.7: seen && !both is a proven half-attached
+    submit and no tile evidence, delta or not, may resurrect it."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    arm = src.index("_cs_ok, _cs_chips = charswap_attach_and_prompt(")
+    tile = src.index("[tile-proof] pre-click", arm)
+    fallback = src.index("charswap_tile_delta_verdict(", tile)
+    guard_start = src.rindex("if not _cs_accept", arm, fallback)
+    guard_line = src[guard_start:src.index(":", guard_start)]
+    assert "not _cs_seen" in guard_line
+
+
+# =============================================================================
+# 17. v945.7 — the prompt read-back checks the TEXT, not just its length
+# =============================================================================
+# Codex rev 532 finding 4a. `got >= want * min_ratio` accepts any string long
+# enough, so the previous clip's prompt left in the composer read back as a
+# clean pass. The three outcomes stay distinct: unreadable, too short/empty,
+# and wrong content.
+
+
+def test_a_box_holding_someone_elses_prompt_is_a_mismatch_not_a_pass():
+    act = _worker_function("charswap_prompt_readback_action")
+    wanted = ("swap the man in the video for the man in the photo, keep the "
+              "camera move and the lighting exactly as they are")
+    stale = ("she lifts the jar toward the camera and smiles while the light "
+             "from the window falls across the counter behind her")
+    assert len(stale) >= len(wanted) * 0.8  # the old check would have passed
+    action, why = act(stale, wanted)
+    assert action == "retype"
+    assert "different text" in why
+
+
+def test_the_mismatch_reason_is_not_the_unreadable_reason():
+    """Unreadable, empty and wrong-content must stay tellable apart in the log
+    — that is the only thing the next failing run has to go on."""
+    act = _worker_function("charswap_prompt_readback_action")
+    wanted = "a" * 120
+    unreadable = act(None, wanted)[1]
+    empty = act("", wanted)[1]
+    wrong = act("b" * 120, wanted)[1]
+    assert "could not be read" in unreadable
+    assert "empty" in empty
+    assert "different text" in wrong
+    assert len({unreadable, empty, wrong}) == 3
+
+
+def test_whitespace_and_case_differences_are_not_a_mismatch():
+    """The composer is a contenteditable: it re-wraps and re-flows. Comparing
+    raw strings would fail on a newline the browser inserted itself."""
+    act = _worker_function("charswap_prompt_readback_action")
+    wanted = ("Swap the man in the video for the man in the photo, keeping "
+              "every camera move intact.")
+    observed = ("swap the  man in the video\nfor the man in the photo,   "
+                "keeping every camera move intact.")
+    assert act(observed, wanted)[0] == "ok"
+
+
+def test_a_box_that_kept_the_head_but_lost_the_tail_is_caught_by_length():
+    """Truncation is still the length rule's job, and it must stay that way —
+    a prefix check alone would pass a box holding only the first sentence."""
+    act = _worker_function("charswap_prompt_readback_action")
+    wanted = ("swap the man in the video for the man in the photo. keep the "
+              "camera move, the lighting and the background exactly as they "
+              "are, and change nothing else about the shot.")
+    action, why = act(wanted[:60], wanted)
+    assert action == "retype"
+    assert "/" in why and "different text" not in why
+
+
+def test_the_prefix_window_is_what_gets_compared():
+    """Only the first prefix_chars are compared, so text after the window is
+    the length rule's business — pinned so the window is not silently widened
+    into a full-string equality nobody can satisfy."""
+    act = _worker_function("charswap_prompt_readback_action")
+    head = "swap the man in the video for the man in the photo and keep it all"
+    wanted = head + " " + ("x" * 200)
+    observed = head + " " + ("y" * 200)  # same length, tail differs
+    assert act(observed, wanted, prefix_chars=len(head))[0] == "ok"
+    assert act(observed, wanted, prefix_chars=400)[0] == "retype"
+
+
+def test_an_all_whitespace_prompt_does_not_wedge_the_content_check():
+    """A degenerate prompt normalizes to nothing; there is no prefix to
+    demand, so the earlier rules decide and the check does not fabricate a
+    mismatch out of an empty comparison."""
+    act = _worker_function("charswap_prompt_readback_action")
+    assert act("   ", "   ")[0] == "retype"  # empty box, by the length rule
+    assert act("anything at all here", "    ")[0] == "ok"
+
+
+# =============================================================================
+# 18. v945.7 — the input-mode stamp may not run ahead of the observation
+# =============================================================================
+# Codex rev 532 finding 4b. `_input_mode_applied` was written the moment the
+# click returned. set_clip_input_mode compares against that stamp to decide
+# whether the dropdown needs re-opening, so a switch that silently failed left
+# a note saying the mode WAS applied and every later clip took the no-op
+# branch — one dud click disabled recovery for the whole project.
+
+
+class _TabLoc:
+    def __init__(self, page, key, exists=True):
+        self._page, self._key, self._exists = page, key, exists
+
+    @property
+    def first(self):
+        return self
+
+    def count(self):
+        return 1 if self._exists else 0
+
+    def wait_for(self, **kwargs):
+        if not self._exists:
+            raise RuntimeError(f"{self._key} tab never visible")
+
+    def get_attribute(self, name):
+        assert name == "aria-selected"
+        return self._page.tabs.get(self._key)
+
+    def all_inner_texts(self):
+        return ["Frames", "Ingredients"]
+
+
+class _TabPage:
+    """Only what _click_input_mode_tab and observe_input_mode_tab touch."""
+
+    def __init__(self, model="Omni Flash", ing="false", frames="true",
+                 click_works=True, missing=()):
+        self._veo_model = model
+        self._clip_has_end_frame = True
+        self.tabs = {"Ingredients": ing, "Frames": frames}
+        self.click_works = click_works
+        self.missing = set(missing)
+        self.clicks = []
+
+    def locator(self, sel):
+        if "Ingredients" in sel or "experiment" in sel:
+            key = "Ingredients"
+        elif "crop_free" in sel or "Frames" in sel:
+            key = "Frames"
+        else:  # the diagnostic enumeration selector
+            key = "Frames"
+        return _TabLoc(self, key, exists=key not in self.missing)
+
+    def click(self, key):
+        self.clicks.append(key)
+        if not self.click_works:
+            return
+        for k in self.tabs:
+            self.tabs[k] = "true" if k == key else "false"
+
+
+def _tab_ns():
+    """_click_input_mode_tab plus the real helpers it calls, with the click
+    and the sleep stubbed so no browser is involved."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    ns = {}
+    for name in ("is_omni", "_omni_ingredients_mode",
+                 "input_mode_from_tab_states", "resolve_observed_input_mode",
+                 "observe_input_mode_tab", "_click_input_mode_tab"):
+        start = src.index(f"\ndef {name}(")
+        rest = src[start + 1:]
+        exec(rest[:rest.index("\ndef ", 1)], ns)  # noqa: S102 — our own file
+
+    class _Time:
+        @staticmethod
+        def sleep(_s):
+            pass
+
+    ns["time"] = _Time()
+    ns["human_click_element"] = lambda page, loc, label: page.click(loc._key)
+    return ns
+
+
+def test_a_confirmed_tab_switch_stamps_the_mode():
+    ns = _tab_ns()
+    page = _TabPage(ing="false", frames="true", click_works=True)
+    ns["_click_input_mode_tab"](page)
+    assert page.clicks == ["Ingredients"]
+    assert page._input_mode_applied == "Ingredients"
+    assert page._input_mode_observed == "Ingredients"
+
+
+def test_a_click_that_did_not_move_the_tab_leaves_no_stamp():
+    """The finding, exactly: the click resolved, the tab never changed."""
+    ns = _tab_ns()
+    page = _TabPage(ing="false", frames="true", click_works=False)
+    ns["_click_input_mode_tab"](page)
+    assert page.clicks == ["Ingredients"]  # it really did try
+    assert page._input_mode_applied is None
+    assert page._input_mode_observed == "Frames"  # honest about what it saw
+
+
+def test_a_tab_the_dom_will_not_describe_leaves_no_stamp():
+    """Both tabs claiming nothing = 'Unverified' = no stamp."""
+    ns = _tab_ns()
+    page = _TabPage(ing="false", frames="false", click_works=False)
+    ns["_click_input_mode_tab"](page)
+    assert page._input_mode_observed is None
+    assert page._input_mode_applied is None
+
+
+def test_a_tab_that_never_appeared_clears_the_stamp_too():
+    """A stamp left over from an earlier clip must not survive a throw."""
+    ns = _tab_ns()
+    page = _TabPage(missing={"Ingredients"})
+    page._input_mode_applied = "Ingredients"  # stale, from the last clip
+    key, ok = ns["_click_input_mode_tab"](page)
+    assert (key, ok) == ("Ingredients", False)
+    assert page._input_mode_applied is None
+
+
+def test_the_frames_branch_follows_the_same_rule():
+    ns = _tab_ns()
+    good = _TabPage(model="Veo 3.1 - Lite", ing="true", frames="false",
+                    click_works=True)
+    good._clip_has_end_frame = False
+    ns["_click_input_mode_tab"](good)
+    assert good._input_mode_applied == "Frames"
+
+    bad = _TabPage(model="Veo 3.1 - Lite", ing="true", frames="false",
+                   click_works=False)
+    bad._clip_has_end_frame = False
+    ns["_click_input_mode_tab"](bad)
+    assert bad._input_mode_applied is None
+
+
+def test_a_cleared_stamp_makes_the_next_clip_retry_the_switch():
+    """The payoff. With the old always-stamp, set_clip_input_mode took the
+    no-op branch and the dropdown was never re-opened again."""
+    ns = _set_clip_input_mode_ns()
+    calls = []
+    ns["select_frames_to_video_mode"] = lambda page, **kw: (
+        calls.append(kw), setattr(page, "_input_mode_observed", "Ingredients"))
+    page = _ModePage()
+    page._input_mode_applied = None      # what a failed switch now leaves
+    page._input_mode_observed = "Frames"
+    assert ns["set_clip_input_mode"](page, True, True) == "Ingredients"
+    assert len(calls) == 1, "the switch has to be re-attempted"
+
+
+def test_a_stamped_mode_still_short_circuits_when_it_was_confirmed():
+    """The optimisation the stamp exists for is not lost — a confirmed stamp
+    still skips re-opening the dropdown."""
+    ns = _set_clip_input_mode_ns()
+    calls = []
+    ns["select_frames_to_video_mode"] = lambda page, **kw: calls.append(kw)
+    page = _ModePage()
+    page._input_mode_applied = "Ingredients"
+    page._input_mode_observed = "Ingredients"
+    assert ns["set_clip_input_mode"](page, True, True) == "Ingredients"
+    assert calls == []

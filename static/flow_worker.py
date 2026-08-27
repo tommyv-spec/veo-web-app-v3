@@ -7916,7 +7916,19 @@ def _click_input_mode_tab(page, prefix=""):
     (mode_key, ok) where mode_key is 'Ingredients' or 'Frames' so the caller can
     record it under the same key the settings verification checks. On success it
     stamps page._input_mode_applied so set_clip_input_mode() only re-opens the
-    dropdown when the mode really changes between clips."""
+    dropdown when the mode really changes between clips.
+
+    v945.7 (Codex rev 532 finding 4b) — THE STAMP FOLLOWS THE OBSERVATION, it
+    does not precede it. `_input_mode_applied` used to be written the moment
+    the click returned, before anyone looked at the tabs. That stamp is what
+    set_clip_input_mode compares against to decide whether the dropdown needs
+    re-opening, so a switch that silently failed left behind a note saying the
+    mode WAS applied, and every following clip took the no-op branch and never
+    retried — the failure became permanent for the rest of the project on the
+    strength of a click that did nothing. The stamp is now written only when
+    the DOM agrees the intended tab is the selected one, and is CLEARED on
+    'Unverified' or on a mismatch, which puts the next call back on the
+    re-open path."""
     if _omni_ingredients_mode(page):
         try:
             ing = page.locator(
@@ -7928,15 +7940,30 @@ def _click_input_mode_tab(page, prefix=""):
             if ing.get_attribute("aria-selected") != "true":
                 human_click_element(page, ing, f"{prefix}Ingredients tab")
                 time.sleep(0.5)
-            page._input_mode_applied = 'Ingredients'
             # v945.3 — record what the DOM actually says, while the dropdown is
             # still open. set_clip_input_mode reports THIS, not the mode it
             # computed from the model name.
             page._input_mode_observed = observe_input_mode_tab(page)
-            print(f"{prefix}✓ Ingredients tab OK (Omni + start&end frame) "
-                  f"[observed={page._input_mode_observed or 'unreadable'}]", flush=True)
+            _confirmed = (resolve_observed_input_mode(page._input_mode_observed)
+                          == 'Ingredients')
+            page._input_mode_applied = 'Ingredients' if _confirmed else None
+            if _confirmed:
+                print(f"{prefix}✓ Ingredients tab OK (Omni + start&end frame) "
+                      f"[observed={page._input_mode_observed or 'unreadable'}]", flush=True)
+            else:
+                print(f"{prefix}⚠ Ingredients tab NOT confirmed "
+                      f"[observed={page._input_mode_observed or 'unreadable'}] — "
+                      f"stamp cleared so the next clip retries the switch",
+                      flush=True)
+            # The returned flag is deliberately left as it was: it feeds
+            # settings_applied / the settings-pass retry loop on EVERY render
+            # lane, and this fix is about the stamp, not about re-tuning when
+            # the whole settings pass restarts. The stamp is what decides
+            # whether the switch is retried per clip, and that is now honest.
             return ('Ingredients', True)
         except Exception:
+            page._input_mode_applied = None
+            page._input_mode_observed = None
             # DIAG (remove after the live Omni-ingredients run lands): dump every
             # slider-tab label so the real Ingredients selector can be confirmed.
             try:
@@ -7955,12 +7982,21 @@ def _click_input_mode_tab(page, prefix=""):
         if tab.get_attribute("aria-selected") != "true":
             human_click_element(page, tab, f"{prefix}Frames tab")
             time.sleep(0.5)
-        page._input_mode_applied = 'Frames'
         page._input_mode_observed = observe_input_mode_tab(page)  # v945.3
-        print(f"{prefix}✓ Frames tab OK "
-              f"[observed={page._input_mode_observed or 'unreadable'}]", flush=True)
-        return ('Frames', True)
+        _confirmed = (resolve_observed_input_mode(page._input_mode_observed)
+                      == 'Frames')
+        page._input_mode_applied = 'Frames' if _confirmed else None
+        if _confirmed:
+            print(f"{prefix}✓ Frames tab OK "
+                  f"[observed={page._input_mode_observed or 'unreadable'}]", flush=True)
+        else:
+            print(f"{prefix}⚠ Frames tab NOT confirmed "
+                  f"[observed={page._input_mode_observed or 'unreadable'}] — "
+                  f"stamp cleared so the next clip retries the switch", flush=True)
+        return ('Frames', True)  # see the Ingredients branch for why unchanged
     except Exception:
+        page._input_mode_applied = None
+        page._input_mode_observed = None
         print(f"{prefix}⚠ Frames tab missed", flush=True)
         return ('Frames', False)
 
@@ -20014,6 +20050,94 @@ def charswap_submit_gate(seen, both):
     return False, False, "no generate request observed after click"
 
 
+# v945.7 — every tile identifier the project grid currently shows. Same
+# extraction the RAI-failure scraper already uses (~11165): a tile's
+# `data-tile-id`, plus any media uuid its img/video/source carries in a
+# `getMediaUrlRedirect?name=<uuid>` src. `index:<n>` is a LAST-RESORT fallback
+# for a container that exposes no tile-id at all — it is positional and
+# therefore weak, which is exactly why it is only reached when the strong
+# identifiers are absent.
+_CHARSWAP_TILE_IDS_JS = """() => {
+  const out = new Set();
+  for (const c of document.querySelectorAll('[data-index]')) {
+    const tiles = c.querySelectorAll('[data-tile-id]');
+    let named = 0;
+    for (const t of tiles) {
+      const tid = t.getAttribute('data-tile-id');
+      if (tid) { out.add('tile:' + tid); named++; }
+      for (const el of t.querySelectorAll('img,video,source')) {
+        const s = el.getAttribute('src') || el.src || '';
+        const m = s.match(/[?&]name=([0-9a-fA-F-]{36})/);
+        if (m) out.add('media:' + m[1].toLowerCase());
+      }
+    }
+    if (!named) out.add('index:' + c.getAttribute('data-index'));
+  }
+  return Array.from(out);
+}"""
+
+
+def charswap_project_tile_ids(page):
+    """The tile identifiers the project grid shows right now, or None.
+
+    None means "the DOM could not be read", and it is deliberately NOT an
+    empty list: an empty list says "this project has no tiles", which — used
+    as a pre-click snapshot — would make every tile on the page look new and
+    hand the fallback below a free pass. Unread must fail closed.
+    """
+    try:
+        ids = page.evaluate(_CHARSWAP_TILE_IDS_JS)
+    except Exception:
+        return None
+    if ids is None:
+        return None
+    try:
+        return [str(i) for i in ids]
+    except TypeError:
+        return None
+
+
+def charswap_tile_delta_verdict(pre_ids, post_ids):
+    """v945.7 (Codex rev 532 finding 2) — did THIS click create a tile?
+
+    Returns (new_ids, accepted).
+
+    v945.5 accepted on a COUNT: total tiles on the page greater than the
+    number this session had made. Codex was right that this is too weak. A
+    count rises for reasons that have nothing to do with the click just made —
+    a tile that finished rendering and swapped its placeholder, a tile from an
+    earlier submit that only now appeared, a lazily-mounted row scrolling into
+    view — and it compares against a number seeded from `len(clips_done)`
+    rather than from the DOM, so the two sides were never measuring the same
+    thing.
+
+    An ID DELTA fixes all of those: snapshot the exact identifier set
+    immediately before the click, take it again after, and accept only when an
+    identifier appears that was NOT there before. A stale tile keeps its id. A
+    delayed tile from a prior submit is already in the pre set the moment it is
+    on the page, and if it was not on the page it was not counted before
+    either. A completed tile keeps its id and merely changes its pixels.
+
+    WHAT THIS STILL CANNOT SEE, said plainly: a tile created by SOMEONE ELSE
+    submitting into the SAME project during our 8-second window is a genuinely
+    new identifier and will be accepted as ours. No DOM signal separates the
+    two — the tile does not say who clicked. This is acceptable here only
+    because a charswap job owns its project for the length of its run (one
+    submitter thread per account, one project per job), so a concurrent
+    submitter into the same project is not a state this lane produces. If that
+    ever changes, this fallback stops being safe and the fix is a real submit
+    receipt, not a better DOM heuristic.
+
+    Either side being None (unread DOM) is a reject: no snapshot, no proof.
+    """
+    if pre_ids is None or post_ids is None:
+        return [], False
+    pre = set(pre_ids)
+    post = set(post_ids)
+    new_ids = sorted(post - pre)
+    return new_ids, bool(new_ids)
+
+
 def charswap_video_chip_present(page):
     """True when a VIDEO chip is sitting in the composer.
 
@@ -20035,7 +20159,8 @@ def charswap_composer_chip_media_ids(page):
         return []
 
 
-def charswap_prompt_readback_action(observed, prompt, min_ratio=0.8):
+def charswap_prompt_readback_action(observed, prompt, min_ratio=0.8,
+                                    prefix_chars=80):
     """v945.3 — what to do after READING the composer's prompt box back.
 
     The charswap arm used to trust `fill_prompt_textarea`'s own "✓ Prompt
@@ -20051,6 +20176,23 @@ def charswap_prompt_readback_action(observed, prompt, min_ratio=0.8):
     not be read at all — which is NOT the same as empty and must not be
     treated as "fine". Returns (action, reason) where action is 'ok' or
     'retype'.
+
+    v945.7 (Codex rev 532 finding 4a) — LENGTH IS NOT CONTENT. The check above
+    accepted any text at all as long as it was long enough, so the previous
+    clip's prompt still sitting in the box read back as a perfect pass: same
+    order of magnitude, zero relation to what this clip asked for. The box now
+    also has to CARRY the text we tried to enter. Comparison is on a
+    normalized form (whitespace collapsed to single spaces, lowercased),
+    because the composer is a contenteditable that re-wraps and re-cases
+    nothing predictably; only the first `prefix_chars` characters are
+    compared, so a trailing truncation is still caught by the length rule
+    while a box that merely renders the tail differently is not failed for it.
+
+    The three outcomes stay distinct in the reason string, which is the point:
+    'could not be read' (no observation), 'empty' / 'holds N/M chars' (the
+    text did not land), and 'holds different text' (something landed, but not
+    ours). Collapsing the last one into the length check is how a wrong-prompt
+    submit got called proven.
     """
     want = len((prompt or ""))
     if want == 0:
@@ -20062,7 +20204,14 @@ def charswap_prompt_readback_action(observed, prompt, min_ratio=0.8):
         return 'retype', f'prompt box is empty (wanted {want} chars)'
     if got < want * min_ratio:
         return 'retype', f'prompt box holds {got}/{want} chars'
-    return 'ok', f'prompt read back {got}/{want} chars'
+    want_norm = " ".join((prompt or "").split()).lower()
+    got_norm = " ".join((observed or "").split()).lower()
+    head = want_norm[:max(0, int(prefix_chars))]
+    if head and not (got_norm.startswith(head) or head in got_norm):
+        return 'retype', (f'prompt box holds different text '
+                          f'({got}/{want} chars, but its first {len(head)} '
+                          f'normalized chars are not the prompt we entered)')
+    return 'ok', f'prompt read back {got}/{want} chars, text matches'
 
 
 def charswap_generate_readiness(enabled, prompt_len, chip_count):
@@ -21649,6 +21798,14 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                    " — recreate the job; charswap must not be redone")[:200])
                 permanently_failed_clips.add(clip_index)
                 continue
+            # v945.7 (Codex rev 532 finding 2) — snapshot the exact tile
+            # identifiers BEFORE the click. The tile fallback further down may
+            # only accept on an ID DELTA against this set; a count can be
+            # satisfied by a tile this click did not create.
+            _cs_pre_tile_ids = charswap_project_tile_ids(page)
+            print(f"{_cs_ctx} [tile-proof] pre-click tiles="
+                  f"{'unread' if _cs_pre_tile_ids is None else len(_cs_pre_tile_ids)}",
+                  flush=True)
             click_generate_button(page, f"v943 clip {clip_index+1}")
             _cs_seen, _cs_both = charswap_submit_body_verdict(page)
             print(f"{_cs_ctx} submit seen={_cs_seen} both_media_in_body={_cs_both}",
@@ -21668,8 +21825,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # tiles rendering and the composer cleared. Flow's submit no
                 # longer passes through this page's request listener (agent-
                 # mode/service-worker path), so a silent probe must not
-                # abandon a REAL render. A NEW tile beyond the count this
-                # session already made is proof the click submitted.
+                # abandon a REAL render.
+                # v945.7 (Codex rev 532 finding 2) — the proof is an ID DELTA
+                # against the pre-click snapshot, NOT a count. See
+                # charswap_tile_delta_verdict for what each rejected case
+                # looks like and for the one case this still cannot see.
                 try:
                     time.sleep(8)
                     _cs_tile_state = page.evaluate(
@@ -21680,16 +21840,26 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         "   if (/\\d+%/.test(t.textContent || '')) generating++;"
                         "   if (t.querySelector('video')) video++; }"
                         " return {total: tiles.length, generating, video}; }")
-                    print(f"{_cs_ctx} [tile-proof] {_cs_tile_state} vs "
-                          f"already-made {_tiles_in_this_project}", flush=True)
-                    if (int(_cs_tile_state.get('total', 0)) >
-                            _tiles_in_this_project):
-                        print(f"{_cs_ctx} [tile-proof] NEW tile present — the "
+                    _cs_post_tile_ids = charswap_project_tile_ids(page)
+                    _cs_new_ids, _cs_tile_proven = charswap_tile_delta_verdict(
+                        _cs_pre_tile_ids, _cs_post_tile_ids)
+                    print(f"{_cs_ctx} [tile-proof] {_cs_tile_state} | ids pre="
+                          f"{'unread' if _cs_pre_tile_ids is None else len(_cs_pre_tile_ids)}"
+                          f" post="
+                          f"{'unread' if _cs_post_tile_ids is None else len(_cs_post_tile_ids)}"
+                          f" new={_cs_new_ids[:4]}", flush=True)
+                    if _cs_tile_proven:
+                        print(f"{_cs_ctx} [tile-proof] NEW tile id "
+                              f"{_cs_new_ids[0]} appeared after the click — the "
                               f"submit was REAL, the probe was blind. "
                               f"Proceeding; media-binding unverified, check "
                               f"the render visually.", flush=True)
                         _cs_accept, _cs_count_tile = True, False
                         _cs_gate_why = "tile-proven submit (probe blind)"
+                    else:
+                        print(f"{_cs_ctx} [tile-proof] no new tile id — the "
+                              f"click created nothing this snapshot can see",
+                              flush=True)
                 except Exception as _cs_tp_e:
                     print(f"{_cs_ctx} [tile-proof] probe failed: {_cs_tp_e}",
                           flush=True)
