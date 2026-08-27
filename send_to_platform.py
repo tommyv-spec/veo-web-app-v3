@@ -25,11 +25,19 @@ Usage:
   python send_to_platform.py autoedit 1234 --trim-start 0.3 --music-output bed.mp3
   python send_to_platform.py autoedit --list-styles              # show templates, no job needed
   python send_to_platform.py update-finishing 1234 videos/build.md  # v947 ## Finishing -> live job
+  python send_to_platform.py approve-clip 14661        # v949 — operator-gated
+  python send_to_platform.py reject-clip 14661,14662   # comma-list works
 
 update-finishing pushes an updated build's `## Finishing` section onto a job
 that is ALREADY promoted, so the v947 auto-finish chain can run on clips the
 operator has already approved without a re-import. No section in the file
 means the job's stored finishing is cleared.
+
+approve-clip / reject-clip (v949) move a clip's approval from the CLI via the
+same endpoints the review UI clicks, under the operator's own token. They are
+OPERATOR-GATED like publishing: run only on an explicit operator instruction
+naming the clips. Approving the last pending clip of an auto_finish job fires
+the v947 chain, exactly as the UI click would.
 
 Autoedit turns a finished render into a finished video (support-footage picture-
 in-picture, keyed hook, enhanced voice, music, karaoke captions). It returns a
@@ -1268,14 +1276,69 @@ def cmd_update_finishing(client, args, report):
     return EXIT_OK
 
 
+def cmd_clip_approval(client, args, report, action):
+    """v949 — approve or reject clips from the CLI, operator-gated.
+
+    The review click used to be the ONLY way to move a clip's approval, so
+    the v947 auto-finish chain (fires on the LAST approval) and any approval
+    backlog always waited on the UI. This calls the same
+    /api/clips/{id}/approve|reject endpoints the review UI calls, under the
+    operator's own bearer token — ownership (get_user_clip), the
+    completed-only rule, and the v947 prior-state guard all apply unchanged.
+
+    OPERATOR-GATED like publishing: an agent runs this only on an explicit
+    operator instruction naming the clips (same discipline as
+    feedback_publishing-needs-an-explicit-go-every-time). The tool prints
+    exactly what it did so the go can be audited.
+    """
+    past = {"approve": "approved", "reject": "rejected"}[action]
+    if not args.token_value:
+        raise PlatformError(
+            EXIT_UNKNOWN,
+            f"{action}-clip needs clip id(s): "
+            f"send_to_platform.py {action}-clip <clip-id>[,<clip-id>...]")
+    ids = parse_clip_id_list(args.token_value)
+    results = []
+    for cid in ids:
+        resp = client.post(f"/api/clips/{cid}/{action}")
+        results.append({"clip_id": cid, **(resp if isinstance(resp, dict) else {})})
+        print(f"clip {cid}: {past}", flush=True)
+    report[f"clips_{past}"] = results
+    report["stages"].append(f"clips:{past}:{len(ids)}")
+    if args.as_json:
+        print(json.dumps(results, indent=2))
+    return EXIT_OK
+
+
+def parse_clip_id_list(raw):
+    """"14661" or "14661,14662" -> [14661, 14662]. Anything non-numeric is an
+    error — clip ids are integers, and a job UUID here means the operator
+    mixed up job and clip (the "d" DataError family, 4616d16)."""
+    ids = []
+    for part in str(raw).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if not part.isdigit():
+            raise PlatformError(
+                EXIT_UNKNOWN,
+                f"clip id {part!r} is not numeric — clip ids are integers "
+                f"(a job id does not work here; use the clip ids from the review UI)")
+        ids.append(int(part))
+    if not ids:
+        raise PlatformError(EXIT_UNKNOWN, "no clip ids given")
+    return ids
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description="Send a videos/*.md build to the platform and render it.")
     p.add_argument("md_file", help="path to videos/<build>.md, or one of: "
                                     "list-uploads, set-token, set-alias, autoedit, "
-                                    "update-finishing")
+                                    "update-finishing, approve-clip, reject-clip")
     p.add_argument("token_value", nargs="?",
                     help="the token (set-token) / alias name (set-alias) / "
-                         "job id (autoedit, update-finishing)")
+                         "job id (autoedit, update-finishing) / "
+                         "clip id(s), comma-separated (approve-clip, reject-clip)")
     p.add_argument("extra_value", nargs="?",
                    help="node id (set-alias) / path to the build .md (update-finishing)")
     p.add_argument("--avatar", help="persona upload by NAME or alias (instead of --subject id)")
@@ -1397,6 +1460,9 @@ def main(argv=None):
             args.job_id = args.token_value
             args.finishing_md = args.extra_value
             return cmd_update_finishing(client, args, report)
+
+        if args.md_file in ("approve-clip", "reject-clip"):
+            return cmd_clip_approval(client, args, report, args.md_file.split("-")[0])
 
         md_text = open(args.md_file, encoding="utf-8").read()
 
