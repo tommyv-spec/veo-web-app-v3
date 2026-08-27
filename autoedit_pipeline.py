@@ -863,7 +863,7 @@ def fit_low_shelf(src, work: Path):
 _VOICE_CHAIN_RAW = "highpass=f=90:p=2," + _TONE + _LEVEL
 
 
-def enhance_audio(base, work: Path):
+def enhance_audio(base, work: Path, denoise: bool = True):
     # v938.12 — the cache is keyed on the CHAIN, not just the filename.
     #
     # It used to be a bare `audio_pol.wav` + `if pol.exists(): return pol`.
@@ -888,22 +888,33 @@ def enhance_audio(base, work: Path):
     # on that audio's fingerprint) then rebuilt the old composite wholesale —
     # measured 2026-08-27 on job 63097756: v3's autoedit shipped v2's video to
     # the millisecond (46.875s), and only QC's duration check caught it.
+    # v948.2 — `denoise=False` is the DELIBERATE no-denoiser path (audio_enhance
+    # "level"). It reuses the chain the Modal-unavailable fallback already runs
+    # — 90Hz cut instead of the +7dB shelf, then the same tone, compressor,
+    # limiter and two-pass loudness — because that chain is already measured
+    # and shipped. The difference is only in the CACHE: a fallback result is
+    # never reused (a transient outage must not leave a job permanently serving
+    # degraded audio), but a deliberate choice is a correct result and IS.
     chain_key = f"{audio_chain_key()}_s{file_fingerprint(base)}"
     raw_wav, enh = work / "audio_raw.wav", work / "audio_enh.wav"
     pol = work / audio_cache_name(chain_key, denoised=True)
     pol_raw = work / audio_cache_name(chain_key, denoised=False)
-    if pol.exists():
+    if denoise and pol.exists():
         print(f"audio: cached (chain {chain_key})")
         return pol
+    if not denoise and pol_raw.exists():
+        print(f"audio: cached, denoiser deliberately off (chain {chain_key})")
+        return pol_raw
     for stale in work.glob("audio_pol*.wav"):
         stale.unlink(missing_ok=True)   # do not hoard one file per chain edit
     run(["ffmpeg", "-v", "error", "-i", str(base), "-vn", "-ac", "1", "-ar", "48000", "-y", str(raw_wav)])
     ok = False
-    try:
-        from audio_processor import try_deepfilter_modal
-        ok = try_deepfilter_modal(raw_wav, enh)
-    except Exception as e:
-        print(f"deepfilter modal unavailable: {e}")
+    if denoise:
+        try:
+            from audio_processor import try_deepfilter_modal
+            ok = try_deepfilter_modal(raw_wav, enh)
+        except Exception as e:
+            print(f"deepfilter modal unavailable: {e}")
     if not ok:
         shutil.copy(raw_wav, enh)
         pol = pol_raw
@@ -952,7 +963,8 @@ def enhance_audio(base, work: Path):
 
     run(["ffmpeg", "-v", "error", "-i", str(enh), "-af", f"{chain},{ln}",
          "-ar", "48000", "-y", str(pol)])
-    print(f"audio: deepfilter={'modal' if ok else 'SKIPPED (raw)'} + capcut-matched EQ "
+    _df = "modal" if ok else ("OFF by request" if not denoise else "SKIPPED (raw)")
+    print(f"audio: deepfilter={_df} + capcut-matched EQ "
           f"+ two-pass loudness (input {measured} LUFS, chain {chain_key})")
     return pol
 
@@ -1434,7 +1446,8 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
         print(f"layout: cached (offset {auto_offset:+.3f}, pip_y {pip_y}, chin {chin:.2f})")
     scan_file.write_text(json.dumps(s))
     progress("audio")
-    if repairs.get("audio_enhance", "voice") == "off":
+    _audio_mode = repairs.get("audio_enhance", "voice")
+    if _audio_mode == "off":
         # v947.2 — source-original / music-bed videos: the export's audio IS the
         # final audio. Extract it untouched; compose muxes and fingerprints it
         # exactly like an enhanced wav, so the cache contract is unchanged.
@@ -1445,6 +1458,12 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
             run(["ffmpeg", "-y", "-i", str(base), "-vn", "-acodec", "pcm_s16le",
                  "-ar", "48000", "-ac", "2", str(audio)])
         print("audio: enhance OFF — export audio passed through untouched")
+    elif _audio_mode == "level":
+        # v948.2 — everything except the denoiser. For a v948-swept export:
+        # keeps the loudness pass (without it a swept final measured -25.1 LUFS
+        # against a -14.3 published reference) while leaving the quiet room tone
+        # the denoiser would crush back into silence.
+        audio = enhance_audio(base, work, denoise=False)
     else:
         audio = enhance_audio(base, work)
     hook_corner = resolve_hook_corner(

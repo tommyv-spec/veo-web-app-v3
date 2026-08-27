@@ -23,6 +23,9 @@ DEFAULT_REPAIRS = {
     # source-original / music-bed videos, where the voice chain measurably guts
     # the track (DeepFilter treats music as noise; Venice job 1e574970,
     # 2026-08-27: spectrogram lost the whole mid/high band).
+    # v948.2 — "level" is the middle setting: the whole voice chain EXCEPT the
+    # denoiser, so a v948-swept export keeps its loudness pass without the
+    # denoiser re-creating the silence holes the sweep removed.
     "audio_enhance": "voice",
     # v938.15 — hook composite. None = today's layout (keyed speaker at full
     # size over a blurred backdrop). A float = the corpus/CapCut layout: the
@@ -89,8 +92,8 @@ def normalize_repairs(value=None):
     if not -40.0 <= out["music_db"] <= -8.0:
         raise ValueError("Music volume must be between -40 dB and -8 dB")
 
-    if out.get("audio_enhance") not in ("voice", "off"):
-        raise ValueError("audio_enhance must be 'voice' or 'off'")
+    if out.get("audio_enhance") not in ("voice", "off", "level"):
+        raise ValueError("audio_enhance must be 'voice', 'off' or 'level'")
 
     # v938.15 — hook corner scale. None keeps today's layout; a float switches
     # to the measured corpus layout. Bounds are deliberately wide (the operator

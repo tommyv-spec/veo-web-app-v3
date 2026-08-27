@@ -93,7 +93,17 @@ class AutoEditRequest(BaseModel):
     # untouched — the voice chain's denoiser treats music as noise and guts it).
     # Literal, not str: the closed value set belongs on the MODEL, so a bad
     # value dies at import/parse AND at the endpoint, not at queue time.
-    audio_enhance: Literal["voice", "off"] = "voice"
+    #
+    # v948.2 — "level" is the middle setting: everything the voice chain does
+    # EXCEPT the DeepFilter denoiser (voice EQ, compressor, limiter, two-pass
+    # loudness). It exists because "off" turns off FOUR things at once, and a
+    # v948-swept export needs exactly one of them gone. Measured on job
+    # 29d45418: the denoiser crushes quiet room tone below the silence floor and
+    # re-creates the holes the sweep just removed, so the sweep forces "off" —
+    # and "off" also drops the loudness pass, landing the final at -25.1 LUFS
+    # against a -14.3 LUFS published reference. Neither existing value can ship
+    # that video.
+    audio_enhance: Literal["voice", "off", "level"] = "voice"
     hook_corner: Optional[float] = None
     hook_bg: Optional[str] = None
     # v944 — the text overlay, normally DERIVED from the job's declared
