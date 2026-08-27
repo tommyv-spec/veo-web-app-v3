@@ -1428,7 +1428,17 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
         print(f"layout: cached (offset {auto_offset:+.3f}, pip_y {pip_y}, chin {chin:.2f})")
     scan_file.write_text(json.dumps(s))
     progress("audio")
-    audio = enhance_audio(base, work)
+    if repairs.get("audio_enhance", "voice") == "off":
+        # v947.2 — source-original / music-bed videos: the export's audio IS the
+        # final audio. Extract it untouched; compose muxes and fingerprints it
+        # exactly like an enhanced wav, so the cache contract is unchanged.
+        audio = work / "audio_source.wav"
+        if not audio.exists():
+            run(["ffmpeg", "-y", "-i", str(base), "-vn", "-acodec", "pcm_s16le",
+                 "-ar", "48000", "-ac", "2", str(audio)])
+        print("audio: enhance OFF — export audio passed through untouched")
+    else:
+        audio = enhance_audio(base, work)
     hook_corner = resolve_hook_corner(
         repairs.get("hook_corner"), hook_end, key_hex, broll is not None)
     if hook_corner is not None and repairs.get("hook_corner") is None:

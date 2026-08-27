@@ -88,3 +88,22 @@ class AutoEditQcTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- v947.2: the audio stage is a declared choice, not a constant ----
+
+def test_audio_enhance_defaults_to_voice():
+    from autoedit_qc import normalize_repairs
+    assert normalize_repairs({})["audio_enhance"] == "voice"
+
+
+def test_audio_enhance_off_accepted():
+    from autoedit_qc import normalize_repairs
+    assert normalize_repairs({"audio_enhance": "off"})["audio_enhance"] == "off"
+
+
+def test_audio_enhance_rejects_unknown_value():
+    from autoedit_qc import normalize_repairs
+    import pytest
+    with pytest.raises(ValueError, match="audio_enhance"):
+        normalize_repairs({"audio_enhance": "loud"})

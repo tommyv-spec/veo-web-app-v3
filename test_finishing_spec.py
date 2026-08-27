@@ -659,3 +659,17 @@ def test_prose_and_html_comments_are_not_bullets():
         "\n"
         "## Next Section\n")
     assert spec == {"captions": "none", "overlay": "none"}
+
+
+def test_autoedit_audio_enhance_declarable_with_zero_parser_change():
+    """v947.2 — a NEW AutoEditRequest field is declarable the same day with no
+    parser edit: validation runs against the real model (the whole v947 design
+    point). 'off' is the source-original/music-bed case."""
+    spec = parse_finishing_section(
+        "## Finishing\n\n- **captions:** none\n"
+        "- **autoedit_audio_enhance:** off\n## Next\n")
+    assert spec["autoedit"] == {"audio_enhance": "off"}
+    with pytest.raises(ValueError, match="value rejected"):
+        parse_finishing_section(
+            "## Finishing\n\n- **captions:** none\n"
+            "- **autoedit_audio_enhance:** loud\n## Next\n")

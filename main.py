@@ -14165,6 +14165,7 @@ def _queue_autoedit_impl(db, job, req: AutoEditRequest, user_id):
             "chroma_blend": req.chroma_blend,
             "music_filename": req.music_filename,
             "music_db": req.music_db,
+            "audio_enhance": req.audio_enhance,
             "hook_corner": hook_corner_req,
             "hook_bg": hook_bg_req,
             "overlay_spec": _v944["overlay_spec"],

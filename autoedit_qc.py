@@ -17,6 +17,13 @@ DEFAULT_REPAIRS = {
     "chroma_blend": 0.02,
     "music_filename": None,
     "music_db": -20.0,
+    # v947.2 — what the audio stage does. "voice" = the full talking-head chain
+    # (DeepFilter denoise + voice EQ + loudnorm), the right thing for every
+    # spoken video. "off" = pass the export's audio through UNTOUCHED — for
+    # source-original / music-bed videos, where the voice chain measurably guts
+    # the track (DeepFilter treats music as noise; Venice job 1e574970,
+    # 2026-08-27: spectrogram lost the whole mid/high band).
+    "audio_enhance": "voice",
     # v938.15 — hook composite. None = today's layout (keyed speaker at full
     # size over a blurred backdrop). A float = the corpus/CapCut layout: the
     # b-roll fills the frame SHARP and the speaker is scaled to this fraction
@@ -81,6 +88,9 @@ def normalize_repairs(value=None):
         raise ValueError("Green-key softness must be between 0.00 and 0.10")
     if not -40.0 <= out["music_db"] <= -8.0:
         raise ValueError("Music volume must be between -40 dB and -8 dB")
+
+    if out.get("audio_enhance") not in ("voice", "off"):
+        raise ValueError("audio_enhance must be 'voice' or 'off'")
 
     # v938.15 — hook corner scale. None keeps today's layout; a float switches
     # to the measured corpus layout. Bounds are deliberately wide (the operator

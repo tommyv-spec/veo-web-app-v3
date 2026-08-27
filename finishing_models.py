@@ -5,7 +5,7 @@ build markdown's declared ## Finishing export_*/autoedit_* fields against the
 REAL models instead of a hand-maintained copy that would drift (the v892.2
 lesson). main.py imports them from here; behavior is unchanged.
 """
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -80,6 +80,12 @@ class AutoEditRequest(BaseModel):
     chroma_blend: float = 0.02
     music_filename: Optional[str] = None
     music_db: float = -20.0
+    # v947.2 — "voice" (default: the talking-head enhancement chain) or "off"
+    # (source-original / music-bed videos: the export's audio passes through
+    # untouched — the voice chain's denoiser treats music as noise and guts it).
+    # Literal, not str: the closed value set belongs on the MODEL, so a bad
+    # value dies at import/parse AND at the endpoint, not at queue time.
+    audio_enhance: Literal["voice", "off"] = "voice"
     hook_corner: Optional[float] = None
     hook_bg: Optional[str] = None
     # v944 — the text overlay, normally DERIVED from the job's declared
