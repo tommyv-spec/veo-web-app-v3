@@ -882,7 +882,13 @@ def enhance_audio(base, work: Path):
     # The measured shelf is derived from the audio itself, so the same source
     # always yields the same gain and the cache stays sound — but the CONSTANTS
     # behind that measurement must invalidate it when they change.
-    chain_key = audio_chain_key()
+    # v947.4 — the SOURCE is baked into the output, so it belongs in the key
+    # (v938.1). Chain-only keying meant a NEW export landing in the same work
+    # dir served the OLD export's enhanced voice, and compose (correctly keyed
+    # on that audio's fingerprint) then rebuilt the old composite wholesale —
+    # measured 2026-08-27 on job 63097756: v3's autoedit shipped v2's video to
+    # the millisecond (46.875s), and only QC's duration check caught it.
+    chain_key = f"{audio_chain_key()}_s{file_fingerprint(base)}"
     raw_wav, enh = work / "audio_raw.wav", work / "audio_enh.wav"
     pol = work / audio_cache_name(chain_key, denoised=True)
     pol_raw = work / audio_cache_name(chain_key, denoised=False)
@@ -1432,7 +1438,9 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
         # v947.2 — source-original / music-bed videos: the export's audio IS the
         # final audio. Extract it untouched; compose muxes and fingerprints it
         # exactly like an enhanced wav, so the cache contract is unchanged.
-        audio = work / "audio_source.wav"
+        # Source fingerprint in the name (v947.4 / v938.1): a new export must
+        # never reuse the previous export's extracted audio.
+        audio = work / f"audio_source_{file_fingerprint(base)}.wav"
         if not audio.exists():
             run(["ffmpeg", "-y", "-i", str(base), "-vn", "-acodec", "pcm_s16le",
                  "-ar", "48000", "-ac", "2", str(audio)])
