@@ -14235,6 +14235,39 @@ async def cancel_autoedit(
     return run.to_dict()
 
 
+class FinishingUpdate(BaseModel):
+    markdown: str
+
+
+@app.post("/api/jobs/{job_id}/finishing")
+async def update_job_finishing(
+    job_id: str,
+    req: FinishingUpdate,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v947 — re-parse a build markdown's ## Finishing onto an EXISTING job.
+
+    The import->promote path only carries the spec for jobs promoted after
+    their build declared it; this is the bridge for every job promoted
+    before. Same parser as import (fail-closed), so a bad section 400s here
+    exactly as it would die at import. An absent section CLEARS the stored
+    spec (parity with re-import semantics: removing the section must not
+    leave the job on the old finish forever).
+    """
+    from image_platform import parse_finishing_section
+    job = get_user_job(db, job_id, current_user)  # 404/403 if not the caller's
+    try:
+        spec = parse_finishing_section(req.markdown or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    job.finishing_spec = json.dumps(spec) if spec else None
+    db.commit()
+    print(f"[Finishing/v947] job={job_id[:8]} finishing_spec updated via API: "
+          f"{spec if spec else 'CLEARED (no section)'}", flush=True)
+    return {"job_id": job_id, "finishing_spec": spec}
+
+
 @app.get("/api/autoedit/templates")
 async def autoedit_templates():
     """Style menu for the UI. Local templates + pycaps builtins."""

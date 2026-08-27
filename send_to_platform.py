@@ -24,6 +24,12 @@ Usage:
   python send_to_platform.py autoedit 1234 --status              # inspect, do not queue
   python send_to_platform.py autoedit 1234 --trim-start 0.3 --music-output bed.mp3
   python send_to_platform.py autoedit --list-styles              # show templates, no job needed
+  python send_to_platform.py update-finishing 1234 videos/build.md  # v947 ## Finishing -> live job
+
+update-finishing pushes an updated build's `## Finishing` section onto a job
+that is ALREADY promoted, so the v947 auto-finish chain can run on clips the
+operator has already approved without a re-import. No section in the file
+means the job's stored finishing is cleared.
 
 Autoedit turns a finished render into a finished video (support-footage picture-
 in-picture, keyed hook, enhanced voice, music, karaoke captions). It returns a
@@ -1217,13 +1223,61 @@ def cmd_autoedit(client, args, report):
         time.sleep(AUTOEDIT_POLL_SECONDS)
 
 
+def cmd_update_finishing(client, args, report):
+    """v947 — push a build's `## Finishing` onto a job that is ALREADY promoted.
+
+    Import carries the declaration onto the batch, and promote copies it to the
+    job. A job promoted before its build declared finishing therefore has no
+    spec, and the only other way to give it one is a re-import, which throws
+    away the operator's approved clips. This edits the job in place instead.
+
+    The server re-parses with the import parser, so a bad section fails here
+    the same way it would fail at import, and an absent section clears the
+    stored spec rather than leaving the job on a finish the build dropped.
+    """
+    if not args.job_id:
+        raise PlatformError(
+            EXIT_UNKNOWN,
+            "update-finishing needs a job id and a build: "
+            "send_to_platform.py update-finishing <job-id> <path/to/build.md>")
+    if not args.finishing_md:
+        raise PlatformError(
+            EXIT_UNKNOWN,
+            "update-finishing needs the build markdown: "
+            "send_to_platform.py update-finishing <job-id> <path/to/build.md>")
+
+    try:
+        md_text = open(args.finishing_md, encoding="utf-8").read()
+    except OSError as exc:
+        raise PlatformError(EXIT_PARSE, f"cannot read {args.finishing_md}: {exc}")
+
+    resp = client.post(f"/api/jobs/{args.job_id}/finishing", {"markdown": md_text})
+    report["finishing"] = resp
+    report["stages"].append("finishing:updated")
+
+    spec = resp.get("finishing_spec")
+    if args.as_json:
+        print(json.dumps(resp, indent=2))
+    elif spec:
+        print(f"job {args.job_id} finishing updated:")
+        for key in sorted(spec):
+            print(f"  {key}: {spec[key]}")
+    else:
+        print(f"job {args.job_id} finishing CLEARED "
+              f"(no ## Finishing section in {args.finishing_md})")
+    return EXIT_OK
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description="Send a videos/*.md build to the platform and render it.")
     p.add_argument("md_file", help="path to videos/<build>.md, or one of: "
-                                    "list-uploads, set-token, set-alias, autoedit")
+                                    "list-uploads, set-token, set-alias, autoedit, "
+                                    "update-finishing")
     p.add_argument("token_value", nargs="?",
-                    help="the token (set-token) / alias name (set-alias) / job id (autoedit)")
-    p.add_argument("extra_value", nargs="?", help="node id (only with set-alias)")
+                    help="the token (set-token) / alias name (set-alias) / "
+                         "job id (autoedit, update-finishing)")
+    p.add_argument("extra_value", nargs="?",
+                   help="node id (set-alias) / path to the build .md (update-finishing)")
     p.add_argument("--avatar", help="persona upload by NAME or alias (instead of --subject id)")
     p.add_argument("--product", help="product upload by NAME or alias (instead of --product-node id)")
     p.add_argument("--subject", type=int, help="upload node id of the persona (see list-uploads)")
@@ -1338,6 +1392,11 @@ def main(argv=None):
         if args.md_file == "autoedit":
             args.job_id = args.token_value
             return cmd_autoedit(client, args, report)
+
+        if args.md_file == "update-finishing":
+            args.job_id = args.token_value
+            args.finishing_md = args.extra_value
+            return cmd_update_finishing(client, args, report)
 
         md_text = open(args.md_file, encoding="utf-8").read()
 
