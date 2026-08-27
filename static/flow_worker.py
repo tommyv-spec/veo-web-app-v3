@@ -7847,6 +7847,68 @@ def ensure_batch_view_mode(page, context=""):
         return False
 
 
+def input_mode_from_tab_states(ing_selected, frames_selected):
+    """v945.3 — read a mode off the two tabs' aria-selected values.
+
+    Returns 'Ingredients', 'Frames', or None when the DOM does not say. None
+    covers both "neither tab claims to be selected" and "both do" — either way
+    the page is not telling us which tab the composer is on, and a guess is
+    exactly what this function exists to stop.
+    """
+    ing = (ing_selected is True) or (str(ing_selected).lower() == 'true')
+    frm = (frames_selected is True) or (str(frames_selected).lower() == 'true')
+    if ing and not frm:
+        return 'Ingredients'
+    if frm and not ing:
+        return 'Frames'
+    return None
+
+
+def resolve_observed_input_mode(observed):
+    """v945.3 — the mode string a caller may act on.
+
+    An observation that did not happen becomes 'Unverified' rather than the
+    mode we MEANT to select. set_clip_input_mode used to return its computed
+    string even when the tab click threw, so the charswap arm's
+    `!= 'Ingredients'` gate passed on a composer nobody had looked at. Any
+    value other than the two real tab names fails that gate by equality, which
+    is the fail-closed behaviour the arm already relies on.
+    """
+    if observed in ('Ingredients', 'Frames'):
+        return observed
+    return 'Unverified'
+
+
+def observe_input_mode_tab(page):
+    """v945.3 — which input-mode tab the DOM says is selected, or None.
+
+    Must be called while the settings dropdown is still OPEN: these are the
+    same `button.flow_tab_slider_trigger` elements _click_input_mode_tab
+    clicks, and they leave the DOM when the dropdown closes.
+    """
+    def _selected(sel):
+        try:
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                return None
+            return loc.get_attribute("aria-selected")
+        except Exception:
+            return None
+
+    ing = _selected(
+        "button.flow_tab_slider_trigger:has-text('Ingredients'), "
+        "button.flow_tab_slider_trigger:has(i:text-is('experiment')), "
+        "button.flow_tab_slider_trigger:has(i:text-is('cards'))"
+    )
+    frm = _selected(
+        "button.flow_tab_slider_trigger:has(i:text-is('crop_free')), "
+        "button.flow_tab_slider_trigger:has-text('Frames')"
+    )
+    if ing is None and frm is None:
+        return None
+    return input_mode_from_tab_states(ing, frm)
+
+
 def _click_input_mode_tab(page, prefix=""):
     """v881: click the Frames OR Ingredients tab for the CURRENT clip's mode.
 
@@ -7867,7 +7929,12 @@ def _click_input_mode_tab(page, prefix=""):
                 human_click_element(page, ing, f"{prefix}Ingredients tab")
                 time.sleep(0.5)
             page._input_mode_applied = 'Ingredients'
-            print(f"{prefix}✓ Ingredients tab OK (Omni + start&end frame)", flush=True)
+            # v945.3 — record what the DOM actually says, while the dropdown is
+            # still open. set_clip_input_mode reports THIS, not the mode it
+            # computed from the model name.
+            page._input_mode_observed = observe_input_mode_tab(page)
+            print(f"{prefix}✓ Ingredients tab OK (Omni + start&end frame) "
+                  f"[observed={page._input_mode_observed or 'unreadable'}]", flush=True)
             return ('Ingredients', True)
         except Exception:
             # DIAG (remove after the live Omni-ingredients run lands): dump every
@@ -7889,7 +7956,9 @@ def _click_input_mode_tab(page, prefix=""):
             human_click_element(page, tab, f"{prefix}Frames tab")
             time.sleep(0.5)
         page._input_mode_applied = 'Frames'
-        print(f"{prefix}✓ Frames tab OK", flush=True)
+        page._input_mode_observed = observe_input_mode_tab(page)  # v945.3
+        print(f"{prefix}✓ Frames tab OK "
+              f"[observed={page._input_mode_observed or 'unreadable'}]", flush=True)
         return ('Frames', True)
     except Exception:
         print(f"{prefix}⚠ Frames tab missed", flush=True)
@@ -14850,21 +14919,44 @@ def set_clip_input_mode(page, start_image, end_image, context=""):
     minimum: record the shape, compute the mode, and only re-open the settings
     dropdown when the mode actually differs from the one currently applied.
 
-    Returns the mode string ('Ingredients' or 'Frames')."""
+    Returns the OBSERVED mode string — 'Ingredients', 'Frames', or
+    'Unverified'.
+
+    v945.3: it used to return the mode it had COMPUTED from the model name,
+    including on the path where select_frames_to_video_mode threw and the log
+    said "input-mode tab switch failed" one line above. The charswap arm gates
+    on `!= 'Ingredients'`, so that string handed a fail-closed gate a pass for
+    a tab nobody had looked at. What comes back now is what the DOM said the
+    selected tab was (recorded by _click_input_mode_tab while the dropdown was
+    still open); when that could not be read the answer is 'Unverified', which
+    fails the arm's equality gate the same way a wrong tab does."""
     prefix = f"{context} " if context else ""
     page._clip_has_end_frame = bool(start_image and end_image)
     mode = 'Ingredients' if _omni_ingredients_mode(page) else 'Frames'
     applied = getattr(page, "_input_mode_applied", None)
     if applied == mode:
-        return mode
+        # No-op switch: nothing re-opens the dropdown, so the only honest
+        # answer is the observation taken the last time this tab WAS clicked.
+        # Never observed (an older call path stamped _input_mode_applied
+        # without one) reads as 'Unverified'.
+        return resolve_observed_input_mode(
+            getattr(page, "_input_mode_observed", None))
     print(f"{prefix}[v881] input mode {applied or '-'} → {mode} "
           f"(model={getattr(page, '_veo_model', '-')}, "
           f"end_frame={'yes' if page._clip_has_end_frame else 'no'})", flush=True)
+    # Clear first: a stale observation from the previous clip must never be
+    # read as this clip's proof.
+    page._input_mode_observed = None
     try:
         select_frames_to_video_mode(page, context=context, input_mode_only=True)
     except Exception as e:
         print(f"{prefix}[v881] ⚠ input-mode tab switch failed: {e}", flush=True)
-    return mode
+    observed = resolve_observed_input_mode(
+        getattr(page, "_input_mode_observed", None))
+    if observed != mode:
+        print(f"{prefix}[v945.3] input mode wanted {mode}, DOM says {observed}",
+              flush=True)
+    return observed
 
 
 def _omni_chip_count(page):
@@ -21512,13 +21604,24 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # the Omni model only.
             _cs_mode = set_clip_input_mode(page, True, True, context=_cs_ctx)
             if _cs_mode != 'Ingredients':
-                _cs_tab_why = (
-                    f"charswap needs the Ingredients tab; the composer stayed "
-                    f"on {_cs_mode} because model="
-                    f"{getattr(page, '_veo_model', None) or '-'} does not offer "
-                    f"it — charswap requires the Omni model until a forced-"
-                    f"Ingredients path exists"
-                )
+                # v945.3 — _cs_mode is now what the DOM SAID, so 'Unverified'
+                # (the tab state could not be read) is its own case and must
+                # not be reported as a model problem.
+                if _cs_mode == 'Unverified':
+                    _cs_tab_why = (
+                        f"charswap needs the Ingredients tab and the composer's "
+                        f"selected tab could not be read from the page "
+                        f"(model={getattr(page, '_veo_model', None) or '-'}) — "
+                        f"refusing rather than attaching blind"
+                    )
+                else:
+                    _cs_tab_why = (
+                        f"charswap needs the Ingredients tab; the composer stayed "
+                        f"on {_cs_mode} because model="
+                        f"{getattr(page, '_veo_model', None) or '-'} does not offer "
+                        f"it — charswap requires the Omni model until a forced-"
+                        f"Ingredients path exists"
+                    )
                 print(f"{_cs_ctx} FAILED CLOSED: {_cs_tab_why}", flush=True)
                 update_clip_status(clip['id'], 'failed',
                                    error_message=_cs_tab_why[:200])

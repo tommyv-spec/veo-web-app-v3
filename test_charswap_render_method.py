@@ -1483,3 +1483,159 @@ def test_the_refusal_reason_reaches_the_clip_status():
     refusal = src[arm:click]
     assert "_charswap_block_reason" in refusal
     assert "flow_redo_queued" in refusal
+
+
+# =============================================================================
+# 13. v945.3 — the Ingredients guard has to OBSERVE the tab, not compute it
+# =============================================================================
+# set_clip_input_mode returned the mode it derived from the model name. When
+# the switch threw it logged the failure and returned 'Ingredients' anyway, so
+# the charswap arm's fail-closed `!= 'Ingredients'` gate passed on a composer
+# nobody had looked at.
+
+
+def _set_clip_input_mode_ns():
+    """set_clip_input_mode plus everything it calls, executed from the real
+    source. The tab-switch call is replaced by the test so the DOM stays out
+    of it — what is under test is which string comes back."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    ns = {}
+    for name in ("is_omni", "_omni_ingredients_mode",
+                 "resolve_observed_input_mode", "input_mode_from_tab_states",
+                 "set_clip_input_mode"):
+        start = src.index(f"\ndef {name}(")
+        rest = src[start + 1:]
+        exec(rest[:rest.index("\ndef ", 1)], ns)  # noqa: S102 — our own file
+    return ns
+
+
+class _ModePage:
+    def __init__(self, model="Omni Flash"):
+        self._veo_model = model
+
+
+def test_a_switch_that_throws_no_longer_reports_ingredients():
+    ns = _set_clip_input_mode_ns()
+
+    def _boom(page, **kwargs):
+        raise RuntimeError("dropdown never opened")
+
+    ns["select_frames_to_video_mode"] = _boom
+    page = _ModePage()
+    assert ns["set_clip_input_mode"](page, True, True) == "Unverified"
+
+
+def test_a_switch_that_cannot_be_observed_reports_unverified():
+    """The tab click "worked" but the DOM would not say which tab is on."""
+    ns = _set_clip_input_mode_ns()
+
+    def _switch(page, **kwargs):
+        page._input_mode_applied = "Ingredients"
+        page._input_mode_observed = None  # observe_input_mode_tab read nothing
+
+    ns["select_frames_to_video_mode"] = _switch
+    assert ns["set_clip_input_mode"](_ModePage(), True, True) == "Unverified"
+
+
+def test_an_observed_ingredients_tab_is_the_only_pass():
+    ns = _set_clip_input_mode_ns()
+
+    def _switch(page, **kwargs):
+        page._input_mode_applied = "Ingredients"
+        page._input_mode_observed = "Ingredients"
+
+    ns["select_frames_to_video_mode"] = _switch
+    assert ns["set_clip_input_mode"](_ModePage(), True, True) == "Ingredients"
+
+
+def test_an_observation_that_disagrees_with_the_computed_mode_wins():
+    """The click landed on Frames. The old code would still have said
+    'Ingredients' because that is what the model name implied."""
+    ns = _set_clip_input_mode_ns()
+
+    def _switch(page, **kwargs):
+        page._input_mode_applied = "Ingredients"
+        page._input_mode_observed = "Frames"
+
+    ns["select_frames_to_video_mode"] = _switch
+    assert ns["set_clip_input_mode"](_ModePage(), True, True) == "Frames"
+
+
+def test_a_no_op_switch_reports_the_last_real_observation():
+    """Second charswap clip in a row: the dropdown is not re-opened, so the
+    answer is the observation from when the tab WAS clicked."""
+    ns = _set_clip_input_mode_ns()
+    ns["select_frames_to_video_mode"] = lambda page, **kw: pytest.fail(
+        "a no-op switch must not re-open the dropdown")
+    page = _ModePage()
+    page._input_mode_applied = "Ingredients"
+    page._input_mode_observed = "Frames"
+    assert ns["set_clip_input_mode"](page, True, True) == "Frames"
+
+
+def test_a_no_op_switch_with_no_observation_at_all_is_unverified():
+    """An older call path stamped _input_mode_applied without ever looking."""
+    ns = _set_clip_input_mode_ns()
+    ns["select_frames_to_video_mode"] = lambda page, **kw: None
+    page = _ModePage()
+    page._input_mode_applied = "Ingredients"
+    assert ns["set_clip_input_mode"](page, True, True) == "Unverified"
+
+
+def test_a_stale_observation_cannot_survive_a_real_switch():
+    """Clip N observed Ingredients; clip N+1's switch fails to observe. The
+    old value must not be read as clip N+1's proof."""
+    ns = _set_clip_input_mode_ns()
+
+    def _switch(page, **kwargs):
+        pass  # observes nothing
+
+    ns["select_frames_to_video_mode"] = _switch
+    page = _ModePage()
+    page._input_mode_applied = "Frames"        # forces a real switch
+    page._input_mode_observed = "Ingredients"  # stale, from the last clip
+    assert ns["set_clip_input_mode"](page, True, True) == "Unverified"
+
+
+@pytest.mark.parametrize("ing,frames,expect", [
+    ("true", "false", "Ingredients"),
+    (True, False, "Ingredients"),
+    ("false", "true", "Frames"),
+    ("false", "false", None),   # neither claims to be selected
+    ("true", "true", None),     # both do — the DOM is not saying
+    (None, None, None),
+])
+def test_the_tab_state_reader_only_answers_when_the_dom_is_clear(ing, frames, expect):
+    fn = _worker_function("input_mode_from_tab_states")
+    assert fn(ing, frames) == expect
+
+
+def test_anything_that_is_not_a_real_tab_name_becomes_unverified():
+    fn = _worker_function("resolve_observed_input_mode")
+    assert fn("Ingredients") == "Ingredients"
+    assert fn("Frames") == "Frames"
+    for junk in (None, "", "ingredients", "Unverified", 0, []):
+        assert fn(junk) == "Unverified", junk
+
+
+def test_the_observation_is_taken_while_the_dropdown_is_still_open():
+    """observe_input_mode_tab reads the settings-dropdown tab elements, which
+    leave the DOM on close — so the call has to sit next to the click."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    start = src.index("\ndef _click_input_mode_tab(")
+    body = src[start:src.index("\ndef ", start + 1)]
+    assert body.count("observe_input_mode_tab(page)") == 2  # both branches
+    assert body.index("_input_mode_applied = 'Ingredients'") < body.index(
+        "observe_input_mode_tab(page)")
+
+
+def test_the_arm_still_fails_closed_on_anything_but_ingredients():
+    """The gate is unchanged equality — which is why 'Unverified' works."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    arm = src.index("if charswap_selected(clip):")
+    guard = src.index("if _cs_mode != 'Ingredients':", arm)
+    attach = src.index("charswap_attach_and_prompt(", guard)
+    refusal = src[guard:attach]
+    assert "Unverified" in refusal  # named as its own case, not a model fault
+    assert "permanently_failed_clips.add(clip_index)" in refusal
+    assert "continue" in refusal
