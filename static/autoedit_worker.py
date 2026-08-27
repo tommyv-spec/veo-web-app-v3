@@ -152,6 +152,11 @@ def main():
 
     print(f"[worker] watching {BASE} every {args.interval}s "
           f"— nothing renders while this is not running")
+    # An empty poll prints nothing, so a healthy idle worker used to look
+    # identical to a dead one. Say we are alive every few minutes.
+    STATUS_EVERY = 300
+    last_status = time.time()
+    polls_ok = 0
     while True:
         try:
             run = api("POST", "/api/autoedit/claim", token)
@@ -160,9 +165,15 @@ def main():
             print(f"[worker] claim failed ({e}) — retrying in {args.interval}s")
             time.sleep(args.interval)
             continue
+        polls_ok += 1
         if run.get("autoedit_id"):
             handle(run, token)
+            last_status = time.time()
             continue          # take the next one right away
+        if time.time() - last_status >= STATUS_EVERY:
+            print(f"[worker] {time.strftime('%H:%M')} alive — queue empty, "
+                  f"{polls_ok} checks reached the server, still watching")
+            last_status = time.time()
         time.sleep(args.interval)
 
 
