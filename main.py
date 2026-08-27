@@ -16950,6 +16950,20 @@ async def local_worker_update_job_status(
     return {"success": True, "job_id": job_id, "status": job.status}
 
 
+def _clip_id_as_int(clip_id):
+    """Clip.id is an Integer column. A non-numeric path value can never match a
+    row, but if it reaches the SQL layer Postgres raises DataError ("invalid
+    input syntax for type integer") — a 500 with a full traceback — instead of
+    the 404 the semantics imply. Production has been receiving clip_id "d" on
+    the worker status route every few hours since at least 2026-08-21 (caller
+    unknown; the guard's log line fingerprints it). Returns int or None."""
+    try:
+        s = str(clip_id).strip()
+    except Exception:
+        return None
+    return int(s) if s.isdigit() else None
+
+
 class LocalWorkerClipUpdate(BaseModel):
     status: Optional[str] = None
     output_url: Optional[str] = None
@@ -16971,12 +16985,23 @@ class LocalWorkerClipUpdate(BaseModel):
 async def local_worker_update_clip_status(
     clip_id: str,
     update: LocalWorkerClipUpdate,
+    request: Request,
     db: DBSession = Depends(get_db_session),
     authorized: bool = Depends(verify_local_worker_key)
 ):
     """Update clip status"""
+    cid = _clip_id_as_int(clip_id)
+    if cid is None:
+        _client = request.client.host if request.client else "?"
+        print(
+            f"[clip-status-guard] non-numeric clip_id {clip_id!r} on local-worker route "
+            f"from {_client} ua={request.headers.get('user-agent', '?')!r} "
+            f"status={update.status!r} err={(update.error_message or '')[:120]!r}",
+            flush=True,
+        )
+        raise HTTPException(status_code=404, detail="Clip not found")
     # Use FOR UPDATE to prevent race condition with upload endpoint
-    clip = db.query(Clip).filter(Clip.id == clip_id).with_for_update().first()
+    clip = db.query(Clip).filter(Clip.id == cid).with_for_update().first()
     if not clip:
         raise HTTPException(status_code=404, detail="Clip not found")
     
@@ -19188,11 +19213,22 @@ async def user_worker_report_policy_violation(
 async def user_worker_update_clip_status(
     clip_id: str,
     update: LocalWorkerClipUpdate,
+    request: Request,
     db: DBSession = Depends(get_db_session),
     user_id: str = Depends(verify_user_worker_token)
 ):
     """Update clip status - verified ownership."""
-    clip = db.query(Clip).join(Job).filter(Clip.id == clip_id, Job.user_id == user_id).with_for_update().first()
+    cid = _clip_id_as_int(clip_id)
+    if cid is None:
+        _client = request.client.host if request.client else "?"
+        print(
+            f"[clip-status-guard] non-numeric clip_id {clip_id!r} on user-worker route "
+            f"from {_client} ua={request.headers.get('user-agent', '?')!r} "
+            f"status={update.status!r} err={(update.error_message or '')[:120]!r}",
+            flush=True,
+        )
+        raise HTTPException(status_code=404, detail="Clip not found or not yours")
+    clip = db.query(Clip).join(Job).filter(Clip.id == cid, Job.user_id == user_id).with_for_update().first()
     if not clip:
         raise HTTPException(status_code=404, detail="Clip not found or not yours")
 
