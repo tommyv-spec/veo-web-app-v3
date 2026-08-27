@@ -903,7 +903,7 @@ def test_the_mux_copies_the_video_and_re_encodes_only_the_audio():
 def test_the_export_runs_the_pass_before_the_concat_pipeline():
     """The mux has to happen while each clip is still its own file. After the
     concat, VAD and the speed pass have moved every segment boundary."""
-    src = _function_source(_HERE / "main.py", "_do_export_final")
+    src = _function_source(_HERE / "main.py", "_do_export_final_impl")
     download = src.index("pool.map(_download_clip")
     mux = src.index("_v943_1_apply_source_audio", download)
     concat = src.index("process_export,", mux)
@@ -1053,7 +1053,7 @@ def test_a_foreign_key_is_refused_before_any_storage_read(tmp_path):
 
 
 def test_the_export_passes_the_jobs_user_into_the_audio_pass():
-    src = _function_source(_HERE / "main.py", "_do_export_final")
+    src = _function_source(_HERE / "main.py", "_do_export_final_impl")
     call = src.index("_v943_1_apply_source_audio,")
     tail = src[call:call + 300]
     assert "job.user_id" in tail
@@ -1173,13 +1173,17 @@ def test_the_mux_leaves_the_canonical_clip_byte_identical(tmp_path):
 
 
 def test_the_export_copies_are_cleaned_up_after_the_run():
+    """v945.3 — the directory is now created and removed by the wrapper, so
+    the cleanup covers the whole call instead of only the part below the old
+    creation point."""
     src = _function_source(_HERE / "main.py", "_do_export_final")
-    made = src.index("_v9431_dir = ")
-    cleanup = src.index("rmtree(_v9431_dir", made)
-    assert made < cleanup
-    # the cleanup sits in the function's finally, so a failed export cleans too
-    assert "finally:" in src[:cleanup]
-    assert src.rindex("finally:", 0, cleanup) > src.index("process_export,")
+    made = src.index("mkdtemp(")
+    call = src.index("_do_export_final_impl(", made)
+    fin = src.index("finally:", call)
+    cleanup = src.index("rmtree(export_tmp_dir", fin)
+    assert made < call < fin < cleanup
+    # nothing may run between the create and the try that owns it
+    assert "try:" in src[made:call]
 
 
 # --- 11.4 short source audio must not truncate the picture -----------------
@@ -1705,3 +1709,85 @@ def test_the_charswap_test_reads_the_same_field_the_worker_branches_on():
     worker = WORKER_SRC.read_text(encoding="utf-8")
     sel = worker.index("\ndef charswap_selected(")
     assert "render_method" in worker[sel:worker.index("\ndef ", sel + 1)]
+
+
+# =============================================================================
+# 15. v945.3 — the export-scoped temp directory must not leak
+# =============================================================================
+# It was created part-way down the export body and cleaned in a `finally`
+# several hundred lines below. Every raise in between — the VAD 400, the
+# no-valid-clip-files 400, any unexpected error — walked past the cleanup, and
+# the container keeps running after a failed export.
+
+
+def _run_export_wrapper(monkeypatch, impl):
+    """Call _do_export_final with its body replaced, and return the temp
+    directory the real wrapper handed that body."""
+    import main
+
+    seen = {}
+
+    async def _fake(job_id, settings, db, current_user, export_tmp_dir):
+        seen["dir"] = export_tmp_dir
+        return await impl(export_tmp_dir)
+
+    monkeypatch.setattr(main, "_do_export_final_impl", _fake)
+    result = {}
+    try:
+        result["value"] = asyncio.run(
+            main._do_export_final("job-1234-5678", None, None, None))
+    except BaseException as e:  # noqa: BLE001 — the raise IS the case under test
+        result["error"] = e
+    return seen.get("dir"), result
+
+
+def test_a_preflight_failure_leaves_no_orphan_directory(monkeypatch):
+    """The exact shape of the bug: an HTTPException raised before the old
+    cleanup point."""
+    from fastapi import HTTPException
+
+    async def _preflight_400(export_tmp_dir):
+        assert os.path.isdir(export_tmp_dir), "the body never got a directory"
+        raise HTTPException(status_code=400, detail="No valid clip files found")
+
+    tmpdir, result = _run_export_wrapper(monkeypatch, _preflight_400)
+    assert tmpdir and isinstance(result.get("error"), HTTPException)
+    assert result["error"].status_code == 400
+    assert not os.path.exists(tmpdir), f"orphan left behind: {tmpdir}"
+
+
+def test_an_unexpected_error_leaves_no_orphan_directory(monkeypatch):
+    async def _boom(export_tmp_dir):
+        raise RuntimeError("ffmpeg died")
+
+    tmpdir, result = _run_export_wrapper(monkeypatch, _boom)
+    assert tmpdir and isinstance(result.get("error"), RuntimeError)
+    assert not os.path.exists(tmpdir)
+
+
+def test_a_directory_with_files_in_it_is_still_removed(monkeypatch):
+    """The real body writes muxed clip copies in there before it fails."""
+    async def _write_then_fail(export_tmp_dir):
+        with open(os.path.join(export_tmp_dir, "clip0.mp4"), "wb") as fh:
+            fh.write(b"not really an mp4")
+        raise RuntimeError("failed after writing a copy")
+
+    tmpdir, _ = _run_export_wrapper(monkeypatch, _write_then_fail)
+    assert not os.path.exists(tmpdir)
+
+
+def test_a_successful_export_also_cleans_up_and_returns_its_result(monkeypatch):
+    async def _ok(export_tmp_dir):
+        return {"success": True, "filename": "final.mp4"}
+
+    tmpdir, result = _run_export_wrapper(monkeypatch, _ok)
+    assert result["value"] == {"success": True, "filename": "final.mp4"}
+    assert not os.path.exists(tmpdir)
+
+
+def test_the_runner_still_calls_the_wrapper_and_not_the_body():
+    """The wrapper is the only thing that owns the directory, so nothing may
+    reach past it into the implementation."""
+    src = (_HERE / "main.py").read_text(encoding="utf-8")
+    assert src.count("await _do_export_final(") == 1
+    assert src.count("await _do_export_final_impl(") == 1

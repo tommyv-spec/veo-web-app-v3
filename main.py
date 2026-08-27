@@ -11956,6 +11956,44 @@ async def _do_export_final(
     db: DBSession,
     current_user: User,
 ) -> dict:
+    """v945.3 — own the export-scoped temp directory for the WHOLE call.
+
+    The muxed-clip directory used to be created part-way down the export body
+    and cleaned in a `finally` several hundred lines later. Everything raised
+    in between — the VAD-not-installed 400, the no-valid-clip-files 400, any
+    unexpected error — left the directory on disk, and Render's container
+    keeps running after a failed export, so those leaks accumulate against the
+    same disk the next export writes into.
+
+    A directory created HERE, before anything can fail, and removed in this
+    function's `finally`, has no exit path that skips the cleanup. Making it
+    unconditionally is deliberate: an empty temp directory costs nothing, and
+    a conditional one is how the gap opened in the first place.
+    """
+    import shutil as _sh9453
+    import tempfile as _tf9453
+
+    export_tmp_dir = _tf9453.mkdtemp(prefix=f"v9431_{str(job_id)[:8]}_")
+    try:
+        return await _do_export_final_impl(
+            job_id, settings, db, current_user, export_tmp_dir)
+    finally:
+        # v943.1 — drop this export run's muxed clip copies. They exist only
+        # so the source audio never had to be written over the canonical
+        # render; nothing outside this call may still be reading them.
+        try:
+            _sh9453.rmtree(export_tmp_dir, ignore_errors=True)
+        except Exception as _c9453:
+            print(f"[v943.1] export copy cleanup skipped: {_c9453}", flush=True)
+
+
+async def _do_export_final_impl(
+    job_id: str,
+    settings: ExportSettings,
+    db: DBSession,
+    current_user: User,
+    export_tmp_dir: str,
+) -> dict:
     """v850 — the export WORK. Was the body of POST /export-final until the
     durable queue landed. Unchanged logic; it just no longer runs inside the
     HTTP request (a Render deploy used to kill it mid-ffmpeg). Called by
@@ -12353,13 +12391,13 @@ async def _do_export_final(
     # the event loop. It never raises — a clip that cannot get its audio stays
     # silent and the export goes on.
     # The muxed segments land in a directory that belongs to THIS export run
-    # (see _v943_1_apply_source_audio) and are deleted in this function's
+    # (see _v943_1_apply_source_audio) and are deleted by _do_export_final's
     # `finally`, after the concat and after every later pass that reads
     # clip_info. The canonical clip files under output_dir/ are never written.
-    _v9431_dir = None
+    # v945.3 — the directory is created by the caller, so no exit path out of
+    # this body (including the preflight 400s below) can leak it.
+    _v9431_dir = export_tmp_dir
     try:
-        import tempfile as _tf9431
-        _v9431_dir = _tf9431.mkdtemp(prefix=f"v9431_{job_id[:8]}_")
         await asyncio.to_thread(
             _v943_1_apply_source_audio, clips, [r for r in results if r],
             job.user_id, _v9431_dir)
@@ -13863,15 +13901,10 @@ async def _do_export_final(
         print(f"[Export] Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
     finally:
-        # v943.1 — drop this export run's muxed clip copies. They exist only
-        # so the source audio never had to be written over the canonical
-        # render; nothing outside this call may still be reading them.
-        if _v9431_dir:
-            try:
-                import shutil as _sh9431
-                _sh9431.rmtree(_v9431_dir, ignore_errors=True)
-            except Exception as _c9431:
-                print(f"[v943.1] export copy cleanup skipped: {_c9431}", flush=True)
+        # v945.3 — the muxed-copy directory is cleaned by _do_export_final,
+        # which owns it for the whole call. It used to be cleaned here, which
+        # covered only the exits BELOW its creation point; the preflight
+        # raises above this try never reached it.
         # v872 — HAND THE MEMORY BACK, on the failure path too.
         #
         # Before this, an export left its Whisper models, its torch/soundfile
