@@ -30,6 +30,15 @@ import sys
 import urllib.parse
 import urllib.request
 
+# §9.1.1 — pin the encoding INSIDE the program, never via PYTHONIOENCODING
+# (that env var is inherited by child processes and blinds the auditor).
+# Log lines carry arrows/emoji; this box's console is cp1252.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 API = "https://api.render.com/v1"
 DEFAULT_SERVICE = "veo-web-app-v3"
 
