@@ -21638,8 +21638,16 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 _cs_block_why = (getattr(page, '_charswap_block_reason', None)
                                  or "charswap ingredients did not attach")
                 print(f"{_cs_ctx} not submitting: {_cs_block_why}", flush=True)
-                update_clip_status(clip['id'], 'flow_redo_queued',
-                                   error_message=_cs_block_why[:200])
+                # v945.6 (Codex rev 532 finding 3) — TERMINAL, not redo-queued.
+                # The redo path runs the NORMAL i2v rebuild with no charswap
+                # metadata, so queueing a redo here submits a wrong-path
+                # render of the start image (measured twice on 2026-08-27,
+                # both had to be hand-cancelled mid-race). A failed charswap
+                # pre-click is recreated as a FRESH job, never redone.
+                update_clip_status(clip['id'], 'failed',
+                                   error_message=(_cs_block_why[:150] +
+                                   " — recreate the job; charswap must not be redone")[:200])
+                permanently_failed_clips.add(clip_index)
                 continue
             click_generate_button(page, f"v943 clip {clip_index+1}")
             _cs_seen, _cs_both = charswap_submit_body_verdict(page)
@@ -21647,7 +21655,12 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                   flush=True)
             _cs_accept, _cs_count_tile, _cs_gate_why = charswap_submit_gate(
                 _cs_seen, _cs_both)
-            if not _cs_accept:
+            if not _cs_accept and not _cs_seen:
+                # v945.6 (Codex rev 532 finding 1) — the tile fallback runs
+                # ONLY when NO request was observed at all. A submit that WAS
+                # seen but carried one media (`seen && !both`) is a proven
+                # half-attached render — the exact rev-488 regression — and
+                # a tile count must never resurrect it.
                 # v945.5 — THE TILE IS THE GROUND TRUTH, the probe is not.
                 # Proven by screenshot on job 6005732f (2026-08-27): the submit
                 # gate said "no generate request observed" while the project

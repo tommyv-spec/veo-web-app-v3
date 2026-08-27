@@ -1490,7 +1490,30 @@ def test_the_refusal_reason_reaches_the_clip_status():
     click = src.index("click_generate_button(page,", arm)
     refusal = src[arm:click]
     assert "_charswap_block_reason" in refusal
-    assert "flow_redo_queued" in refusal
+    # v945.6 (Codex rev 532 finding 3): a pre-click charswap failure is
+    # TERMINAL ('failed'), never 'flow_redo_queued' — the redo path runs the
+    # normal i2v rebuild with no charswap metadata and submits a wrong-path
+    # render (measured twice 2026-08-27). The status message tells the
+    # operator to recreate the job instead.
+    assert "flow_redo_queued" not in refusal
+    assert "'failed'" in refusal
+    assert "charswap must not be redone" in refusal
+    assert "permanently_failed_clips.add" in refusal
+
+
+def test_tile_proof_never_overrides_a_seen_half_attached_submit():
+    """v945.6 (Codex rev 532 finding 1): the tile fallback exists for the
+    probe-blind case ONLY (no request observed at all). A submit that WAS seen
+    but carried one media id is a proven half-attached render — the rev-488
+    regression — and a tile count must never resurrect it."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    arm = src.index("_cs_ok, _cs_chips = charswap_attach_and_prompt(")
+    tile = src.index("[tile-proof]", arm)
+    guard_start = src.rindex("if not _cs_accept", arm, tile)
+    guard_line = src[guard_start:src.index(":", guard_start)]
+    assert "not _cs_seen" in guard_line, (
+        "the tile-proof block must be gated on `not _cs_seen`, not on the "
+        "gate verdict alone")
 
 
 # =============================================================================
