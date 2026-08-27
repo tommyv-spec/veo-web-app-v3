@@ -27559,7 +27559,26 @@ if __name__ == "__main__":
         
         print(f"✓ Worker version: {WORKER_VERSION} (build {WORKER_BUILD})", flush=True)
     
-    check_for_updates()  # Auto-update on startup
+    # Local-dev override: run THIS file as-is, no self-update, no companion
+    # re-sync. Exists because every worker-side fix used to cost a full
+    # push → Render deploy → self-update → restart loop (~10+ min per
+    # iteration, measured during the 2026-08-27 charswap debugging night).
+    # Pre-scanned from sys.argv because argparse runs later in main; the
+    # flag is also declared there so parse_args() accepts it. LOUD banner
+    # on purpose — a worker silently running divergent code is exactly the
+    # silent-Chrome-fallback trap (bde3702) in a different coat.
+    _local_dev = (
+        "--local-dev" in sys.argv
+        or os.environ.get("WORKER_LOCAL_DEV", "").strip().lower() in ("1", "true", "yes")
+    )
+    if _local_dev:
+        print("=" * 62, flush=True)
+        print("[Init] LOCAL DEV MODE — self-update SKIPPED, running local file", flush=True)
+        print(f"[Init]   local build {WORKER_BUILD} · production may differ", flush=True)
+        print("[Init]   drop --local-dev / WORKER_LOCAL_DEV to resync from server", flush=True)
+        print("=" * 62, flush=True)
+    else:
+        check_for_updates()  # Auto-update on startup
 
     # ── v780 — dedicated worker heartbeat (user mode only) ──
     # Drives the "● Online" dot on the My Worker page. Posts every 5s so the
@@ -27638,6 +27657,8 @@ if __name__ == "__main__":
         help='Show cache status')
     parser.add_argument('--recover', action='store_true',
         help='Re-queue stuck/failed downloads')
+    parser.add_argument('--local-dev', action='store_true',
+        help='Skip self-update and companion sync; run this local file as-is (dev iteration)')
     parser.add_argument('--restore-threshold', type=int, default=None, metavar='N',
         help='Override proactive restore threshold (default: 6). Use 1 for testing.')
     parser.add_argument('--help', '-h', action='store_true',
