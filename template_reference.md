@@ -18080,3 +18080,65 @@ A build with no `## Finishing` still parses to `None` and behaves byte-for-byte 
 ### Deployed
 
 `e207592` (`ExportSettings` + `AutoEditRequest` move to `finishing_models.py` — one shared home, no drift copy) · `a773756` (`auto_finish.py`: the pure decisions, `auto_finish_on` / `all_clips_approved` / `derive_export_defaults`) · `7239515` + `236553c` + `1225028` (the parser: the three bullets, the `none` sentinel, malformed and commented bullets) · `ae330db` + `1b206fd` (the last-approval trigger) · `d2b348f` + `dce6ce6` (the export → auto-edit link) · `b8c09db` (comment) · `2066bc4` + `a55ee66` (the lint gate). Tests: 68 in `test_finishing_spec.py`. Plan: `docs/superpowers/plans/2026-08-26-finishing-autofinish-export.md`.
+
+## v948 — THE SILENCE-HOLE SWEEP: dead air is cut on the ASSEMBLED timeline, not per clip (2026-08-27)
+
+**The complaint that made it.** The operator watched an axe selling final and said the quiet stretches were disturbing — and, importantly, rejected the excuse I had used to leave them in: *"the actions that you decided to leave are not really relevant and the silence is disturbing at that time."* Visible action on screen is NOT a licence for dead air. In this format the ear carries retention as much as the eye, and a second of nothing reads as a broken video on a phone.
+
+**Why the existing VAD could never fix it.** `apply_vad` runs on each clip **in isolation**, so it only ever trims that clip's own head and tail. Two kinds of dead air walk straight past it:
+
+1. a pause in the MIDDLE of a clip — the VAD keeps a clip contiguous, on purpose;
+2. the stack-up at a clip BOUNDARY — clip N's kept tail plus clip N+1's kept head, each individually reasonable, adding up to a stall.
+
+Neither exists until after the concat, because until then there is no finished timeline to measure. Tightening the VAD does not reach either one: measured on job `29d45418`, the default settings left holes of 2.2s / 3.7s / 0.9s, and the tightest sane VAD (`vad_silence_trigger: 0.3`, `vad_silence_keep: 0.2`) still left roughly 1–1.6s. **Per-clip trimming is the wrong layer for a whole-timeline defect.**
+
+### The stage
+
+One optional field: `ExportSettings.max_silence_s` (`Optional[float]`, default `None`). Absent means OFF and the export is byte-identical to pre-v948. Set, it runs the procedure that was done by hand:
+
+- `detect_silence_holes()` — ffmpeg `silencedetect` at `noise=-35dB, d=0.7`, returning the holes themselves.
+- `plan_silence_cuts()` — pure arithmetic, unit-tested, no ffmpeg: every hole at least `max_silence_s` long is cut down to a **0.3s breath**, and the complement is returned as keep-segments. The breath is kept at the FRONT of the hole, so it sits right after the word that just ended, which is where a real pause lives. A hole at the very top of the file is the one exception — there is no preceding word to breathe after, so the LAST 0.7s survives instead: the run-up to the first word is capped, not the silence after nothing.
+- `sweep_silence_holes()` — the ffmpeg wrapper: trim/concat hard cuts (**no crossfade, no ramp** — jump cuts are native to this format), then **re-measures** and reports what is still there.
+
+**Where it sits, and why that is the whole point.** Last thing in `_do_export_final_impl` before the file is stored and uploaded: after concat, after audio enhancement, after the speed pass, after the v925 b-roll pass. Anything earlier would sweep a file that a later stage then changes — which is §v938.1 in miniature (measure the DELIVERED artifact, not an intermediate).
+
+**It is never fatal.** Any error ships the pre-sweep file with a named warning. An export that survived the whole pipeline is not worth losing to a cosmetic pass.
+
+**It reports residuals honestly.** If a hole survives the cut, the log says so out loud rather than claiming a clean sweep the file does not support (`stats.v948_residual` + `residual_holes`). Usually that means a hole sits inside a segment the plan kept whole — a detector-floor mismatch, not a failed cut.
+
+**v948.1 — the single-keep edge.** The first version bailed out when the plan produced one keep segment (`len(keeps) <= 1`), reasoning that a one-segment plan was a no-op. It is not: a file whose ONLY hole is a long lead-in plans to exactly one keep and genuinely needs the cut. The guard is now `if holes_cut == 0 or not keeps`.
+
+### Declarable from the build, with zero parser edits
+
+Because v947 validates `export_*` against the real `ExportSettings` model instead of a hand-copied field list, the new field became sayable in `## Finishing` the moment it existed:
+
+```markdown
+- **export_max_silence_s:** 0.9
+```
+
+That is proof-by-test of the v947 design claim, not a coincidence — a hand-maintained mirror would have needed a second edit here, and would have been the bug.
+
+### What it does NOT fix — read this before trusting a swept export
+
+**The denoiser puts the holes back.** Measured on the first production run: the export swept genuinely clean (`holes_cut=2`, `removed_s=1.75`, **residual 0**), and then the auto-edit's `audio_enhance: "voice"` (DeepFilter) produced a file with THREE holes ≥1.4s again. The enhancer crushes quiet ambient stretches below the −35dB floor, manufacturing silence that was not there. This is a9's v947.2 music finding extended to speech gaps.
+
+So: **the silence measurement belongs on the FINISH OUTPUT, not on the export.** The no-dead-air gate already says "the delivered final" — this is why. For a swept export the working combination, measured end to end on `29d45418`, is:
+
+| stage | settings |
+|---|---|
+| export | `remove_silence: true` · `vad_silence_trigger: 0.3` · `vad_silence_keep: 0.2` · `max_silence_s: 0.7` |
+| finish | `audio_enhance: "off"` |
+
+Result on that job: platform-produced final, 47.6s, **zero** `silencedetect` detections at −35dB / d=0.7. Whether `audio_enhance` should DEFAULT to off on swept exports is a9/Codex's call on their own control and was flagged rather than changed unilaterally.
+
+**The b-roll pairing goes stale.** The v925 b-roll track is measured against the speaker file as it stood BEFORE the cut, so after a sweep it is longer than what ships. Surfaced as `stats.v948_broll_stale` plus a log warning — deliberately warned rather than silently re-paired. Re-run the b-roll pass if you need the pair.
+
+**No bounds on the value.** `max_silence_s` takes any positive float; nothing stops an absurd one.
+
+### Reading the evidence
+
+`[Export/v948]` in the export log: holes cut, seconds removed, residual detections, and the two warnings above. `stats` carries `v948_holes_cut`, `v948_removed_s`, `v948_residual`, `pre_sweep_duration`, `final_duration`.
+
+### Deployed
+
+`cfef1c5` (the stage: `plan_silence_cuts` / `detect_silence_holes` / `sweep_silence_holes` in `video_processor.py`, the `ExportSettings.max_silence_s` field, the export-stage wiring in `main.py`) · `5b34b03` (v948.1, the single-keep edge). Both deploy-confirmed. Tests: 10 in `code/tests/test_v948_silence_sweep.py`, including real-ffmpeg verification on planted holes. Operator rule + the three-layer gate: `wiki/meta/generate-video-checklist.md` §"No dead air"; machine memory `feedback_no-dead-air-in-finals`.
