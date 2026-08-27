@@ -11722,6 +11722,41 @@ def update_scene_assignment(
     }
 
 
+# v945.3 — the model a charswap clip has to render on. The worker attaches two
+# ingredients (avatar image + source video), which only exists on the Omni
+# composer's Ingredients tab; `flow_worker.is_omni` matches loosely so a
+# suffixed name like "Omni Flash [Beta]" still counts.
+V943_CHARSWAP_VEO_MODEL = "Omni Flash"
+
+
+def _v943_charswap_veo_model(existing_model, has_charswap):
+    """Which veo_model a promoted job must carry. Returns (model, conflict).
+
+    The direct batch promote built config_json with no veo_model at all, so
+    the worker fell back to its own default (Veo 3.1 Lite) and the v945.2
+    Ingredients gate then failed the clip closed BY CONSTRUCTION: a charswap
+    promoted this way could never render. The browser promote path is not
+    affected — it goes through main.py, which carries the model.
+
+    `model` is None when nothing needs stamping. `conflict` is a 400 message
+    when the config already names a model that is not Omni: silently
+    overwriting an explicit choice is the other way to lose a render, so the
+    caller is told rather than corrected.
+    """
+    if not has_charswap:
+        return None, None
+    named = (existing_model or "").strip()
+    if not named:
+        return V943_CHARSWAP_VEO_MODEL, None
+    if "omni" in named.lower():
+        return None, None  # already an Omni model — leave the exact name alone
+    return None, (
+        f"This batch has at least one charswap scene, which renders only on "
+        f"the Omni composer, but the job config asks for {named!r}. Remove the "
+        f"model override or drop the charswap scenes."
+    )
+
+
 @router.post("/batches/{batch_id}/promote-to-video")
 def promote_batch_to_video(
     batch_id: str,
@@ -12195,6 +12230,25 @@ def promote_batch_to_video(
         config_dict["persona"] = batch.persona
     if batch.setting:
         config_dict["setting"] = batch.setting
+
+    # v945.3 — a charswap clip needs the Omni model or the worker's
+    # Ingredients gate fails it closed before the attach. This path wrote no
+    # veo_model at all, so the worker defaulted to Lite and every charswap
+    # promoted here was unrenderable by construction.
+    _v943_has_charswap = any(
+        (spec.get("render_method") or "").strip().lower() == "charswap"
+        for spec in clip_specs
+    )
+    _v943_model, _v943_conflict = _v943_charswap_veo_model(
+        config_dict.get("veo_model"), _v943_has_charswap)
+    if _v943_conflict:
+        raise HTTPException(400, _v943_conflict)
+    if _v943_model:
+        config_dict["veo_model"] = _v943_model
+        log.info(
+            f"[v945.3] promote batch={batch_id}: charswap scene present → "
+            f"veo_model={_v943_model}"
+        )
 
     # v827 TEMP DIAG — proves the promote payload no longer fabricates a last
     # frame. Remove once an operator export confirms the closing clip logs

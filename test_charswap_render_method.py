@@ -1639,3 +1639,69 @@ def test_the_arm_still_fails_closed_on_anything_but_ingredients():
     assert "Unverified" in refusal  # named as its own case, not a model fault
     assert "permanently_failed_clips.add(clip_index)" in refusal
     assert "continue" in refusal
+
+
+# =============================================================================
+# 14. v945.3 — the direct batch promote dropped veo_model
+# =============================================================================
+# promote_batch_to_video built config_json with no veo_model, so the worker
+# fell back to its own default (Veo 3.1 Lite) and the v945.2 Ingredients gate
+# then failed every charswap clip closed BY CONSTRUCTION. The browser promote
+# goes through main.py and was never affected.
+
+
+def test_a_promote_with_no_charswap_scene_stamps_nothing():
+    from image_platform import _v943_charswap_veo_model as pick
+    assert pick(None, False) == (None, None)
+    assert pick("Veo 3.1 - Lite [Lower Priority]", False) == (None, None)
+
+
+def test_a_charswap_scene_stamps_the_omni_model():
+    from image_platform import V943_CHARSWAP_VEO_MODEL, _v943_charswap_veo_model
+    model, conflict = _v943_charswap_veo_model(None, True)
+    assert model == V943_CHARSWAP_VEO_MODEL
+    assert conflict is None
+    assert "omni" in model.lower()
+
+
+def test_a_config_already_on_omni_is_left_exactly_as_it_is():
+    """Suffixed names exist ("Omni Flash [Beta]") and flow_worker.is_omni
+    matches loosely — rewriting the string would be a change nobody asked
+    for."""
+    from image_platform import _v943_charswap_veo_model as pick
+    assert pick("Omni Flash [Beta]", True) == (None, None)
+
+
+def test_a_charswap_scene_with_a_different_explicit_model_is_a_conflict():
+    from image_platform import _v943_charswap_veo_model as pick
+    model, conflict = pick("Veo 3.1 - Lite [Lower Priority]", True)
+    assert model is None
+    assert conflict and "Veo 3.1 - Lite [Lower Priority]" in conflict
+    assert "charswap" in conflict
+
+
+def test_the_stamp_lands_on_the_config_the_job_row_actually_stores():
+    """Source-level: the decision has to run on config_dict BEFORE the Job is
+    built, or the stamp never reaches config_json."""
+    src = _function_source(_HERE / "image_platform.py", "promote_batch_to_video")
+    built = src.index("config_dict = {")
+    decide = src.index("_v943_charswap_veo_model(", built)
+    job = src.index("job = Job(", decide)
+    assert built < decide < job
+    block = src[decide:job]
+    assert 'config_dict["veo_model"] = _v943_model' in block
+    assert "HTTPException(400" in block
+
+
+def test_the_charswap_test_reads_the_same_field_the_worker_branches_on():
+    """render_method on the clip spec — the same key charswap_selected asks
+    for. A different spelling here would silently never match."""
+    src = _function_source(_HERE / "image_platform.py", "promote_batch_to_video")
+    decide = src.index("_v943_has_charswap = any(")
+    block = src[decide:src.index("_v943_charswap_veo_model(", decide)]
+    assert 'spec.get("render_method")' in block
+    assert '"charswap"' in block
+
+    worker = WORKER_SRC.read_text(encoding="utf-8")
+    sel = worker.index("\ndef charswap_selected(")
+    assert "render_method" in worker[sel:worker.index("\ndef ", sel + 1)]
