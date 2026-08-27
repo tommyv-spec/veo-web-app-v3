@@ -1314,3 +1314,172 @@ def test_the_same_retime_without_the_flag_is_still_silent(tmp_path):
     assert out.exists()
     vol = _mean_volume_db(out)
     assert vol is None or vol < -60, f"expected silence, measured {vol} dB"
+
+
+# =============================================================================
+# 12. v945.3 — the live failure: a Generate click that submitted nothing
+# =============================================================================
+# Job 5f1eef9d attached both chips, logged "✓ Prompt pasted via clipboard",
+# logged "✓ Clicked Generate button", and produced ZERO network requests. A
+# click on a DISABLED button resolves happily, so the log said success for a
+# no-op. The arm now reads the prompt box back and checks the button's real
+# state before clicking; the two decisions are pure functions so they can be
+# checked here, and the DOM parts stay thin enough to read.
+
+
+def test_an_unreadable_prompt_box_is_not_treated_as_a_good_one():
+    """None means "could not read", which is the whole point of the check —
+    the old code inferred success from the paster's own log line."""
+    act = _worker_function("charswap_prompt_readback_action")
+    action, why = act(None, "a real prompt")
+    assert action == "retype"
+    assert "could not be read" in why
+
+
+def test_an_empty_prompt_box_asks_for_a_retype():
+    act = _worker_function("charswap_prompt_readback_action")
+    action, why = act("", "a real prompt")
+    assert action == "retype"
+    assert "empty" in why
+
+
+def test_a_partially_pasted_prompt_asks_for_a_retype():
+    act = _worker_function("charswap_prompt_readback_action")
+    action, why = act("a real", "a real prompt that is much longer than this")
+    assert action == "retype"
+    assert "/" in why  # names got/wanted so the log is diagnosable
+
+
+def test_a_prompt_that_read_back_whole_is_accepted():
+    act = _worker_function("charswap_prompt_readback_action")
+    prompt = "swap the man in the video for the man in the photo"
+    action, why = act(prompt, prompt)
+    assert action == "ok"
+    assert str(len(prompt)) in why
+
+
+def test_no_prompt_at_all_is_not_a_retype_loop():
+    act = _worker_function("charswap_prompt_readback_action")
+    assert act(None, "")[0] == "ok"
+
+
+def test_a_disabled_generate_button_is_refused_and_says_the_visible_state():
+    """The failure this whole item exists for: everything attached, prompt
+    full, button dead. The reason has to carry the numbers or the next log is
+    as unreadable as tonight's."""
+    ready_fn = _worker_function("charswap_generate_readiness")
+    ready, why = ready_fn(False, 120, 2)
+    assert ready is False
+    assert "disabled" in why
+    assert "120" in why and "2" in why
+
+
+def test_an_empty_prompt_is_refused_before_the_button_is_even_blamed():
+    ready_fn = _worker_function("charswap_generate_readiness")
+    ready, why = ready_fn(True, 0, 2)
+    assert ready is False
+    assert "empty" in why
+
+
+def test_one_chip_is_refused_even_with_a_full_prompt_and_a_live_button():
+    ready_fn = _worker_function("charswap_generate_readiness")
+    ready, why = ready_fn(True, 120, 1)
+    assert ready is False
+    assert "1 chip" in why
+
+
+def test_both_chips_a_full_prompt_and_a_live_button_is_the_only_ready_state():
+    ready_fn = _worker_function("charswap_generate_readiness")
+    ready, why = ready_fn(True, 120, 2)
+    assert ready is True
+    assert "enabled" in why
+
+
+def test_the_readiness_check_survives_junk_counts():
+    """chip ids come from page.evaluate and the prompt length from inner_text;
+    neither is worth trusting to be an int."""
+    ready_fn = _worker_function("charswap_generate_readiness")
+    assert ready_fn(True, None, None)[0] is False
+    assert ready_fn(True, "120", "2")[0] is True
+
+
+def test_the_prompt_box_reader_returns_none_when_the_dom_read_throws():
+    read = _worker_function("charswap_prompt_box_text")
+
+    class _Boom:
+        def locator(self, _sel):
+            raise RuntimeError("page closed")
+
+    assert read(_Boom()) is None
+
+
+def test_the_prompt_box_reader_returns_none_when_there_is_no_box():
+    read = _worker_function("charswap_prompt_box_text")
+
+    class _Box:
+        def count(self):
+            return 0
+
+    class _Page:
+        def locator(self, _sel):
+            return type("L", (), {"first": _Box()})()
+
+    assert read(_Page()) is None
+
+
+def test_the_prompt_box_reader_strips_what_the_dom_shows():
+    read = _worker_function("charswap_prompt_box_text")
+
+    class _Box:
+        def count(self):
+            return 1
+
+        def inner_text(self):
+            return "  swap the man  \n"
+
+    class _Page:
+        def locator(self, _sel):
+            return type("L", (), {"first": _Box()})()
+
+    assert read(_Page()) == "swap the man"
+
+
+def test_the_arm_runs_before_the_click_and_can_stop_it():
+    """Source-level, because the ordering is the fix: read back and verify
+    BEFORE click_generate_button, and refuse rather than click."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    fn = src.index("\ndef charswap_attach_and_prompt(")
+    end = src.index("\ndef ", fn + 1)
+    body = src[fn:end]
+    paste = body.index("fill_prompt_textarea(")
+    arm = body.index("charswap_arm_generate(", paste)
+    assert paste < arm
+    assert "return False, chip_ids" in body[arm:]
+
+    arm_site = src.index("_cs_ok, _cs_chips = charswap_attach_and_prompt(")
+    click = src.index("click_generate_button(page,", arm_site)
+    refusal = src[arm_site:click]
+    assert "if not _cs_ok:" in refusal
+    assert "continue" in refusal
+
+
+def test_the_submit_body_gate_is_still_the_last_line():
+    """The new check stops one failure mode; it does not replace the proof
+    that both media ids reached the generate body."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    arm = src.index("_cs_ok, _cs_chips = charswap_attach_and_prompt(")
+    click = src.index("click_generate_button(page,", arm)
+    gate = src.index("charswap_submit_gate(", click)
+    assert click < gate
+    assert "FAILED CLOSED" in src[gate:gate + 600]
+
+
+def test_the_refusal_reason_reaches_the_clip_status():
+    """"charswap ingredients did not attach" was printed for a composer whose
+    chips were both there. The status now carries the real reason."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    arm = src.index("_cs_ok, _cs_chips = charswap_attach_and_prompt(")
+    click = src.index("click_generate_button(page,", arm)
+    refusal = src[arm:click]
+    assert "_charswap_block_reason" in refusal
+    assert "flow_redo_queued" in refusal

@@ -19943,6 +19943,172 @@ def charswap_composer_chip_media_ids(page):
         return []
 
 
+def charswap_prompt_readback_action(observed, prompt, min_ratio=0.8):
+    """v945.3 — what to do after READING the composer's prompt box back.
+
+    The charswap arm used to trust `fill_prompt_textarea`'s own "✓ Prompt
+    pasted via clipboard" line and click Generate two seconds later. That line
+    is printed by the paster about the box IT targeted; it is not a check made
+    at generate time, and on the Ingredients composer (job 5f1eef9d) the click
+    produced ZERO network requests — the signature of a Generate button that
+    is disabled because Flow's React state never took the text.
+
+    So the box is read again, here, immediately before the click.
+
+    `observed` is the text the DOM currently shows, or None when the box could
+    not be read at all — which is NOT the same as empty and must not be
+    treated as "fine". Returns (action, reason) where action is 'ok' or
+    'retype'.
+    """
+    want = len((prompt or ""))
+    if want == 0:
+        return 'ok', 'no prompt to enter'
+    if observed is None:
+        return 'retype', 'prompt box could not be read'
+    got = len((observed or "").strip())
+    if got == 0:
+        return 'retype', f'prompt box is empty (wanted {want} chars)'
+    if got < want * min_ratio:
+        return 'retype', f'prompt box holds {got}/{want} chars'
+    return 'ok', f'prompt read back {got}/{want} chars'
+
+
+def charswap_generate_readiness(enabled, prompt_len, chip_count):
+    """v945.3 — may this charswap click Generate? Returns (ready, why).
+
+    Fails on the two states that make a click a no-op, and says WHICH one in
+    the same sentence, because the failing run's log could not tell them
+    apart: `page.click()` on a disabled button still resolves happily, so
+    "✓ Clicked Generate button" was printed for a click that submitted
+    nothing. The visible state (prompt length, chip count) is named in the
+    reason so the next failure is diagnosable from the log alone.
+    """
+    try:
+        chip_count = int(chip_count)
+    except Exception:
+        chip_count = 0
+    try:
+        prompt_len = int(prompt_len)
+    except Exception:
+        prompt_len = 0
+    if chip_count < 2:
+        return False, (f"composer holds {chip_count} chip(s), needs 2 "
+                       f"(avatar + source video)")
+    if prompt_len <= 0:
+        return False, (f"prompt box is empty ({chip_count} chips attached) — "
+                       f"Generate cannot register")
+    if not enabled:
+        return False, (f"Generate button is disabled (prompt {prompt_len} "
+                       f"chars, {chip_count} chips)")
+    return True, f"Generate enabled (prompt {prompt_len} chars, {chip_count} chips)"
+
+
+def charswap_prompt_box_text(page):
+    """The text the composer's prompt box currently shows, or None.
+
+    None means "could not read", never "empty" — see
+    charswap_prompt_readback_action for why the difference matters.
+    """
+    try:
+        box = page.locator('div[role="textbox"]').first
+        if box.count() == 0:
+            return None
+        return (box.inner_text() or "").strip()
+    except Exception:
+        return None
+
+
+def charswap_retype_prompt(page, prompt, context="[v943]"):
+    """Re-enter the prompt with keyboard events instead of a clipboard paste.
+
+    Same mechanism the normal path falls back to inside fill_prompt_textarea
+    (focus → Ctrl+A → Backspace → insert_text). Kept thin on purpose: every
+    decision about whether to call it, and whether it worked, lives in the two
+    pure functions above.
+    """
+    try:
+        box = page.locator('div[role="textbox"]').first
+        try:
+            box.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            pass
+        try:
+            box.click(force=True, timeout=3000)
+        except Exception:
+            pass
+        try:
+            box.focus(timeout=2000)
+        except Exception:
+            pass
+        time.sleep(0.3)
+        page.keyboard.press("Control+A")
+        time.sleep(0.1)
+        page.keyboard.press("Backspace")
+        time.sleep(0.1)
+        page.keyboard.insert_text(prompt)
+        time.sleep(0.5)
+        return True
+    except Exception as e:
+        print(f"{context} prompt re-entry failed: {e}", flush=True)
+        return False
+
+
+def charswap_arm_generate(page, prompt, chip_ids, context="[v943]"):
+    """v945.3 — prove the composer can actually submit, before the click.
+
+    Three steps, in this order, because each one only means something once the
+    one before it holds:
+      1. read the prompt box back from the DOM and log what it holds; retype
+         with keyboard events when it is short, empty or unreadable;
+      2. check the Generate button is really ENABLED, naming the visible state
+         (prompt length, chip count) when it is not, and retry ONCE after
+         re-entering the prompt;
+      3. return (ready, why) so the caller can refuse instead of burning a
+         render slot on a click that registers nothing.
+
+    The submit-body gate (charswap_submit_gate) stays the last line of
+    defence — this only stops the failure mode that gate kept catching.
+    """
+    for attempt in (1, 2):
+        observed = charswap_prompt_box_text(page)
+        action, why = charswap_prompt_readback_action(observed, prompt)
+        print(f"{context} prompt read-back: {why}", flush=True)
+        if action == 'retype':
+            print(f"{context} re-entering the prompt by keyboard "
+                  f"(attempt {attempt})", flush=True)
+            charswap_retype_prompt(page, prompt, context=context)
+            observed = charswap_prompt_box_text(page)
+            action, why = charswap_prompt_readback_action(observed, prompt)
+            print(f"{context} prompt read-back after re-entry: {why}", flush=True)
+
+        prompt_len = len((observed or "").strip())
+        try:
+            live_ids = charswap_composer_chip_media_ids(page) or list(chip_ids or [])
+        except Exception:
+            live_ids = list(chip_ids or [])
+        try:
+            enabled = is_generate_button_enabled(page)
+        except Exception:
+            enabled = False
+
+        ready, ready_why = charswap_generate_readiness(
+            enabled, prompt_len, len(live_ids))
+        if ready:
+            print(f"{context} {ready_why}", flush=True)
+            return True, ready_why
+        print(f"{context} not ready to generate: {ready_why}", flush=True)
+        if attempt == 1:
+            # Say WHY in the page's own words as well — the v788 dump is the
+            # only thing that has ever explained a stuck Generate button.
+            _dump_generate_disabled_state(page, f"{context} ")
+            # Force a re-entry on the second pass even if the read-back looked
+            # fine: a full box with a dead button is exactly the state where
+            # React never took the paste.
+            charswap_retype_prompt(page, prompt, context=context)
+            time.sleep(2)
+    return False, ready_why
+
+
 def charswap_install_submit_probe(page, chip_ids):
     """Watch the next generate request and record whether it carried the chips.
 
@@ -20164,14 +20330,17 @@ def charswap_attach_and_prompt(page, avatar_path, video_path, prompt,
     prompt (replace-the-person vs apply-the-movement). `swap_mode` is printed
     next to the chip ids so the log says which cell rendered.
     """
+    page._charswap_block_reason = None
     ok, reason = attach_ingredient_image_with_check(
         page, avatar_path, context=f"{context}-avatar", clear_existing=True)
     if not ok:
         print(f"{context} avatar attach failed ({reason})", flush=True)
+        page._charswap_block_reason = f"avatar ingredient did not attach ({reason})"
         return False, []
 
     if not charswap_attach_source_video(page, video_path, context=context):
         print(f"{context} source video attach failed", flush=True)
+        page._charswap_block_reason = "source video ingredient did not attach"
         return False, []
 
     chip_ids = charswap_composer_chip_media_ids(page)
@@ -20179,11 +20348,21 @@ def charswap_attach_and_prompt(page, avatar_path, video_path, prompt,
     if len(chip_ids) < 2:
         print(f"{context} fewer than 2 chip mediaIds on the composer — not generating",
               flush=True)
+        page._charswap_block_reason = (
+            f"only {len(chip_ids)} chip mediaId(s) on the composer, needs 2")
         return False, chip_ids
 
     charswap_install_submit_probe(page, chip_ids)
     fill_prompt_textarea(page, prompt)
     time.sleep(2)
+    # v945.3 — the paste's own "✓ Prompt pasted via clipboard" line is not a
+    # generate-time check. Read the box back and prove the button is enabled
+    # before the click, or refuse; job 5f1eef9d clicked a button that fired no
+    # request at all and only the submit-body gate noticed.
+    armed, armed_why = charswap_arm_generate(page, prompt, chip_ids, context=context)
+    if not armed:
+        page._charswap_block_reason = f"composer not ready to generate: {armed_why}"
+        return False, chip_ids
     return True, chip_ids
 
 
@@ -21349,8 +21528,15 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 page, _cs_avatar, _cs_video, prompt, context=_cs_ctx,
                 swap_mode=(clip.get('swap_mode') or 'video-led'))
             if not _cs_ok:
+                # v945.3 — say WHICH precondition failed. "did not attach" was
+                # printed for a composer whose chips were both present and whose
+                # Generate button was dead, which sent the reader looking at the
+                # upload code for a prompt-entry bug.
+                _cs_block_why = (getattr(page, '_charswap_block_reason', None)
+                                 or "charswap ingredients did not attach")
+                print(f"{_cs_ctx} not submitting: {_cs_block_why}", flush=True)
                 update_clip_status(clip['id'], 'flow_redo_queued',
-                                   error_message="charswap ingredients did not attach")
+                                   error_message=_cs_block_why[:200])
                 continue
             click_generate_button(page, f"v943 clip {clip_index+1}")
             _cs_seen, _cs_both = charswap_submit_body_verdict(page)
