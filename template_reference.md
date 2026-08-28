@@ -18227,3 +18227,78 @@ Both wordings are kept here on purpose, the same way §8.1.1 keeps its wrong ver
 **Open question this does not answer (rev 596, still open):** does the hooks masterclass or the Part 9 Loom teach a PROCEDURE for the adapted-side judgment that the wiki flattened into a principle? A text checker can never do that part.
 
 **Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/meta/generate-video-checklist.md`, root `CLAUDE.md` §9, `wiki/log.md`.
+
+## v950 — SEGMENTED SWAP: one start frame PER SEGMENT, and the previous segment carries the identity (2026-08-28)
+
+**The mistake this exists to stop, measured.** `raw/decode_work/martha-reformer-DZVTwnbN72v/martha-reformer-swap-v1.md`
+is a 15.4s reformer routine cut into two 8s segments (§v943 charswap, video-led). Scene 2's start
+frame was generated with the video's **t=0** frame as its composition parent — the split-stance
+lunge — while segment 2 actually opens at **t=8.0s** on a different shape entirely: both hands on
+the footbar at the left of the reformer, hips high, one leg extended back onto the raised box. The
+operator caught it by eye in the node view. A video-led swap start frame has exactly one job — match
+the first frame of the segment it drives — and it was not doing it.
+
+**Root cause worth naming, because it was reasoning and not carelessness.** The build was modelled on
+`raw/decode_work/martha-timessquare-78/martha-timessquare-78-v2-segmented.md`, which binds ONE
+`sourceframe` for both of its images. That is correct THERE: both of its segments are the same
+continuous tilt in the same framing. Copying the shape without asking why it held is the general
+failure — **a precedent's structure is only valid under the conditions that produced it.**
+
+**The platform constraint that makes this non-obvious (verified in `code/image_platform.py`).**
+Nothing parses the Ingredients `Attached to` column — it is documentation. The importer attaches the
+build's one `character` upload and one `product` upload to EVERY node in the batch; a second product
+row also kills the slot inference that fills `product_node_id` (reproduce with
+`send_to_platform.py <build> --bindings`); and `reference_image:` accepts only `image_N` or `none`,
+never an upload. **So one batch carries exactly one composition anchor.** Splitting into one build
+per segment is NOT the answer — they become two jobs and the export stops concatenating the segments
+back into the single take, which is the entire reason for segmenting.
+
+**THE RULE.**
+
+1. **Write each segment's start frame from THAT segment's own first frame.** Extract it
+   (`ffmpeg -ss <segment start> -frames:v 1`), LOOK at it, and describe the pose from the picture.
+   Never from the video's frame 0, and never from memory of the routine — the same pass that found
+   this also found the scene-2 prompt calling the opening a "long supported plank" when the plank is
+   where the segment goes NEXT.
+2. **Upload every segment's frame** and keep its node id in the RECIPE, even the ones the importer
+   cannot bind. The correct frame for this build had already been extracted and uploaded (node 5140)
+   and was simply never used.
+3. **After import, re-parent segments 2..N node-side**, because the batch has only one anchor:
+
+   ```
+   PATCH /api/images/nodes/<scene N> {"prompt": "<pose written from THAT segment's frame 0>",
+     "parents": [{"parent_node_id": <segN frame>, "role": "sourceframe",       "slot_order": 0, "kind": "product"},
+                 {"parent_node_id": <avatar>,     "role": "<avatar row name>", "slot_order": 1, "kind": "character"},
+                 {"parent_node_id": <scene N-1>,  "role": "chain_from_image_1","slot_order": 2, "kind": "chain"}]}
+   POST  /api/images/nodes/<scene N>/regenerate
+   ```
+
+   `PATCH` refuses with 409 while the node is `queued` or `generating`, so this lands either before
+   the queue moves or after the render.
+
+4. **CHAIN THE PREVIOUS SEGMENT for identity — operator, 2026-08-28: *"to keep consistency we can
+   reuse the new first frame (with our avatar already in that context), only if it makes sense…
+   that depends on the video."*** Segment N's start frame should take a third reference: our OWN
+   chosen frame from segment N-1. It already holds the avatar, the wardrobe, the room and the light
+   as we rendered them, so the identity stops being re-derived from scratch on every segment — which
+   is where a 78-year-old drifts back toward a generic forty-year-old between clips.
+   `nano_banana_2` accepts 3 references (`_max_parents`), so pose + avatar + continuity all fit.
+   In a build, declare it as `- **reference_image:** image_<N-1>`; the importer then stamps the
+   `kind="chain"` edge itself and only the product anchor needs the node-side repair.
+
+   **The condition is the operator's own and it is load-bearing: only when it makes sense.** Chain
+   when the segments are the same person in the same place, continuing the same action. Do NOT chain
+   across a location change, a wardrobe change or a cast change — there the previous frame is a
+   source of contamination, not continuity.
+
+   **And say what the chain is FOR, in the prompt (§v859).** Name the segment frame FIRST as the
+   composition lock, and demote the chain image explicitly to identity, wardrobe, room and light —
+   never pose. Without that sentence the chain image's own pose competes with the segment frame's,
+   which is the same failure mode §v930 records for any un-demoted reference.
+
+**Applies to** every `render_method: charswap` build with more than one scene, and to any build whose
+scenes are cut from ONE continuous source take.
+
+**Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`,
+`raw/decode_work/martha-reformer-DZVTwnbN72v/RECIPE.md` (the worked case),
+memory `swap-image-two-ref-method`.
