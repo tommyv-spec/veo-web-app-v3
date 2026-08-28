@@ -20211,6 +20211,119 @@ async function renderAutoEditCard(jobId, hasExport) {
             }, 8000);
         }
 
+        // Countdown toast with a real Cancel button — used by the promote
+        // auto-generate tail so a wrong model/backend is catchable BEFORE the
+        // render spends. imgShowToast can't be reused: it has no button, no
+        // countdown, and its whole body is a dismiss target.
+        //
+        // Any dismissal that isn't the timer reaching zero counts as CANCEL.
+        // Firing is the one thing that must be deliberate.
+        let _imgCountdownTimer = null;
+        function imgShowCountdownToast(title, body, seconds, onFire, onCancel) {
+            // A second promote must not leave two timers racing to create two
+            // jobs from one intent. The newest one wins; the old one cancels.
+            if (_imgCountdownTimer) {
+                try { clearInterval(_imgCountdownTimer.id); } catch (e) {}
+                try { _imgCountdownTimer.el.remove(); } catch (e) {}
+                _imgCountdownTimer = null;
+            }
+            let container = document.getElementById('imgToastContainer');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'imgToastContainer';
+                container.style.cssText = 'position:fixed;top:72px;right:16px;z-index:10000;display:flex;flex-direction:column;gap:8px;max-width:340px;pointer-events:none;';
+                document.body.appendChild(container);
+            }
+            const toast = document.createElement('div');
+            toast.style.cssText = `
+                background: var(--bg-surface); border: 1px solid var(--accent);
+                border-left: 4px solid var(--accent);
+                border-radius: var(--radius-md);
+                padding: 12px 14px;
+                box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+                pointer-events: auto;
+                animation: imgToastIn 0.25s ease-out;
+                transition: opacity 0.2s, transform 0.2s;
+            `;
+            let left = Math.max(1, parseInt(seconds, 10) || 5);
+            toast.innerHTML = `
+                <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:4px;">${imgEscape(title)}</div>
+                <div style="font-size:12px;color:var(--text-secondary);line-height:1.4;">${imgEscape(body)}</div>
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px;">
+                    <span style="font-size:12px;color:var(--text-secondary);" data-role="countdown">starting in ${left}s</span>
+                    <button type="button" class="btn btn-secondary" style="padding:3px 10px;font-size:12px;" data-role="cancel">Cancel</button>
+                </div>
+            `;
+            container.appendChild(toast);
+
+            const label = toast.querySelector('[data-role="countdown"]');
+            let done = false;
+            const stop = () => {
+                if (_imgCountdownTimer) { try { clearInterval(_imgCountdownTimer.id); } catch (e) {} }
+                _imgCountdownTimer = null;
+                toast.remove();
+            };
+            toast.querySelector('[data-role="cancel"]').addEventListener('click', () => {
+                if (done) return;
+                done = true;
+                stop();
+                try { if (onCancel) onCancel(); } catch (e) {}
+            });
+            const id = setInterval(() => {
+                left -= 1;
+                if (left > 0) {
+                    if (label) label.textContent = `starting in ${left}s`;
+                    return;
+                }
+                if (done) return;
+                done = true;
+                stop();
+                try { if (onFire) onFire(); } catch (e) { console.error('[promote] auto-generate failed:', e); }
+            }, 1000);
+            _imgCountdownTimer = { id, el: toast };
+        }
+
+        // Is the staged batch complete enough to generate without a human
+        // looking at the form? Pure function of the state prepare-for-video
+        // just wrote, so it can be checked by hand in the console.
+        // Returns {ok:true} or {ok:false, reason:"<plain sentence>"}.
+        function imgPromoteReadiness(data) {
+            const assignments = (data && data.scene_assignments) || [];
+            if (!Array.isArray(uploadedImages) || uploadedImages.length === 0) {
+                return { ok: false, reason: 'no images were staged' };
+            }
+            const lineCount = (document.getElementById('dialogueInput')?.value || '')
+                .trim().split('\n').filter(l => l.trim()).length;
+            if (lineCount === 0) {
+                return { ok: false, reason: 'no dialogue lines were staged' };
+            }
+            if (editorMode !== 'storyboard' || !Array.isArray(sceneBreaks) || sceneBreaks.length === 0) {
+                // Auto-cycle mode round-robins images across lines. A promote
+                // must never silently land there — the scene→image mapping
+                // from the markdown would be thrown away.
+                return { ok: false, reason: 'the editor is not in storyboard mode with scene breaks' };
+            }
+            if (sceneBreaks.length !== assignments.length) {
+                return {
+                    ok: false,
+                    reason: `staging dropped a scene (${sceneBreaks.length} scene breaks vs ${assignments.length} from the server)`,
+                };
+            }
+            for (let i = 0; i < sceneBreaks.length; i++) {
+                const sb = sceneBreaks[i];
+                // v682e — a text_card scene carries no image by design.
+                if ((sb.sceneType || '').toLowerCase() === 'text_card') continue;
+                const local = sb.imgIndex;
+                if (local === null || local === undefined || !uploadedImages[local]) {
+                    return { ok: false, reason: `scene ${i + 1} points at no image` };
+                }
+            }
+            if (sceneBreaks[0].lineIndex !== 0) {
+                return { ok: false, reason: 'the first scene does not start at line 1, so lines fall outside every scene' };
+            }
+            return { ok: true };
+        }
+
         function imgEnsureNotifPermission() {
             if (typeof Notification === 'undefined') return;
             if (Notification.permission === 'default' && !imgState.notifPermissionAsked) {
@@ -23237,7 +23350,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                     // job becomes an orphan but stays in the Videos tab list.
                     bulkActions.push(`<button class="btn btn-secondary" onclick="imgPrepareBatchForVideo(event, '${sharedBatchId}')" title="Re-stage this batch and create a NEW video job (the old job stays in the Videos tab; new Job picks up latest markdown + parser fixes)">🔄 Re-promote (new video)</button>`);
                 } else {
-                    bulkActions.push(`<button class="btn btn-primary" onclick="imgPrepareBatchForVideo(event, '${sharedBatchId}')" title="Stage this batch in the Videos tab for visual review before generation">🎬 Promote to video</button>`);
+                    bulkActions.push(`<button class="btn btn-primary" onclick="imgPrepareBatchForVideo(event, '${sharedBatchId}')" title="Promote to video: stages the batch and, when everything needed is there, starts generation after a 5s cancellable countdown">🎬 Promote to video</button>`);
                 }
             } else if (allReadyChosen && !sharedBatchId
                        && !groupKey.startsWith('__')
@@ -24010,14 +24123,10 @@ async function renderAutoEditCard(jobId, hasExport) {
                 window._pendingImagePromoteScenes = data.scenes_metadata || [];
             } catch (e) {}
 
-            // 8. A gentle inline confirmation so the user knows what happened
-            try {
-                imgShowToast(
-                    '🎬 Staged for review',
-                    `${(data.uploaded || []).length} scenes loaded. Auto-split forced off — md lines preserved 1:1. Verify and hit Generate.`,
-                    () => {}
-                );
-            } catch (e) {}
+            // 8. The confirmation toast moved to step 10 — it now depends on
+            //    whether the staged batch is complete enough to generate on
+            //    its own, and that has to be decided after the job form is
+            //    open (step 9), because that's when createJob can run.
 
             // 9. Open the job form directly (same as clicking "➕ New Job").
             //    Promote already switched to the Videos tab + pre-filled the
@@ -24031,6 +24140,60 @@ async function renderAutoEditCard(jobId, hasExport) {
                     console.log('[promote] auto-opened job form (state-create)');
                 }
             } catch (e) { console.warn('promote auto-open job form:', e); }
+
+            // 10. Straight to creation when the staged info is complete
+            //     (operator 2026-08-28: "if i promote and the info are there
+            //     it goes straight to creation"). This deliberately keeps the
+            //     staging path and calls createJob() — the same function the
+            //     Generate button calls — because the older one-click
+            //     /promote-to-video endpoint cannot carry per-scene bindings
+            //     (composite plate, v698A anchor, v718i end frame; see v892.8).
+            //
+            //     The build markdown carries CONTENT, not render settings:
+            //     backend, Veo model and variant count come from the form.
+            //     That's why they go in the toast — a wrong model has to be
+            //     catchable before the render spends, not after.
+            try {
+                const _ready = imgPromoteReadiness(data);
+                // TEMP DIAGNOSTIC (root CLAUDE.md §2) — remove once the
+                // operator confirms a live auto-generate run.
+                console.log('[promote] readiness:', JSON.stringify(_ready),
+                            'scenes=', (sceneBreaks || []).length);
+                if (!_ready.ok) {
+                    imgShowToast(
+                        '🎬 Staged for review',
+                        `${(data.uploaded || []).length} scenes loaded, but ${_ready.reason}. Fix it and hit Generate.`,
+                        () => {}
+                    );
+                } else {
+                    const _backend = document.querySelector('#backendToggle button.active')?.dataset.value || 'default backend';
+                    const _model = document.getElementById('veoModel')?.value || 'default model';
+                    const _variants = document.querySelector('#flowVariantsSeg button.active')?.dataset.value || '?';
+                    imgShowCountdownToast(
+                        '⚡ Promoting → generating',
+                        `${_backend} · ${_model} · ${_variants} variants · ${sceneBreaks.length} scenes`,
+                        5,
+                        () => {
+                            console.log('[promote] auto-generate firing');
+                            if (typeof createJob === 'function') createJob();
+                        },
+                        () => {
+                            imgShowToast(
+                                '🎬 Staged for review',
+                                'Cancelled — everything is still filled in. Change what you need and hit Generate.',
+                                () => {}
+                            );
+                        }
+                    );
+                }
+            } catch (e) {
+                // Never let the tail swallow a successful staging. Worst case
+                // the operator lands on a filled form, which is today's flow.
+                console.warn('[promote] auto-generate tail failed:', e);
+                imgShowToast('🎬 Staged for review',
+                             `${(data.uploaded || []).length} scenes loaded. Verify and hit Generate.`,
+                             () => {});
+            }
         }
 
 
