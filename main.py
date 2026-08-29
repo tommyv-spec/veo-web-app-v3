@@ -11840,6 +11840,12 @@ def _v943_1_render_duration(path) -> float:
         return 0.0
 
 
+# v952 — how long the source audio fades at the very end of a clip. Long enough
+# to read as an ending rather than a cut, short enough not to eat a beat of the
+# music. Capped at a quarter of the clip so a very short segment still fades.
+RC_AUDIO_FADE_S = 0.35
+
+
 def _v943_1_mux_argv(render_path, source_path, out_path,
                      render_duration=None) -> list:
     """The ffmpeg call that lays the source's audio over the render.
@@ -11850,30 +11856,57 @@ def _v943_1_mux_argv(render_path, source_path, out_path,
 
     THE VIDEO SETS THE LENGTH. The first version used `-shortest` alone, which
     cuts to whichever input is shorter — so a source audio one second short of
-    the render silently chopped a second off the PICTURE. Now the audio is
-    padded with silence (`apad`) and the output is cut at the render's own
-    duration (`-t`), so short audio ends in silence and long audio is trimmed;
-    the visual segment keeps every frame either way. `-shortest` stays as the
-    belt-and-braces stop for the case where the duration could not be probed
-    (render_duration falsy) — apad would otherwise run forever.
+    the render silently chopped a second off the PICTURE. The second padded the
+    audio with silence (`apad`) and cut the output at the render's own duration
+    (`-t`), which kept every frame but left the tail SILENT.
+
+    v952 — that silent tail is what the operator heard: "the music stopping
+    before the end of the video". It is structural, not occasional. Veo returns a
+    FIXED ~7.7s container whatever the source length, so a 6s source can never
+    fill it. Measured on job bb159509: source audio 6.000s, the export then trims
+    7 frames (0.292s) off the head, so sound ended at 5.769s of a 7.479s cut —
+    1.70s of dead air on every clip in the lane.
+
+    So the audio now LOOPS to fill the render (`-stream_loop -1` on the audio
+    input) instead of padding with silence, and the last RC_AUDIO_FADE_S are
+    faded out so the loop seam and the ending both land clean. `apad` stays after
+    the loop as the belt for a source ffmpeg refuses to loop; `-shortest` still
+    guards the un-probed case, and it terminates because the VIDEO input is
+    finite even when the audio input is endless.
+
+    The caveat, stated because it is real: on a source whose audio is SPEECH
+    rather than music, looping repeats the last words instead of going quiet.
+    This path is the charswap `audio: source-original` lane, which is the
+    music-bed case by construction (its scenes are `speaker: silent`), and the
+    fade covers a short repeat. A speech source that must not loop should ask for
+    `audio: none` and take a voiceover.
     """
     try:
         from video_processor import FFMPEG_BIN as _ffmpeg
     except Exception:
         _ffmpeg = "ffmpeg"
-    argv = [
-        _ffmpeg, "-y", "-loglevel", "error", "-nostats",
-        "-i", str(render_path),
-        "-i", str(source_path),
-        "-map", "0:v:0", "-map", "1:a:0",
-        "-c:v", "copy",
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        "-af", "apad",
-    ]
     try:
         _dur = float(render_duration or 0.0)
     except (TypeError, ValueError):
         _dur = 0.0
+
+    _af = "apad"
+    if _dur > 0:
+        fade = min(RC_AUDIO_FADE_S, _dur / 4.0)
+        _af = f"apad,afade=t=out:st={max(0.0, _dur - fade):.6f}:d={fade:.6f}"
+
+    argv = [
+        _ffmpeg, "-y", "-loglevel", "error", "-nostats",
+        "-i", str(render_path),
+        # v952 — loop the AUDIO input so a short source fills the render instead
+        # of ending in silence. Applies to the input that follows it only.
+        "-stream_loop", "-1",
+        "-i", str(source_path),
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+        "-af", _af,
+    ]
     if _dur > 0:
         argv += ["-t", f"{_dur:.6f}"]
     else:

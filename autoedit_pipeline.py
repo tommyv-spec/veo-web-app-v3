@@ -1942,6 +1942,93 @@ def rc_smart_layout(prof, H, need_age, need_block, gap):
             "age_cov": age[1], "block_cov": blk[1]}
 
 
+RC_SPLIT_MIN_GAIN = 0.08   # absolute body-coverage win required before splitting
+
+
+def rc_band_coverage(prof, H, top_px, height_px):
+    """Mean share of frame width the SUBJECT occupies behind a text band."""
+    import numpy as _np
+    a = max(0, int(round(top_px)))
+    b = min(len(prof), int(round(top_px + height_px)))
+    if b <= a:
+        return 1.0
+    return float(_np.mean(prof[a:b]))
+
+
+def rc_best_top(prof, H, height_px, lo_frac, hi_frac, step=0.005):
+    """Lowest-coverage top edge for a band of `height_px` inside [lo,hi].
+
+    Returns (top_frac, coverage) or None when the band does not fit.
+    """
+    best = None
+    t = float(lo_frac)
+    while t + height_px / H <= hi_frac + 1e-9:
+        c = rc_band_coverage(prof, H, t * H, height_px)
+        if best is None or c < best[1]:
+            best = (t, c)
+        t += step
+    return best
+
+
+def rc_split_layout(prof, H, scale, n_lines, has_route, face_lo, face_hi,
+                    age_top_frac, age_h):
+    """v952 — SPLIT the body block: some lines above the face, the rest low.
+
+    Why this exists, measured on job bb159509 (a standing man on a cable
+    machine). The body block plus its route line is 495px on a 1920 frame —
+    25.8% of the picture — and it must clear the face, which sits 27.1%..41.9%.
+    That leaves exactly one window, 43.5%..53.0%, and every position in it lands
+    across his chest: best achievable coverage 0.411. No amount of re-ranking a
+    SINGLE block can fix that, because the slab is simply taller than any clean
+    gap. The operator said it plainly: "if the big block of text was splitted and
+    moved up and down it would have been better."
+
+    He is right, and the frame says why: above his head, 0%..22.7%, is COMPLETELY
+    empty and the old layout never used it. Measured on that clip:
+
+        one slab, below the face            0.411
+        2 lines up top + 2 lines & route low 0.000 and 0.381  -> 0.190 average
+
+    Returns {"split_at", "block_top", "block", "top_cov", "low_cov", "cov"} or
+    None when a split is impossible (too few lines, no room above the face, no
+    room below it) or when `prof` is missing. The CALLER decides whether the win
+    is big enough to take — see RC_SPLIT_MIN_GAIN.
+    """
+    if prof is None or n_lines < 2:
+        return None
+    line_h = RC_SPEC["body"][0] * scale
+    pitch = RC_BODY_PITCH * scale
+    route_h = RC_SPEC["route"][0] * scale
+    gap_br = RC_GAP_BODY_ROUTE * scale
+
+    def group_h(k, with_route):
+        h = (k - 1) * pitch + line_h
+        return h + gap_br + route_h if with_route else h
+
+    # The top group lives between the age line and the face. Never above the
+    # age line: the age tag is the account's fixed masthead.
+    top_lo = age_top_frac + age_h / H + 0.02
+    top_hi = face_lo - 0.015
+    low_lo = face_hi + 0.015
+
+    best = None
+    # Prefer putting MORE lines up top (the empty zone is free real estate), but
+    # always leave at least one line for the low group so the split is real.
+    for k in range(n_lines - 1, 0, -1):
+        top = rc_best_top(prof, H, group_h(k, False), top_lo, top_hi)
+        if top is None:
+            continue                      # k lines do not fit above the face
+        low = rc_best_top(prof, H, group_h(n_lines - k, has_route),
+                          low_lo, RC_SAFE_BOTTOM)
+        if low is None:
+            continue
+        cov = (top[1] + low[1]) / 2.0
+        if best is None or cov < best["cov"]:
+            best = {"split_at": k, "block_top": top[0] * H, "block": low[0] * H,
+                    "top_cov": top[1], "low_cov": low[1], "cov": cov}
+    return best
+
+
 def rc_layout(head_top, head_bottom, H, need_age, need_block):
     """Pick y for the age line and for the body+route block.
 
@@ -2091,8 +2178,22 @@ def rc_occupancy_layout(src, H, need_age, need_block, gap, block_until=None):
     if best is None:
         return None
     _, a_c, b_c = best
+    # v952 — the face union this engine actually vetoed against, so the split
+    # layout downstream can reuse it instead of measuring the face twice. Only
+    # the boxes that count: the central 12-88% of width, same as face_free().
+    _f_lo, _f_hi = 1.0, 0.0
+    for b in buckets:
+        for fx0, fy0, fx1, fy1 in b["faces"]:
+            if fx1 > 0.12 and fx0 < 0.88:
+                _f_lo, _f_hi = min(_f_lo, fy0), max(_f_hi, fy1)
     return {"age": (a_c - ha) * H, "block": (b_c - hb) * H, "mode": "occupancy",
-            "age_cov": 0.0, "block_cov": 0.0,
+            # v952 — these were hardcoded 0.0, which is why the engine reported
+            # "covers 0% of subject" for a block sitting across a man's chest:
+            # it vetoes FACES and ranks MOTION, and never knew a body was there.
+            # The caller fills them in from the silhouette when it has one.
+            "age_cov": None, "block_cov": None,
+            "face_lo": (_f_lo if _f_hi > _f_lo else None),
+            "face_hi": (_f_hi if _f_hi > _f_lo else None),
             "age_action": action(a_c, ha),
             "block_action": action(b_c, hb, b_buckets),
             "squeezed": squeezed,
@@ -2193,11 +2294,25 @@ def rc_build_ass(args):
     body_lines = [l for l in args.body if l.strip()]
     block_h = (len(body_lines) - 1) * RC_BODY_PITCH * scale + RC_SPEC["body"][0] * scale \
         + RC_GAP_BODY_ROUTE * scale + RC_SPEC["route"][0] * scale
+    # v952 — the silhouette is measured ONCE, up front, and used for three
+    # things: the split decision below, honest coverage reporting, and the smart
+    # fallback. It used to be computed only on the smart path, which is exactly
+    # why the occupancy path could report 0% coverage over a man's chest.
+    prof = None
+    if not args.no_smart:
+        prof = rc_coverage_profile(args.src)
+        if prof is None:
+            print("  no silhouette available — body coverage is unknown this run",
+                  flush=True)
+
     plan = None
     if args.occupancy:
         plan = rc_occupancy_layout(args.src, H, age_h, block_h, RC_GAP_AGE_BODY,
                                    args.body_until)
         if plan is not None:
+            if prof is not None:
+                plan["age_cov"] = rc_band_coverage(prof, H, plan["age"], age_h)
+                plan["block_cov"] = rc_band_coverage(prof, H, plan["block"], block_h)
             print(f"  occupancy placement: age action {plan['age_action']:.3f}, "
                   f"block action {plan['block_action']:.3f} (lower = calmer)", flush=True)
             if plan.get("squeezed"):
@@ -2207,8 +2322,7 @@ def rc_build_ass(args):
         else:
             print("  occupancy placement found no window — falling back", flush=True)
     if plan is None and not args.no_smart:
-        prof = rc_coverage_profile(args.src)
-        if prof is not None:
+        if prof is not None:                       # v952 — measured once, above
             plan = rc_smart_layout(prof, H, age_h, block_h, RC_GAP_AGE_BODY)
             if plan is not None:
                 print(f"  smart placement: age covers {100*plan['age_cov']:.0f}% of "
@@ -2230,9 +2344,43 @@ def rc_build_ass(args):
         print(f"  clear top  {100*top_clear[0]:.0f}%..{100*top_clear[1]:.0f}%"
               f"   clear low {100*low_clear[0]:.0f}%..{100*low_clear[1]:.0f}%", flush=True)
 
+    # v952 — SPLIT the block when one slab cannot clear the body. A tall block
+    # that must also clear the face has, on a standing subject, exactly one
+    # window and it is his chest. Splitting uses the empty frame above his head,
+    # which no single-slab layout can reach. Taken only on a real, measured win
+    # (RC_SPLIT_MIN_GAIN), so a clip the current layout already handles keeps the
+    # account's proven one-block look.
+    face_lo = plan.get("face_lo")
+    face_hi = plan.get("face_hi")
+    if args.head_top is not None:
+        face_lo = args.head_top if face_lo is None else min(face_lo, args.head_top)
+    if args.head_bottom is not None:
+        face_hi = args.head_bottom if face_hi is None else max(face_hi, args.head_bottom)
+    if prof is not None and face_lo is not None and face_hi is not None:
+        single_cov = plan.get("block_cov")
+        if single_cov is None:
+            single_cov = rc_band_coverage(prof, H, plan["block"], block_h)
+        sp = rc_split_layout(prof, H, scale, len(body_lines), bool(args.route),
+                             face_lo, face_hi, plan["age"] / H, age_h)
+        if sp is not None and single_cov - sp["cov"] >= RC_SPLIT_MIN_GAIN:
+            print(f"  [v952] SPLIT: one slab would cover {100*single_cov:.0f}% of the "
+                  f"subject; {sp['split_at']} line(s) above the face cover "
+                  f"{100*sp['top_cov']:.0f}% and the rest {100*sp['low_cov']:.0f}%",
+                  flush=True)
+            plan.update({"block_top": sp["block_top"], "block": sp["block"],
+                         "split_at": sp["split_at"], "mode": plan["mode"] + "+split",
+                         "block_cov": sp["low_cov"], "top_cov": sp["top_cov"]})
+        elif sp is not None:
+            print(f"  [v952] split considered ({100*sp['cov']:.0f}% vs "
+                  f"{100*single_cov:.0f}%) — not worth it, keeping one block",
+                  flush=True)
+
     print(f"  frame {W}x{H}", flush=True)
     print(f"  layout: {plan['mode']}   age y={plan['age']:.0f} ({100*plan['age']/H:.1f}%)"
-          f"   block y={plan['block']:.0f} ({100*plan['block']/H:.1f}%)", flush=True)
+          f"   block y={plan['block']:.0f} ({100*plan['block']/H:.1f}%)"
+          + (f"   top-group y={plan['block_top']:.0f} "
+             f"({100*plan['block_top']/H:.1f}%)" if plan.get("split_at") else ""),
+          flush=True)
 
     # Two INDEPENDENT TIMINGS, not two bitmap layers. The age line and the body
     # block expire separately on the reference (judy's body lines vanish at
@@ -2255,8 +2403,19 @@ def rc_build_ass(args):
     blk_end = args.body_until if args.body_until else END
     events = [(0.0, END, plan["age"] + RC_SPEC["age"][0] * scale * age_k / 2,
                args.age, "age")]
+    # v952 — with a split, the first `split_at` lines sit in their own group in
+    # the empty band above the face; the rest (and the route) stay low. Without
+    # one this is the original single run, line for line.
+    split_at = int(plan.get("split_at") or 0)
+    if split_at:
+        y_top = plan["block_top"] + RC_SPEC["body"][0] * scale * body_k / 2
+        for line in body_lines[:split_at]:
+            events.append((0.0, blk_end, y_top, line, "body"))
+            y_top += RC_BODY_PITCH * scale
+    low_lines = body_lines[split_at:]
+
     y = plan["block"] + RC_SPEC["body"][0] * scale * body_k / 2
-    for line in body_lines:
+    for line in low_lines:
         events.append((0.0, blk_end, y, line, "body"))
         y += RC_BODY_PITCH * scale
     y += RC_GAP_BODY_ROUTE * scale - RC_BODY_PITCH * scale
@@ -2316,7 +2475,14 @@ def overlay_stage_plan(spec):
         # read-caption post without the route line is not asking anyone to read
         # the caption.
         "route": str(spec.get("overlay_footer") or "(READ CAPTION)").strip(),
-        "watermark": spec.get("overlay_watermark", "syntheticperformer"),
+        # v952 — DEFAULT NONE. compose() already burns `syntheticperformer`
+        # bottom-left on every frame (v938.15), so stamping it again here put TWO
+        # overlapping copies in the corner of every readcaption post — one grey
+        # at 50% from compose, one solid white from this ASS. autoedit_captions
+        # has always documented the right rule ("No watermark here on purpose:
+        # the composed video already carries it"); this stage just never followed
+        # it. Still declarable for a path where compose did not run.
+        "watermark": spec.get("overlay_watermark") or None,
         "body_until": spec.get("overlay_body_until"),
         "route_with_body": bool(spec.get("overlay_route_with_body")),
         # Line pitch in spec units. Default = the account constant, MEASURED
