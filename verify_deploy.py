@@ -20,6 +20,7 @@ is veo-web-app-v3.onrender.com. That cost a round of guessing on 2026-07-30.
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -27,10 +28,58 @@ import urllib.request
 
 DEFAULT_URL = "https://veo-web-app-v3.onrender.com/api/health"
 
+# v953 — pin the repo. head_sha() used to run a bare `git rev-parse HEAD` in the
+# CALLER's cwd, so running this from the wiki root asked about a wiki commit that
+# can never appear as render_commit, and then waited the full timeout for it.
+REPO = os.path.dirname(os.path.abspath(__file__))
+
+
+def _git(*args):
+    """git inside code/. Returns (rc, stdout); rc is None if git could not run."""
+    try:
+        r = subprocess.run(["git", "-C", REPO, *args], capture_output=True,
+                           text=True, encoding="utf-8", timeout=60)
+        return r.returncode, (r.stdout or "").strip()
+    except Exception:
+        return None, ""
+
 
 def head_sha():
-    r = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, encoding="utf-8")
-    return r.stdout.strip() if r.returncode == 0 else ""
+    rc, out = _git("rev-parse", "HEAD")
+    return out if rc == 0 else ""
+
+
+def live_contains(mine, live):
+    """Is MY commit inside what production is serving? True / False / None.
+
+    v953 — this was `live[:7] == short`, which asks the wrong question on a repo
+    several sessions push to: the live TIP is often a DESCENDANT of the commit
+    you pushed, not that commit. Measured 2026-08-29, four commits were live and
+    serving while this reported NOT CONFIRMED, and deploy.ps1 turned that into
+    "the live deploy was not confirmed healthy" — a deploy failure that never
+    happened.
+
+    None means "cannot tell" (unknown object, shallow clone, no git) and must
+    NEVER be treated as confirmed. Exit codes of --is-ancestor: 0 yes, 1 no,
+    anything else undecidable — same split check_deploy_safety.py relies on.
+    """
+    if not mine or not live:
+        return None
+    if live.startswith(mine) or mine.startswith(live):
+        return True                       # prefix match, no git needed
+    for ref in (mine, live):
+        if _git("cat-file", "-e", f"{ref}^{{commit}}")[0] != 0:
+            _git("fetch", "-q", "origin", "main")
+            break
+    for ref in (mine, live):
+        if _git("cat-file", "-e", f"{ref}^{{commit}}")[0] != 0:
+            return None
+    rc, _ = _git("merge-base", "--is-ancestor", mine, live)
+    if rc == 0:
+        return True
+    if rc == 1:
+        return False
+    return None
 
 
 def probe(url, timeout=20):
@@ -68,8 +117,9 @@ def main(argv):
             if live[:7] != seen:
                 seen = live[:7]
                 print("  live=%s status=%s" % (seen or "?", status))
-            commit_matches = live.startswith(want) or (len(live) >= 7 and want.startswith(live))
-            if commit_matches and live[:7] == short:
+            # v953 — ancestry, not equality. None ("cannot tell") keeps waiting;
+            # it must never confirm. The health clause below is untouched.
+            if live_contains(want, live) is True:
                 if str(status).lower() == "healthy":
                     print("\nDEPLOY CONFIRMED: %s is live and healthy" % short)
                     return 0
