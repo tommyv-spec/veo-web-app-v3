@@ -8920,7 +8920,19 @@ def _import_scene_table_impl(
     #   the AVATAR — exactly one character upload from the Ingredients table.
     #   Zero uploads or several is ambiguous, and an ambiguous face is the one
     #   thing a swap must never improvise.
-    _v943_scenes = [s for s in storyboard_scenes if s.get("render_method") == "charswap"]
+    # v943.8 — normalized to match the OTHER charswap test in this same
+    # function (`is_video_led_swap_scene`, ~9018), which does
+    # `(s.get("render_method") or "").strip().lower()`. This one compared
+    # exactly. Identical today because the parser already normalizes at ~5811
+    # and rejects anything else, so this changes no behaviour — but two
+    # spellings of one question is how a scene comes to satisfy the second
+    # test and miss the first, and that combination leaves
+    # `_v943_avatar_node_id` None and writes a NULL scene image, which is the
+    # zero-clips-no-error bug f798f94 exists to prevent. One spelling.
+    _v943_scenes = [
+        s for s in storyboard_scenes
+        if (s.get("render_method") or "").strip().lower() == "charswap"
+    ]
     _v943_source_keys: Dict[str, str] = {}
     _v943_avatar_node_id: Optional[int] = None
     if _v943_scenes:
