@@ -14619,9 +14619,31 @@ Ambient: same kitchen room tone, soft pour sound.
             }
             const isAssembleJob = currentJobBackend === 'import';
             console.log('[Export] Job backend:', currentJobBackend, 'isAssembleJob:', isAssembleJob);
-            
-            // Get current export settings
+
+            // v951 — what THIS video declared in its build's ## Finishing.
+            // The dialog seeds itself from this instead of localStorage, so
+            // the settings that open belong to the video, not to whatever this
+            // browser picked last on some other job. A job that declared
+            // nothing comes back with declared:[] and the dialog behaves
+            // exactly as it did before v951. A failed fetch does the same —
+            // never block the export on this.
+            let declaredExport = { settings: {}, declared: [] };
+            try {
+                const dRes = await fetch(`${API}/jobs/${jobId}/export-defaults`);
+                if (dRes.ok) declaredExport = await dRes.json();
+            } catch(e) { console.warn('[v951] export-defaults unavailable', e); }
+            console.log('[v951] declared from build:', declaredExport.declared);
+
+            // Get current export settings. v951 — the build's declaration
+            // outranks the page's own controls for the fields it names; these
+            // three are all the modal markup below reads. The rest are applied
+            // to the controls after the localStorage restore.
+            const _dNamed = new Set(declaredExport.declared || []);
+            const _dSet = declaredExport.settings || {};
             const currentSettings = getExportSettings();
+            if (_dNamed.has('frames_to_cut_start')) currentSettings.frames_to_cut_start = _dSet.frames_to_cut_start;
+            if (_dNamed.has('frames_to_cut_end')) currentSettings.frames_to_cut_end = _dSet.frames_to_cut_end;
+            if (_dNamed.has('smart_trim')) currentSettings.smart_trim = _dSet.smart_trim;
             
             // Build toggle position based on smart_trim setting
             const togglePosition = currentSettings.smart_trim ? 'right:2px' : 'left:2px';
@@ -14638,6 +14660,10 @@ Ambient: same kitchen room tone, soft pour sound.
                             <h3 style="margin:0;font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px;">✂️ Export Settings</h3>
                             <button onclick="document.getElementById('exportSettingsModal').remove()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px;line-height:1;padding:2px 6px;">✕</button>
                         </div>
+
+                        <!-- v951 — names the settings that came from this build's ## Finishing,
+                             so the operator can check the choice in front of him. -->
+                        <div id="v951DeclaredBanner" style="display:none;margin:10px 20px 0;padding:7px 10px;border-radius:6px;background:var(--bg-elevated);border:1px solid var(--border-color);font-size:12px;line-height:1.45;color:var(--text-muted);flex-shrink:0;"></div>
 
                         <!-- Body — scrollable two-column layout -->
                         <div style="overflow-y:auto;flex:1;padding:16px 20px;">
@@ -15453,6 +15479,79 @@ Ambient: same kitchen room tone, soft pour sound.
                     if (el) { el.value = Math.round(saved.transition_duration * 1000); document.getElementById('transitionDurationValue').textContent = saved.transition_duration.toFixed(1) + 's'; }
                 }
             } catch(e) {}
+
+            // v951 — the build's declared export_* wins over the localStorage
+            // restore above. Applied AFTER it on purpose: localStorage is
+            // "what this browser did last", the declaration is "what this
+            // video needs". Only the fields the build actually named are
+            // touched; the operator can still change any control before
+            // clicking Export, and that change wins because the submit path
+            // reads the DOM.
+            try {
+                const _setToggle = (id, on) => {
+                    const el = document.getElementById(id);
+                    if (el) el.classList.toggle('active', !!on);
+                };
+                const _setValue = (id, v) => {
+                    const el = document.getElementById(id);
+                    if (el && v !== undefined && v !== null) el.value = v;
+                };
+                const _setText = (id, s) => {
+                    const el = document.getElementById(id);
+                    if (el) el.textContent = s;
+                };
+
+                if (_dNamed.has('smart_trim')) _setToggle('modalSmartTrim', _dSet.smart_trim);
+                if (_dNamed.has('frames_to_cut_start')) _setValue('modalFramesStart', _dSet.frames_to_cut_start);
+                if (_dNamed.has('frames_to_cut_end')) _setValue('modalFramesEnd', _dSet.frames_to_cut_end);
+
+                if (_dNamed.has('remove_silence')) {
+                    _setToggle('modalRemoveSilence', _dSet.remove_silence);
+                    const sc = document.getElementById('silenceControlsSection');
+                    if (sc) sc.style.display = _dSet.remove_silence ? 'block' : 'none';
+                }
+                if (_dNamed.has('silence_mode') && typeof window.setSilMode === 'function') {
+                    window.setSilMode(_dSet.silence_mode);
+                }
+                // The slider and its printed value are two elements; the
+                // localStorage restore above sets both, so this must too or
+                // the dialog shows a stale number next to a moved slider.
+                if (_dNamed.has('silence_trigger')) {
+                    _setValue('modalSilenceTrigger', _dSet.silence_trigger);
+                    _setText('silenceTriggerValue', Number(_dSet.silence_trigger).toFixed(1) + 's');
+                }
+                if (_dNamed.has('silence_keep')) {
+                    _setValue('modalSilenceKeep', _dSet.silence_keep);
+                    _setText('silenceKeepValue', Number(_dSet.silence_keep).toFixed(1) + 's');
+                }
+                if (_dNamed.has('silence_threshold')) _setValue('modalSilenceThreshold', _dSet.silence_threshold);
+
+                if (_dNamed.has('playback_speed')) {
+                    const on = _dSet.playback_speed > 1.01;
+                    _setToggle('modalSpeedToggle', on);
+                    const sec = document.getElementById('speedSliderSection');
+                    if (sec) sec.style.display = on ? 'block' : 'none';
+                    if (on) {
+                        _setValue('modalSpeed', Math.round(_dSet.playback_speed * 100));
+                        _setText('speedValue', Number(_dSet.playback_speed).toFixed(2) + '×');
+                    }
+                }
+
+                // Tell the operator which ones came from the build, so the
+                // choice stays checkable in front of him rather than after
+                // the fact in a log.
+                const banner = document.getElementById('v951DeclaredBanner');
+                if (banner) {
+                    if (_dNamed.size) {
+                        banner.style.display = 'block';
+                        banner.textContent = '📄 ' + _dNamed.size +
+                            ' setting' + (_dNamed.size === 1 ? '' : 's') +
+                            ' from this build: ' + [..._dNamed].join(', ');
+                    } else {
+                        banner.style.display = 'none';
+                    }
+                }
+            } catch (e) { console.warn('[v951] could not apply declaration', e); }
 
             // Master audio mode: disable toggles that conflict with per-clip speed alignment
             // Only applies when master audio toggle is actually ON, not just because backend is 'import'
