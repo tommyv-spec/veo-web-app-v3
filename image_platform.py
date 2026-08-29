@@ -12095,10 +12095,31 @@ def promote_batch_to_video(
             scene_notes = _ad.get("action_notes") or []
             scene_veo_prompts = _ad.get("veo_prompts") or []
             if not scene_lines:
-                # Empty assignment (shouldn't happen) — fall back to denorm
+                # Empty assignment — fall back to denorm for the LINE and the
+                # note. This is not the "shouldn't happen" case the comment
+                # here claimed for years: a SILENT scene (a charswap, a b-roll
+                # clip under voiceover, a music beat) legitimately has no lines
+                # at all, so this branch is the normal path for every one of
+                # them.
+                #
+                # v943.6 — and it used to hard-code `scene_veo_prompts = [None]`,
+                # which threw away the override that had just been read out of
+                # the assignment one line above. That is where the build's
+                # `## Veo 3.1 Final Prompts` text died on 2026-08-29: the parser
+                # extracted it, attach_veo_prompts_to_scenes put it on the scene,
+                # v682s deliberately preserved the 1-entry list through the
+                # no-lines truncation, the import stored it in
+                # veo_prompts_json — and then this line dropped it because the
+                # scene had no dialogue. The clip was written with prompt_text
+                # NULL, the Flow worker filled the gap with its silent-speaker
+                # DIALOGUE template, and the swap rendered as a talking head.
+                #
+                # Only fill in a None when the assignment genuinely carried no
+                # override. Never overwrite one it did carry.
                 scene_lines = [line_text_default]
                 scene_notes = [n.action_note or ""]
-                scene_veo_prompts = [None]
+                if not scene_veo_prompts:
+                    scene_veo_prompts = [None]
         else:
             # Truly legacy data predating ImageSceneAssignment — use the
             # node's denormalized fields. Only one line per node here.

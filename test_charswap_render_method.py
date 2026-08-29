@@ -2364,3 +2364,52 @@ def test_charswap_default_prompt_says_replace_not_perform():
     for performance_word in ("speaks", "camera and says", "eye contact",
                              "recording booth", "nod"):
         assert performance_word not in low
+
+
+# --- 11. v943.6 — a silent scene keeps its Veo prompt override --------------
+#
+# The root of the 2026-08-29 talking-head render, reproduced at the exact line
+# that lost it. A silent scene (charswap, b-roll under voiceover, music beat)
+# legitimately has lines == [], which sends promote-to-video down a fallback
+# branch commented "shouldn't happen". That branch hard-coded
+# scene_veo_prompts = [None], discarding the override the assignment had just
+# supplied — so the clip was written with prompt_text NULL and the Flow worker
+# substituted its silent-speaker dialogue template.
+
+def _fallback(scene_lines, scene_veo_prompts, line_text_default="", note=""):
+    """The promote-time fallback, isolated. Mirrors image_platform.py's branch."""
+    scene_notes = []
+    if not scene_lines:
+        scene_lines = [line_text_default]
+        scene_notes = [note]
+        if not scene_veo_prompts:
+            scene_veo_prompts = [None]
+    return scene_lines, scene_notes, scene_veo_prompts
+
+
+def test_silent_scene_keeps_its_veo_prompt_override():
+    override = {"text_prompt": "only replace the subject of the video with "
+                               "the subject from the image",
+                "negative_prompt": None}
+    lines, _notes, vps = _fallback([], [override])
+    assert len(lines) == 1, "a silent scene still needs exactly one clip row"
+    assert vps == [override], "the override must survive the no-lines fallback"
+
+
+def test_silent_scene_with_no_override_still_gets_a_none_slot():
+    lines, _notes, vps = _fallback([], [])
+    assert len(lines) == 1
+    assert vps == [None], "parallel arrays must stay the same length"
+
+
+def test_the_real_promote_branch_no_longer_hardcodes_none():
+    """Guard the source itself: the discard was one assignment, easy to
+    reintroduce, and invisible in any output until a render comes back wrong."""
+    src = (pathlib.Path(__file__).parent / "image_platform.py").read_text(
+        encoding="utf-8", errors="replace")
+    marker = "if not scene_lines:"
+    i = src.index(marker)
+    window = src[i:i + 1800]
+    assert "if not scene_veo_prompts:" in window, (
+        "the no-lines fallback must only DEFAULT scene_veo_prompts, never "
+        "overwrite an override the assignment supplied (v943.6)")
