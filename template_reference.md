@@ -18767,3 +18767,114 @@ the safety net you are relying on actually fires for them.
 `tools/test_publish_reel.py`, `code/finishing_models.py`, `code/main.py`,
 `code/tests/test_v953_skip_start_trim.py`, `wiki/patterns/conventions.md`,
 `wiki/meta/build-rule-index.md`, and the four swap builds' `## Finishing` blocks.
+
+## v953.1 / v953.2 — THE REVIEW LOOP ON v953: WHAT THREE ROUNDS OF ADVERSARIAL READING FOUND (2026-08-29)
+
+v953 shipped and was then read by six independent reviewers, each finding
+adversarially refuted by a second agent. Round 1 raised 36 findings (34 survived
+refutation), round 2 raised 32 on the FIXES (30 survived, 3 must-fix), round 3
+checked convergence. This is what that produced, and it is worth recording
+because **two of the worst findings were regressions introduced by v953 itself**
+and one was a live outage nobody had noticed.
+
+### The two regressions v953 introduced, and the shape they share
+
+**Recording the job id on the ledger row moved `find_platform_job()` ABOVE the
+ledger write.** That function's `explicit` branch calls `resolve_platform_job`
+→ `_kaveno_api` → `raise_for_status` with no guard, and `main()` catches only
+`PublishError`. So a 500, a Render cold start or a dropped connection raised
+straight out of the process **after the post was live and before its row was
+written** — no permalink, no submission id, nothing for the reconciler to heal.
+
+**The `publicUrl` grace poll had the same shape**, and fixing only that one left
+two more: the outer status loop (about 20 unguarded calls at the 300s/15s
+defaults, and the ONLY status call for a scheduled post) and the poll timeout,
+whose own message said the post *"was ACCEPTED… a retry can post the same reel
+twice"* and then discarded the submission id that lets anything de-duplicate.
+
+**The shared shape, and the rule that falls out of it:**
+
+> **`POST /posts` succeeding means the broker owns the post. From that line on,
+> nothing may fail in a way that loses the record.** Chasing a permalink,
+> identifying a kanban card, hashing the file, tidying a staged copy — all
+> optional. Writing the row is not. Every exit between "accepted" and
+> `log_ledger` now carries the submission id out, because a row with a
+> submission id is a PENDING row the reconciler can finish, and no row at all is
+> a live post nothing can ever find.
+
+Generalised: **when you move work earlier to enrich a record, you put that work
+between the irreversible act and the record of it.** Ask what happens if the new
+work throws.
+
+### The outage nobody noticed: a mandatory flag with no caller
+
+A concurrent change made `--lane` mandatory in `publish_reel` whenever a quality
+verdict sits beside the file — correctly, because the build and charswap prompt
+contracts are opposites and the wrong one turns a bad swap into a PASS. But
+`daily_autopost` never sent it, so **every unattended post died in preflight**.
+Reproduced on the real file: exit 2 without the flag, exit 0 with it. The commit
+message said "no script calls publish_reel.py"; `run_daily_autopost.cmd` →
+`daily_autopost.py` → `publish_reel.py` is that script, under Task Scheduler.
+
+**The lesson is about the gate, not the flag: making an argument mandatory is an
+API break, and the unattended caller is the one that cannot complain.** When you
+add a required argument, grep for every caller including the ones that run at
+02:00. The fix reads the lane from the sidecar and treats a lane-less sidecar as
+build — which is `check_visual_quality`'s OWN reading of that case, so there is
+one contract rather than two.
+
+### The wrong-link cluster: a machine guess wearing a human's badge
+
+Three lenses found different pieces of one story.
+
+- **No job-level dedupe.** The platform's `/match` UNLINKS the previous holder
+  and spares it only when a waveform proves a repost — impossible for a reel the
+  sync just created, which has no fingerprint yet. Two reels resolving to one
+  job therefore moved the link back and forth, **one wrong write every morning,
+  forever, reported as success.** The real ledger already had that shape (job
+  `62e36066`, two shortcodes).
+- **`match_source = "manual"`.** The reconciler writes through the endpoint a
+  human uses, which stamps a provenance the exclusivity gate treats as
+  unstealable. So the first wrong link **permanently disabled the evidence
+  matcher that would have caught it.** Now `MatchInstagramVideoRequest.source`
+  accepts `"ledger"` (and only that) as a machine provenance the gate can
+  outrank.
+- **A folder-level marker in a shared drop.** `output/exports/platform-job.txt`
+  named one job while the folder held exports from four, because
+  `remember_folder_job` overwrote it on every publish. Verified on disk:
+  `CORRECTED_1f35eac2_korella.mp4` resolved to `1e574970`.
+
+> **A machine's guess must stay correctable by the machine that can prove it
+> wrong.** If an automated writer borrows a human's authority, every mistake it
+> makes becomes permanent.
+
+### Measurements worth keeping
+
+| Thing | Measured |
+|---|---|
+| `find_video` rescan vs an index | 72,574 comparisons vs 539 — 135× |
+| Ledger lock held during a real 277-row rewrite | **5 ms** (20s timeout = 4,200× headroom) |
+| `resolve_job` over 262 targets | 68 ms, only 12 distinct directories — **the "cache the directory listings" idea was wrong** |
+| Jobs with an export | **458** — the export-name fallback probes one at a time, hence `_EXPORT_PROBE_CAP` |
+| `/api/jobs` without params | 14 rows (`since_days=3, limit=50`); with `since_days=0, limit=2000` → **1442** |
+| U+2028/2029/0085 in the corpus | **zero** across 1793 files — real defect, low likelihood, one-line fix |
+
+### Three review lessons that generalise
+
+- **Measure before optimising.** Two of my own efficiency instincts were wrong:
+  the directory-listing cache would have saved nothing (12 directories, 68 ms),
+  while the index nobody flagged first was a genuine 135×.
+- **A guard that only cooperating writers take is not a closed race.** The
+  compare-and-swap narrowed the window; only the lock closed it, and only
+  because BOTH writers take it. The test that asserts the remaining limitation
+  is deliberately honest rather than aspirational.
+- **A test that mocks the thing it is testing proves nothing.** The empty-clips
+  guard was "covered" by a fake that re-implemented it, so deleting the real
+  guard left the suite green. Drive the real path, patch at the seam.
+
+**FILES:** `tools/publish_state.py`, `tools/reconcile_publish_state.py`,
+`tools/publish_reel.py`, `tools/daily_autopost.py`, `tools/run_daily_autopost.cmd`,
+`tools/test_publish_state.py`, `tools/test_publish_reel.py`,
+`tools/test_reconcile_publish_state.py`, `tools/test_daily_autopost.py`,
+`code/instagram_autosync.py`, `code/main.py`, `code/local_transcribe.py`,
+`code/tests/test_instagram_autosync.py`, `code/tests/test_claim_exclusivity.py`.
