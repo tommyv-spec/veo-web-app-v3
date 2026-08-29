@@ -9058,12 +9058,25 @@ def _import_scene_table_impl(
         # Banana 2 render). For shot scenes the existing `node.id`
         # binding stands. For text_card the column must be nullable
         # (see migration entry below).
-        # v943.2 — keyed off `node` rather than off scene_type, because there
-        # are now TWO kinds of scene that legitimately have no image node: a
-        # text_card (drawn by ffmpeg) and a video-led charswap (the swap happens
-        # inside the real video). Testing scene_type alone raised AttributeError
-        # on `node.id` for the second one.
+        # v943.2 — keyed off `node` rather than off scene_type, because a
+        # text_card (drawn by ffmpeg) legitimately has no image node either.
+        # Testing scene_type alone raised AttributeError on node.id.
         scene_image_node_id = node.id if node is not None else None
+
+        # v943.2 — a video-led charswap that declared no `### Image N` binds to
+        # the AVATAR upload, which is not a fallback but what the mode already
+        # means: in video-led the avatar IS the image reference, and
+        # charswap_fetch_inputs reads exactly that node to build the clip.
+        #
+        # Leaving image_node_id NULL here looked tidier and silently broke
+        # promote: _scene_plan is built by looking each assignment's
+        # image_node_id up in _nodes_by_id, so a NULL one matches nothing, the
+        # scene is skipped, and the job comes out with ZERO clips and no error
+        # anywhere. Binding the avatar keeps every downstream consumer — the
+        # frame copy, the start_frame key, the scene plan — working unchanged,
+        # and nothing is generated or chosen by an operator.
+        if is_video_led_swap_scene and scene_image_node_id is None:
+            scene_image_node_id = _v943_avatar_node_id
 
         # v698A — resolve voiceover_anchor_image (markdown int) → ImageNode.id.
         # The anchor must already exist in created_nodes_by_image_index because
