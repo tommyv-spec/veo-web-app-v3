@@ -26,7 +26,7 @@ static/.submit_storage_state.json
 static/.worker_chrome_channel
 # Local scratch job list; carries absolute operator paths, not a repo template.
 static/chatgpt_jobs.example.json
-# v943.8 — the charswap evidence file (see charswap_write_diag). Runtime
+# v945.8 — the charswap evidence file (see charswap_write_diag). Runtime
 # observation from whichever machine ran the worker, appended per clip and
 # never rotated. It is diagnostics, not knowledge. Ignored because this repo
 # is checked out on a SHARED working tree where a `git add -A` sweeps whatever

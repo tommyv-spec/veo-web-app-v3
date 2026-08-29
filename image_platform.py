@@ -8920,7 +8920,7 @@ def _import_scene_table_impl(
     #   the AVATAR — exactly one character upload from the Ingredients table.
     #   Zero uploads or several is ambiguous, and an ambiguous face is the one
     #   thing a swap must never improvise.
-    # v943.8 — normalized to match the OTHER charswap test in this same
+    # v945.8 — normalized to match the OTHER charswap test in this same
     # function (`is_video_led_swap_scene`, ~9018), which does
     # `(s.get("render_method") or "").strip().lower()`. This one compared
     # exactly. Identical today because the parser already normalizes at ~5811

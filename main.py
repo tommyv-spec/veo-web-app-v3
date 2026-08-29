@@ -3018,7 +3018,7 @@ async def _setup_job_background(
                 # trailer concatenated, if any). Empty string or null
                 # = fall through to the auto-build path.
                 _veo_prompt_override = (line_data.get("veo_prompt_override") or "").strip() or None
-                # v943.8 — a charswap scene must NEVER reach build_prompt with
+                # v945.8 — a charswap scene must NEVER reach build_prompt with
                 # no override. This is the same guard v943.5 put on the promote
                 # path (image_platform.py ~12512), placed on the OTHER clip
                 # creator, because the two are not symmetric and only one was
@@ -3039,7 +3039,7 @@ async def _setup_job_background(
                         == "charswap"):
                     from image_platform import CHARSWAP_DEFAULT_PROMPT as _cs_default
                     _veo_prompt_override = _cs_default
-                    print(f"[v943.8] clip {idx} is charswap but carried NO Veo "
+                    print(f"[v945.8] clip {idx} is charswap but carried NO Veo "
                           f"prompt override — stamping the swap default so "
                           f"build_prompt cannot auto-construct a dialogue "
                           f"prompt for a silent swap scene", flush=True)

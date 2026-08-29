@@ -607,7 +607,7 @@ def test_image_led_runs_when_the_clip_has_a_start_frame():
     refusal = _worker_function("charswap_mode_refusal")
     assert refusal({"swap_mode": "image-led",
                     "start_frame_url": "https://x/frame.png"}) is None
-    # v943.8 — the `swap_start_frame_url` case was removed, not relaxed. NO
+    # v945.8 — the `swap_start_frame_url` case was removed, not relaxed. NO
     # payload has ever carried that key (no producer exists anywhere in the
     # repo), so this line asserted that the worker honours a field the server
     # never sends. It read as coverage of image-led's charswap-specific start
@@ -620,7 +620,7 @@ def test_the_refusal_accepts_only_what_the_fetcher_consumes():
     so the clip cleared the gate and then died at the download. The two must
     agree on the same fields.
 
-    v943.8 — the field list is now DERIVED from the fetcher instead of being a
+    v945.8 — the field list is now DERIVED from the fetcher instead of being a
     frozen copy of it. The old version asserted the pair
     `["swap_start_frame_url", "start_frame_url"]` literally, which is how a
     dead key survived: the test pinned it in place."""
@@ -1513,7 +1513,7 @@ def test_the_submit_body_gate_is_still_the_last_line():
     click = src.index("click_generate_button(page,", arm)
     gate = src.index("charswap_submit_gate(", click)
     assert click < gate
-    # v943.8 — this was a byte window (`src[gate:gate+8000]`) that had already
+    # v945.8 — this was a byte window (`src[gate:gate+8000]`) that had already
     # been widened once for v945.4/v945.5 and broke again the next time
     # comments were added near it. A window measured in characters tests the
     # length of the prose, not the shape of the code. The real claim is
@@ -2457,7 +2457,7 @@ def test_the_real_promote_branch_no_longer_hardcodes_none():
         "overwrite an override the assignment supplied (v943.6)")
 
 
-# --- 12. v943.8: the submit verdict was read before it could exist ----------
+# --- 12. v945.8: the submit verdict was read before it could exist ----------
 #
 # Every charswap run recorded `submit_seen=false` / `media_binding="never
 # observed"` on renders that really happened. Two sessions read that as Flow

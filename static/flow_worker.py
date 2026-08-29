@@ -20011,7 +20011,7 @@ def charswap_mode_refusal(clip):
     then die at the download with "missing image_url". Accepting only what the
     fetcher consumes keeps the two in one contract.
 
-    v943.8 — both sites used to also read `swap_start_frame_url` first. No
+    v945.8 — both sites used to also read `swap_start_frame_url` first. No
     payload has ever carried that key (it appears nowhere in main.py), so that
     term was always None and image-led has always run on `start_frame_url`.
     Removed rather than kept as a harmless fallback: a key that reads as the
@@ -20411,7 +20411,7 @@ def charswap_install_submit_probe(page, chip_ids):
     and the result looks like an ordinary animation of a still. The check is a
     request listener because the body is the only place that fact exists.
 
-    v943.8 — three fixes, all from the same 2026-08-29 reading:
+    v945.8 — three fixes, all from the same 2026-08-29 reading:
 
     1. The previous clip's listener is REMOVED first. Each install made a fresh
        state dict but left the old callback attached, so a page that rendered
@@ -20478,7 +20478,7 @@ def charswap_submit_body_verdict(page):
 def charswap_await_submit_verdict(page, timeout_s=20, poll_ms=250):
     """Wait for the generate request, THEN read the probe. Returns (seen, both).
 
-    v943.8 — this function exists because the old call site read the verdict
+    v945.8 — this function exists because the old call site read the verdict
     with no wait at all, and that is why every charswap run recorded
     `submit_seen=false` while a real render came back.
 
@@ -20688,7 +20688,7 @@ def charswap_fetch_inputs(clip, temp_dir, context="[v943]"):
     """
     mode = (clip.get('swap_mode') or 'video-led').strip().lower()
     if mode == 'image-led':
-        # v943.8 — `swap_start_frame_url` was read first here and is never sent
+        # v945.8 — `swap_start_frame_url` was read first here and is never sent
         # by any payload; see charswap_mode_blocked for why it was removed.
         image_url = clip.get("start_frame_url")
     else:
@@ -21996,7 +21996,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # way on that run, so nothing rendered wrong — but the diagnostic
             # was lying about where the prompt came from, and a diagnostic that
             # misreports its own source is worse than none.
-            # v943.8 — the two leading terms were DEAD FROM BIRTH, and their
+            # v945.8 — the two leading terms were DEAD FROM BIRTH, and their
             # deadness is what made fa1aeda's diagnostic fix incomplete. The
             # worker's clip payload has no `veo_prompt_override` key and no
             # `prompt_text` key. The server sends the build's authored prompt
@@ -22009,7 +22009,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             if _cs_prompt != prompt:
                 print(f"{_cs_ctx} swap prompt in use ({len(_cs_prompt)} chars): "
                       f"{_cs_prompt[:120]}", flush=True)
-            # v943.8 — DETECT the martha collision, do not merely record it.
+            # v945.8 — DETECT the martha collision, do not merely record it.
             # Job 302875cc declared two scenes with two different segments
             # (seg1-0-8 for the lunge, seg2-8-15 for the plank) and both clips
             # rendered the SAME movement. bd7516a added the source key to the
@@ -22035,7 +22035,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 swap_source_repeat_of=_cs_src_repeat,
                 job_id=clip.get('job_id') or job_id,
                 clip_index=clip_index,
-                # v943.8 — this used to be a three-branch ternary whose first
+                # v945.8 — this used to be a three-branch ternary whose first
                 # two branches tested payload keys that do not exist, so it
                 # could only ever emit "charswap_default" — including on the
                 # runs where the build's own prompt WAS used. That is why the
@@ -22047,7 +22047,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                else "charswap_default"),
                 prompt_chars=len(_cs_prompt),
                 prompt_head=_cs_prompt[:160],
-                # v943.8 — renamed from `dialogue_prompt_rejected_chars`, which
+                # v945.8 — renamed from `dialogue_prompt_rejected_chars`, which
                 # reported the length of the prompt that was ACCEPTED under a
                 # name saying it was rejected.
                 build_prompt_chars=len(_cs_platform_prompt or ""),
@@ -22060,7 +22060,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # said which source each clip received, so the collision was
                 # invisible until someone watched both clips side by side.
                 # Recording the key makes two clips sharing one source a grep.
-                # v943.8 — WRONG KEY, fixed. This read `swap_source_r2_key`,
+                # v945.8 — WRONG KEY, fixed. This read `swap_source_r2_key`,
                 # which is the SQLAlchemy COLUMN name (main.py:277), not the
                 # payload key. The server sends it as `swap_source_key`
                 # (main.py:17601). So bd7516a — the commit whose entire purpose
@@ -22102,7 +22102,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                   f"{'unread' if _cs_pre_tile_ids is None else len(_cs_pre_tile_ids)}",
                   flush=True)
             click_generate_button(page, f"v943 clip {clip_index+1}")
-            # v943.8 — WAIT for the submit before judging it. This line used to
+            # v945.8 — WAIT for the submit before judging it. This line used to
             # be a bare `charswap_submit_body_verdict(page)` read taken one
             # second after the click, which is the whole reason every run
             # recorded `submit_seen=false` on a render that really happened.
@@ -22118,7 +22118,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # MORE than the chip ids: chips prove what the composer showed, this
             # proves what the request carried.
             #
-            # v943.8 — the old text here said `seen=False` meant Flow's submit
+            # v945.8 — the old text here said `seen=False` meant Flow's submit
             # "bypassed this page's listener (agent-mode / service-worker
             # path)". That was a misreading and it sent two sessions looking
             # for a service worker that does not exist. The verdict was simply
@@ -22140,7 +22140,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 media_binding=("confirmed" if (_cs_seen and _cs_both)
                                else "contradicted" if _cs_seen
                                else "never observed"),
-                # v943.8 — how many generate requests the probe actually saw,
+                # v945.8 — how many generate requests the probe actually saw,
                 # and how long after the click the first one landed. If a
                 # future run reports seen=False again, these two say whether
                 # the wait was too short or nothing was ever sent.
@@ -22162,7 +22162,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # visibly held our prompt as a created generation with two
                 # tiles rendering and the composer cleared.
                 #
-                # v943.8 CORRECTION — that observation was right, its cause was
+                # v945.8 CORRECTION — that observation was right, its cause was
                 # not. v945.5 concluded Flow's submit "no longer passes through
                 # this page's request listener (agent-mode/service-worker
                 # path)". It does. The probe was read one second after the
