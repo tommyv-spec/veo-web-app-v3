@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -24,9 +25,15 @@ class DeployEntrypointTests(unittest.TestCase):
         self.assertIn("remote main could not be refreshed", text)
         self.assertIn("the deploy checker did not complete", text)
         self.assertNotIn("if [ -f check_deploy_safety.py ]", text)
-        self.assertNotIn("| grep", text)
-        self.assertNotIn("| sed", text)
-        self.assertNotIn("| tr", text)
+        # The gate must not pipe its output through text-munging tools. Match a
+        # REAL pipe: a plain substring search reads the tail of `||` as `|`, so
+        # `... || true` on line 127 tripped the `| tr` check and failed a push
+        # that had nothing to do with `tr`. The same trap was waiting for
+        # `|| grep` / `|| sed`; the lookbehind closes all three.
+        for tool in ("grep", "sed", "tr"):
+            self.assertIsNone(
+                re.search(rf"(?<!\|)\|\s*{tool}\b", text),
+                f"the pre-push gate must not pipe through {tool}")
 
 
 if __name__ == "__main__":
