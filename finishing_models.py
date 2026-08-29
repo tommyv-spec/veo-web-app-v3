@@ -12,7 +12,23 @@ from pydantic import BaseModel, Field
 class ExportSettings(BaseModel):
     frames_to_cut_start: int = Field(default=7, ge=0, le=30)
     frames_to_cut_end: int = Field(default=7, ge=0, le=30)
-    smart_trim: bool = True  # Don't trim first clip / cut-to scenes
+    smart_trim: bool = True  # Master switch for start-trim protection (see below)
+    # v953 — split out of smart_trim, which meant two things at once: "never trim
+    # the FIRST clip of the video" and "never trim the first clip of a
+    # `transition: cut` scene". Only the first is uncontroversial. The second was
+    # measured wrong: every scene in the paddleboard build declares `cut`, so ALL
+    # 11 clips landed in the skip set and 4 frames of a WRONG scene shipped at the
+    # 38.5s boundary. Five of five builds that ever declared smart_trim set it
+    # false to escape exactly this.
+    #
+    # False = the old behaviour (skip the trim on cut-scene starts too).
+    # True  = trim them; clip 0 stays protected either way.
+    #
+    # Landing at False first, so the extracted decision below is provably
+    # identical to the inline block it replaced. Flipping the default is a
+    # separate decision with its own evidence — see v947.3, which had to undo a
+    # blanket start-trim after it cut real words out of speech.
+    trim_cut_scene_starts: bool = False
     remove_silence: bool = False
     silence_mode: str = "energy"  # "energy" = ffmpeg silencedetect, "whisper" = speech-based detection
     silence_trigger: float = Field(default=1.5, ge=0.3, le=5.0)   # Gaps >= this are trimmed (seconds)
@@ -111,3 +127,32 @@ class AutoEditRequest(BaseModel):
     # imported before v944 (nothing declared, nothing to derive) can still be
     # re-finished with an overlay without re-importing the build.
     overlay_spec: Optional[Dict[str, Any]] = None
+
+
+def skip_start_trim(*, smart_trim, trim_cut_scene_starts, has_lineup, pos,
+                    clip_index, cut_scene_first_clips):
+    """Should this clip KEEP its head frames instead of losing frames_to_cut_start?
+
+    v953 — extracted verbatim from the inline block in main.py's export body. It
+    lived 300 lines deep inside an endpoint no test could reach, which is how a
+    behaviour nobody could pin got changed twice in one week (turned off on
+    2026-08-27 14:13, undone by v947.3 at 14:53 after it cut real words out of
+    speech: "THREE rules" -> "Rules", "KORella" -> "Ella").
+
+    smart_trim protects the FIRST clip of the finished video and nothing else.
+    trim_cut_scene_starts answers the separate question about a clip that merely
+    OPENS a `transition: cut` scene.
+
+    The lineup branch has always answered "first" differently — position in the
+    operator's chosen order, never clip_index — and has never consulted the
+    cut-scene set at all. So a lineup export ALREADY ships the behaviour
+    trim_cut_scene_starts=True turns on for everyone else. Preserved verbatim;
+    do not "tidy" the two branches together.
+    """
+    if not smart_trim:
+        return False
+    if has_lineup:
+        return pos == 0
+    if clip_index == 0:
+        return True
+    return (not trim_cut_scene_starts) and clip_index in cut_scene_first_clips

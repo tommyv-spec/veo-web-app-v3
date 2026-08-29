@@ -12320,7 +12320,10 @@ async def _do_export_final_impl(
         dialogue_data = json.loads(dialogue_json) if dialogue_json else {}
         scenes = dialogue_data.get("scenes", [])
         
-        if scenes and settings.smart_trim:
+        # v953 — when the cut-scene skip is off, do not build the set at all, so
+        # the "[Export] Scene with 'cut' transition starts at clip N" lines below
+        # only ever appear when they actually mean something.
+        if scenes and settings.smart_trim and not settings.trim_cut_scene_starts:
             for scene in scenes:
                 transition = scene.get("transition", None)
                 scene_clips = scene.get("clips", [])
@@ -12387,13 +12390,19 @@ async def _do_export_final_impl(
             except Exception as e:
                 print(f"[Export] R2 download error for clip {clip.clip_index}: {e}")
         if clip_path.exists():
-            skip_start_trim = False
-            if settings.smart_trim:
-                # For lineup override: only skip trim on first clip in lineup
-                if _has_lineup:
-                    skip_start_trim = (pos == 0)
-                else:
-                    skip_start_trim = (clip.clip_index == 0 or clip.clip_index in cut_scene_first_clips)
+            # v953 — the decision moved to finishing_models.skip_start_trim so it
+            # can be tested. It used to live only here, 300 lines inside an
+            # endpoint no test could reach, which is how it got changed twice in
+            # one week without anyone able to pin the behaviour.
+            from finishing_models import skip_start_trim as _skip_start_trim
+            skip_start_trim = _skip_start_trim(
+                smart_trim=settings.smart_trim,
+                trim_cut_scene_starts=settings.trim_cut_scene_starts,
+                has_lineup=_has_lineup,
+                pos=pos,
+                clip_index=clip.clip_index,
+                cut_scene_first_clips=cut_scene_first_clips,
+            )
             return {
                 "path": clip_path,
                 "clip_index": clip.clip_index,
