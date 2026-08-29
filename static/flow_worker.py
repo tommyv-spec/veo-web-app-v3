@@ -20183,6 +20183,17 @@ def charswap_composer_chip_media_ids(page):
 CHARSWAP_DIAG_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "charswap_diag.jsonl")
 
+# v943.4 — what a swap says when the build supplied no prompt of its own.
+# The operator's wording, 2026-08-29, and the cell-A baseline from the
+# 2026-08-21 split test. Deliberately one sentence: the 2026-08-23 matrix
+# measured a 65-character prompt performing identically to the long ones, and
+# the only prompt content that ever changed an outcome was naming the room —
+# which matters only when the room is being replaced. Anything longer belongs
+# in the build's own `## Veo 3.1 Final Prompts` block, not in this default.
+CHARSWAP_DEFAULT_PROMPT = (
+    "only replace the subject of the video with the subject from the image"
+)
+
 
 def charswap_write_diag(**fields):
     """Append one JSON line of charswap evidence. Never raises."""
@@ -21848,8 +21859,44 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # several call paths share, does not change.
             page._charswap_job_id = clip.get('job_id') or job_id
             page._charswap_clip_index = clip_index
+
+            # v943.4 — A SWAP MUST NEVER BE SENT THE DIALOGUE PROMPT.
+            #
+            # `prompt` above is built by build_flow_prompt() from the clip's
+            # dialogue line. A charswap scene is `speaker: silent` with no line,
+            # so that builder produced its silent-speaker TALKING-HEAD template:
+            #   "Medium shot, static locked-off camera... [0:00-0:02] The subject
+            #    speaks directly to camera and says in English, ""... [0:02-0:08]
+            #    maintains direct eye contact... Ambient noise: Complete silence,
+            #    professional recording booth"
+            # and that is what Flow actually received on 2026-08-29 (operator
+            # screenshot, project 451aabbb). Both media chips were attached
+            # correctly — the avatar AND the source video with its badge — so
+            # the swap failed on the PROMPT, not on the attach. The render came
+            # back as a man standing in a room looking at the camera, because
+            # that is precisely what it was asked for.
+            #
+            # The fallback is the operator's own sentence (2026-08-29), which is
+            # also the cell-A baseline from the 2026-08-21 split test.
+            _cs_prompt = (clip.get('veo_prompt_override')
+                          or clip.get('prompt_text')
+                          or CHARSWAP_DEFAULT_PROMPT)
+            if _cs_prompt is not prompt:
+                print(f"{_cs_ctx} swap prompt in use ({len(_cs_prompt)} chars): "
+                      f"{_cs_prompt[:120]}", flush=True)
+            charswap_write_diag(
+                stage="prompt_selected",
+                job_id=clip.get('job_id') or job_id,
+                clip_index=clip_index,
+                prompt_source=("veo_prompt_override" if clip.get('veo_prompt_override')
+                               else "prompt_text" if clip.get('prompt_text')
+                               else "charswap_default"),
+                prompt_chars=len(_cs_prompt),
+                prompt_head=_cs_prompt[:160],
+                dialogue_prompt_rejected_chars=len(prompt or ""),
+            )
             _cs_ok, _cs_chips = charswap_attach_and_prompt(
-                page, _cs_avatar, _cs_video, prompt, context=_cs_ctx,
+                page, _cs_avatar, _cs_video, _cs_prompt, context=_cs_ctx,
                 swap_mode=(clip.get('swap_mode') or 'video-led'))
             if not _cs_ok:
                 # v945.3 — say WHICH precondition failed. "did not attach" was
