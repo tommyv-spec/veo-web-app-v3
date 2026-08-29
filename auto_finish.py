@@ -36,3 +36,32 @@ def derive_export_defaults(req_dict, spec, request_was_explicit):
         if k not in request_was_explicit:
             out[k] = v
     return out
+
+
+def export_modal_defaults(spec):
+    """v951 — the settings the Export dialog should OPEN on for this job.
+
+    The dialog used to open on localStorage, i.e. whatever this browser picked
+    last, on any video, in any lane. This returns the video's own answer
+    instead: every ExportSettings field at its model default, with the build's
+    declared `export_*` folded on top, plus `declared` naming the keys the
+    build actually decided (the UI shows those, so the choice stays checkable).
+
+    Read-only and total: a corrupt or absent spec degrades to plain model
+    defaults rather than raising. Opening a dialog is not where a bad build
+    should surface — import already fails closed on that
+    (image_platform._finishing_validate_prefixed).
+    """
+    from finishing_models import ExportSettings
+    settings = ExportSettings().model_dump()
+    declared = {}
+    if isinstance(spec, dict):
+        raw = spec.get("export")
+        if isinstance(raw, dict):
+            # Only keys the model actually has. The import-time validator
+            # already rejects unknown ones; this is the belt for a spec that
+            # was stored by an older, looser build of the parser.
+            declared = {k: v for k, v in raw.items()
+                        if k in ExportSettings.model_fields}
+    settings.update(declared)
+    return {"settings": settings, "declared": sorted(declared)}
