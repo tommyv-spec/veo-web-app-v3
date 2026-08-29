@@ -26,12 +26,19 @@
         "what": "the decode-corpus denominator in v938.3 (\"Of 319 raw/videos/decoded_*.md\")",
         "superseded_by": "the same sentence with the correct count, 163 (2026-08-22, same day)",
         "why": "319 counted every decoded_*.md on disk, which includes 148 copies inside deliverables/autonomous-video-producer/workspace. The live corpus swept for that finding was raw/videos/ only = 163 files. The '16 corner composites' numerator is unchanged and correct; only the denominator was wrong, and a wrong denominator in canon understates how common the pattern is (10% of the corpus, not 5%)."
+      },
+      {
+        "what": "the first draft of v950 clause 4 — the 'CHAIN THE PREVIOUS SEGMENT for identity' heading and its claim that chaining stops 'a 78-year-old drifting back toward a generic forty-year-old between clips'",
+        "superseded_by": "the narrowed v950 clause 4 in this checkout (2026-08-29, after an operator correction and a Codex peer review)",
+        "why": "the retired lines assert something the lane's own mechanism inverts and that the one render did not show. The read-caption overlay CLAIMS a high age and the picture is SUPPOSED to look younger than the claim — that gap is the hook (control overlay 'I'M 74 ... I do daily to move like I'm 35'; amplifier 'my biological age is 41.3'; mentor's 'move like I'm 35'; the model account @agelessjudy; momohsen64 at 62 reading forty). So 'drifting younger' was never a defect to prevent. The peer review then caught that the replacement claim ('the drift that matters is identity') was ALSO unproven at n=1. The clause now separates PROVEN (wardrobe, footwear, room, light carry), UNPROVEN (face/identity fidelity, eye-checked against the avatar every time) and NOT A TARGET (apparent age). Rule coverage unchanged: v950 is still one section with one heading, and check_rule_index.py stays PASS."
       }
     ],
     "retired_line_sha256_16": [
       "03c89471b4810ce3",
+      "0c3ddd8bef025b25",
       "0d73dc1ee8c4f4ea",
       "10e7879d921ba9bc",
+      "13f459164968188d",
       "141079770a6e505a",
       "15c26fa923b705ef",
       "16022d71dda98864",
@@ -56,6 +63,7 @@
       "39e206d7cf903086",
       "3a8701fb705d9092",
       "3c9af2a72f0804f6",
+      "3cc35aefc6c9f57a",
       "3d878cd781f285a7",
       "4359a5e339637eb0",
       "43714a8913da2069",
@@ -115,10 +123,11 @@
       "bae2bc13f66ed8e0",
       "bb4b40770881ff95",
       "bd1b6101c7f44f2e",
+      "bfbb37e108ca615f",
       "c0d2223c0f8c3992",
+      "c1a463436580da53",
       "c2df1ca5939907eb",
       "c3c1a4004566d81f",
-      "ca75d1eb1c6508e1",
       "ca75d1eb1c6508e1",
       "ce5a732c6f87e128",
       "d0b70acbe35f45ad",
@@ -135,6 +144,7 @@
       "efd3ab2d8dee17e5",
       "efd6d3df6dadde95",
       "f29dbc23ec961b09",
+      "f56250b0e640ad6e",
       "f62d0f7aee8afbe6",
       "f679b1d5431e115d",
       "f84edc8d0bc2deb6",

@@ -18276,12 +18276,29 @@ back into the single take, which is the entire reason for segmenting.
    `PATCH` refuses with 409 while the node is `queued` or `generating`, so this lands either before
    the queue moves or after the render.
 
-4. **CHAIN THE PREVIOUS SEGMENT for identity — operator, 2026-08-28: *"to keep consistency we can
-   reuse the new first frame (with our avatar already in that context), only if it makes sense…
-   that depends on the video."*** Segment N's start frame should take a third reference: our OWN
-   chosen frame from segment N-1. It already holds the avatar, the wardrobe, the room and the light
-   as we rendered them, so the identity stops being re-derived from scratch on every segment — which
-   is where a 78-year-old drifts back toward a generic forty-year-old between clips.
+4. **CHAIN THE PREVIOUS SEGMENT for VISIBLE CONTINUITY — operator, 2026-08-28: *"to keep consistency
+   we can reuse the new first frame (with our avatar already in that context), only if it makes
+   sense… that depends on the video."*** Segment N's start frame takes a third reference: our OWN
+   chosen frame from segment N-1, which already holds the avatar, wardrobe, room and light as we
+   rendered them.
+
+   **WHAT THIS IS PROVEN TO DO, and what it is not — narrowed 2026-08-29 after peer review, because
+   the first draft of this clause overclaimed twice.** Measured once (n=1, martha node 5143, chained
+   against its own scene 1):
+   - **PROVEN — visible continuity carries.** Wardrobe, footwear (the grip socks), room and light
+     were identical across the two clips where the unchained render had drifted.
+   - **UNPROVEN — face and identity fidelity.** That render does not establish that the person in
+     clip 2 is recognisably the person in clip 1. It must be checked SEPARATELY, by eye against the
+     AVATAR, on every chained segment. Do not treat the chain as an identity guarantee.
+   - **NOT A TARGET AT ALL — apparent age.** The first draft said chaining stops "a 78-year-old
+     drifting back toward a forty-year-old", which inverts the lane's mechanism. In the read-caption
+     lanes the overlay CLAIMS a high age and the picture is SUPPOSED to look younger than the claim;
+     that gap is the hook (`I'M 74 … I do daily to move like I'm 35`, the amplifier *"my biological
+     age is 41.3"*, the mentor's own *"move like I'm 35"* example, the model account `@agelessjudy`,
+     and momohsen64 at 62 reading forty). A render that convincingly looked its claimed age would
+     destroy the video. **Never chase the claimed age in a prompt, never grade a variant against it,
+     and never write an age-frailty gate into a RECIPE.** Grade against the avatar.
+
    `nano_banana_2` accepts 3 references (`_max_parents`), so pose + avatar + continuity all fit.
    In a build, declare it as `- **reference_image:** image_<N-1>`; the importer then stamps the
    `kind="chain"` edge itself and only the product anchor needs the node-side repair.
