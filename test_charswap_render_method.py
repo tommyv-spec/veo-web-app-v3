@@ -2259,3 +2259,73 @@ def test_redo_endpoint_refuses_charswap_clips():
     # name the statuses; no status-setting CALL may precede the guard)
     assert "update_clip_status" not in guard
     assert "clip.status =" not in guard
+
+
+# --- 9. v943.2 — a video-led charswap scene needs no image ------------------
+#
+# The worker never reads a start frame in video-led mode: it replaces the
+# character inside the real video and the avatar upload rides along as the
+# reference. The parser demanded one anyway, so every video-led build carried a
+# placeholder image that cost a generation and an operator variant pick.
+# Measured proof the frame was unused: on 2026-08-28 the renders came back in
+# short sleeves while the operator-chosen start frame had long sleeves.
+
+VIDEO_LED_NO_IMAGE = """### Scene 1
+
+- **scene_type:** shot
+- **speaker:** silent
+- **render_method:** charswap
+- **swap_source_video:** src.mp4
+- **swap_mode:** video-led
+- **action_note:** he reaches for the hold [Start beat]
+"""
+
+IMAGE_LED_NO_IMAGE = VIDEO_LED_NO_IMAGE.replace("video-led", "image-led")
+
+ORDINARY_SHOT_NO_IMAGE = """### Scene 1
+
+- **scene_type:** shot
+- **speaker:** silent
+- **action_note:** she lifts the jar [Start beat]
+"""
+
+
+def test_video_led_charswap_scene_may_omit_image():
+    scene = _parse(VIDEO_LED_NO_IMAGE)[0]
+    assert scene["image_index"] is None
+    assert scene["render_method"] == "charswap"
+    assert scene["swap_mode"] == "video-led"
+
+
+def test_image_led_charswap_scene_still_requires_image():
+    """image-led applies the movement TO the frame, so the frame IS the render."""
+    with pytest.raises(ValueError, match=r"missing '- \*\*image:\*\*"):
+        _parse(IMAGE_LED_NO_IMAGE)
+
+
+def test_ordinary_shot_scene_still_requires_image():
+    with pytest.raises(ValueError, match=r"missing '- \*\*image:\*\*"):
+        _parse(ORDINARY_SHOT_NO_IMAGE)
+
+
+def test_video_led_charswap_scene_may_still_carry_an_image():
+    """The exemption is permission, not a ban — v1-shaped builds still parse."""
+    scene = _parse(CHARSWAP_SCENE)[0]
+    assert scene["image_index"] == 1
+    assert scene["swap_mode"] == "video-led"
+
+
+def test_video_led_exemption_needs_both_bullets():
+    """render_method alone must not unlock it — the three-bullet gate still applies."""
+    md = VIDEO_LED_NO_IMAGE.replace("- **swap_mode:** video-led\n", "")
+    with pytest.raises(ValueError, match=r"missing '- \*\*image:\*\*"):
+        _parse(md)
+
+
+def test_video_led_exemption_is_case_and_space_insensitive():
+    md = VIDEO_LED_NO_IMAGE.replace("charswap", " CharSwap ").replace(
+        "video-led", " Video-Led ")
+    scene = _parse(md)[0]
+    assert scene["image_index"] is None
+    assert scene["render_method"] == "charswap"
+    assert scene["swap_mode"] == "video-led"

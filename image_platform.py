@@ -5519,13 +5519,37 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 scene_type = st
         is_text_card = scene_type == "text_card"
 
-        # Required: image reference (skipped for text_card scenes per v681)
+        # v943.2 — a video-led charswap scene needs no start frame, so it needs
+        # no image. The charswap bullets are parsed properly ~250 lines below;
+        # they are read here too because the image check comes first and has to
+        # know. Deliberately narrow: ONLY charswap + video-led is exempt.
+        # image-led applies the source's MOVEMENT to the chosen start frame, so
+        # there the frame IS the render and stays mandatory.
+        #
+        # Why this exists: the worker never reads a start frame in video-led
+        # mode — it replaces the character inside the real video and the avatar
+        # upload rides along as the reference. Demanding an image anyway made
+        # every video-led build carry a placeholder that cost an image
+        # generation and an operator variant pick. Measured proof the frame was
+        # unused (2026-08-28): the renders came back in short sleeves while the
+        # operator-chosen start frame had long sleeves.
+        _rm_early = _parse_bullet_field(block, "render_method")
+        _sm_early = _parse_bullet_field(block, "swap_mode")
+        _is_video_led_swap = (
+            bool(_rm_early)
+            and _rm_early.strip().split()[0].strip().lower() == "charswap"
+            and bool(_sm_early)
+            and _sm_early.strip().split()[0].strip().lower() == "video-led"
+        )
+
+        # Required: image reference (skipped for text_card scenes per v681, and
+        # for video-led charswap scenes per v943.2)
         image_ref_m = _re.search(
             r"^\s*[-*]\s*\*\*image:\*\*\s*(\S+)",
             block, flags=_re.MULTILINE,
         )
         if not image_ref_m:
-            if is_text_card:
+            if is_text_card or _is_video_led_swap:
                 image_index = None  # type: ignore[assignment]
             else:
                 raise ValueError(f"Scene {scene_index}: missing '- **image:** image_N' (or '* **image:** image_N') field")
@@ -6223,9 +6247,23 @@ def parse_scene_table(md_text: str) -> Dict[str, Any]:
         r"^###\s+Image\s+\d+(?:\s*[\-—:(].*)?\s*$", md_text, flags=_re.MULTILINE
     ))
 
-    if has_image_headers:
-        images = _parse_image_blocks_new(md_text)
-        if not images:
+    # v943.2 — a build whose only scenes are video-led charswaps has no images
+    # at all, so the `### Image N` probe above cannot see it and it would fall
+    # through to the LEGACY parser, which demands a per-scene image prompt and
+    # fails with a message about a section the build correctly does not have
+    # ("Scene 1: no fenced 'Image prompt:' block found"). Recognise it here
+    # instead. Both bullets are required, so an image-led build — which really
+    # does need its frame — never takes this path.
+    has_video_led_charswap = bool(
+        _re.search(r"^\s*[-*]\s*\*\*render_method:\*\*\s*charswap\b",
+                   md_text, flags=_re.MULTILINE | _re.IGNORECASE)
+        and _re.search(r"^\s*[-*]\s*\*\*swap_mode:\*\*\s*video-led\b",
+                       md_text, flags=_re.MULTILINE | _re.IGNORECASE)
+    )
+
+    if has_image_headers or has_video_led_charswap:
+        images = _parse_image_blocks_new(md_text) if has_image_headers else []
+        if has_image_headers and not images:
             raise ValueError("Found '### Image N' header but couldn't parse any image blocks")
         known_indexes = {i["image_index"] for i in images}
         scenes = _parse_scene_blocks_new(md_text, known_indexes)
