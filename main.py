@@ -3018,6 +3018,31 @@ async def _setup_job_background(
                 # trailer concatenated, if any). Empty string or null
                 # = fall through to the auto-build path.
                 _veo_prompt_override = (line_data.get("veo_prompt_override") or "").strip() or None
+                # v943.8 — a charswap scene must NEVER reach build_prompt with
+                # no override. This is the same guard v943.5 put on the promote
+                # path (image_platform.py ~12512), placed on the OTHER clip
+                # creator, because the two are not symmetric and only one was
+                # covered.
+                #
+                # Why the v943.5 shape does not protect this path: that guard
+                # fires when prompt_text is EMPTY. Here, an empty override is
+                # not empty downstream — build_prompt auto-constructs a full
+                # DIALOGUE prompt from the line, writes it to prompt_text, and
+                # the worker then trusts it because it is non-empty. That is
+                # exactly the talking-head render this whole v943 chain exists
+                # to stop, reachable through POST /api/jobs instead of promote.
+                #
+                # Scoped to charswap, so a job that never declares it is
+                # bit-for-bit unaffected.
+                if not _veo_prompt_override and (
+                        (line_data.get("render_method") or "").strip().lower()
+                        == "charswap"):
+                    from image_platform import CHARSWAP_DEFAULT_PROMPT as _cs_default
+                    _veo_prompt_override = _cs_default
+                    print(f"[v943.8] clip {idx} is charswap but carried NO Veo "
+                          f"prompt override — stamping the swap default so "
+                          f"build_prompt cannot auto-construct a dialogue "
+                          f"prompt for a silent swap scene", flush=True)
                 _veo_negative_override = (line_data.get("veo_negative_prompt_override") or "").strip() or None
                 # v805 — Prompt B policy fallback. Ships VERBATIM (no
                 # build_prompt pass, no negative trailer): it is the

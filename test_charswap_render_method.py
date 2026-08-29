@@ -607,32 +607,52 @@ def test_image_led_runs_when_the_clip_has_a_start_frame():
     refusal = _worker_function("charswap_mode_refusal")
     assert refusal({"swap_mode": "image-led",
                     "start_frame_url": "https://x/frame.png"}) is None
-    assert refusal({"swap_mode": "image-led",
-                    "swap_start_frame_url": "https://x/frame.png"}) is None
+    # v943.8 — the `swap_start_frame_url` case was removed, not relaxed. NO
+    # payload has ever carried that key (no producer exists anywhere in the
+    # repo), so this line asserted that the worker honours a field the server
+    # never sends. It read as coverage of image-led's charswap-specific start
+    # frame and was coverage of nothing.
 
 
 def test_the_refusal_accepts_only_what_the_fetcher_consumes():
     """rev 503 contract mismatch: the refusal used to pass a clip carrying a
-    local `start_frame` path, but charswap_fetch_inputs reads only
-    swap_start_frame_url / start_frame_url — so that clip cleared the gate and
-    then died at the download. The two must agree on the same fields."""
+    local `start_frame` path, but charswap_fetch_inputs cannot download that —
+    so the clip cleared the gate and then died at the download. The two must
+    agree on the same fields.
+
+    v943.8 — the field list is now DERIVED from the fetcher instead of being a
+    frozen copy of it. The old version asserted the pair
+    `["swap_start_frame_url", "start_frame_url"]` literally, which is how a
+    dead key survived: the test pinned it in place."""
+    import re
     refusal = _worker_function("charswap_mode_refusal")
     msg = refusal({"swap_mode": "image-led", "start_frame": "jobs/x.png"})
     assert msg is not None, "a local start_frame path is not something the fetcher can use"
     assert "start frame" in msg
 
     src = WORKER_SRC.read_text(encoding="utf-8")
-    fetch = src[src.index("\ndef charswap_fetch_inputs("):]
-    fetch = fetch[:fetch.index("\ndef ", 1)]
-    consumed = [f for f in ("swap_start_frame_url", "start_frame_url")
-                if f in fetch]
-    assert consumed == ["swap_start_frame_url", "start_frame_url"]
-    gate = src[src.index("\ndef charswap_mode_refusal("):]
-    gate = gate[:gate.index("\ndef ", 1)]
-    accepted = gate[gate.index("if mode == 'image-led':"):]
-    for field in consumed:
-        assert f"clip.get('{field}')" in accepted
-    assert "clip.get('start_frame')" not in accepted
+
+    def body(name):
+        b = src[src.index(f"\ndef {name}("):]
+        return b[:b.index("\ndef ", 1)]
+
+    def frame_keys(text):
+        # real clip.get(...) reads only — prose in a docstring is not a read
+        return {k for k in re.findall(r"""clip\.get\(['"]([a-z_0-9]+)['"]""", text)
+                if "frame" in k}
+
+    consumed = frame_keys(body("charswap_fetch_inputs"))
+    accepted = frame_keys(
+        body("charswap_mode_refusal").split("if mode == 'image-led':")[1])
+    assert consumed, "the fetcher must read at least one frame field"
+    assert consumed == accepted, (
+        f"gate and fetcher disagree: gate accepts {sorted(accepted)}, "
+        f"fetcher consumes {sorted(consumed)}")
+    # and every field either of them relies on must be one the server sends
+    unsent = sorted(consumed - _served_clip_keys())
+    assert not unsent, (
+        f"image-led depends on payload keys nobody sends: {unsent}")
+    assert "clip.get('start_frame')" not in body("charswap_mode_refusal")
 
 
 def test_image_led_without_a_start_frame_is_refused():
@@ -1189,10 +1209,28 @@ def test_the_export_copies_are_cleaned_up_after_the_run():
 # --- 11.4 short source audio must not truncate the picture -----------------
 
 def test_the_mux_pads_the_audio_and_cuts_at_the_render_length():
-    from main import _v943_1_mux_argv
+    """v952 UPDATE — this test asserted `-af == "apad"` and had been RED since
+    commit 6c29393 landed the loop+fade. A permanently failing test is not a
+    gate: the suite it lives in stops being read. Rewritten to pin what v952
+    actually intends, so it fails if either half regresses."""
+    from main import _v943_1_mux_argv, RC_AUDIO_FADE_S
     argv = _v943_1_mux_argv("render.mp4", "source.mp4", "out.mp4",
                             render_duration=4.0)
-    assert argv[argv.index("-af") + 1] == "apad"
+    af = argv[argv.index("-af") + 1]
+    # the belt survives: apad still guards a source ffmpeg refuses to loop
+    assert af.startswith("apad"), af
+    # v952 — and the tail is faded, not silent
+    assert "afade=t=out:" in af, af
+    st = float(af.split("st=")[1].split(":")[0])
+    d = float(af.split("d=")[1])
+    assert d == pytest.approx(min(RC_AUDIO_FADE_S, 1.0)), af
+    # the fade must land exactly ON the cut, never before or after it
+    assert st + d == pytest.approx(4.0), af
+    # v952 — the audio input loops so a short source fills the render
+    assert argv[argv.index("-stream_loop") + 1] == "-1"
+    assert argv.index("-stream_loop") < argv.index(str("source.mp4")), (
+        "-stream_loop applies to the input that FOLLOWS it; before the render "
+        "input it would loop the video instead of the audio")
     assert argv[argv.index("-t") + 1] == "4.000000"
     # with an explicit length, -shortest would defeat the padding
     assert "-shortest" not in argv
@@ -1475,11 +1513,15 @@ def test_the_submit_body_gate_is_still_the_last_line():
     click = src.index("click_generate_button(page,", arm)
     gate = src.index("charswap_submit_gate(", click)
     assert click < gate
-    # v945.4/v945.5 widened this window: post-click forensics AND the
-    # tile-proof override now sit between the gate and the FAILED CLOSED
-    # line. The ordering claim is unchanged: the fail-closed exit still
-    # exists downstream of the gate, inside the same charswap branch.
-    assert "FAILED CLOSED" in src[gate:gate + 8000]
+    # v943.8 — this was a byte window (`src[gate:gate+8000]`) that had already
+    # been widened once for v945.4/v945.5 and broke again the next time
+    # comments were added near it. A window measured in characters tests the
+    # length of the prose, not the shape of the code. The real claim is
+    # structural: the fail-closed exit sits AFTER the gate and BEFORE the
+    # charswap branch ends. Pin that instead, so it survives edits above it.
+    branch_end = src.index("elif first_submission_in_project:", gate)
+    failed_closed = src.index("FAILED CLOSED", gate)
+    assert gate < failed_closed < branch_end
 
 
 def test_the_refusal_reason_reaches_the_clip_status():
@@ -2413,3 +2455,312 @@ def test_the_real_promote_branch_no_longer_hardcodes_none():
     assert "if not scene_veo_prompts:" in window, (
         "the no-lines fallback must only DEFAULT scene_veo_prompts, never "
         "overwrite an override the assignment supplied (v943.6)")
+
+
+# --- 12. v943.8: the submit verdict was read before it could exist ----------
+#
+# Every charswap run recorded `submit_seen=false` / `media_binding="never
+# observed"` on renders that really happened. Two sessions read that as Flow
+# bypassing the page listener via a service worker and built a tile fallback
+# around the theory. The listener was never blind. The verdict was read with
+# no wait, by code that cannot receive events:
+#
+#   click_generate_button(...)        # ends with time.sleep(1); return True
+#   charswap_submit_body_verdict(page)  # a plain attribute read
+#
+# This worker uses playwright.sync_api, where event callbacks run on a
+# dispatcher greenlet that only gets control while the main thread is INSIDE a
+# Playwright call. time.sleep does not yield to it. So `_on_request` had not
+# run yet, and could not have.
+#
+# The fake page below models exactly that: it delivers queued requests ONLY
+# from wait_for_timeout. Code that waits with time.sleep sees nothing.
+
+
+def _worker_ns(*names):
+    """Execute several worker functions into ONE namespace so they can call
+    each other. _worker_function runs a single function in a fresh namespace,
+    which is enough when it is self-contained; charswap_await_submit_verdict
+    calls charswap_submit_body_verdict and uses `time`, so it needs both."""
+    import time as _time
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    ns = {"time": _time}
+    for name in names:
+        start = src.index(f"\ndef {name}(")
+        rest = src[start + 1:]
+        exec(rest[:rest.index("\ndef ", 1)], ns)  # noqa: S102 — our own file
+    return ns
+
+
+_PROBE_FNS = ("charswap_install_submit_probe", "charswap_submit_body_verdict",
+              "charswap_await_submit_verdict")
+
+GEN_URL = "https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideo"
+
+
+class _FakeReq:
+    def __init__(self, url, body=None, buf=None):
+        self.url = url
+        self.post_data = body
+        self.post_data_buffer = buf
+
+
+class _FakePage:
+    """Enough of a Playwright page for the submit probe.
+
+    Requests are delivered ONE per wait_for_timeout and from nowhere else,
+    which is the whole point: it reproduces the sync-API rule that events
+    arrive only inside a Playwright call.
+    """
+
+    def __init__(self, queued=()):
+        self._handlers = []
+        self._queued = list(queued)
+        self.pumps = 0
+        self.removed = []
+
+    def on(self, event, cb):
+        self._handlers.append((event, cb))
+
+    def remove_listener(self, event, cb):
+        self._handlers = [(e, c) for (e, c) in self._handlers if c is not cb]
+        self.removed.append(cb)
+
+    def wait_for_timeout(self, ms):
+        import time as _t
+        self.pumps += 1
+        _t.sleep(min(ms, 50) / 1000.0)
+        if self._queued:
+            req = self._queued.pop(0)
+            for event, cb in list(self._handlers):
+                if event == "request":
+                    cb(req)
+
+    def evaluate(self, js):
+        return 0
+
+
+def test_reading_the_probe_without_pumping_sees_nothing():
+    """THE MECHANISM, pinned. The request is queued and about to land, yet a
+    bare read reports False — then the same read reports True the moment the
+    event loop is pumped. This is what made every run say `never observed`."""
+    ns = _worker_ns(*_PROBE_FNS)
+    page = _FakePage([_FakeReq(GEN_URL, body='{"a":"aaa","b":"bbb"}')])
+    ns["charswap_install_submit_probe"](page, ["aaa", "bbb"])
+    assert ns["charswap_submit_body_verdict"](page) == (False, False)
+    page.wait_for_timeout(1)
+    assert ns["charswap_submit_body_verdict"](page) == (True, True)
+
+
+def test_the_submit_verdict_is_awaited_not_read_immediately():
+    """The regression guard. If the call site reverts to the bare read, the
+    evidence file starts lying again and the next reader goes hunting for a
+    service worker that does not exist."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    click = src.index('click_generate_button(page, f"v943')
+    window = src[click:click + 1200]
+    assert "charswap_await_submit_verdict(page)" in window
+    assert "_cs_seen, _cs_both = charswap_submit_body_verdict(page)" not in window
+
+
+def test_the_wait_uses_a_playwright_call_not_a_bare_sleep():
+    """time.sleep does not dispatch events in sync Playwright. A wait built on
+    it would compile, run, and reproduce the original bug exactly."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    start = src.index("def charswap_await_submit_verdict(")
+    body = src[start:src.index("\ndef ", start + 1)]
+    assert "page.wait_for_timeout(" in body
+
+
+def test_the_await_returns_once_both_media_are_in_the_body():
+    ns = _worker_ns(*_PROBE_FNS)
+    page = _FakePage([_FakeReq(GEN_URL, body='{"a":"aaa","b":"bbb"}')])
+    ns["charswap_install_submit_probe"](page, ["aaa", "bbb"])
+    assert ns["charswap_await_submit_verdict"](page, timeout_s=5) == (True, True)
+    assert page.pumps >= 1, "it must pump the event loop, not merely re-read"
+
+
+def test_the_await_still_reports_nothing_when_no_request_is_made():
+    """seen=False must keep meaning 'nothing was sent'. If the wait swallowed
+    that case the gate would stop failing closed."""
+    ns = _worker_ns(*_PROBE_FNS)
+    page = _FakePage([])
+    ns["charswap_install_submit_probe"](page, ["aaa", "bbb"])
+    assert ns["charswap_await_submit_verdict"](
+        page, timeout_s=0.3, poll_ms=50) == (False, False)
+
+
+def test_a_one_media_submit_is_reported_as_contradicted_not_unseen():
+    """seen && !both is the half-attached render — a proven wrong submit. It
+    must NOT be reported as 'never observed', which routes to the tile
+    fallback and can resurrect it."""
+    ns = _worker_ns(*_PROBE_FNS)
+    page = _FakePage([_FakeReq(GEN_URL, body='{"a":"aaa"}')])
+    ns["charswap_install_submit_probe"](page, ["aaa", "bbb"])
+    assert ns["charswap_await_submit_verdict"](
+        page, timeout_s=0.3, poll_ms=50) == (True, False)
+
+
+def test_the_probe_keeps_the_best_submit_not_the_last():
+    """A retry click issues a second generate. The old probe assigned `hits`
+    on every request, so a proven two-media submit was erased by whatever
+    request happened to come after it."""
+    ns = _worker_ns(*_PROBE_FNS)
+    page = _FakePage([
+        _FakeReq(GEN_URL, body='{"a":"aaa","b":"bbb"}'),   # both media
+        _FakeReq(GEN_URL, body='{"a":"zzz"}'),             # neither
+    ])
+    ns["charswap_install_submit_probe"](page, ["aaa", "bbb"])
+    for _ in range(4):
+        page.wait_for_timeout(1)
+    assert ns["charswap_submit_body_verdict"](page) == (True, True)
+
+
+def test_the_probe_reads_a_body_playwright_cannot_decode_as_text():
+    """post_data returns None for a body Playwright will not decode. Scoring
+    that as 'no media' would fail a correct submit."""
+    ns = _worker_ns(*_PROBE_FNS)
+    page = _FakePage([_FakeReq(GEN_URL, body=None,
+                               buf=b'{"a":"aaa","b":"bbb"}')])
+    ns["charswap_install_submit_probe"](page, ["aaa", "bbb"])
+    page.wait_for_timeout(1)
+    assert ns["charswap_submit_body_verdict"](page) == (True, True)
+
+
+def test_installing_a_new_probe_removes_the_previous_clips_listener():
+    """One listener per page, not one per clip. A five-clip job used to leave
+    five live callbacks all parsing every request."""
+    ns = _worker_ns(*_PROBE_FNS)
+    page = _FakePage([])
+    ns["charswap_install_submit_probe"](page, ["aaa", "bbb"])
+    first = page._charswap_submit_probe_cb
+    ns["charswap_install_submit_probe"](page, ["ccc", "ddd"])
+    assert first in page.removed
+    assert len([c for (e, c) in page._handlers if e == "request"]) == 1
+
+
+def test_a_non_generate_request_never_counts_as_a_submit():
+    ns = _worker_ns(*_PROBE_FNS)
+    page = _FakePage([_FakeReq("https://x/telemetry", body="aaa bbb")])
+    ns["charswap_install_submit_probe"](page, ["aaa", "bbb"])
+    page.wait_for_timeout(1)
+    assert ns["charswap_submit_body_verdict"](page) == (False, False)
+
+
+# --- 13. the payload-key contract between the server and the worker ---------
+#
+# The worker reads its clip as a plain dict, so a misspelled key is not an
+# error — it is None, and None is a legal value for every one of these fields.
+# Three separate bugs of exactly this shape shipped before anything checked:
+#
+#   swap_source_r2_key   the DB COLUMN name, not the payload key. v943.7 added
+#                        it to make "two clips sharing one source" greppable
+#                        after the martha-reformer collision; it logged None on
+#                        every clip and would never have caught that bug.
+#   swap_start_frame_url never sent by any payload. image-led silently ran on
+#                        `start_frame_url` for its whole life.
+#   prompt_text          never sent either; the server sends `prompt`. Two dead
+#                        terms sat at the head of the charswap prompt chain and
+#                        made its reporter emit a constant.
+#
+# A comment cannot prevent the fourth one. This can.
+
+
+def _served_clip_keys():
+    """Every key the server actually puts on a clip payload."""
+    import re
+    src = (pathlib.Path(__file__).parent / "main.py").read_text(
+        encoding="utf-8", errors="replace")
+
+    def keys_after(marker, span=2500):
+        i = src.index(marker)
+        return set(re.findall(r'"([a-z_0-9]+)"\s*:', src[i:i + span]))
+
+    return keys_after("def _v943_charswap_payload") | keys_after("clip_data = {")
+
+
+# Keys the worker legitimately reads that the payload builders above do not
+# spell literally. Each needs a REASON, not just an entry.
+_WORKER_ONLY_CLIP_KEYS = {
+    # set by the worker on its own in-process copy of the clip dict
+    "job_id",
+    # v805 policy-fallback bookkeeping the worker adds after a refusal
+    "swap_retry_of",
+}
+
+
+def test_every_swap_key_the_worker_reads_is_a_key_the_server_sends():
+    """The guard for the whole class. `swap_source_r2_key` passed review twice
+    and shipped, because reading a key that does not exist looks exactly like
+    reading a key whose value is null."""
+    import re
+    worker = WORKER_SRC.read_text(encoding="utf-8", errors="replace")
+    read = set(re.findall(r"""clip\.get\(['"](swap_[a-z_0-9]+)['"]""", worker))
+    assert read, "the regex stopped matching — fix the test, not the code"
+    dead = sorted(read - _served_clip_keys() - _WORKER_ONLY_CLIP_KEYS)
+    assert not dead, (
+        f"the worker reads swap keys the server never sends: {dead}. "
+        f"These are silently None. Either fix the spelling against "
+        f"_v943_charswap_payload in main.py, or add the key there.")
+
+
+def test_the_charswap_prompt_does_not_read_keys_that_are_never_sent():
+    """`prompt_text` and `veo_prompt_override` are not payload keys — the
+    server sends the authored prompt as `prompt`. Two dead terms at the head of
+    the prompt chain are what made the evidence file report
+    `prompt_source=charswap_default` on runs that used the build's own text."""
+    worker = WORKER_SRC.read_text(encoding="utf-8", errors="replace")
+    served = _served_clip_keys()
+    assert "prompt" in served and "prompt_text" not in served
+    start = worker.index("_cs_prompt = ")
+    chain = worker[start:start + 300]
+    assert "clip.get('prompt_text')" not in chain
+    assert "clip.get('veo_prompt_override')" not in chain
+
+
+def test_the_evidence_file_can_report_a_prompt_source_other_than_the_default():
+    """A reporter whose every branch resolves to one value is not a reporter.
+    This one had three branches and could only ever emit "charswap_default"."""
+    worker = WORKER_SRC.read_text(encoding="utf-8", errors="replace")
+    # Anchor on the diag call, not on the bare string: "prompt_source=" also
+    # appears inside a comment, and matching prose is how source-scanning
+    # tests start failing for reasons that have nothing to do with the code.
+    block = worker.index('charswap_write_diag(\n                stage="prompt_selected"')
+    expr_at = worker.index("prompt_source=(", block)
+    expr = worker[expr_at:expr_at + 200]
+    assert "_cs_platform_prompt" in expr, (
+        "prompt_source must be decided by the value actually used, not by "
+        "payload keys that do not exist")
+
+
+def test_both_clip_creators_guard_the_charswap_prompt_not_just_promote():
+    """There are TWO places a Clip is born — promote_batch_to_video and the
+    background prompt builder behind POST /api/jobs — and v943.5 only guarded
+    the first. The second is worse, not equal: an empty override there does not
+    stay empty, because build_prompt auto-constructs a full DIALOGUE prompt and
+    writes it to prompt_text. The worker then trusts it BECAUSE it is
+    non-empty, which is the exact talking-head render this chain exists to
+    stop. A guard on one creator is not a guard."""
+    ip = (pathlib.Path(__file__).parent / "image_platform.py").read_text(
+        encoding="utf-8", errors="replace")
+    mn = (pathlib.Path(__file__).parent / "main.py").read_text(
+        encoding="utf-8", errors="replace")
+    assert "if _is_charswap_spec and not _prompt_text:" in ip, (
+        "the promote-path guard (v943.5) is gone")
+    i = mn.index('_veo_prompt_override = (line_data.get("veo_prompt_override")')
+    window = mn[i:i + 1800]
+    assert '"charswap"' in window, (
+        "POST /api/jobs builds prompts with no charswap guard — a swap scene "
+        "with no authored Veo prompt gets an auto-built dialogue prompt")
+    assert "CHARSWAP_DEFAULT_PROMPT" in window, (
+        "the guard must stamp the shared constant, never a third copy of the "
+        "sentence: two copies are already kept in sync by test at ~2365")
+
+
+def test_two_clips_sharing_one_swap_source_is_announced_on_the_run():
+    """Job 302875cc declared two segments and rendered the same movement
+    twice. Recording the key in a file only helps someone who already suspects
+    it; the collision has to say so while it happens."""
+    worker = WORKER_SRC.read_text(encoding="utf-8", errors="replace")
+    assert "SOURCE COLLISION" in worker
+    assert "_charswap_sources_this_job" in worker

@@ -20005,12 +20005,18 @@ def charswap_mode_refusal(clip):
     start frame. Without it there is no composite to animate, so the worker
     refuses rather than quietly rendering video-led under the other name.
 
-    The precondition is checked on the SAME two fields charswap_fetch_inputs
-    reads — `swap_start_frame_url` / `start_frame_url`. A local `start_frame`
-    path used to pass here, which promised a case the fetcher could not run:
-    it would clear this gate and then die at the download with "missing
-    image_url". Accepting only what the fetcher consumes keeps the two in one
-    contract.
+    The precondition is checked on the SAME field charswap_fetch_inputs reads,
+    `start_frame_url`. A local `start_frame` path used to pass here, which
+    promised a case the fetcher could not run: it would clear this gate and
+    then die at the download with "missing image_url". Accepting only what the
+    fetcher consumes keeps the two in one contract.
+
+    v943.8 — both sites used to also read `swap_start_frame_url` first. No
+    payload has ever carried that key (it appears nowhere in main.py), so that
+    term was always None and image-led has always run on `start_frame_url`.
+    Removed rather than kept as a harmless fallback: a key that reads as the
+    charswap-specific one, but is never populated, invites the next reader to
+    "fix" image-led by setting it.
     """
     try:
         mode = (clip.get('swap_mode') or 'video-led').strip().lower()
@@ -20019,7 +20025,7 @@ def charswap_mode_refusal(clip):
     if mode == 'video-led':
         return None
     if mode == 'image-led':
-        if clip.get('swap_start_frame_url') or clip.get('start_frame_url'):
+        if clip.get('start_frame_url'):
             return None
         return ("image-led needs the clip's chosen start frame URL (the "
                 "pose-matched composite) and this clip has none; choose a "
@@ -20404,22 +20410,54 @@ def charswap_install_submit_probe(page, chip_ids):
     Both media have to reach the submit body or Flow renders the avatar alone
     and the result looks like an ordinary animation of a still. The check is a
     request listener because the body is the only place that fact exists.
+
+    v943.8 — three fixes, all from the same 2026-08-29 reading:
+
+    1. The previous clip's listener is REMOVED first. Each install made a fresh
+       state dict but left the old callback attached, so a page that rendered
+       five clips ended up with five live listeners all parsing every request.
+
+    2. `hits` now keeps the BEST submit seen, not the LAST. A retry click, or
+       any second request on the same endpoint, used to overwrite a proven
+       two-media submit with a zero from an unrelated body.
+
+    3. `post_data` returns None for a body Playwright cannot decode as text;
+       `post_data_buffer` is tried before giving up, so a large or
+       binary-framed submit is not silently scored as "no media".
     """
-    state = {"seen": False, "hits": 0, "want": len(chip_ids or [])}
+    state = {"seen": False, "hits": 0, "want": len(chip_ids or []),
+             "n_requests": 0, "first_seen_at": None}
     ids = [i for i in (chip_ids or []) if i]
 
     def _on_request(req):
         try:
             if "batchAsyncGenerateVideo" not in req.url:
                 return
-            body = req.post_data or ""
+            body = req.post_data
+            if not body:
+                try:
+                    raw = req.post_data_buffer
+                    body = raw.decode("utf-8", "replace") if raw else ""
+                except Exception:
+                    body = ""
             state["seen"] = True
-            state["hits"] = sum(1 for i in ids if i in body)
+            state["n_requests"] += 1
+            if state["first_seen_at"] is None:
+                state["first_seen_at"] = time.time()
+            # Keep the strongest evidence any submit produced (see 2 above).
+            state["hits"] = max(state["hits"], sum(1 for i in ids if i in body))
         except Exception:
             pass
 
+    prev = getattr(page, "_charswap_submit_probe_cb", None)
+    if prev is not None:
+        try:
+            page.remove_listener("request", prev)
+        except Exception:
+            pass
     try:
         page.on("request", _on_request)
+        page._charswap_submit_probe_cb = _on_request
     except Exception as e:
         print(f"[v943] submit probe not installed: {e}", flush=True)
     page._charswap_submit_probe = state
@@ -20427,9 +20465,72 @@ def charswap_install_submit_probe(page, chip_ids):
 
 
 def charswap_submit_body_verdict(page):
-    """(saw_a_submit, both_media_present) from the probe installed above."""
+    """(saw_a_submit, both_media_present) from the probe installed above.
+
+    Reads the probe state ONLY. It does not wait and it does not pump
+    Playwright's event loop — callers after a Generate click must use
+    charswap_await_submit_verdict instead. See that function for why.
+    """
     state = getattr(page, "_charswap_submit_probe", None) or {}
     return bool(state.get("seen")), int(state.get("hits", 0)) >= 2
+
+
+def charswap_await_submit_verdict(page, timeout_s=20, poll_ms=250):
+    """Wait for the generate request, THEN read the probe. Returns (seen, both).
+
+    v943.8 — this function exists because the old call site read the verdict
+    with no wait at all, and that is why every charswap run recorded
+    `submit_seen=false` while a real render came back.
+
+    THE CAUSE IS THE MISSING PUMP, AND ONLY THAT. This worker uses
+    `playwright.sync_api`, where event callbacks run on a dispatcher greenlet
+    that gets control only while the main thread is INSIDE a Playwright call.
+    `click_generate_button` ends with `time.sleep(1); return True`, and
+    `charswap_submit_body_verdict` is a plain attribute read — so between the
+    click and the verdict there is no Playwright call at all, and `_on_request`
+    cannot have run. The queued event was delivered later, in a burst, by the
+    first `page.evaluate` in the tile fallback — after the verdict had already
+    been written to the evidence file as False.
+
+    DO NOT "FIX" THIS BY SLEEPING LONGER. That reading is tempting because a
+    generate cannot go out until the page mints a reCAPTCHA token, which the
+    v919 measurement at ~1558 puts at 450-900ms. Waiting is not the problem.
+    `tools/flow_charswap.py` waits FORTY-EIGHT seconds in a pure `time.sleep`
+    loop and then reports "no submit request seen" — in 43 of 43 charswap logs
+    in this repo, deterministically, never flaky. A wall-clock race would be
+    flaky. What rescues that script one line later is its `page.screenshot()`,
+    which pumps: the log then prints the request event (fired at ~1s) and the
+    response event (fired at ~35s) ADJACENTLY, which is the signature of a
+    batched greenlet flush and is the proof of this whole reading.
+
+    The fix is to wait with a call that yields to the dispatcher.
+    `page.wait_for_timeout` is that call (`time.sleep` is not), with a
+    `page.evaluate` no-op as the fallback pump if it is unavailable.
+
+    This is also why the v945.5 note claiming Flow's submit "bypassed this
+    page's request listener (agent-mode / service-worker path)" was a
+    misreading. The same page's `page.on('response')` listener at ~2044 is
+    what the normal render pipeline's v729/v770 media binding runs on; if a
+    service worker were really bypassing the page, every job's binding would
+    fail, not only charswap's. The listener was never blind — it was read
+    before it could speak.
+
+    Returns as soon as a submit carrying BOTH media is seen. Otherwise it
+    waits the full timeout so that a one-media submit is reported as the
+    contradiction it is rather than as "never observed".
+    """
+    deadline = time.time() + max(0, timeout_s)
+    seen, both = charswap_submit_body_verdict(page)
+    while not (seen and both) and time.time() < deadline:
+        try:
+            page.wait_for_timeout(poll_ms)
+        except Exception:
+            try:
+                page.evaluate("() => 0")
+            except Exception:
+                time.sleep(poll_ms / 1000.0)
+        seen, both = charswap_submit_body_verdict(page)
+    return seen, both
 
 
 def charswap_prepare_source(src_path, out_path, max_s=CHARSWAP_MAX_SOURCE_S):
@@ -20587,7 +20688,9 @@ def charswap_fetch_inputs(clip, temp_dir, context="[v943]"):
     """
     mode = (clip.get('swap_mode') or 'video-led').strip().lower()
     if mode == 'image-led':
-        image_url = clip.get("swap_start_frame_url") or clip.get("start_frame_url")
+        # v943.8 — `swap_start_frame_url` was read first here and is never sent
+        # by any payload; see charswap_mode_blocked for why it was removed.
+        image_url = clip.get("start_frame_url")
     else:
         image_url = clip.get("swap_avatar_url")
     source_url = clip.get("swap_source_url")
@@ -21893,23 +21996,61 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # way on that run, so nothing rendered wrong — but the diagnostic
             # was lying about where the prompt came from, and a diagnostic that
             # misreports its own source is worse than none.
-            _cs_prompt = (clip.get('veo_prompt_override')
-                          or clip.get('prompt_text')
-                          or _cs_platform_prompt
-                          or CHARSWAP_DEFAULT_PROMPT)
-            if _cs_prompt is not prompt:
+            # v943.8 — the two leading terms were DEAD FROM BIRTH, and their
+            # deadness is what made fa1aeda's diagnostic fix incomplete. The
+            # worker's clip payload has no `veo_prompt_override` key and no
+            # `prompt_text` key. The server sends the build's authored prompt
+            # as `prompt` (main.py ~16703: `"prompt": clip.prompt_text`), and
+            # `_cs_platform_prompt` IS that value, captured before
+            # build_flow_prompt substitutes into it. So this four-term chain
+            # only ever had one live source. Reading the real key makes the
+            # code say what it does.
+            _cs_prompt = _cs_platform_prompt or CHARSWAP_DEFAULT_PROMPT
+            if _cs_prompt != prompt:
                 print(f"{_cs_ctx} swap prompt in use ({len(_cs_prompt)} chars): "
                       f"{_cs_prompt[:120]}", flush=True)
+            # v943.8 — DETECT the martha collision, do not merely record it.
+            # Job 302875cc declared two scenes with two different segments
+            # (seg1-0-8 for the lunge, seg2-8-15 for the plank) and both clips
+            # rendered the SAME movement. bd7516a added the source key to the
+            # evidence file so the collision would be greppable, but a field is
+            # only useful to someone who already suspects the bug and goes
+            # looking. This says it out loud, on the run, while it happens.
+            _cs_src_key = clip.get('swap_source_key') or ''
+            _cs_seen_srcs = getattr(page, '_charswap_sources_this_job', None)
+            if not isinstance(_cs_seen_srcs, dict):
+                _cs_seen_srcs = {}
+                page._charswap_sources_this_job = _cs_seen_srcs
+            _cs_src_repeat = _cs_seen_srcs.get(_cs_src_key)
+            if _cs_src_key and _cs_src_repeat is not None:
+                print(f"{_cs_ctx} ⚠ SOURCE COLLISION: this clip's swap source "
+                      f"is the SAME file clip {_cs_src_repeat} already used "
+                      f"({_cs_src_key[-60:]}). Two clips that declared "
+                      f"different segments will render the same movement.",
+                      flush=True)
+            elif _cs_src_key:
+                _cs_seen_srcs[_cs_src_key] = clip_index
             charswap_write_diag(
                 stage="prompt_selected",
+                swap_source_repeat_of=_cs_src_repeat,
                 job_id=clip.get('job_id') or job_id,
                 clip_index=clip_index,
-                prompt_source=("veo_prompt_override" if clip.get('veo_prompt_override')
-                               else "prompt_text" if clip.get('prompt_text')
+                # v943.8 — this used to be a three-branch ternary whose first
+                # two branches tested payload keys that do not exist, so it
+                # could only ever emit "charswap_default" — including on the
+                # runs where the build's own prompt WAS used. That is why the
+                # evidence file kept saying charswap_default next to a
+                # 69-character prompt that came from the build. fa1aeda fixed
+                # the selection and left this reporter untouched, which made it
+                # lie unconditionally rather than occasionally.
+                prompt_source=("build_prompt" if _cs_platform_prompt
                                else "charswap_default"),
                 prompt_chars=len(_cs_prompt),
                 prompt_head=_cs_prompt[:160],
-                dialogue_prompt_rejected_chars=len(prompt or ""),
+                # v943.8 — renamed from `dialogue_prompt_rejected_chars`, which
+                # reported the length of the prompt that was ACCEPTED under a
+                # name saying it was rejected.
+                build_prompt_chars=len(_cs_platform_prompt or ""),
                 # v943.7 — WHICH source this clip was actually given. Job
                 # 302875cc (martha-reformer, 2026-08-29) declared two scenes
                 # with two different segments — seg1-0-8.mp4 for the lunge and
@@ -21919,7 +22060,15 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # said which source each clip received, so the collision was
                 # invisible until someone watched both clips side by side.
                 # Recording the key makes two clips sharing one source a grep.
-                swap_source_key=clip.get('swap_source_r2_key'),
+                # v943.8 — WRONG KEY, fixed. This read `swap_source_r2_key`,
+                # which is the SQLAlchemy COLUMN name (main.py:277), not the
+                # payload key. The server sends it as `swap_source_key`
+                # (main.py:17601). So bd7516a — the commit whose entire purpose
+                # was to make "two clips sharing one source" greppable after the
+                # martha-reformer collision — recorded None on every clip and
+                # would never have caught it. The lesson is the commit's own:
+                # a field nobody reads back cannot be trusted to be populated.
+                swap_source_key=clip.get('swap_source_key'),
                 swap_source_url_tail=(clip.get('swap_source_url') or "")[-80:],
             )
             _cs_ok, _cs_chips = charswap_attach_and_prompt(
@@ -21953,19 +22102,31 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                   f"{'unread' if _cs_pre_tile_ids is None else len(_cs_pre_tile_ids)}",
                   flush=True)
             click_generate_button(page, f"v943 clip {clip_index+1}")
-            _cs_seen, _cs_both = charswap_submit_body_verdict(page)
-            print(f"{_cs_ctx} submit seen={_cs_seen} both_media_in_body={_cs_both}",
+            # v943.8 — WAIT for the submit before judging it. This line used to
+            # be a bare `charswap_submit_body_verdict(page)` read taken one
+            # second after the click, which is the whole reason every run
+            # recorded `submit_seen=false` on a render that really happened.
+            # charswap_await_submit_verdict explains both causes.
+            _cs_seen, _cs_both = charswap_await_submit_verdict(page)
+            _cs_probe = getattr(page, "_charswap_submit_probe", None) or {}
+            print(f"{_cs_ctx} submit seen={_cs_seen} both_media_in_body={_cs_both} "
+                  f"(generate requests observed: {_cs_probe.get('n_requests', 0)})",
                   flush=True)
             _cs_accept, _cs_count_tile, _cs_gate_why = charswap_submit_gate(
                 _cs_seen, _cs_both)
             # v943.3 — the submit verdict, into the evidence file. This matters
             # MORE than the chip ids: chips prove what the composer showed, this
-            # proves what the request carried. `seen=False` means Flow's submit
-            # bypassed this page's listener (agent-mode / service-worker path),
-            # so media binding is UNVERIFIABLE and the tile fallback decides —
-            # which is how an avatar-only render can be accepted as real. When
-            # a swap comes back wrong, this line says whether the binding was
-            # confirmed, contradicted, or never observed at all.
+            # proves what the request carried.
+            #
+            # v943.8 — the old text here said `seen=False` meant Flow's submit
+            # "bypassed this page's listener (agent-mode / service-worker
+            # path)". That was a misreading and it sent two sessions looking
+            # for a service worker that does not exist. The verdict was simply
+            # read before the request could be observed — see
+            # charswap_await_submit_verdict for the two reasons and the proof.
+            # `seen=False` NOW means what it always claimed to: after a real
+            # wait that pumped the event loop, no generate request went out.
+            # That is a genuine failure to submit, not an instrumentation gap.
             charswap_write_diag(
                 stage="submit_verdict",
                 job_id=clip.get('job_id') or job_id,
@@ -21979,6 +22140,15 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 media_binding=("confirmed" if (_cs_seen and _cs_both)
                                else "contradicted" if _cs_seen
                                else "never observed"),
+                # v943.8 — how many generate requests the probe actually saw,
+                # and how long after the click the first one landed. If a
+                # future run reports seen=False again, these two say whether
+                # the wait was too short or nothing was ever sent.
+                generate_requests_observed=_cs_probe.get('n_requests', 0),
+                media_ids_matched=int((getattr(page, "_charswap_submit_probe", None)
+                                       or {}).get('hits', 0)),
+                chip_ids_wanted=int((getattr(page, "_charswap_submit_probe", None)
+                                     or {}).get('want', 0)),
             )
             if not _cs_accept and not _cs_seen:
                 # v945.6 (Codex rev 532 finding 1) — the tile fallback runs
@@ -21990,10 +22160,20 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # Proven by screenshot on job 6005732f (2026-08-27): the submit
                 # gate said "no generate request observed" while the project
                 # visibly held our prompt as a created generation with two
-                # tiles rendering and the composer cleared. Flow's submit no
-                # longer passes through this page's request listener (agent-
-                # mode/service-worker path), so a silent probe must not
-                # abandon a REAL render.
+                # tiles rendering and the composer cleared.
+                #
+                # v943.8 CORRECTION — that observation was right, its cause was
+                # not. v945.5 concluded Flow's submit "no longer passes through
+                # this page's request listener (agent-mode/service-worker
+                # path)". It does. The probe was read one second after the
+                # click, by a `time.sleep` that never yields to the sync-API
+                # dispatcher, so the callback had not run yet — the listener
+                # was never blind. charswap_await_submit_verdict now waits
+                # properly, which should make this fallback rare. It is KEPT,
+                # because a fallback that only fires when the primary signal
+                # genuinely fails is exactly what you want, and because the
+                # screenshot case (a real render behind a silent probe) is
+                # still possible for reasons nobody has ruled out.
                 # v945.7 (Codex rev 532 finding 2) — the proof is an ID DELTA
                 # against the pre-click snapshot, NOT a count. See
                 # charswap_tile_delta_verdict for what each rejected case
