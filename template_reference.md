@@ -18471,3 +18471,108 @@ its own copy, which must be refreshed and restarted or the old placement keeps s
 `code/main.py` (`_v943_1_mux_argv`, `RC_AUDIO_FADE_S`),
 `code/tests/test_v952_overlay_split_and_audio.py`, `wiki/patterns/conventions.md`,
 `wiki/meta/build-rule-index.md`.
+
+## v953 — A SCHEDULED POST IS RECORDED BEFORE IT EXISTS, AND NOTHING EVER CAME BACK FOR IT (2026-08-29)
+
+Operator: *"two of those 'unpublished' jobs — cupping and v13 — are already live…
+platform 'unpublished' ≠ actually unpublished, and anything reading that field
+alone will try to repost live videos."*
+
+### What was actually broken
+
+Three live Instagram reels (`DcjYYjCgfWJ` puffy, `Dck4gI_jgKI` cupping,
+`Dcla59FEvNW` v13) sat on Instagram for two days while their platform jobs
+`c41a7f3e`, `eb23f66d`, `29d45418` all reported `lifecycle_stage:
+awaiting_finishing` and `published_at: null`. Every inventory sweep offered them
+as fresh stock.
+
+**The cause is one sentence: a scheduled post is written to the ledger at SUBMIT
+time, hours before it exists.** `publish_reel --schedule-at` hands the post to
+Blotato and returns the moment Blotato answers `scheduled`. There is no permalink
+yet — correctly, because there is no post yet — so the ledger row is written with
+`permalink: ""`, `shortcode: ""` and `source_job: ""`. The post then fires later,
+on Blotato's servers, with nobody here awake. Nothing ever came back for it.
+
+Four separate things then had to be wrong at once, and all four were:
+
+1. **The kanban gate keyed on a string.** `ig_hits` was
+   `[... if "instagram.com" in (r.get("permalink") or "")]`. A scheduled target
+   has no permalink, so it was not even recognised as an Instagram target, and
+   the whole platform-update step was skipped without a word.
+2. **Blotato reports `published` before `publicUrl` lands.** Even an immediate
+   post could record an empty permalink. Six ledger rows had done so.
+3. **`source_job` only ever held `--from-job`.** Every `--video` publish wrote an
+   empty one, so even the ledger could not say which job a post belonged to.
+4. **Nothing synced Instagram on a schedule.** The platform learns "published"
+   only through an InstagramVideo→Job match (`main.py` `match_video`), that match
+   needs the reel to have been synced, and the ONLY caller of
+   `/api/instagram/accounts/{id}/sync` was the kanban step in (1). Measured:
+   account 1 had not synced since **2026-07-04**; account 4 was three days stale.
+
+The deeper shape: **the park mechanism and the sync mechanism were the same
+mechanism.** Scheduling posts so nobody has to be awake is exactly what removed
+the only thing that told the platform a post happened. The more the posting ran
+unattended, the further the platform drifted.
+
+### The fix — three layers, each independently useful
+
+**L1 — stop creating the gap** (`tools/publish_reel.py`).
+`_target_is_instagram(target, res)` reads the accounts file, so a target is
+Instagram because of what it IS; the permalink is only a fallback for a target we
+cannot look up. `blotato_publish` grace-polls for a late `publicUrl`
+(`--url-grace-polls`, default 6). The ledger row records `resolved_job` +
+`resolved_job_via` — the job as ACTUALLY identified, not just the flag — because
+publish time is when the evidence is freshest.
+
+**L2 — close the gap that exists** (`tools/publish_state.py` +
+`tools/reconcile_publish_state.py`). A row is `LIVE` (has a shortcode), `PENDING`
+(has a submission id whose outcome we never wrote down) or `OPAQUE` (neither).
+`PENDING` is the state that had no name, which is why nothing chased it. The CLI
+heals pending rows from Blotato, resolves each live reel to a job by
+evidence-ordered rules (`ledger:source_job` > `ledger:resolved_job` >
+`filename:autoedit` > `folder:platform-job.txt` > `folder:uuid`), syncs and
+matches on the platform, and reports. **It abstains rather than guesses** — an
+ambiguous prefix returns `ambiguous`, never its first hit, because one click in
+the popover is cheaper than the v857 day of untangling. Dry run by default;
+exit code is the verdict (0 agree · 1 fixable · 2 needs a human · 3 incomplete ·
+4 no ledger).
+
+**L3 — stop it re-opening** (`code/instagram_autosync.py` + the worker loop).
+One stale account per tick, stalest first, NULL sorting as infinitely stale. The
+worker's existing transcription pass then evidence-matches whatever it pulls in
+and stamps `published_at` — that half already worked; only the sync call had no
+caller. `main.py`'s endpoint delegates to the same function so the manual button
+and the unattended pass cannot drift.
+
+### Three things this taught that generalise
+
+- **Name the in-between state or nothing will chase it.** The row was neither
+  published nor failed. With only two states it read as "no work to do".
+- **Two clocks, because success and attempt are different facts.**
+  `last_synced_at` moves only on success, so on its own a broken account would be
+  retried every tick forever. `last_sync_attempt_at` gates ONLY the account that
+  failed, never the queue behind it.
+- **A slow job does not belong in a web request.** Driving the 157-reel sync over
+  HTTP hit gunicorn's timeout and dropped the connection mid-pagination. The
+  worker has no such deadline — which is a second, quieter reason L3 is right.
+
+### Gotchas worth keeping
+
+- **`/api/jobs` defaults to `since_days=3, limit=50`.** The bare call answers with
+  14 rows, and a perfectly valid job id looks unknown. Pass `since_days=0,
+  limit=2000`. This wrongly refused puffy's `c41a7f3e` on the first dry run.
+- **The ledger rewrite must survive a concurrent append.** Several sessions share
+  this tree and all of them append at publish time (§16.5). Two rows really did
+  land mid-run. `rewrite_ledger` re-reads immediately before the swap and redoes
+  the patch on the newer content; it raises `LedgerRaced` rather than clobbering.
+- **106 older reels sit on the platform unmatched with no local evidence.** That
+  is the platform popover's own backlog, not this gap. Reporting each as a
+  failure buried the three real findings, so they are counted on one line and do
+  not set the exit code. A report nobody reads is not a report.
+
+**FILES:** `tools/publish_state.py`, `tools/reconcile_publish_state.py`,
+`tools/test_publish_state.py` (24 tests), `tools/publish_reel.py`,
+`tools/test_publish_reel.py`, `code/instagram_autosync.py`,
+`code/tests/test_instagram_autosync.py` (12 tests), `code/main.py`,
+`code/models.py` (2 columns), `code/worker.py`, `docs/publish-ledger.jsonl`,
+`docs/superpowers/plans/2026-08-29-instagram-publish-sync.md`.
