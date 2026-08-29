@@ -4440,19 +4440,10 @@ class MatchInstagramVideoRequest(BaseModel):
     job_id: str
 
 
-def _ig_apply_counts(row, clip: dict) -> None:
-    """Copy view/like/comment counts onto an InstagramVideo row.
-
-    A 0 from the API never overwrites a stored non-zero. The v1 chunk endpoint
-    carries play_count for the ~12 newest reels; the v2 endpoints that serve
-    everything older don't always, so an older reel comes back as 0 views —
-    and a straight assignment wipes the real number we already had. Counts on a
-    live reel don't fall to zero, so a 0 means "not reported", not "no views".
-    """
-    for field in ("views", "likes", "comments"):
-        incoming = clip.get(field) or 0
-        if incoming > 0 or not getattr(row, field):
-            setattr(row, field, incoming)
+# Copy view/like/comment counts onto an InstagramVideo row. Canonical home is
+# instagram_autosync, which owns the sync body — /refresh-stats below applies the
+# same rule, and two copies of it would drift.
+from instagram_autosync import apply_counts as _ig_apply_counts  # noqa: E402
 
 
 def _get_user_ig_account(db: DBSession, account_id: int, user: User):
@@ -4537,77 +4528,19 @@ def sync_instagram_account(
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    from models import InstagramAccount, InstagramVideo
+    # 2026-08-29 — the body of this sync now lives in instagram_autosync, so the
+    # manual button and the worker's unattended pass run THE SAME code. Two
+    # copies would drift, and that drift shows up as "it works when I click it".
+    from instagram_autosync import sync_account_once
     acc = _get_user_ig_account(db, account_id, current_user)
-    api_key = _enc_decrypt(acc.api_key_encrypted)
-    try:
-        if not acc.ig_user_id:
-            acc.ig_user_id = _ig_resolve_user_id(acc.handle, api_key)
-        # limit=0 → fetch all reels via cursor pagination (max 50 pages).
-        clips = _ig_fetch_recent_clips(acc.ig_user_id, api_key, limit=0)
-    except HikerAPIError as he:
-        raise HTTPException(status_code=502, detail=str(he))
-    added = 0
-    # Best-effort thumb byte-cache: resolve storage once; None if unconfigured.
-    from backends.storage import is_storage_configured, get_storage
-    from instagram_client import ig_thumb_key, cache_thumb_bytes
-    _ig_storage = get_storage() if is_storage_configured() else None
-    _thumbs_cached = 0  # count of thumbs cached this sync; returned to the caller
-    for c in clips:
-        if not c.get("shortcode"):
-            continue
-        existing = db.query(InstagramVideo).filter_by(account_id=acc.id, shortcode=c["shortcode"]).first()
-        if existing:
-            _ig_apply_counts(existing, c)
-            # Backfill posted_at on rows stored before the timestamp parser
-            # handled string taken_at — NULL posted_at sinks the reel in the grid.
-            if not existing.posted_at and c.get("posted_at"):
-                existing.posted_at = c["posted_at"]
-            # v853 — backfill the reel runtime on rows synced before we read it.
-            if existing.duration_s is None and c.get("duration_s"):
-                existing.duration_s = c["duration_s"]
-            # Refresh signed URLs (they expire) so retries can re-download.
-            if c.get("video_url"):
-                existing.video_url = c.get("video_url")
-            if c.get("thumb_url"):
-                existing.thumb_url = c.get("thumb_url")
-            # Cache the thumb bytes if not already cached (stale rows self-heal:
-            # the line above just refreshed the dead url to a live one).
-            if not existing.thumb_r2_key and existing.thumb_url:
-                _k = cache_thumb_bytes(
-                    existing.thumb_url, ig_thumb_key(acc.id, existing.shortcode), _ig_storage
-                )
-                if _k:
-                    existing.thumb_r2_key = _k
-                    _thumbs_cached += 1
-            continue
-        _thumb_key = None
-        if c.get("thumb_url"):
-            _thumb_key = cache_thumb_bytes(
-                c.get("thumb_url"), ig_thumb_key(acc.id, c["shortcode"]), _ig_storage
-            )
-            if _thumb_key:
-                _thumbs_cached += 1
-        v = InstagramVideo(
-            account_id=acc.id,
-            shortcode=c["shortcode"],
-            url=c.get("url") or f"https://www.instagram.com/reel/{c['shortcode']}/",
-            thumb_url=c.get("thumb_url"),
-            thumb_r2_key=_thumb_key,
-            video_url=c.get("video_url"),
-            caption=c.get("caption"),
-            views=c.get("views") or 0,
-            likes=c.get("likes") or 0,
-            comments=c.get("comments") or 0,
-            posted_at=c.get("posted_at"),
-            duration_s=c.get("duration_s"),
-        )
-        db.add(v)
-        added += 1
-    acc.last_synced_at = datetime.utcnow()
-    db.commit()
-    total = db.query(InstagramVideo).filter_by(account_id=acc.id).count()
-    return {"added": added, "total": total, "thumbs_cached": _thumbs_cached}
+    res = sync_account_once(acc, db)
+    if not res["ok"]:
+        # sync_account_once swallows the exception on purpose (its other caller
+        # is a worker loop that must not die), so the HTTP surface is unchanged:
+        # an upstream failure is still a 502 here.
+        raise HTTPException(status_code=502, detail=res["error"] or "sync failed")
+    return {"added": res["added"], "total": res["total"],
+            "thumbs_cached": res["thumbs_cached"]}
 
 
 @app.get("/api/instagram/videos/{video_id}/thumb")

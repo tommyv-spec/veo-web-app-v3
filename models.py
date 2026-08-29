@@ -796,6 +796,12 @@ class InstagramAccount(Base):
     ig_user_id        = Column(String(32), nullable=True)
     api_key_encrypted = Column(Text, nullable=False)
     last_synced_at    = Column(DateTime, nullable=True)
+    # 2026-08-29 — the unattended sync's own clocks. `last_synced_at` only moves
+    # on SUCCESS, so on its own a broken account would be retried every worker
+    # tick forever. The attempt clock is what makes the backoff possible, and
+    # the error is what makes a stale account explainable instead of mysterious.
+    last_sync_attempt_at = Column(DateTime, nullable=True)
+    last_sync_error      = Column(Text, nullable=True)
     added_at          = Column(DateTime, default=datetime.utcnow)
 
     user   = relationship("User", back_populates="instagram_accounts")
@@ -813,6 +819,9 @@ class InstagramAccount(Base):
             "handle": self.handle,
             "ig_user_id": self.ig_user_id,
             "last_synced_at": self.last_synced_at.isoformat() if self.last_synced_at else None,
+            "last_sync_attempt_at": (self.last_sync_attempt_at.isoformat()
+                                     if self.last_sync_attempt_at else None),
+            "last_sync_error": self.last_sync_error,
             "added_at": self.added_at.isoformat() if self.added_at else None,
         }
 
@@ -1339,6 +1348,14 @@ def _run_migrations_postgresql(engine):
         ("jobs", "instagram_video_id", "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS instagram_video_id INTEGER"),
         # 2026-06-01: drive-watch lifecycle path
         ("jobs", "published_via",      "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS published_via VARCHAR(20)"),
+        # 2026-08-29 — unattended Instagram sync. last_synced_at only moves on
+        # success, so the attempt clock is what lets a broken account back off
+        # instead of retrying every worker tick, and the error is what makes a
+        # stale account explainable.
+        ("instagram_accounts", "last_sync_attempt_at",
+         "ALTER TABLE instagram_accounts ADD COLUMN IF NOT EXISTS last_sync_attempt_at TIMESTAMP"),
+        ("instagram_accounts", "last_sync_error",
+         "ALTER TABLE instagram_accounts ADD COLUMN IF NOT EXISTS last_sync_error TEXT"),
         # v853 — duration discriminator for the IG->job matcher
         ("jobs", "export_duration_s",
          "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS export_duration_s DOUBLE PRECISION"),
@@ -1577,6 +1594,11 @@ def _run_migrations_sqlite(engine):
         ("instagram_videos", "video_url", "ALTER TABLE instagram_videos ADD COLUMN video_url TEXT"),
         # 2026-06-01: drive-watch lifecycle path
         ("jobs", "published_via",      "ALTER TABLE jobs ADD COLUMN published_via TEXT"),
+        # 2026-08-29 — unattended Instagram sync (see the Postgres list above).
+        ("instagram_accounts", "last_sync_attempt_at",
+         "ALTER TABLE instagram_accounts ADD COLUMN last_sync_attempt_at DATETIME"),
+        ("instagram_accounts", "last_sync_error",
+         "ALTER TABLE instagram_accounts ADD COLUMN last_sync_error TEXT"),
         # v853 — duration discriminator for the IG->job matcher
         ("jobs", "export_duration_s", "ALTER TABLE jobs ADD COLUMN export_duration_s REAL"),
         ("jobs", "export_probed_at",  "ALTER TABLE jobs ADD COLUMN export_probed_at DATETIME"),

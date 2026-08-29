@@ -730,6 +730,22 @@ class JobWorker:
                 except Exception as ig_exc:
                     print(f"[worker] instagram transcription pass error: {ig_exc}", flush=True)
 
+                # Instagram account auto-sync (2026-08-29). Nothing used to call
+                # /api/instagram/accounts/{id}/sync except publish_reel's kanban
+                # step, and that step was skipped for every SCHEDULED post — a
+                # scheduled post has no permalink at submit time. So a reel that
+                # Blotato published overnight never reached the platform and its
+                # job kept reporting published_at: null, while account 1 sat
+                # unsynced since 2026-07-04. One account per tick keeps the
+                # HikerAPI spend bounded; the transcription pass above then
+                # evidence-matches whatever this pulls in, on its own.
+                try:
+                    from instagram_autosync import process_instagram_autosync
+                    with get_db() as sync_db:
+                        process_instagram_autosync(sync_db)
+                except Exception as sync_exc:
+                    print(f"[worker] instagram autosync pass error: {sync_exc}", flush=True)
+
                 # Drive folder watcher pass (sync + transcribe, one pending per tick)
                 try:
                     from drive_transcribe import process_drive_transcriptions
