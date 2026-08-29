@@ -9004,7 +9004,22 @@ def _import_scene_table_impl(
         # crashed at the `if node is None: raise 500` guard with the
         # error "Scene N references image_None with no matching
         # ImageNode" the moment any text_card scene was imported.
-        if is_text_card_scene:
+        # v943.2 — a VIDEO-LED charswap scene has no start frame either, for
+        # the same reason a text_card has none: nothing renders an image for
+        # it. The worker replaces the character inside the real video and the
+        # avatar upload rides along as the reference, so the build declares no
+        # `### Image N` and the parser leaves image_index None. Without this
+        # the import died exactly where text_card used to, on the guard below:
+        # "Scene 1 references image_None with no matching ImageNode".
+        #
+        # image-led is NOT exempt — there the source's movement is applied TO
+        # the chosen start frame, so that frame is the render and must exist.
+        is_video_led_swap_scene = (
+            (s.get("render_method") or "").strip().lower() == "charswap"
+            and (s.get("swap_mode") or "").strip().lower() == "video-led"
+            and img_idx is None
+        )
+        if is_text_card_scene or is_video_led_swap_scene:
             node = None
         else:
             node = created_nodes_by_image_index.get(img_idx)
@@ -9043,7 +9058,12 @@ def _import_scene_table_impl(
         # Banana 2 render). For shot scenes the existing `node.id`
         # binding stands. For text_card the column must be nullable
         # (see migration entry below).
-        scene_image_node_id = None if s.get("scene_type") == "text_card" else node.id
+        # v943.2 — keyed off `node` rather than off scene_type, because there
+        # are now TWO kinds of scene that legitimately have no image node: a
+        # text_card (drawn by ffmpeg) and a video-led charswap (the swap happens
+        # inside the real video). Testing scene_type alone raised AttributeError
+        # on `node.id` for the second one.
+        scene_image_node_id = node.id if node is not None else None
 
         # v698A — resolve voiceover_anchor_image (markdown int) → ImageNode.id.
         # The anchor must already exist in created_nodes_by_image_index because
