@@ -3997,6 +3997,18 @@ def _job_finishing_spec(job):
         return None
 
 
+def _export_defaults_payload(job):
+    """v951 — what the Export dialog should open on for this job: the
+    ExportSettings model defaults with the build's declared export_* folded on
+    top, plus the names of the declared keys.
+
+    Split out from the endpoint so it is unit-testable without a DB session —
+    it touches only job.finishing_spec.
+    """
+    from auto_finish import export_modal_defaults
+    return export_modal_defaults(_job_finishing_spec(job))
+
+
 def _maybe_auto_finish_export(db, job):
     """v947 — when the job declares `auto_finish: on` and EVERY clip is
     approved, queue the export with the declared export_* settings. Called
@@ -4117,6 +4129,31 @@ async def get_job(
     except Exception as _e:
         print(f"[v780] source_image_batch_id lookup skipped (non-fatal): {_e}", flush=True)
     return resp
+
+
+@app.get("/api/jobs/{job_id}/export-defaults")
+async def export_defaults(
+    job_id: str,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v951 — the settings the Export dialog opens on for this job.
+
+    Read-only. The dialog used to seed itself from localStorage (whatever this
+    browser picked last, on any video); this gives it the VIDEO's own answer,
+    declared in the build's `## Finishing` as export_* bullets. A job that
+    declared nothing returns plain model defaults, which is what the dialog
+    already did — no behaviour change for a build without the section.
+
+    This does NOT change what the export runs: the modal still posts the
+    controls the operator sees, so a manual change still wins. It changes what
+    those controls START at.
+    """
+    job = get_user_job(db, job_id, current_user)  # 404/403 if not the caller's
+    payload = _export_defaults_payload(job)
+    print(f"[Finishing/v951] job={job_id[:8]} export-defaults "
+          f"declared={payload['declared'] or 'none'}", flush=True)
+    return payload
 
 
 @app.get("/api/jobs/{job_id}/config")
