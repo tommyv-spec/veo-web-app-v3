@@ -18576,3 +18576,96 @@ and the unattended pass cannot drift.
 `code/tests/test_instagram_autosync.py` (12 tests), `code/main.py`,
 `code/models.py` (2 columns), `code/worker.py`, `docs/publish-ledger.jsonl`,
 `docs/superpowers/plans/2026-08-29-instagram-publish-sync.md`.
+
+---
+
+## v945.8 — A CHECK THAT CANNOT RECEIVE ITS ANSWER IS NOT A CHECK (2026-08-29)
+
+**The symptom.** Every charswap run wrote `submit_seen=false` and
+`media_binding="never observed"` into the evidence file while a real render
+came back. Two sessions read that as Flow submitting through a **service
+worker** that the page's request listener cannot see, and built the v945.5
+tile-counting fallback around that theory.
+
+**The listener was never blind. The verdict was read before it could speak.**
+
+```python
+click_generate_button(page, ...)      # ends: time.sleep(1); return True
+charswap_submit_body_verdict(page)    # a plain attribute read
+```
+
+The worker runs `playwright.sync_api`. In the sync API, event callbacks run on
+a dispatcher greenlet that gets control **only while the main thread is inside
+a Playwright call**. `time.sleep` does not yield to it, and reading an
+attribute is not a Playwright call. So between the click and the verdict there
+was nothing that could deliver the event, and `_on_request` had not run — it
+*could not* have. The queued event arrived later, in a burst, on the first
+`page.evaluate` in the tile fallback, long after the verdict was written.
+
+**Why "wait longer" is the wrong fix, and the evidence that proves it.**
+`tools/flow_charswap.py` waits **48 seconds** in a pure `time.sleep` loop and
+still prints "no submit request seen" — in **43 of 43** charswap logs in this
+repo, deterministically. A wall-clock race would be flaky; this never is. What
+rescues that script one line later is its `page.screenshot()`, which pumps: the
+log then prints the request event (fired ~1s) and the response event (fired
+~35s) **adjacently**. A 1-second event and a 35-second event printing together
+is the signature of a batched greenlet flush, and it is the proof.
+
+**The counter-test that killed the service-worker theory.** The same page's
+`page.on('response')` listener is what the normal pipeline's v729/v770 media
+binding runs on, and it demonstrably fires on charswap submits
+(`[v729-diag] strict-match response captured ... endpoint=…EditVideo`). A
+service worker cannot be invisible to one listener and visible to another, on
+the same page, for the same URL. Whenever an instrument reports nothing, ask
+what else uses the same instrument — if that thing works, the instrument is fine
+and the *reading* is wrong.
+
+**The fix.** `charswap_await_submit_verdict` waits with `page.wait_for_timeout`,
+which pumps, and re-reads until both media are seen or the timeout expires.
+`seen=false` now means what it always claimed: nothing was sent.
+
+### The same mistake in three other places, found by re-reading the chain
+
+The worker reads its clip as a plain dict, so a **misspelled key is not an
+error** — it is `None`, and `None` is legal for every one of these fields.
+
+| Read | Reality | Cost |
+|---|---|---|
+| `swap_source_r2_key` | the SQLAlchemy **column** name (`main.py:277`); the payload key is `swap_source_key` (`main.py:17601`) | v945.7 was added *precisely* to make the martha-reformer "two clips, one source" collision greppable. It logged `None` on every clip and could never have caught it. |
+| `veo_prompt_override` / `prompt_text` | neither is a payload key; the server sends the authored prompt as `prompt` | two dead terms at the head of the charswap prompt chain, so `prompt_source` could only ever emit `"charswap_default"` — including on runs that used the build's own text |
+| `swap_start_frame_url` | **no producer anywhere in the repo** | image-led has always run on `start_frame_url`; two tests asserted the worker honours the dead key, which is how it survived review |
+
+Guarded now by a contract test that compares every `clip.get('swap_*')` in the
+worker against the keys `_v943_charswap_payload` actually emits.
+
+### Both clip creators must guard the charswap prompt
+
+v945 guarded `promote_batch_to_video` on "prompt_text is empty". The **other**
+creator, the background prompt builder behind `POST /api/jobs`, had no guard —
+and there an empty override does not stay empty: `build_prompt`
+auto-constructs a full **dialogue** prompt and writes it. The worker then
+trusts it *because it is non-empty*. That is the original talking-head render,
+reachable through the other door. A guard on one of two creators is not a guard.
+
+### Two tests that had quietly stopped being gates
+
+- The mux test asserted `-af == "apad"` and had been **red since v952**
+  (`6c29393`) added the audio fade. A permanently failing test is not a gate —
+  the suite it lives in stops being read.
+- The submit-gate test asserted a **character distance** (`gate → "FAILED
+  CLOSED"` within 8000 chars). It had already been widened once and broke again
+  on comment edits. It measured the length of the prose, not the shape of the
+  code. Both are now structural.
+
+**The general lesson, worth more than the bug:** *an instrument that reports
+`nothing observed` is making two claims — that the thing did not happen, and
+that the instrument could have seen it.* Check the second before believing the
+first.
+
+Files: `code/static/flow_worker.py`, `code/main.py`, `code/image_platform.py`,
+`code/test_charswap_render_method.py` (+17 tests, 172→189), `code/.gitignore`.
+Commits `548f658`, `cd9939d`, `e73748b`.
+
+**Number note:** the code tags say `v945.8`. The charswap family is canonically
+v945 (see §v945 on the v943 collision); the "do not fix the deployed strings"
+instruction there governs the strings already shipped, not new ones.
