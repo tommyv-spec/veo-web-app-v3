@@ -21894,6 +21894,17 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 prompt_chars=len(_cs_prompt),
                 prompt_head=_cs_prompt[:160],
                 dialogue_prompt_rejected_chars=len(prompt or ""),
+                # v943.7 — WHICH source this clip was actually given. Job
+                # 302875cc (martha-reformer, 2026-08-29) declared two scenes
+                # with two different segments — seg1-0-8.mp4 for the lunge and
+                # seg2-8-15.mp4 for the plank — and both clips rendered the
+                # SAME movement: measured 3.45/255 mean frame difference, i.e.
+                # the same content twice. Nothing in any log or API response
+                # said which source each clip received, so the collision was
+                # invisible until someone watched both clips side by side.
+                # Recording the key makes two clips sharing one source a grep.
+                swap_source_key=clip.get('swap_source_r2_key'),
+                swap_source_url_tail=(clip.get('swap_source_url') or "")[-80:],
             )
             _cs_ok, _cs_chips = charswap_attach_and_prompt(
                 page, _cs_avatar, _cs_video, _cs_prompt, context=_cs_ctx,
