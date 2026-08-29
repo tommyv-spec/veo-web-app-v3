@@ -21651,6 +21651,10 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         
         # Use API prompt if available, otherwise build with job context
         prompt = clip.get('prompt')
+        # v943.4 — keep the platform's own prompt before the dialogue builder
+        # is allowed to stand in for it, so the charswap arm below can tell
+        # "the build authored this" from "build_flow_prompt invented it".
+        _cs_platform_prompt = prompt
         if not prompt:
             prompt = build_flow_prompt(
                 dialogue_line=clip.get('dialogue_text', ''),
@@ -21878,8 +21882,20 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             #
             # The fallback is the operator's own sentence (2026-08-29), which is
             # also the cell-A baseline from the 2026-08-21 split test.
+            # `clip['prompt']` is the platform-supplied prompt, read at the top
+            # of this loop BEFORE build_flow_prompt() is allowed to substitute
+            # for it — so it is the build's own text when the platform stamped
+            # one, and it is what v943.5/v943.6 now populate. Preferred first.
+            # Measured 2026-08-29 (charswap_diag, job a8f016dc): without it this
+            # chain reported prompt_source=charswap_default even though the clip
+            # DID carry the build's prompt, because the worker's clip dict
+            # exposes it as `prompt`, not `prompt_text`. Same sentence either
+            # way on that run, so nothing rendered wrong — but the diagnostic
+            # was lying about where the prompt came from, and a diagnostic that
+            # misreports its own source is worse than none.
             _cs_prompt = (clip.get('veo_prompt_override')
                           or clip.get('prompt_text')
+                          or _cs_platform_prompt
                           or CHARSWAP_DEFAULT_PROMPT)
             if _cs_prompt is not prompt:
                 print(f"{_cs_ctx} swap prompt in use ({len(_cs_prompt)} chars): "
