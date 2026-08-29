@@ -18302,3 +18302,75 @@ scenes are cut from ONE continuous source take.
 **Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`,
 `raw/decode_work/martha-reformer-DZVTwnbN72v/RECIPE.md` (the worked case),
 memory `swap-image-two-ref-method`.
+
+## v951 — THE EXPORT DIALOG OPENS ON THE BUILD'S DECLARED SETTINGS, NOT THE BROWSER'S (2026-08-29)
+
+**The complaint, verbatim.** Operator, on the Export Settings modal: *"this video should already contain
+all the info to extract automatically when i click export final (the whole process)."* He was right, and
+he was also right that we had already discussed it — v947 shipped `export_*` declarations eleven days
+earlier. They just never reached a manual click.
+
+**Why the v947 declaration could never win on that button.** `derive_export_defaults`
+(`code/auto_finish.py`) applies a declared value only for a field the caller did NOT explicitly send,
+and `code/main.py` passes pydantic's `settings.model_fields_set` as that "explicitly sent" set. But the
+frontend builds the export POST body naming **every** field — `frames_to_cut_start`, `smart_trim`,
+`remove_silence`, `silence_mode`, `playback_speed` and the rest (`static/index.html` ~16770). So
+`model_fields_set` is always full, and the declaration folds in nothing, every time. It only ever won on
+the automatic path, `_maybe_auto_finish_export`, where the server builds the request itself. **The rule
+was sound and the caller made it unreachable** — a merge that keys on "did the caller send this" is dead
+the moment some caller sends everything.
+
+**And what the dialog opened on instead: another video's settings.** The modal seeded its controls from
+`localStorage.getItem('exportSettings')` — whatever that browser picked last, on any job, in any lane.
+Measured 2026-08-28 on job `bb159509` (batch `noemi-cablefly`): a 6-second `speaker: silent` /
+`audio: source-original` character swap with no speech in it at all, and the dialog was offering the ED
+lane's **Whisper** silence removal ("keeps only segments with actual spoken words" — on a music-only clip
+it has nothing to keep), **1.10x** speed (which re-times the music), Smart Trim **on** with
+`transition: cut` (the exact condition the ED builds turned it off for, because smart-trim then skips the
+start trim and lets Veo lead-in frames through) and a start trim of **0**. Four settings, all wrong,
+all inherited from a different video.
+
+**The fix, one layer earlier than the merge.** `GET /api/jobs/{id}/export-defaults` returns the
+`ExportSettings` model defaults with the job's declared `export_*` folded on top, plus `declared` naming
+the keys the build actually decided. `exportFinalVideo()` fetches it when the modal opens and applies it
+**AFTER** the localStorage restore, so the video outranks the browser, and a banner in the modal names
+the declared fields — the choice stays checkable in front of the operator instead of afterwards in a log.
+The decision itself is `auto_finish.export_modal_defaults(spec)`, a pure function beside the other v947
+decisions, so it is unit-tested rather than buried in a 17k-line HTML file.
+
+**What it deliberately does NOT do.** It does not change what the export RUNS given a set of settings,
+and it does not make the server override the payload. `derive_export_defaults` is untouched. The submit
+path still reads the DOM, so **an operator override still wins** — v951 changes what the controls START
+at. A job that declared nothing gets plain model defaults, which is byte-identical to the old behaviour;
+that is what the other 330+ builds need, and a failed fetch degrades the same way.
+
+**Why not fix it on the server.** The obvious alternative is to make a declaration beat a payload
+default. It cannot work while the frontend names every field: the server has no way to tell "the operator
+chose 1.10x" from "the dialog's default is 1.10x". Making the frontend stop sending fields would fix that
+but has a far larger blast radius, and it would HIDE the settings from the operator instead of showing
+them — the opposite of what "so it stays checkable" is for.
+
+**Authoring rule.** Every build's `## Finishing` should declare the `export_*` its lane needs, with the
+reason on the same line. Derive them from the build's own Storyboard — `speaker:`, `audio:` and
+`transition:` decide all four of the common ones — and **never by copying what the dialog happens to be
+showing**, which is the last video's settings by construction.
+
+| Read this in the build | Declare |
+|---|---|
+| `speaker: silent` on every scene (no speech anywhere) | `export_remove_silence: false` — silence removal has nothing to keep |
+| `audio: source-original` (music, not a spoken read) | `export_playback_speed: 1.0` — speeding it re-times the music |
+| any scene with `transition: cut` | `export_smart_trim: false` + `export_frames_to_cut_start: 7` — smart-trim skips the start trim on cut scenes and lets Veo lead-in frames through |
+| a spoken read with dead-air tails | `export_remove_silence: true` + `export_silence_mode: whisper` + `export_silence_trigger: 0.3` + `export_silence_keep: 0.2` |
+
+**General lesson, the transferable one.** A defaulting rule that keys on "did the caller specify this"
+is only as good as the caller's restraint. This one was correct, tested, and inert in production for
+eleven days because one caller sent every field. **When a merge depends on a caller omitting things,
+check what the callers actually send before believing the merge runs.**
+
+**Applies to** every job with a `## Finishing` section, and to the Export Settings modal on every job.
+
+**Touched:** this deep-dive (canonical), `code/auto_finish.py` (`export_modal_defaults`),
+`code/main.py` (`_export_defaults_payload` + `GET /api/jobs/{id}/export-defaults`),
+`code/static/index.html` (fetch, apply-after-restore, banner),
+`code/tests/test_auto_finish.py`, `code/tests/test_export_defaults_endpoint.py`,
+`wiki/patterns/conventions.md`, `.claude/skills/build-video/SKILL.md`.
