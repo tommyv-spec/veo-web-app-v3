@@ -87,7 +87,47 @@ if [ $status -ne 0 ]; then
   exit 1
 fi
 
-echo ""
-echo "After the push, CONFIRM it (never assume):"
-echo "    python code/verify_deploy.py ${targets_main}"
+# ---------------------------------------------------------------------------
+# FEATURE CHECKS (added 2026-08-28)
+#
+# Deploy safety above proves the push loses no content and ships parseable
+# modules. It says nothing about whether the FEATURES still work. These two
+# steps close that, for every session, without anyone remembering to.
+#
+# Neither one can block on infrastructure: if node or the checks are missing
+# the push proceeds with a loud note. The content gate above is the thing that
+# fails closed; this part is quality feedback, and a quality check that blocks
+# a deploy because a tool is absent gets deleted, taking the signal with it.
+# A check that RUNS and FAILS does block -- that is a real answer.
+# ---------------------------------------------------------------------------
+
+if [ -f "tests/ui/run_ui_checks.mjs" ] && command -v node >/dev/null 2>&1; then
+  echo ""
+  echo "running UI checks on the tree being pushed..."
+  if node tests/ui/run_ui_checks.mjs --source local; then
+    :
+  else
+    echo ""
+    echo "PUSH BLOCKED - the UI checks failed on this tree."
+    echo "Deploying this would ship a broken feature. Fix it, or run"
+    echo "    node code/tests/ui/run_ui_checks.mjs --source local"
+    echo "to see which check went red."
+    exit 1
+  fi
+else
+  echo "(UI checks skipped: node or tests/ui/run_ui_checks.mjs unavailable)"
+fi
+
+# Start the live verification in the background. It waits for the sha to go
+# live, then re-runs the checks and the browser proof against the DELIVERED
+# page and records a verdict. Replaces the printed "remember to verify" that
+# nobody actioned. Never blocks: this runs AFTER the push either way.
+if [ -f "../tools/spawn_watcher.py" ] && command -v python >/dev/null 2>&1; then
+  echo ""
+  python ../tools/spawn_watcher.py "${targets_main}" || true
+else
+  echo ""
+  echo "After the push, CONFIRM it (never assume):"
+  echo "    python code/verify_deploy.py ${targets_main}"
+fi
 exit 0
