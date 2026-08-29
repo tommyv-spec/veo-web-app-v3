@@ -2329,3 +2329,38 @@ def test_video_led_exemption_is_case_and_space_insensitive():
     assert scene["image_index"] is None
     assert scene["render_method"] == "charswap"
     assert scene["swap_mode"] == "video-led"
+
+
+# --- 10. v943.5 — a charswap clip can never carry a NULL prompt -------------
+#
+# The 2026-08-29 failure: prompt_text was NULL on a charswap clip, so the Flow
+# worker's `clip.get('prompt') or build_flow_prompt(...)` fallback built its
+# SILENT-SPEAKER DIALOGUE template — "the subject speaks directly to camera...
+# professional recording booth" — and Flow rendered exactly that: a man
+# standing in a room looking at the lens. Both media chips were attached the
+# whole time. The swap was lost on the prompt, and nothing complained.
+
+def test_charswap_default_prompt_is_the_same_sentence_in_both_targets():
+    """The worker holds its own copy of flow_worker.py, so the constant is
+    defined twice on purpose. If the two ever drift, a swap renders one thing
+    on the platform path and another on the worker path."""
+    import re
+    from image_platform import CHARSWAP_DEFAULT_PROMPT
+    worker_src = (pathlib.Path(__file__).parent / "static" / "flow_worker.py").read_text(
+        encoding="utf-8", errors="replace")
+    m = re.search(r'CHARSWAP_DEFAULT_PROMPT\s*=\s*\(\s*\n\s*"([^"]+)"', worker_src)
+    assert m, "flow_worker.py no longer defines CHARSWAP_DEFAULT_PROMPT"
+    assert m.group(1) == CHARSWAP_DEFAULT_PROMPT
+
+
+def test_charswap_default_prompt_says_replace_not_perform():
+    """A swap prompt describes a REPLACEMENT. The template that broke this
+    described a performance — speaking, eye contact, a nod. Guard the
+    difference, since that is the whole failure."""
+    from image_platform import CHARSWAP_DEFAULT_PROMPT
+    low = CHARSWAP_DEFAULT_PROMPT.lower()
+    assert "replace" in low
+    assert "video" in low and "image" in low
+    for performance_word in ("speaks", "camera and says", "eye contact",
+                             "recording booth", "nod"):
+        assert performance_word not in low

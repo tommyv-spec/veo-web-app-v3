@@ -693,6 +693,18 @@ def run_image_platform_migrations():
     _backfill_user_id_ownership()
 
 
+# v943.5 — what a swap clip says when the build supplied no prompt of its own.
+# The operator's wording (2026-08-29) and the cell-A baseline from the
+# 2026-08-21 split test. It exists so a charswap clip can never be written with
+# prompt_text NULL, which is what let the Flow worker substitute its
+# silent-speaker dialogue template and render a talking head instead of a swap.
+# Kept byte-identical to CHARSWAP_DEFAULT_PROMPT in static/flow_worker.py — the
+# worker holds its own copy of that file, so the same sentence is defined in
+# both deploy targets on purpose rather than imported across them.
+CHARSWAP_DEFAULT_PROMPT = (
+    "only replace the subject of the video with the subject from the image"
+)
+
 # v943 — the columns a charswap job cannot work without. Named once so the
 # readback check and the migration list can never drift apart by hand.
 CHARSWAP_COLUMNS = {
@@ -12420,6 +12432,42 @@ def promote_batch_to_video(
         _prompt_text = None
         if _veo_override and _compose_veo_prompt is not None:
             _prompt_text = _compose_veo_prompt(_veo_override, _veo_neg)
+
+        # v943.5 — A CHARSWAP CLIP MUST NEVER LEAVE HERE WITH A NULL PROMPT.
+        #
+        # The 2026-08-29 failure in one line: prompt_text was NULL on a charswap
+        # clip, so the Flow worker's `clip.get('prompt') or build_flow_prompt(...)`
+        # fallback built its SILENT-SPEAKER DIALOGUE template instead — "the
+        # subject speaks directly to camera... maintains direct eye contact...
+        # professional recording booth" — and Flow rendered exactly that: a man
+        # standing in a room looking at the lens. Both media chips were attached
+        # correctly the whole time. The swap was lost on the prompt.
+        #
+        # That fallback is right for an ordinary silent scene and catastrophic
+        # for a swap, because the two want opposite things: one describes a
+        # performance, the other says replace-this-person-and-change-nothing-else.
+        #
+        # The build's own prompt is still preferred and nothing above changes.
+        # This only refuses to emit the NULL that hands the worker a blank
+        # cheque. It is loud on purpose: a swap silently rendering someone
+        # else's prompt cost two renders and most of a session before an
+        # operator screenshot of the Flow composer showed what had been sent.
+        _is_charswap_spec = (
+            (spec.get("render_method") or "").strip().lower() == "charswap"
+        )
+        if _is_charswap_spec and not _prompt_text:
+            _prompt_text = CHARSWAP_DEFAULT_PROMPT
+            log.warning(
+                "[v943.5] clip_index=%s scene=%s is charswap but carried NO prompt "
+                "override — the build's `## Veo 3.1 Final Prompts` text did not "
+                "reach this clip. Stamping the swap default (%r) so the worker "
+                "cannot fall back to the dialogue builder. If the build DOES "
+                "declare a `### Clip N.M` text prompt for this scene, its "
+                "veo_prompts_json is missing on the assignment row — re-import "
+                "the markdown (delete the batch first).",
+                spec.get("clip_index"), spec.get("scene_index"),
+                CHARSWAP_DEFAULT_PROMPT,
+            )
 
         # v892.9 — stamp Prompt B too. The Flow worker retries a
         # generation-policy-blocked clip on prompt_text_b before escalating
