@@ -560,6 +560,13 @@ def enforce_exclusivity(db, job, video, kind, evidence):
         # column existed. We cannot prove it was machine-made, and destroying a
         # possibly hand-made link is far worse than declining a steal — so NULL is
         # read as 'manual'. Only a link this code stamped 'evidence' can be taken.
+        #
+        # 'ledger' is the one machine provenance that IS evictable (v953). The
+        # reconciler writes through this same endpoint, so without a value of
+        # its own every unattended link was stamped 'manual' — a machine guess
+        # wearing a human's badge, which permanently disabled the evidence
+        # matcher that would have caught it. A tool that can be proven wrong by
+        # a waveform must stay correctable by one.
         inc_source = getattr(inc, "match_source", None) or "manual"
         if inc_source in ("manual", "filename"):
             print(f"[claim] job={str(job.id)[:8]} {kind}={me} REFUSE "

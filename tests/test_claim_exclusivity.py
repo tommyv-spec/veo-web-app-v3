@@ -547,7 +547,33 @@ def test_every_link_site_records_how_the_link_was_made():
     assert 'match_source = "filename"' in dt_src              # drive v856 stamp
     assert 'match_source="evidence"' in lt_src                # local auto-match
     assert 'match_source="filename"' in lt_src                # local v856 stamp
-    assert main_src.count('v.match_source = "manual"') == 1   # match_video
+    # match_video stamps exactly one site, and since v953 the value depends on
+    # WHO called: a human gets 'manual' (unstealable), the reconciler declares
+    # 'ledger' and stays correctable by the media-evidence matcher. The
+    # requirement is unchanged -- one site, always stamped.
+    body = main_src.split("async def match_video(")[1].split("async def unmatch_video(")[0]
+    assert body.count("v.match_source = ") == 1
+    assert '"ledger" if' in body, "the machine caller must get its own provenance"
+    assert 'else "manual"' in body, "an unrecognised source must fall back to manual"
+
+
+def test_only_ledger_is_accepted_as_a_non_manual_source():
+    """A typo in the source field must never weaken a link.
+
+    Anything other than the one recognised machine value falls back to
+    'manual', so a caller cannot make its link evictable by accident -- or make
+    a human's link evictable on purpose.
+    """
+    main_src = open(_MAIN, encoding="utf-8").read()
+    body = main_src.split("async def match_video(")[1].split("async def unmatch_video(")[0]
+    line = [x for x in body.splitlines() if "v.match_source = " in x][0]
+    assert ".strip().lower() == \"ledger\"" in line, line
+    # and the gate must actually treat it as evictable
+    lt_src = open(_LT, encoding="utf-8").read()
+    gate = lt_src.split("def enforce_exclusivity")[1]
+    refused = gate.split("if inc_source in (")[1].split(")")[0]
+    assert "ledger" not in refused, "'ledger' must NOT be in the unstealable set"
+    assert "manual" in refused and "filename" in refused
 
 
 def test_the_manual_pick_releases_the_old_holder_before_it_writes():

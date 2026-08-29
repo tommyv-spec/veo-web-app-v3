@@ -4460,6 +4460,12 @@ class CreateInstagramAccountRequest(BaseModel):
 
 class MatchInstagramVideoRequest(BaseModel):
     job_id: str
+    # v953 — who is making this link. Defaults to 'manual' so the popover and
+    # every existing caller are unchanged. An unattended caller (the reconciler)
+    # sends 'ledger', which enforce_exclusivity treats as evictable: a machine
+    # guess must stay correctable by the media-evidence matcher, and stamping it
+    # 'manual' made every wrong reconciler link permanent.
+    source: str = "manual"
 
 
 # Copy view/like/comment counts onto an InstagramVideo row. Canonical home is
@@ -5122,7 +5128,16 @@ async def match_video(
     # pick carries no media evidence, so it would score ~0 against any waveform
     # challenger, and the displaced reel is never re-matched (transcribe_one is
     # idempotent on 'done') — the operator's repair would be destroyed, not moved.
-    v.match_source = "manual"
+    #
+    # v953 — UNLESS the caller says it is not a human. The reconciler writes
+    # through this same endpoint, and stamping its evidence-derived guess
+    # 'manual' made every wrong link permanent by disabling the very matcher
+    # that could disprove it. Only 'ledger' is accepted as an alternative;
+    # anything else falls back to 'manual', so a typo can never weaken a link.
+    v.match_source = "ledger" if (req.source or "").strip().lower() == "ledger" else "manual"
+    if v.match_source != "manual":
+        print(f"[ig-match] video={video_id} job={job.id[:8]} linked by "
+              f"source={v.match_source} (evictable by media evidence)", flush=True)
     job.instagram_url = v.url
     job.instagram_video_id = v.id
     # Record WHO published the job, mirroring drive_watch / local_watch. Without

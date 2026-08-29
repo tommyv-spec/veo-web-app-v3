@@ -35,14 +35,45 @@ DESIGN NOTES:
 import os
 from datetime import datetime, timedelta
 
-# Every 6 hours per account. Four accounts is then ~16 syncs a day, a couple of
-# cents of HikerAPI, and a reel is never more than 6 hours from being seen.
+# Every 6 hours per account: four accounts is ~16 syncs a day and a reel is
+# never more than 6 hours from being seen.
+#
+# BE HONEST ABOUT THE COST — a sync is not one API call. Each one runs
+# fetch_recent_clips(limit=0), which walks the account's WHOLE history over
+# several passes of up to 50 pages (the /refresh-stats docstring says the same:
+# "up to 50 HikerAPI calls" where that endpoint wants 1-3). So the real figure
+# is pages, not syncs, and roughly an order of magnitude above "a couple of
+# cents". It is still small, and this repo's standing rule is that paid calls
+# get named rather than waved at. Turning the routine tick into a shallow fetch
+# with one deep pass a day would cut it further; that is an operator call, not
+# a defect, and the page counts behind it are inferred rather than measured.
 DEFAULT_INTERVAL_HOURS = float(os.environ.get("IG_AUTOSYNC_INTERVAL_HOURS", "6"))
 # How long a FAILED account waits before it is tried again.
 DEFAULT_RETRY_MINUTES = float(os.environ.get("IG_AUTOSYNC_RETRY_MINUTES", "30"))
 ENABLED = os.environ.get("IG_AUTOSYNC", "1").strip().lower() not in ("0", "false", "no")
 
 _ERROR_MAX = 500
+
+
+def _rollback(db) -> None:
+    """Best-effort. A rollback that itself fails must not mask the real error."""
+    try:
+        db.rollback()
+    except Exception:
+        pass
+
+
+def _commit(db) -> bool:
+    """True when the commit landed. Never raises — every caller here is either
+    a worker loop or an endpoint that has its own error contract."""
+    try:
+        db.commit()
+        return True
+    except Exception as exc:
+        print(f"[ig-autosync] commit failed: {type(exc).__name__}: "
+              f"{str(exc)[:200]}", flush=True)
+        _rollback(db)
+        return False
 
 
 def apply_counts(row, clip: dict) -> None:
@@ -111,6 +142,22 @@ def _fetch_and_store(acc, db):
         acc.ig_user_id = resolve_user_id(acc.handle, api_key)
     # limit=0 → fetch all reels via cursor pagination (max 50 pages).
     clips = fetch_recent_clips(acc.ig_user_id, api_key, limit=0)
+
+    # AN EMPTY ANSWER FROM A NON-EMPTY ACCOUNT IS A FAILURE, NOT A SYNC.
+    # fetch_recent_clips swallows HikerAPIError on every pass and returns [],
+    # so a total API outage looked exactly like "this account has no new reels":
+    # last_synced_at advanced, last_sync_error was CLEARED (erasing a genuine
+    # earlier failure), the 30-minute retry never engaged, and the account went
+    # quiet for six hours showing green. That is precisely the blindness this
+    # module exists to end, asserted as success. An account we already hold
+    # reels for cannot legitimately return zero.
+    if not clips:
+        from models import InstagramVideo
+        stored = db.query(InstagramVideo).filter_by(account_id=acc.id).count()
+        if stored:
+            raise RuntimeError(
+                f"HikerAPI returned no clips for @{acc.handle} while {stored} "
+                f"reel(s) are already stored — treating as an outage, not a sync")
 
     storage = get_storage() if is_storage_configured() else None
     added = 0
@@ -181,15 +228,41 @@ def sync_account_once(acc, db, fetcher=None):
     try:
         res = fetch(acc, db) or {}
     except Exception as exc:
+        # ROLLBACK FIRST. If the failure came from the database, the session is
+        # already in a failed state and a commit on it raises
+        # PendingRollbackError — out of a function whose docstring promises it
+        # never raises, leaving BOTH clocks unwritten so nothing records why the
+        # account went stale. The rollback also discards the attempt stamp set
+        # above, so it has to be re-applied afterwards.
+        _rollback(db)
+        acc.last_sync_attempt_at = datetime.utcnow()
         acc.last_sync_error = f"{type(exc).__name__}: {exc}"[:_ERROR_MAX]
-        db.commit()
+        if not _commit(db):
+            print(f"[ig-autosync] account={acc.id} @{acc.handle} FAILED and the "
+                  f"failure could not even be recorded: "
+                  f"{type(exc).__name__}: {str(exc)[:160]}", flush=True)
+            return {"ok": False, "added": 0, "total": 0, "thumbs_cached": 0,
+                    "error": f"{type(exc).__name__}: {exc}"[:_ERROR_MAX]}
         print(f"[ig-autosync] account={acc.id} @{acc.handle} FAILED "
               f"{acc.last_sync_error}", flush=True)
         return {"ok": False, "added": 0, "total": 0, "thumbs_cached": 0,
                 "error": acc.last_sync_error}
     acc.last_synced_at = datetime.utcnow()
     acc.last_sync_error = None
-    db.commit()
+    # The success commit is where EVERY insert from the walk actually lands —
+    # the sessionmaker is autoflush=False, so nothing flushed during the loop.
+    # A unique-constraint clash with the manual Sync button racing this one used
+    # to escape from here and discard the whole paid walk with both clocks
+    # unwritten. Record the failure instead.
+    if not _commit(db):
+        _rollback(db)
+        acc.last_sync_attempt_at = datetime.utcnow()
+        acc.last_sync_error = "commit failed (concurrent sync?)"
+        _commit(db)
+        print(f"[ig-autosync] account={acc.id} @{acc.handle} fetched but the "
+              f"commit failed — nothing stored", flush=True)
+        return {"ok": False, "added": 0, "total": 0, "thumbs_cached": 0,
+                "error": acc.last_sync_error}
     out = {"ok": True, "added": res.get("added", 0), "total": res.get("total", 0),
            "thumbs_cached": res.get("thumbs_cached", 0), "error": None}
     print(f"[ig-autosync] account={acc.id} @{acc.handle} ok "
