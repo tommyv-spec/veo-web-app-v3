@@ -20159,6 +20159,43 @@ def charswap_composer_chip_media_ids(page):
         return []
 
 
+# v943.3 — the charswap evidence file.
+#
+# Why this exists. On 2026-08-29 a swap rendered the avatar standing in a
+# corridor with no trace of the source video, and the question "did the source
+# video actually attach?" could not be answered at all: `/api/jobs/<id>/clips`
+# exposes no swap fields, and the only record of the chip state was a print on
+# whichever session's console happened to run the worker. That console had
+# already rotated. A whole render was spent and the one fact needed to explain
+# it was gone.
+#
+# So every charswap clip now appends one JSON line here, on success as well as
+# failure. `error_message` was the only persisted channel and it is the wrong
+# semantics for a clip that rendered fine, so this is a file rather than a
+# column — no migration, no deploy, readable by any session:
+#
+#     python -c "import json;[print(json.loads(l)) for l in open(CHARSWAP_DIAG_PATH)]"
+#
+# The fields are chosen to separate the two failure modes that look identical
+# from the outside: a video that never attached (chip_count 1, or two chips
+# with the same mediaId) versus a video that attached and was ignored by the
+# model (chip_count 2, distinct ids, junk output).
+CHARSWAP_DIAG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "charswap_diag.jsonl")
+
+
+def charswap_write_diag(**fields):
+    """Append one JSON line of charswap evidence. Never raises."""
+    try:
+        import datetime as _dt
+        fields.setdefault("ts", _dt.datetime.now().isoformat(timespec="seconds"))
+        with open(CHARSWAP_DIAG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(fields, default=str) + "\n")
+    except Exception as e:
+        # Diagnostics must never be able to fail a render.
+        print(f"[v943.3] diag write failed: {e}", flush=True)
+
+
 def charswap_prompt_readback_action(observed, prompt, min_ratio=0.8,
                                     prefix_chars=80):
     """v945.3 — what to do after READING the composer's prompt box back.
@@ -20572,26 +20609,55 @@ def charswap_attach_and_prompt(page, avatar_path, video_path, prompt,
     next to the chip ids so the log says which cell rendered.
     """
     page._charswap_block_reason = None
+
+    # v943.3 — everything this function learns is written to the evidence file,
+    # whatever the outcome. `_diag` is filled in as we go so an early return
+    # still records WHERE it stopped.
+    _diag = {
+        "swap_mode": swap_mode,
+        "context": context,
+        "avatar_path": os.path.basename(avatar_path or ""),
+        "video_path": os.path.basename(video_path or ""),
+        "video_bytes": (os.path.getsize(video_path)
+                        if video_path and os.path.exists(video_path) else None),
+        "job_id": getattr(page, "_charswap_job_id", None),
+        "clip_index": getattr(page, "_charswap_clip_index", None),
+    }
+
     ok, reason = attach_ingredient_image_with_check(
         page, avatar_path, context=f"{context}-avatar", clear_existing=True)
     if not ok:
         print(f"{context} avatar attach failed ({reason})", flush=True)
         page._charswap_block_reason = f"avatar ingredient did not attach ({reason})"
+        charswap_write_diag(stage="avatar_attach_failed", reason=reason, **_diag)
         return False, []
+    _diag["avatar_attached"] = True
 
     if not charswap_attach_source_video(page, video_path, context=context):
         print(f"{context} source video attach failed", flush=True)
         page._charswap_block_reason = "source video ingredient did not attach"
+        charswap_write_diag(stage="source_video_attach_failed", **_diag)
         return False, []
+    _diag["source_video_attached"] = True
+    _diag["video_chip_badge"] = charswap_video_chip_present(page)
 
     chip_ids = charswap_composer_chip_media_ids(page)
     print(f"{context} mode={swap_mode} composer chips: {chip_ids}", flush=True)
+    _diag["chip_ids"] = chip_ids
+    _diag["chip_count"] = len(chip_ids)
+    # Two chips carrying the SAME mediaId means the avatar got attached twice
+    # and the video never landed — the shape that renders an avatar-only clip
+    # while still satisfying a bare count check.
+    _diag["chip_ids_distinct"] = len(set(chip_ids))
     if len(chip_ids) < 2:
         print(f"{context} fewer than 2 chip mediaIds on the composer — not generating",
               flush=True)
         page._charswap_block_reason = (
             f"only {len(chip_ids)} chip mediaId(s) on the composer, needs 2")
+        charswap_write_diag(stage="too_few_chips", **_diag)
         return False, chip_ids
+
+    charswap_write_diag(stage="attached_ok", **_diag)
 
     charswap_install_submit_probe(page, chip_ids)
     fill_prompt_textarea(page, prompt)
@@ -21776,6 +21842,12 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                    error_message=_cs_tab_why[:200])
                 permanently_failed_clips.add(clip_index)
                 continue
+            # v943.3 — stamp the identity of this clip onto the page so the
+            # charswap evidence file can name the job it belongs to. Set here
+            # rather than passed as arguments so the attach signature, which
+            # several call paths share, does not change.
+            page._charswap_job_id = clip.get('job_id') or job_id
+            page._charswap_clip_index = clip_index
             _cs_ok, _cs_chips = charswap_attach_and_prompt(
                 page, _cs_avatar, _cs_video, prompt, context=_cs_ctx,
                 swap_mode=(clip.get('swap_mode') or 'video-led'))
