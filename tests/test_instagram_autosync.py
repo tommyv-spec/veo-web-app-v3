@@ -201,27 +201,54 @@ class TestWorkerPass:
         db.add(InstagramVideo(account_id=a.id, shortcode="DcAAAAAAAAA",
                               url="https://instagram.com/reel/DcAAAAAAAAA/"))
         db.commit()
-        monkey = {}
 
-        def no_clips(acc, session):
-            # Mirror _fetch_and_store's guard without touching HikerAPI.
-            stored = session.query(InstagramVideo).filter_by(account_id=acc.id).count()
-            if stored:
-                raise RuntimeError("HikerAPI returned no clips while reels are stored")
-            return {"added": 0, "total": 0}
+        # Drive the REAL _fetch_and_store. Passing a fetcher that re-implements
+        # the guard would have left the guard itself untested -- deleting it
+        # from the module would not have failed anything.
+        autosync_mod = autosync
 
-        res = autosync.sync_account_once(a, db, fetcher=no_clips)
-        assert res["ok"] is False
+        def no_clips(*a_, **kw):
+            return []
+
+        import instagram_client
+        orig_fetch = instagram_client.fetch_recent_clips
+        orig_resolve = instagram_client.resolve_user_id
+        instagram_client.fetch_recent_clips = no_clips
+        instagram_client.resolve_user_id = lambda *a_, **kw: "1"
+        try:
+            import encryption
+            orig_dec = encryption.decrypt
+            encryption.decrypt = lambda *a_, **kw: "key"
+            try:
+                res = autosync_mod.sync_account_once(a, db)
+            finally:
+                encryption.decrypt = orig_dec
+        finally:
+            instagram_client.fetch_recent_clips = orig_fetch
+            instagram_client.resolve_user_id = orig_resolve
+
+        assert res["ok"] is False, "an outage was recorded as a successful sync"
         db.refresh(a)
         assert a.last_synced_at is None
         assert "no clips" in a.last_sync_error
 
     def test_an_empty_answer_for_a_brand_new_account_is_fine(self, db):
-        # A genuinely empty account must still sync cleanly, or a new handle
-        # could never get off the ground.
+        # A genuinely empty account must still sync cleanly through the REAL
+        # code path, or a new handle could never get off the ground.
         a = account(db, "brand-new")
-        res = autosync.sync_account_once(
-            a, db, fetcher=lambda acc, s: {"added": 0, "total": 0})
+        import instagram_client, encryption
+        orig_fetch = instagram_client.fetch_recent_clips
+        orig_resolve = instagram_client.resolve_user_id
+        orig_dec = encryption.decrypt
+        instagram_client.fetch_recent_clips = lambda *a_, **kw: []
+        instagram_client.resolve_user_id = lambda *a_, **kw: "1"
+        encryption.decrypt = lambda *a_, **kw: "key"
+        try:
+            res = autosync.sync_account_once(a, db)
+        finally:
+            instagram_client.fetch_recent_clips = orig_fetch
+            instagram_client.resolve_user_id = orig_resolve
+            encryption.decrypt = orig_dec
         assert res["ok"] is True
         db.refresh(a)
         assert a.last_synced_at is not None
