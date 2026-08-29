@@ -18391,3 +18391,83 @@ check what the callers actually send before believing the merge runs.**
 `code/static/index.html` (fetch, apply-after-restore, banner),
 `code/tests/test_auto_finish.py`, `code/tests/test_export_defaults_endpoint.py`,
 `wiki/patterns/conventions.md`, `.claude/skills/build-video/SKILL.md`.
+
+## v952 — THE OVERLAY STOPS COVERING THE BODY, AND THE MUSIC STOPS CUTTING OUT (2026-08-29)
+
+Three defects on one delivered file (job `bb159509`, `noemi-cablefly` — a 6s
+`speaker: silent` / `audio: source-original` character swap). Operator: *"the overlays
+they cover completely the body… if the big block of text was splitted and moved up and
+down it would have been better. the smart placing is not really working well"* and
+*"the music stopping before the end of the video."* Everything below was measured on the
+delivered artifact BEFORE anything changed (§v938.1 — measure what shipped).
+
+### 1. The block sat on his chest, and the engine said it covered nothing
+
+**Two faults compounding.** First, `rc_occupancy_layout` returned `"age_cov": 0.0,
+"block_cov": 0.0` **hardcoded**. It vetoes FACES and ranks MOTION; it has never known a
+body is there. So it reported "covers 0% of subject" for a block lying across a man's
+tattoos, and every log line agreed with it.
+
+Second, and the reason no tuning could fix it: the block plus its route line is **495px on
+a 1920 frame — 25.8% of the picture** — and it must also clear the face, which on this clip
+spans 27.1%..41.9%. That leaves **exactly one window, 43.5%..53.0%, and all of it is
+torso**. Measured by sweeping a body-coverage term through the occupancy score at weights
+0→10: the block moves 50.0% → 53.0% and coverage 0.441 → 0.410, and then stops. **A single
+slab has nowhere good to go.**
+
+**The fix is the operator's: split it.** The frame above his head, 0%..22.7%, is completely
+empty and no single-slab layout could ever reach it. `rc_split_layout` puts the first lines
+there and the rest (with the route) low. Measured on this clip: one slab covers **44%** of
+the subject; the split covers **0%** up top and **39%** low. Only taken on a real win
+(`RC_SPLIT_MIN_GAIN = 0.08` absolute), so a clip the one-block layout already handles keeps
+the account's proven look. How many lines go up is decided by what actually fits between
+the age line and the face — on this clip that was one, because the face band is widened to
+the union of the occupancy faces and `rc_head_band` (22.7%) so text never lands on hair.
+
+The silhouette (`rc_coverage_profile`) is now measured **once, up front**, and used for
+three things: the split decision, honest `age_cov`/`block_cov`, and the smart fallback. It
+used to be computed only on the smart path — which is precisely how the occupancy path
+could report zero coverage over a chest.
+
+**The general lesson: a score can only protect what it measures.** Occupancy was correct
+about faces and motion and silent about the body, and silence read as a pass.
+
+### 2. The disclosure was stamped twice
+
+`compose()` burns `syntheticperformer` bottom-left on every frame (§v938.15). The
+readcaption overlay stamped it **again**, so every post in this lane carried two
+overlapping copies — one grey at 50%, one solid white, offset. `autoedit_captions.py` has
+always documented the correct rule ("No watermark here on purpose: the composed video
+already carries it"); this stage simply never followed it. `overlay_watermark` now defaults
+to `None` and stays declarable for a path where compose did not run.
+
+### 3. The music stopped 1.70s before the end
+
+Not occasional — **structural, on every clip in the lane.** Veo returns a fixed ~7.7s
+container whatever the source length, and `_v943_1_mux_argv` padded a short source with
+silence (`apad`) to fill it. That padding was itself a fix: the first version used
+`-shortest` and chopped frames off the PICTURE. Measured here: source audio **6.000s**, the
+export then trims 7 frames (0.292s) off the head, so sound ended at **5.769s of a 7.479s
+cut**. The source itself has continuous sound throughout — we truncated it.
+
+The audio now **loops** to fill the render (`-stream_loop -1` on the audio input) and fades
+out over `RC_AUDIO_FADE_S` (0.35s, capped at a quarter of the clip). Proven with real
+ffmpeg both ways: a 6.000s source over a 7.479s render now yields **zero** silence
+detections; a 6.665s source over a 4.0s render is still trimmed, picture intact.
+`-shortest` still guards the un-probed case and still terminates, because the VIDEO input
+is finite even when the audio input is endless. **Caveat stated because it is real:** on a
+SPEECH source looping repeats the last words. This path is the charswap
+`audio: source-original` lane, which is the music-bed case by construction; a speech source
+that must not loop should declare `audio: none` and take a voiceover.
+
+**Applies to** every readcaption overlay and every `audio: source-original` charswap.
+
+**Deploy note — this rule touches BOTH targets (§v948.2).** `main.py` (the audio) ships to
+Render on push; `autoedit_pipeline.py` (the overlay) runs on the OPERATOR'S OWN worker from
+its own copy, which must be refreshed and restarted or the old placement keeps shipping.
+
+**Touched:** this deep-dive (canonical), `code/autoedit_pipeline.py`
+(`rc_split_layout`, `rc_band_coverage`, `rc_best_top`, honest coverage, watermark default),
+`code/main.py` (`_v943_1_mux_argv`, `RC_AUDIO_FADE_S`),
+`code/tests/test_v952_overlay_split_and_audio.py`, `wiki/patterns/conventions.md`,
+`wiki/meta/build-rule-index.md`.
