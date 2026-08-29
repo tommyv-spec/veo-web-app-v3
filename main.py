@@ -4150,10 +4150,7 @@ async def export_defaults(
     those controls START at.
     """
     job = get_user_job(db, job_id, current_user)  # 404/403 if not the caller's
-    payload = _export_defaults_payload(job)
-    print(f"[Finishing/v951] job={job_id[:8]} export-defaults "
-          f"declared={payload['declared'] or 'none'}", flush=True)
-    return payload
+    return _export_defaults_payload(job)
 
 
 @app.get("/api/jobs/{job_id}/config")
