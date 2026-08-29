@@ -21884,6 +21884,28 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                   flush=True)
             _cs_accept, _cs_count_tile, _cs_gate_why = charswap_submit_gate(
                 _cs_seen, _cs_both)
+            # v943.3 — the submit verdict, into the evidence file. This matters
+            # MORE than the chip ids: chips prove what the composer showed, this
+            # proves what the request carried. `seen=False` means Flow's submit
+            # bypassed this page's listener (agent-mode / service-worker path),
+            # so media binding is UNVERIFIABLE and the tile fallback decides —
+            # which is how an avatar-only render can be accepted as real. When
+            # a swap comes back wrong, this line says whether the binding was
+            # confirmed, contradicted, or never observed at all.
+            charswap_write_diag(
+                stage="submit_verdict",
+                job_id=clip.get('job_id') or job_id,
+                clip_index=clip_index,
+                swap_mode=(clip.get('swap_mode') or 'video-led'),
+                submit_seen=_cs_seen,
+                both_media_in_body=_cs_both,
+                accepted=_cs_accept,
+                accepted_on_tile_evidence=_cs_count_tile,
+                gate_reason=_cs_gate_why,
+                media_binding=("confirmed" if (_cs_seen and _cs_both)
+                               else "contradicted" if _cs_seen
+                               else "never observed"),
+            )
             if not _cs_accept and not _cs_seen:
                 # v945.6 (Codex rev 532 finding 1) — the tile fallback runs
                 # ONLY when NO request was observed at all. A submit that WAS
