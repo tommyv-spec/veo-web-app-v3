@@ -18669,3 +18669,101 @@ Commits `548f658`, `cd9939d`, `e73748b`.
 **Number note:** the code tags say `v945.8`. The charswap family is canonically
 v945 (see §v945 on the v943 collision); the "do not fix the deployed strings"
 instruction there governs the strings already shipped, not new ones.
+
+## v954 — VERIFY BY ANCESTRY, PUBLISH BY LANE, AND THE DEFAULT THAT STAYS PUT (2026-08-29)
+
+**Number note:** the shipped code comments, commit messages and test filenames all say `v953`. That
+number was claimed the same day by the scheduled-post rule (§v953 above) in a concurrent session, and
+this master is append-only, so **canon is v954**. Same convention as §v945. Do not "fix" the strings
+in the code — the collision is the record of two sessions working the same tree.
+
+Four findings from one review pass. Three shipped; the fourth is a decision NOT to ship, and
+its evidence is the most useful part of this section.
+
+### 1. The deploy watcher asked the wrong question
+
+`tools/watch_deploy.py` and `code/verify_deploy.py` both asked *"does the live sha EQUAL mine?"*.
+On a repo several sessions push to, the live TIP is routinely a DESCENDANT of what you pushed.
+Measured: four commits were live and serving while `ship.py` printed **"NOT CONFIRMED … Nothing was
+checked"**, because three other sessions pushed during the 900s wait. `git merge-base --is-ancestor`
+exits 0 for every one of them. In `verify_deploy.py` it was worse — line 71 computed a flexible
+prefix match and line 72 ANDed it straight back to equality, so the flexible half was dead weight,
+and `deploy.ps1` turns exit 1 into "the live deploy was not confirmed healthy": a deploy failure that
+never happened.
+
+Both now answer by ancestry, **tri-state**: `LANDED / NOT_YET / UNKNOWN`, and **UNKNOWN never counts
+as success**. Not knowing is not the same as landed, and collapsing the two is how a fail-closed gate
+quietly stops failing. The falsifier is tested in both: asking the question backwards must still say
+no. `verify_deploy.py` also pins `REPO` — `head_sha()` ran a bare `git rev-parse HEAD` in the
+CALLER's cwd, so running it from the wiki root waited the full timeout on a wiki commit that can
+never appear as `render_commit`.
+
+### 2. Publishing trusted a verdict without knowing which contract produced it
+
+`tools/publish_reel.py check_visual_quality` read the quality sidecar's `verdict` and never its
+`lane`, though `check_render_quality.py` records it. The two lanes hold **opposite** prompt
+contracts: a `build` wants the locked realism block present, a `charswap` wants it ABSENT, because
+that block opens with a composition instruction (`prompt_assembly.py`, "The composition clearly
+directs attention toward …") and a swap must preserve the source's composition. So a verdict produced
+under the wrong contract published as if it applied. A swap judged as a build shows 5 prompt FAILs
+that are not defects; **a build judged as a swap PASSES a prompt genuinely missing its realism half**
+— and that direction ships. `--lane` is now required whenever the check runs, with no default,
+because an unsaid lane is exactly how the wrong one gets used. The function had zero test coverage
+before; it has five tests now.
+
+**The near-miss worth recording.** This section began as "add the realism block to swap video
+prompts, because 0 of 6 swap builds carry it". That was WRONG, and the gate's own output is what
+misled: running the DEFAULT lane against a compliant swap prompt produces five confident FAILs.
+The operator rule already existed —
+`feedback_swap-lane-interactive-review-loop` : *"the realism block is IMAGE contract, never appended
+to video prompts"*. **A checker run under the wrong contract does not report "wrong contract"; it
+reports defects.** Read what a gate is configured to assume before believing what it says.
+
+### 3. The start-trim decision is now testable
+
+`smart_trim` meant two things at once: *never trim the FIRST clip of the video*, and *never trim the
+first clip of a `transition: cut` scene*. The decision lived inline in `main.py`'s export body, ~300
+lines inside an endpoint no test could reach — which is how it got changed twice in one week with
+nobody able to pin the behaviour (turned off on the paddleboard build 2026-08-27 14:13, undone by
+v947.3 at 14:53 after the blanket trim cut real words out of speech: *"THREE rules"* → *"Rules"*,
+*"KORella"* → *"Ella"*, *"reach you"* → *"read"*).
+
+It is now `finishing_models.skip_start_trim()`, pure and importable, with a new
+`trim_cut_scene_starts` field **defaulted to False so nothing changed**. The headline test is
+exhaustive: 320 input combinations, every one asserted equal to the old inline block. The lineup
+branch is preserved verbatim — it answers "first" by POSITION and has never consulted the cut-scene
+set, so it already ships the behaviour the flag would turn on for everyone else.
+
+### 4. The default STAYS — and why the obvious fix is wrong
+
+Every build that ever declared `smart_trim` (5 of 5) set it false, and 333 of 343 builds have a
+`transition: cut` scene, so flipping the default looks obviously right. **It is not.** v947.3 zeroes
+the fixed trims only when `_vad_owns_edges` — i.e. when `remove_silence` is ON with whisper/action
+VAD. Measured across the corpus, among builds with cut scenes that do not declare the trim fields:
+
+| population | count |
+|---|---|
+| silent (no words a head trim could damage) | 20 |
+| speech + `remove_silence` ON (v947.3 protects) | **0** |
+| speech + `remove_silence` OFF (**not protected**) | **303** |
+
+Flipping the default would start trimming 7 frames off the head of the first clip of every cut scene
+in 303 builds — precisely where a spoken line begins, and precisely the failure v947.3 exists to
+prevent. The guard everyone reasons from covers **nobody** who is not already declaring the fields.
+
+So the field stays declarable and the default stays False. The four builds that actually needed the
+behaviour (`noemi-venice`, `martha-reformer`, `noemi-boulder` v1/v2 — all `auto_finish: on`,
+`transition: cut`, silent, declaring nothing) got the two-line declaration instead, which fixes them
+today with no deploy and no risk to anyone else.
+
+**The transferable lesson:** "5 out of 5 overrode the default" is an argument about the 5, not about
+the 338. Before changing a default, measure the population the change would reach and check whether
+the safety net you are relying on actually fires for them.
+
+**Applies to** every deploy verification, every publish, and every export.
+
+**Touched:** this deep-dive (canonical), `tools/watch_deploy.py` + `tools/test_watch_deploy.py`,
+`code/verify_deploy.py` + `code/tests/test_verify_deploy.py`, `tools/publish_reel.py` +
+`tools/test_publish_reel.py`, `code/finishing_models.py`, `code/main.py`,
+`code/tests/test_v953_skip_start_trim.py`, `wiki/patterns/conventions.md`,
+`wiki/meta/build-rule-index.md`, and the four swap builds' `## Finishing` blocks.
