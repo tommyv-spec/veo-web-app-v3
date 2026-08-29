@@ -125,6 +125,12 @@ fi
 if [ -f "../tools/spawn_watcher.py" ] && command -v python >/dev/null 2>&1; then
   echo ""
   python ../tools/spawn_watcher.py "${targets_main}" || true
+  # Some changes cannot be judged at deploy time -- a caption fix, a prompt
+  # change, a publish change. Register what will eventually prove them so the
+  # deploy is not silently treated as verified. A commit can say so itself with
+  # a "Proof: <what has to happen> | <the question>" trailer; otherwise the file
+  # map guesses, and anything unmatched is reported as UNCOVERED.
+  python ../tools/deploy_claims.py register "${targets_main}" || true
 else
   echo ""
   echo "After the push, CONFIRM it (never assume):"
