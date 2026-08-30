@@ -3128,7 +3128,7 @@
         }
 
         /* ====================================================================
-           v954 mobile — full-screen variant viewer.
+           v955 mobile — full-screen variant viewer.
            This is an isolated dialog component. Width-only page changes remain
            inside the Images-scoped media query; the closed dialog has no old path.
            ==================================================================== */
@@ -4205,7 +4205,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
         <!-- ============ Images Tab ============ -->
         <div id="imagesTab">
-            <!-- v954 mobile: tapping outside the drawer closes it. Hidden on
+            <!-- v955 mobile: tapping outside the drawer closes it. Hidden on
                  desktop by the media query — the drawer only exists there. -->
             <div class="img-drawer-scrim" aria-hidden="true" onclick="imgToggleDrawer(false)"></div>
             <!-- Drag handle on the sidebar edge — widen to read full job titles -->
@@ -4214,7 +4214,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
             <div class="img-config-panel" id="imgConfigPanel">
                 <button type="button" class="img-drawer-close" id="imgDrawerClose"
                         aria-label="Close builds" onclick="imgToggleDrawer(false)">&times;</button>
-                <!-- v954 mobile: the action bar is hidden under 900px, so its
+                <!-- v955 mobile: the action bar is hidden under 900px, so its
                      two Images controls live here. Hidden on desktop, where
                      the action bar is still on screen. -->
                 <div class="img-drawer-actions" style="display:none;gap:8px;margin-bottom:12px;">
@@ -6647,12 +6647,12 @@ Ambient: same kitchen room tone, soft pour sound.
         });
 
         window.addEventListener("DOMContentLoaded", async () => {
-          // v954: first, so every mobile CSS rule that keys off body.is-touch
+          // v955: first, so every mobile CSS rule that keys off body.is-touch
           // is correct before anything renders. Spacing/fallback only -- it
           // never decides whether an activation may pick.
           imgApplyTouchClass();
           imgRestoreLayoutPreference();
-          // v954: settle the drawer closed once on startup, so in the narrow
+          // v955: settle the drawer closed once on startup, so in the narrow
           // layout the transformed-offscreen panel is marked inert instead of
           // sitting invisibly in the tab order.
           try { imgToggleDrawer(false); } catch (e) { /* not on the images tab yet */ }
@@ -21369,7 +21369,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                 // Repaint now — the caller is fire-and-forget, so the render
                 // that kicked this off already drew the local-only number.
                 if (typeof imgUpdateTabCount === 'function') imgUpdateTabCount();
-                // v954: the phone's queue position, and the entry point that
+                // v955: the phone's queue position, and the entry point that
                 // opens the all-time head. Both no-op on a desktop.
                 imgPaintQueueLabel();
                 try { await imgOpenApprovalHead(); } catch (e) {
@@ -23247,7 +23247,7 @@ async function renderAutoEditCard(jobId, hasExport) {
             if (row) {
                 row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
             }
-            // v954: choosing a build from the drawer means you are done with the
+            // v955: choosing a build from the drawer means you are done with the
             // drawer. Here rather than in a mobile-aware wrapper, so there is
             // one function and one way to select a node. On desktop the class
             // is never set, so this is a no-op.
@@ -25001,7 +25001,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                 let refTileHtml = '';
                 let refEdge = null;
                 if (node.parents && node.parents.length) {
-                    // v954: same resolver the viewer's compare control uses.
+                    // v955: same resolver the viewer's compare control uses.
                     refEdge = imgPreviousSceneEdge(node);
                     if (refEdge) {
                         const refNode = imgState.nodesById[refEdge.parent_node_id];
@@ -25220,7 +25220,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                     </div>` : ''}
                     <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;font-weight:500;">
                         ${refTileHtml ? 'Reference + Variants' : 'Variants'} — ${
-                            // v954: on touch a tap no longer selects, it opens the
+                            // v955: on touch a tap no longer selects, it opens the
                             // viewer — so the old wording is simply untrue there.
                             imgIsTouchDevice()
                                 ? 'tap to open it full screen, then pick'
@@ -25693,7 +25693,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                 // waiting for a pick. Only on a fresh approval (not a re-pick),
                 // and only if there IS a next pending one; otherwise stay put.
                 //
-                // v954: refresh the ALL-TIME queue before deciding the work is
+                // v955: refresh the ALL-TIME queue before deciding the work is
                 // done. The local node list is windowed to three days, so an
                 // older unapproved image would read as "nothing left".
                 await imgRefreshApprovalSummary();
@@ -25732,7 +25732,7 @@ async function renderAutoEditCard(jobId, hasExport) {
         }
 
         // ====================================================================
-        // v954 — mobile. Two gates, deliberately different:
+        // v955 — mobile. Two gates, deliberately different:
         //   LAYOUT  switches on WIDTH (@media max-width: 900px)
         //   ACTION  follows the actual PointerEvent in imgVariantTap
         // body.is-touch is spacing/fallback only; it never authorizes a pick.
@@ -26406,7 +26406,7 @@ async function renderAutoEditCard(jobId, hasExport) {
             const btn = ev && ev.currentTarget ? ev.currentTarget : null;
             if (btn) btn.disabled = true;
             try {
-                // v954 — one implementation, shared with the mobile viewer, so
+                // v955 — one implementation, shared with the mobile viewer, so
                 // the two surfaces cannot drift on what a toggle means or on
                 // what an error says. It also does the imgRefreshNodes call.
                 const result = await imgSaveVariantVerdict(nodeId, variantId, want, cur);
