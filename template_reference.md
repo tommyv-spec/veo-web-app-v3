@@ -16431,6 +16431,16 @@ Then run the v879 start-frame check separately: every animation starts before th
 
 **Scope:** GENERATE side, forward-only. Applies to every script-changing method; the full map is mandatory when `OBJECT SWAP: yes`. Build-time enforcement lives in the `/build` loader. Auditor `object_swap_logic` hard-fails a changed-object/action declaration with no map, incomplete required fields, or a declared stale token that survives in the render zone. It warns on legacy method builds with no `OBJECT SWAP:` declaration.
 
+> **AMENDMENT (2026-08-30, forward-only — Wave-3 gate spec `docs/audits/wave3-gate-spec-2026-08-30.md` rev 2, item N2).** "Every script-changing method" now means all SIX §6.13 methods in the auditor too, not just the four its regex happened to list. Until this date `METHOD: SELLING-SCRIPT-TEST`, `METHOD: FULL-BUILD` and every typo read as *"no script-changing METHOD"* and skipped the `LINE SOURCING` / `SCROLL-STOPPER` / `OBJECT SWAP` gates in total silence — fail-OPEN. What each method owes:
+>
+> | METHOD | LINE SOURCING | SCROLL-STOPPER | `OBJECT SWAP:` |
+> |---|---|---|---|
+> | ADAPT-NEW-STRUCTURE · HOOK-ITERATION · STEP-UP-SAME-SOURCE · INNOVATION-MIX-AND-MATCH | required, unchanged | required, unchanged | required, unchanged |
+> | **SELLING-SCRIPT-TEST** | **required** — it rewrites the selling lines over locked winning visuals, so every changed line still owes a tier + source | **required, but it MAY name the PRESERVED winning carrier** — this route keeps the winning hook fixed while the selling package moves; nothing here demands a new 20% visual delta | **required**, normally `no` |
+> | **FULL-BUILD** | **not owed** — there is no parent script to tier lines against; corpus mining and the Evidence Packet already carry its source basis | **not owed** — no parent to owe a delta to; `HOOK CARRIER` + v873 cover the new hook | **required**, normally `no` — v882 binds every script-changing method, and the declaration itself is the point |
+>
+> A `METHOD:` value that is none of the six (a typo, the retired `STEP-UP: mix-and-match` form, an invented name) is now a fault, not a free pass: **FAIL** when the build declares `EVIDENCE PROGRAM: v1`, **WARN** otherwise. `c_line_sourcing` OWNS that message; `c_object_swap_logic` stays silent on an unrecognized value so one problem never reports twice. **Measured blast radius (whole `videos/` corpus, old vs new):** 156 legacy builds whose `METHOD:` is free prose move from silent PASS to WARN, **none to FAIL** — not one of them declares the evidence program; 4 SELLING builds that already declare `OBJECT SWAP` move SKIP → PASS, 3 legacy ones move SKIP → WARN. No current-program build newly fails on this item.
+
 ## v883 — MOVIE STYLE CONTRACT: keep the emotion engine, age payload, named pain, and body handoff in one ordered chain
 
 Sources: `raw/docs/salvora-movie-style-playbook-2026-07-31.txt` · `raw/videos/decoded_airplane-aisle-overheadbin-50-cheating-wife-cortisol-chest-salvora-rhodiola-ted-seminar-pip-fb.md` · `raw/videos/decoded_rodeodrive-gucci-two-women-63-jealousy-cortisol-belly-salvora-rhodiola-amish-market-pip-ig.md` · `raw/videos/decoded_homedepot-truckbed-shirtless-wife-cheating-cortisol-chest-salvora-rhodiola-asian-coach-boxinggym-pip-fb.md` · `raw/videos/decoded_boardwalk-betrayal-napkin-throw-comforter-48-cortisol-belly-salvora-rhodiola-amish-barn-lecture-ig.md` · `wiki/patterns/interaction-hook-engine.md`.
@@ -16480,6 +16490,38 @@ The scene numbers are examples. The order and truth checks are mandatory:
 5. Production terms remain banned from speech under v880. The Movie Style map belongs in §0; the characters still talk like people.
 
 **Scope:** GENERATE side, forward-only. Applies to every Movie Style / interaction-scene build, both genders and all four emotions. The `/build` loader is the hard pre-draft gate. Auditor `movie_style_contract` warns when a likely legacy interaction build has no declaration, then hard-fails an explicit `MOVIE STYLE: yes` block with a missing field, wrong sequence, displaced age, or broken pain handoff. Auditor `spoken_production_terms` separately hard-fails v880 internal labels inside spoken lines and quoted prompt dialogue only.
+
+> **AMENDMENT (2026-08-30, forward-only — Wave-3 gate spec `docs/audits/wave3-gate-spec-2026-08-30.md` rev 2, items D1 / D2 / N3; landed in `.claude/skills/build-video/audit_build.py`).** Everything above stands. Three things are added, and each one is EVIDENCE-GATED — a build may take the new road only by saying where in the corpus it saw it.
+>
+> **1. Age stays the default payload; a different payload needs source evidence (D1).** The job of `AGE PAYLOAD` was never the number. It was to say *why this result is reproducible* — the viewer hears the age and reads "so it can happen to me". Some sources carry that job with a named routine, a protocol, a repeated process, a verified result or a peer likeness instead. Those builds may declare, INSTEAD of `AGE PAYLOAD`:
+>
+> ```text
+> REPRODUCIBILITY PAYLOAD: <literal spoken words> | carrier: <value> | scene=N | evidence: `raw/or/wiki/path.md:LINE` — what at that location attests the non-age carrier
+> ```
+>
+> `carrier:` is `age | routine | protocol | repeated-process | verified-result | peer-similarity | UNLISTED — <source-derived name>`. It is closed FOR ROUTING (it decides which payload checks run), open in the §3.6 way through the named `UNLISTED` escape; free text and a bare `UNLISTED` both fail, because a blank is not a declaration. `evidence:` is REQUIRED for every carrier except `age`, and is ignored when the carrier IS age. **A non-age payload names its sequence slot `payload=Scene N`, never `age=Scene N`** — calling a routine an age is exactly the misnaming this field exists to stop, and no old file can carry the new field, so nothing needs the alias. Declaring BOTH `AGE PAYLOAD` and a non-age `REPRODUCIBILITY PAYLOAD` fails: one payload, one carrier. **The standard lane's denial check does not relax.** That lane's job is wrong guess → denial/proof → press, whatever the payload is; a source whose proof arrives outside a denial is not this lane and belongs in the unlisted route below.
+>
+> **2. A new interaction chain now has a legal declaration (D2).** Before this, a chain that was neither the standard lane nor betrayal had two exits, both bad: force it into the wrong lane, or write `MOVIE STYLE: no` and ship it mislabeled. That is the same trap the 2026-08-10 emotion fix removed for `flirtation`. The variant enum stays closed for routing and gains a THIRD ROUTED value with its own checks:
+>
+> ```text
+> MOVIE STYLE VARIANT: UNLISTED — <source-derived name> | evidence: `raw/or/wiki/path.md:LINE` — what chain is observed there
+> ```
+>
+> The variant needs its OWN evidence: the payload's evidence proves the carrier, not the sequence. On this route the two fixed beat-chains are skipped and these run instead — the beat NAMES are the author's (§6.10 derives sections from the source), but four JOBS are owed: at least one interaction/start beat BEFORE the payload, the payload beat, `reveal`, and `body open`. Scene numbers must not go backwards in declaration order; **two jobs may share one scene**, a later job may never point at an earlier one. Every mapped scene must be a real `### Scene N` block, but **only beats that make a literal speech claim need a line** — the payload (its words), the body open (the pain part), and a numeric press (the pain part). A visual beat may be silent, as the boardwalk betrayal's thrown napkin is. A fully verified unlisted chain is a **PASS**, not a warning: a warning on every legitimate new chain would only teach us to ignore warnings.
+>
+> **3. `MOVIE STYLE: no` must now say why, when a marker actually fires (N3).** The decline was the escape valve. D2 removes the reason to use it; this removes the ability. Three marker phrases are searched — `movie style` / `movie-style`, `interaction scene`, `paired dialogue` / `paired-dialogue` — and the set is deliberately NOT widened here. **Every `MOVIE STYLE…:` declaration line is removed from the text before that search**, because `MOVIE STYLE: no` matched `movie[- ]style` and so marked its own build: until 2026-08-30 an honest `no` could never reach PASS. When a marker still fires from real prose, the decline reads:
+>
+> ```text
+> MOVIE STYLE: no | marker: <movie style | interaction scene | paired dialogue> | why-not: <one line: why that marker is not an interaction scene here>
+> ```
+>
+> The named token must be one of the three AND must actually fire. Missing, placeholder, or naming a token that is not firing → **FAIL** on a build that declares `EVIDENCE PROGRAM: v1`, **WARN** on a pre-program build (forward-only, the split `c_forbidden_words` already uses). Whether the reason is a GOOD one is operator-audited; the checker only verifies it was declared, points at the exact disputed marker, and is not a placeholder.
+>
+> **The shared evidence grammar** used by both new `evidence:` fields verifies five mechanical things and nothing more: the path is repo-relative, the NORMALIZED path stays under `raw/` or `wiki/`, the file exists, `:LINE` is a real line in it, and the prose after the dash is not a placeholder. It deliberately does NOT grep the cited file for the carrier or variant words — sources paraphrase, and a word-match gate would fail true evidence — and it does not judge whether the explanation persuades.
+>
+> **One well-formedness fix reaches all three lanes:** a `MOVIE STYLE SEQUENCE` that names the same beat twice now FAILs. The old parser built a map and silently kept the last value, so a contradictory declaration audited clean or failed later with an order message about a scene the author never meant to write.
+>
+> **Measured blast radius (2026-08-30, whole `videos/` corpus, old auditor vs new):** 5 builds move WARN → FAIL, all of them current-program builds that decline Movie Style while the marker words appear in their own §0 review prose; 3 move WARN → PASS, the builds whose only "marker" was their own declaration line. Nothing else in this rule changes an existing verdict.
 
 ---
 
