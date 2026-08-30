@@ -18878,3 +18878,76 @@ Three lenses found different pieces of one story.
 `tools/test_reconcile_publish_state.py`, `tools/test_daily_autopost.py`,
 `code/instagram_autosync.py`, `code/main.py`, `code/local_transcribe.py`,
 `code/tests/test_instagram_autosync.py`, `code/tests/test_claim_exclusivity.py`.
+
+## v953.4 — THE SYNC IS REASON-DRIVEN, NOT TIMED (2026-08-30)
+
+Operator: *"the check should be smart, not timed."* Correct, and the timer was the
+weakest thing v953 shipped.
+
+**A poll is wrong in both directions at once.** The 6-hour version paid for a
+full HikerAPI history walk on an idle account, AND was still up to six hours late
+when something actually happened. The production log makes the waste plain — four
+consecutive syncs on the evening of 2026-08-29, every one of them `added=0`:
+
+```
+21:10:57 account=4 ok added=0     21:26:07 account=3 ok added=0
+21:40:18 account=1 ok added=0     22:28:29 account=2 ok added=0
+```
+
+### The signals that already existed
+
+The system knows when a sync is worth doing; nobody was asking it. Strongest
+first, with a clock only as a backstop:
+
+| Reason | Trigger | Latency |
+|---|---|---|
+| `requested` | a caller says a post went out — `POST /api/instagram/accounts/{id}/request-sync`, one column write, no API call | **~1 second** (the worker ticks every second) |
+| `never-synced` | no picture at all yet | next tick |
+| `waiting-jobs` | a RECENT exported job has no `published_at`, so a reel for it may exist | ≤30 min (`DISCOVERY_MINUTES` floor) |
+| `backstop` | nothing said anything for 24h | the honest job of a clock |
+
+**Measured end to end in production:** nudge → `HTTP 200 in 0.42s`; the worker
+picked it up **1 second** later and the sync completed 23s after the nudge.
+Against up to six hours.
+
+### The measurement that decided the design, and killed my first idea
+
+My first instinct for `waiting-jobs` was "is there an exported job with no
+`published_at`?" On the live platform that is true **252 times over** — the table
+is full of old abandoned exports — so the gate would have been permanently OPEN
+and told us nothing. Scoped to the freshness window it inverts completely:
+
+| window | exported + unpublished |
+|---|---|
+| all time | **252** |
+| 30 days | 2 |
+| 14 days | 2 |
+| **3 days** (the §R0.1 cap the posting lane already works to) | **0** |
+
+> **A gate that is always open is not a gate.** Check what your condition
+> actually evaluates to on real data before building on it — the difference
+> between 252 and 0 is the difference between a design and a no-op.
+
+### Design notes worth keeping
+
+- **The nudge is self-clearing.** `sync_requested_at > last_synced_at` is the
+  whole condition, so a completed sync retires the request. No second write, no
+  flag to lose, and a crash between the two just means one extra sync.
+- **The cheap half is the point.** The nudge does not sync, does not wait, does
+  not pay and cannot time out — so a publisher on a flaky link can still say
+  "look at account 2" for free. Doing the sync inside that request is what made
+  the old `/sync` endpoint blow gunicorn's timeout (§v953).
+- **Backoff gates every reason, including a nudge.** A broken handle must not
+  spin on a request it cannot satisfy.
+- **The candidate query is memoised for 60s.** The worker ticks every second and
+  the answer cannot change meaningfully inside a minute; a stale "yes" costs one
+  early sync, a stale "no" costs 60 seconds of latency on the weakest signal.
+- **The backstop is 24h, not 6.** Its job is what no signal reports — a reel
+  posted by hand from a phone, a repost, a deleted reel. Naming that honestly is
+  what lets it be rare.
+
+**FILES:** `code/instagram_autosync.py` (`request_sync`,
+`has_fresh_unpublished_export`, `sync_reason_for`, `pick_account` now returns
+`(account, reason)`), `code/models.py` (`sync_requested_at`, `sync_reason`),
+`code/main.py` (`POST …/request-sync`), `tools/publish_reel.py` (`_nudge_sync`),
+`code/tests/test_instagram_autosync.py` (23 tests).
