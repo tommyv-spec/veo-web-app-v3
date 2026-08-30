@@ -3195,6 +3195,20 @@
             min-width: 44px; min-height: 44px; border: 0; background: transparent;
             color: #fff; font: inherit; font-size: 12px; font-weight: 600;
         }
+        .img-viewer-compare {
+            flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+            padding: 6px 12px; background: rgba(0,0,0,0.92);
+            overflow-x: auto;
+        }
+        .img-viewer-compare button {
+            flex: 0 0 auto; min-height: 44px; padding: 0 14px;
+            background: rgba(255,255,255,0.10); color: #e5e7eb;
+            border: 1px solid rgba(255,255,255,0.22); border-radius: 8px;
+            font-family: inherit; font-size: 13px; font-weight: 600;
+            white-space: nowrap; cursor: pointer;
+        }
+        .img-viewer-compare button.active { background: var(--accent); color: #fff; border-color: transparent; }
+        .img-viewer-compare:empty { display: none; }
         .img-viewer-actions {
             flex: 0 0 auto;
             padding: 8px 12px calc(12px + env(safe-area-inset-bottom, 0px));
@@ -25724,6 +25738,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                   '<button class="img-viewer-nav img-viewer-next" id="imgViewerNext" type="button" aria-label="Next variant">&rsaquo;</button>' +
                   '<div class="img-viewer-dots" id="imgViewerDots"></div>' +
                 '</div>' +
+                '<div class="img-viewer-compare" id="imgViewerCompare"></div>' +
                 '<div class="img-viewer-actions">' +
                   '<div class="img-viewer-verdicts">' +
                     '<button id="imgViewerGood" type="button">Keep as usable</button>' +
@@ -25769,6 +25784,9 @@ async function renderAutoEditCard(jobId, hasExport) {
         }
 
         function imgCloseViewer() {
+            // A close mid-hold would otherwise leave imgCompare.restore set,
+            // and the next release would put back a stale picture.
+            imgCompare.restore = null;
             const el = document.getElementById('imgViewer');
             if (el && el.open) el.close();
             document.body.classList.remove('img-viewer-open');
@@ -25788,6 +25806,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                 imgViewerState.variants.map((_, i) =>
                     '<i class="' + (i === imgViewerState.index ? 'on' : '') + '"></i>').join('');
             imgViewerZoomReset();
+            imgViewerBuildCompareBar();
             imgViewerPaintVerdicts();
         }
 
@@ -25916,6 +25935,99 @@ async function renderAutoEditCard(jobId, hasExport) {
             // (image_platform.py:4028) — so do not offer it.
             good.disabled = isChosen;
             bad.disabled = isChosen;
+        }
+
+        // What the hold compares against. Defaults to the previous scene;
+        // any parent can be made the target by tapping its chip.
+        const imgCompare = { url: null, label: null, restore: null };
+
+        function imgViewerBuildCompareBar() {
+            const bar = document.getElementById('imgViewerCompare');
+            if (!bar) return;
+            const node = (imgState.nodes || []).find(n => n.id === imgViewerState.nodeId);
+            const edge = imgPreviousSceneEdge(node);
+            const targets = [];
+
+            if (edge) {
+                const p = imgState.nodesById[edge.parent_node_id];
+                if (p && p.chosen_variant) {
+                    targets.push({ url: p.chosen_variant.image_url, label: '← previous scene' });
+                }
+            }
+            (node && node.parents ? node.parents : []).forEach(e => {
+                if (edge && e.parent_node_id === edge.parent_node_id) return;
+                const p = imgState.nodesById[e.parent_node_id];
+                if (p && p.chosen_variant) {
+                    targets.push({ url: p.chosen_variant.image_url,
+                                   label: (p.name || ('node ' + p.id)).slice(0, 24) });
+                }
+            });
+
+            // A first-scene node may still have upload parents. If there are
+            // no usable targets at all, show nothing rather than a dead control.
+            if (!targets.length) { bar.innerHTML = ''; imgCompare.url = null; return; }
+
+            imgCompare.url = targets[0].url;
+            imgCompare.label = targets[0].label;
+            bar.innerHTML = '<button id="imgCompareHold" class="active">⇄ hold to compare</button>' +
+                targets.map((t, i) =>
+                    '<button data-cmp="' + i + '">' + imgEscape(t.label) + '</button>').join('');
+
+            bar.querySelectorAll('[data-cmp]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const t = targets[parseInt(btn.getAttribute('data-cmp'), 10)];
+                    if (!t) return;
+                    imgCompare.url = t.url;
+                    imgCompare.label = t.label;
+                    bar.querySelectorAll('[data-cmp]').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    // Warm it so the first hold is instant.
+                    const pre = new Image();
+                    pre.src = imgThumbUrl(t.url, 1024);
+                });
+            });
+
+            const hold = document.getElementById('imgCompareHold');
+            hold.setAttribute('aria-pressed', 'false');
+            hold.addEventListener('pointerdown', (e) => {
+                e.preventDefault();
+                if (hold.setPointerCapture) hold.setPointerCapture(e.pointerId);
+                hold.setAttribute('aria-pressed', 'true');
+                imgCompareOn();
+            });
+            ['pointerup', 'pointercancel', 'pointerleave'].forEach(ev =>
+                hold.addEventListener(ev, () => {
+                    hold.setAttribute('aria-pressed', 'false');
+                    imgCompareOff();
+                }));
+            // Keyboard activation toggles; it is the non-hold alternative.
+            // detail === 0 is what distinguishes Enter/Space from a real click.
+            hold.addEventListener('click', (e) => {
+                if (e.detail !== 0) return;
+                const on = hold.getAttribute('aria-pressed') !== 'true';
+                hold.setAttribute('aria-pressed', on ? 'true' : 'false');
+                if (on) imgCompareOn(); else imgCompareOff();
+            });
+
+            const pre = new Image();
+            pre.src = imgThumbUrl(targets[0].url, 1024);
+        }
+
+        // Swap in place: same element, same box, only the bytes change. That
+        // is what makes the difference visible -- nothing moves, so the eye
+        // catches the change instead of re-finding the picture.
+        function imgCompareOn() {
+            const im = document.getElementById('imgViewerImg');
+            if (!im || !imgCompare.url) return;
+            if (imgCompare.restore === null) imgCompare.restore = im.getAttribute('src');
+            im.setAttribute('src', imgThumbUrl(imgCompare.url, 1024));
+        }
+
+        function imgCompareOff() {
+            const im = document.getElementById('imgViewerImg');
+            if (!im || imgCompare.restore === null) return;
+            im.setAttribute('src', imgCompare.restore);
+            imgCompare.restore = null;
         }
 
         // The tile's click handler. On a mouse this hands straight to the
