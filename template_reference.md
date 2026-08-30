@@ -19300,3 +19300,53 @@ structure, `wiki/synthesis/listicle-caption-growth-play.md` (loom URL recorded),
 `wiki/patterns/conventions.md`, `wiki/meta/build-rule-index.md`, `wiki/log.md`. Loom NOT yet
 ingested (download blocked by connection resets — the Surfshark MTU pattern); the evelyn grid scraped
 the same day is the standing ground truth.
+
+## v957 — THE EXPORT DIALOG OPENS LANE-CONFIGURED, AND THE STEP READS AS A SUMMARY (2026-08-30)
+
+**The operator ask, verbatim:** *"in the platform the settings goes directly into the right set up
+and i just reclick and proceed … so i can actually see them … we have different settings when we do
+charswap and music and stuff — so we should clean up and reorganize the settings step."* The dialog
+deliberately still OPENS (visibility was half the ask); it opens CORRECT for the video and LEGIBLE.
+
+**The chain of custody for an opening value (lowest wins first):** ExportSettings model defaults →
+the browser's localStorage → the LANE's derived answers (this rule) → the build's declared
+`export_*` (v951) → whatever the operator edits in the dialog before pressing Export. The summary
+strip at the top names where each decided value came from ("From the build: …" / "Set for this
+lane: …"), and the strip ends "Ready — press Export to proceed", which is the whole intended flow.
+
+**Lane derivation (`auto_finish.derive_lane_defaults`, pure, tested).** Facts come off the job's
+own Clip rows — `render_method`, `swap_audio`, `dialogue_text` (`main._job_export_facts`):
+- **all clips charswap, no speech** → lane `charswap-music` (any `swap_audio: source-original`)
+  or `charswap-silent`: `smart_trim false` + `frames_to_cut_start 7` (the cut-boundary head trim
+  must actually run — v953), `remove_silence false` (nothing to keep), `playback_speed 1.0`
+  (speeding re-times the music). This is the v951 authoring table, computed instead of hoped for.
+- **spoken / mixed / unknown** → derives NOTHING. Turning whisper ON by derivation would change
+  behaviour for the 300+ spoken builds that predate the rule — the measure-the-population lesson
+  (`feedback_measure-the-population-a-default-change-reaches`). Whisper stays a declared choice.
+
+**What auto-finish does NOT inherit.** `_maybe_auto_finish_export` and `derive_export_defaults`
+are untouched: the unattended path still runs DECLARED settings only. An auto-finished build
+already declares its exports (v951 authoring rule + the v956 gate era); deriving silently on the
+unattended path is exactly the class of change v951 refused. The derivation is modal-only — a
+human is looking at it.
+
+**The reorganized step.** On a charswap lane the Speed Up Video, Remove Silence and Voice Clone
+cards FOLD (`display:none`, ids `modalSpeedCard` / `modalSilenceCard` / `modalVoiceCloneRow`),
+with one link — "Show N hidden settings that don't apply to this video" — that reveals them.
+Nothing is removed; the submit path reads controls by id and is visibility-blind (verified).
+Folded cards carry a fold marker so the music pick/clear repaint (`_applyBeatAlignLock`) does not
+resurrect them behind the link's back.
+
+**Degrades everywhere:** endpoint db failure → plain v951 payload; fetch failure → the dialog
+behaves exactly as before v951; lane null/spoken → no strip lane line, no folding, byte-identical
+opening values. The 330+ legacy builds see nothing new unless their clips actually are a swap lane.
+
+**Applies to** the Export Settings modal on every job; derivation activates only on all-charswap
+jobs. Forward-only, no schema change, no worker change.
+
+**Touched:** this deep-dive (canonical), `code/auto_finish.py` (`derive_lane_defaults`,
+`export_modal_defaults(spec, job_facts)`), `code/main.py` (`_job_export_facts`,
+`_export_defaults_payload(job, db)`), `code/static/index.html` (derived apply + summary strip +
+lane folding), `code/tests/test_lane_defaults.py`, `code/tests/test_export_defaults_endpoint.py`,
+`wiki/patterns/conventions.md`, `wiki/meta/build-rule-index.md`, `wiki/log.md`,
+plan `code/docs/superpowers/plans/2026-08-30-lane-aware-export-settings.md`.
