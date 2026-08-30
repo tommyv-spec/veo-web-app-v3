@@ -81,3 +81,18 @@ def test_payload_gathers_facts_from_clip_rows():
     # empty job: no lane claims
     assert main._job_export_facts([]) == {
         "all_charswap": False, "any_source_audio": False, "has_speech": False}
+
+
+def test_payload_db_failure_degrades_to_v951():
+    """A broken clip query must never block the dialog: facts stay None and
+    the payload is exactly the v951 shape (lane None, derived empty)."""
+
+    class _ExplodingDB:
+        def query(self, *a, **k):
+            raise RuntimeError("db is down")
+
+    out = main._export_defaults_payload(_Job(None), _ExplodingDB())
+    assert out["declared"] == []
+    assert out["derived"] == []
+    assert out["lane"] is None
+    assert out["settings"]["smart_trim"] is True
