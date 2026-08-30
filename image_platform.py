@@ -4286,7 +4286,11 @@ async def upload_manual_variant(
 # v756 — thumbnail buckets. The gallery shows tiles at ~128px; serving the
 # full-res PNG (multi-MB) for each is the dominant cold-load cost. ?w=N gives
 # a small webp resized to the nearest bucket, cached next to the original.
-_THUMB_WIDTHS = (128, 256, 512)
+# 1024 added 2026-08-29: a phone screen is ~1170 device pixels wide, so a
+# full-screen review at 512 is soft and the only alternative was the
+# multi-megabyte original. Nearest-match means no existing caller moves --
+# every call site asks for 128 or 256.
+_THUMB_WIDTHS = (128, 256, 512, 1024)
 
 
 def _make_or_get_thumb(abs_path: Path, w: int):
