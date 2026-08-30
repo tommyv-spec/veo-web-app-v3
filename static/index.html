@@ -25080,7 +25080,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                                 <div class="img-variant ${chosen ? 'chosen' : ''} ${isManual ? 'manual-variant' : ''}"
                                      data-track="variant_card"
                                      data-source="${isManual ? 'manual' : 'generated'}"
-                                     onclick="imgChooseVariant(event, ${node.id}, ${v.id})">
+                                     onclick="imgVariantTap(event, ${node.id}, ${v.id})">
                                     <img src="${imgThumbUrl(v.image_url, 256)}" loading="lazy" decoding="async" alt="variant ${v.variant_index}">
                                     ${isManual ? '<div class="manual-badge">M</div>' : ''}
                                     ${beBadge}
@@ -25822,6 +25822,23 @@ async function renderAutoEditCard(jobId, hasExport) {
             // (image_platform.py:4028) — so do not offer it.
             good.disabled = isChosen;
             bad.disabled = isChosen;
+        }
+
+        // The tile's click handler. On a mouse this hands straight to the
+        // existing imgChooseVariant with the same event, so desktop behaviour
+        // is what it was. A real finger/pen activation means "show me that
+        // bigger" even on a hybrid laptop whose primary pointer is a mouse.
+        function imgVariantTap(event, nodeId, variantId) {
+            const pointerType = event && typeof event.pointerType === 'string'
+                ? event.pointerType : '';
+            const coarseFallback = document.body.classList.contains('is-touch');
+            const action = imgVariantTapAction(pointerType, coarseFallback);
+            if (action === 'zoom') {
+                if (event) { event.preventDefault(); event.stopPropagation(); }
+                imgOpenViewer(nodeId, variantId);
+                return;
+            }
+            return imgChooseVariant(event, nodeId, variantId);
         }
 
         // Browser pinch remains enabled. Double-tap and the visible Zoom button
