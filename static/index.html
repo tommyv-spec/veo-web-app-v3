@@ -3260,6 +3260,32 @@
             }
 
             #imagesTab .img-results-panel { padding: 12px; }
+
+            /* 112px of bars before any picture. The header shrinks and keeps
+               the tabs (they live inside it, :3147) plus the drawer button.
+               The action bar's Images group is two buttons; both move into
+               the drawer, so the whole bar goes. */
+            .app-container.tab-images .header { height: 52px; padding: 8px 10px; }
+            .app-container.tab-images .header .logo { display: none; }
+            .app-container.tab-images .action-bar { display: none; }
+
+            .img-drawer-btn {
+                display: inline-flex; align-items: center; justify-content: center;
+                width: 44px; height: 44px; margin-right: 4px;
+                background: transparent; border: none;
+                color: var(--text-primary); font-size: 20px; cursor: pointer;
+            }
+            /* !important only because the element carries an inline
+               display:none that keeps it off desktop. Scoped to the media
+               query and the images tab. */
+            .app-container.tab-images .img-drawer-btn { display: inline-flex !important; }
+            .img-drawer-actions { display: flex !important; }
+
+            /* The drawer contains the existing forms. Keep iOS from zooming
+               the whole page when a 13px input receives focus. */
+            .app-container.tab-images #imagesTab input,
+            .app-container.tab-images #imagesTab select,
+            .app-container.tab-images #imagesTab textarea { font-size: 16px; }
         }
 
         @media (prefers-reduced-motion: reduce) {
@@ -3290,6 +3316,9 @@
     
     <div class="app-container state-initial" id="appContainer">
         <header class="header">
+            <button class="img-drawer-btn" id="imgDrawerBtn" onclick="imgToggleDrawer()"
+                    aria-label="Open builds" aria-controls="imgConfigPanel" aria-expanded="false"
+                    style="display:none;">&#9776;</button>
             <div class="logo">
                 <div class="logo-icon">🎬</div>
                 <h1>KavenoBuilder</h1>
@@ -4101,6 +4130,13 @@ Example: A realistic vertical video of a professional presenter speaking directl
             <div class="img-config-panel" id="imgConfigPanel">
                 <button type="button" class="img-drawer-close" id="imgDrawerClose"
                         aria-label="Close builds" onclick="imgToggleDrawer(false)">&times;</button>
+                <!-- v954 mobile: the action bar is hidden under 900px, so its
+                     two Images controls live here. Hidden on desktop, where
+                     the action bar is still on screen. -->
+                <div class="img-drawer-actions" style="display:none;gap:8px;margin-bottom:12px;">
+                    <button class="btn btn-primary" style="flex:1;min-height:44px;" onclick="imgToggleDrawer(false);imgOpenImportModal();">&#128203; Import</button>
+                    <button class="btn btn-secondary" style="min-height:44px;" aria-label="Open image tutorial" onclick="openTutorial()">&#128214;</button>
+                </div>
                 <!-- New-Node form (toggled by the #imgToggleNewNodeBtn button in the action bar) -->
                 <div class="card" id="imgNewNodeFormCard" style="display:none;">
                     <label class="field-label">Name <span style="color:var(--text-muted);font-weight:400;">(optional)</span></label>
