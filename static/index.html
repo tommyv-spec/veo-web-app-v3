@@ -3311,6 +3311,13 @@
                display:none that keeps it off desktop. Scoped to the media
                query and the images tab. */
             .app-container.tab-images .img-drawer-btn { display: inline-flex !important; }
+            .app-container.tab-images .img-queue-label {
+                display: inline-block !important;
+                margin-left: auto; padding: 4px 10px;
+                background: var(--bg-elevated); border-radius: 999px;
+                color: var(--text-secondary); font-size: 12px; font-weight: 600;
+                font-variant-numeric: tabular-nums; white-space: nowrap;
+            }
             .img-drawer-actions { display: flex !important; }
 
             /* The drawer contains the existing forms. Keep iOS from zooming
@@ -3395,6 +3402,7 @@
             <button class="img-drawer-btn" id="imgDrawerBtn" onclick="imgToggleDrawer()"
                     aria-label="Open builds" aria-controls="imgConfigPanel" aria-expanded="false"
                     style="display:none;">&#9776;</button>
+            <span class="img-queue-label" id="imgQueueLabel" style="display:none;" aria-live="polite"></span>
             <div class="logo">
                 <div class="logo-icon">🎬</div>
                 <h1>KavenoBuilder</h1>
@@ -21361,6 +21369,12 @@ async function renderAutoEditCard(jobId, hasExport) {
                 // Repaint now — the caller is fire-and-forget, so the render
                 // that kicked this off already drew the local-only number.
                 if (typeof imgUpdateTabCount === 'function') imgUpdateTabCount();
+                // v954: the phone's queue position, and the entry point that
+                // opens the all-time head. Both no-op on a desktop.
+                imgPaintQueueLabel();
+                try { await imgOpenApprovalHead(); } catch (e) {
+                    console.warn('[mobile approval entry]', e);
+                }
             } catch (e) {
                 /* keep whatever we had; the counter degrades to local counts */
             }
@@ -25908,6 +25922,69 @@ async function renderAutoEditCard(jobId, hasExport) {
             // \u only takes four hex digits, so an emoji above U+FFFF needs the
             // braced form. '὚5' would silently render as garbage.
             if (btn) btn.textContent = on ? '☰ Phone layout' : '\u{1F5A5} Desktop layout (touch-safe)';
+        }
+
+        // Pure so the awkward case can be checked without a browser: re-picking
+        // an already-approved image takes you OFF the queue, where "0 / 7"
+        // would be a lie and "7 waiting" is the truth.
+        function imgQueueLabel(queue, currentNodeId) {
+            const rows = Array.isArray(queue) ? queue : [];
+            if (!rows.length) return 'all picked';
+            const i = rows.findIndex(q => q.id === currentNodeId);
+            return i >= 0 ? ((i + 1) + ' / ' + rows.length)
+                          : (rows.length + ' waiting');
+        }
+
+        // The server summary is the ALL-TIME queue; imgApprovalQueue() is the
+        // local 3-day window and is only the fallback before the first summary
+        // response lands.
+        function imgApprovalQueueForHeader() {
+            const server = imgState.approvalSummary && imgState.approvalSummary.queue;
+            return Array.isArray(server) ? server : imgApprovalQueue();
+        }
+
+        function imgPaintQueueLabel() {
+            const el = document.getElementById('imgQueueLabel');
+            if (!el) return;
+            el.textContent = imgQueueLabel(
+                imgApprovalQueueForHeader(), imgViewerState.nodeId || imgState.detailNodeId);
+        }
+
+        // any-pointer: coarse, not pointer: coarse — a tablet with a keyboard
+        // case has a fine PRIMARY pointer and a touchscreen, and the viewer is
+        // right for it. Width keeps this off a desktop that merely has a
+        // touchscreen monitor.
+        function imgShouldAutoOpenApprovalViewer() {
+            try {
+                return window.matchMedia('(max-width: 900px)').matches
+                    && window.matchMedia('(any-pointer: coarse)').matches;
+            } catch (e) {
+                return false;
+            }
+        }
+
+        // The phone's front door: open the ALL-TIME queue head in the viewer,
+        // fetching its batch first when it is older than the loaded window.
+        // Never steals the screen from a viewer that is already open.
+        async function imgOpenApprovalHead() {
+            if (!imgShouldAutoOpenApprovalViewer()) return;
+            const viewer = document.getElementById('imgViewer');
+            if (viewer && viewer.open) return;
+
+            const queue = imgApprovalQueueForHeader();
+            const head = queue[0];
+            if (!head) { imgPaintQueueLabel(); return; }
+
+            if (!imgState.nodesById[head.id]) {
+                await imgJumpToNextApproval(); // fetches the old batch when needed
+            }
+            const node = imgState.nodesById[head.id];
+            const first = node && node.variants && node.variants[0];
+            if (!node || !first) return;
+
+            imgSelectNode(node.id);
+            imgOpenViewer(node.id, first.id);
+            imgPaintQueueLabel();
         }
 
         function imgRestoreLayoutPreference() {
