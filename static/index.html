@@ -3317,7 +3317,15 @@
                 background: var(--bg-elevated); border-radius: 999px;
                 color: var(--text-secondary); font-size: 12px; font-weight: 600;
                 font-variant-numeric: tabular-nums; white-space: nowrap;
+                /* Measured: "12 waiting" pushed the header 8px past the screen
+                   and clipped the user menu. The label is the least important
+                   thing in that row, so it is the thing that gives way. */
+                flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
             }
+            /* The avatar identifies the account on a phone; the name is still
+               in the dropdown. Dropping it is what buys the row its room back. */
+            .app-container.tab-images .header .user-name { display: none !important; }
+            .app-container.tab-images .header .user-btn { padding: 4px !important; }
             .img-drawer-actions { display: flex !important; }
 
             /* The drawer contains the existing forms. Keep iOS from zooming
@@ -19866,8 +19874,17 @@ async function renderAutoEditCard(jobId, hasExport) {
             // Load saved minimized preference
             const saved = obLoadState();
             
+            // v955: on a phone the expanded panel takes ~45% of the screen —
+            // measured on the live page, it covered the variants the operator
+            // opened the app to judge. Start it as the tab there instead.
+            // Nothing is lost: the tab reopens it, and an explicit saved
+            // preference still wins, so someone who opens it keeps it open.
+            const _narrow = (() => {
+                try { return window.matchMedia('(max-width: 900px)').matches; }
+                catch (e) { return false; }
+            })();
             // Show sidebar (or minimized tab based on saved preference)
-            if (saved && saved.minimized) {
+            if ((saved && saved.minimized) || (_narrow && !saved)) {
                 document.getElementById('obToggleTab').classList.add('visible');
             } else {
                 document.getElementById('obSidebar').classList.add('open');
