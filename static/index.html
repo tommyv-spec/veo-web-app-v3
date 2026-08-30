@@ -24927,39 +24927,8 @@ async function renderAutoEditCard(jobId, hasExport) {
                 let refTileHtml = '';
                 let refEdge = null;
                 if (node.parents && node.parents.length) {
-                    refEdge = node.parents.find(e =>
-                        (e.role || '').toLowerCase().startsWith('chain_from_image')
-                    );
-                    if (!refEdge) {
-                        const generatedParents = node.parents.filter(e => {
-                            const pn = imgState.nodesById[e.parent_node_id];
-                            return pn && pn.kind === 'generated';
-                        });
-                        if (generatedParents.length) {
-                            // Pick the highest scene_index_in_batch (most recent)
-                            generatedParents.sort((a, b) => {
-                                const an = imgState.nodesById[a.parent_node_id];
-                                const bn = imgState.nodesById[b.parent_node_id];
-                                const ai = (an && an.scene_index_in_batch != null) ? an.scene_index_in_batch : -1;
-                                const bi = (bn && bn.scene_index_in_batch != null) ? bn.scene_index_in_batch : -1;
-                                return bi - ai;
-                            });
-                            refEdge = generatedParents[0];
-                        }
-                    }
-                    if (!refEdge) {
-                        // Legacy fallback — pre-v680 behavior. Only triggers
-                        // when this scene has no chain edge and no generated
-                        // parent (typical for first-scene nodes that only
-                        // bind subject + ingredients).
-                        const nonSubject = node.parents.filter(e =>
-                            (e.role || '').toLowerCase() !== 'subject'
-                        );
-                        if (nonSubject.length) {
-                            nonSubject.sort((a, b) => (b.slot_order || 0) - (a.slot_order || 0));
-                            refEdge = nonSubject[0];
-                        }
-                    }
+                    // v954: same resolver the viewer's compare control uses.
+                    refEdge = imgPreviousSceneEdge(node);
                     if (refEdge) {
                         const refNode = imgState.nodesById[refEdge.parent_node_id];
                         const refThumb = refNode && refNode.chosen_variant ? refNode.chosen_variant.image_url : null;
@@ -25964,6 +25933,46 @@ async function renderAutoEditCard(jobId, hasExport) {
                 return;
             }
             return imgChooseVariant(event, nodeId, variantId);
+        }
+
+        // v680, lifted out of imgRenderNodeDetail so the viewer's compare
+        // control and the grid's reference tile cannot drift apart.
+        //
+        // Order matters: an ingredient parent (the saffron bottle) is bound
+        // before the chain image, so "first parent" was landing on the bottle.
+        //   1. the edge whose role starts chain_from_image
+        //   2. the newest parent NODE of kind 'generated'
+        //   3. legacy: highest slot_order, non-subject
+        function imgPreviousSceneEdge(node) {
+            if (!node || !node.parents || !node.parents.length) return null;
+            const edge = node.parents.find(e =>
+                (e.role || '').toLowerCase().startsWith('chain_from_image'));
+            if (edge) return edge;
+
+            const generated = node.parents.filter(e => {
+                const pn = imgState.nodesById[e.parent_node_id];
+                return pn && pn.kind === 'generated';
+            });
+            if (generated.length) {
+                // Highest scene_index_in_batch = the most recent scene.
+                generated.sort((a, b) => {
+                    const an = imgState.nodesById[a.parent_node_id];
+                    const bn = imgState.nodesById[b.parent_node_id];
+                    const ai = (an && an.scene_index_in_batch != null) ? an.scene_index_in_batch : -1;
+                    const bi = (bn && bn.scene_index_in_batch != null) ? bn.scene_index_in_batch : -1;
+                    return bi - ai;
+                });
+                return generated[0];
+            }
+
+            // Legacy fallback — pre-v680 behavior. Only triggers when this
+            // scene has no chain edge and no generated parent (typical for
+            // first-scene nodes that only bind subject + ingredients).
+            const nonSubject = node.parents.filter(e =>
+                (e.role || '').toLowerCase() !== 'subject');
+            if (!nonSubject.length) return null;
+            nonSubject.sort((a, b) => (b.slot_order || 0) - (a.slot_order || 0));
+            return nonSubject[0];
         }
 
         // The build list is a drawer in the narrow layout. It is a real modal,
