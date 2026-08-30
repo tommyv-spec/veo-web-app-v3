@@ -16600,6 +16600,93 @@ A 10-minute source at fps=2 native = ~1200 frames; the old habit under scale pre
 
 ---
 
+## v888 — BEAT-ALIGNED EXPORT: fill the slot, lay the bed, plan it before you render (2026-08-04; canonical home written 2026-08-30)
+
+**Where this section came from.** v888 shipped on 2026-08-04 with no section here. For three weeks its only rule-level statement was a 2015-character row in `wiki/patterns/conventions.md`, and `code/check_rule_index.py` carried a dated `ROW_BUDGET_EXCEPTIONS` entry whose own text said "REPAIR: write §v888 into template_reference.md, then trim this row and delete this entry." This is that repair (repair matrix `docs/audits/repair-matrix-2026-08-30.md` §2, finding F11). Every claim below was re-verified against the code on 2026-08-30; where the 2026-08-04 record has since gone stale, the correction is marked and dated rather than copied forward.
+
+**Protected function — three separate silent failures.**
+
+1. **ffmpeg `-t` trims DOWN only.** Asking for 5.9s of a 4.0s clip returns 4.0s, with no error and no warning (verified empirically 2026-08-04; `docs/handoff-archive/2026-08.md:2733`). The concat then runs short, every cut after it sits off the bar grid, and nothing in the logs says so. `check_headroom()` in `code/beat_align.py` repeats the reason in its own docstring, because the failure is invisible at every later stage.
+2. **A music bed started at the wrong offset ruins a perfect cut list.** Bar phase comes from WHERE in the track the bed begins. Start it 0.4s early and every cut is 0.4s off the bar, even when each clip is exactly the length the plan asked for.
+3. **The analysis is heavy and the render box is small.** librosa's beat/drop analysis over a whole track peaks around 0.5–1 GB RSS; Render is a 2 GB box with an OOM history. The original design kept analysis strictly author-side for that reason. That constraint has since been solved rather than removed — see clause 3.
+
+### Clause 1 — FILL THE SLOT (retime instead of truncating)
+
+In the `cut_mode: timeline` branch of `code/video_processor.py`, each clip is probed before it is cut. When the source is shorter than the slot it has to fill, or when the clip declares a `clip_speed`, the clip is retimed with `setpts` so the output is exactly `target_duration_s` (`video_processor.py:6214-6290`; the atempo note for audio at `:5957`). The arithmetic:
+
+```
+source_used  = min(src_dur, target_duration_s * requested_speed)
+actual_speed = source_used / target_duration_s          # < 1.0 = slow motion
+```
+
+A short clip therefore SLOWS DOWN to fill its slot rather than leaving a hole. A probe failure or a retime failure is logged (`[VideoProcessor/v888]`) and falls back to the old behaviour — alignment is an enhancement and may never lose an export.
+
+### Clause 2 — THE MUSIC BED (and the authoring contract on its offset)
+
+Before v888 the export had no audio-bed handling at all. Four parameters were added (`video_processor.py:6000-6003`):
+
+| param | meaning |
+|---|---|
+| `music_path` | the track laid under the finished cut |
+| `music_start_s` | offset INTO the track where the bed begins |
+| `music_gain_db` | bed level |
+| `music_mode` | `replace` (silent build) or `mix` (keep the dialogue) |
+
+The bed is muxed AFTER concat (`:6634-6684`). All four default to off, so an export that does not ask for music is byte-identical to before.
+
+**The authoring contract: `music_start_s` MUST equal the beat plan's `music_source_start`.** `beat_align.py` writes that field into the plan JSON (`beat_align.py:521`) because the whole cut list is solved relative to it. Nothing checks the two agree — this is a **prose-only contract**, enforced by the author, and getting it wrong produces a video where every clip length is right and every cut is still off the beat. (In the server-side `solve` path the platform sets the effective bed start itself from the solved first edge, `main.py:12730` + `:12757` — that path cannot disagree with itself. The prose contract binds the author-side CLI path.)
+
+**v888.2 — report the bed.** The first two v888 exports could not answer "did the music actually get laid?", because a failed mux logged and continued. Export stats now carry `music_requested` / `music_filename` / `music_start_s` / `music_mode` / `music_applied` (`video_processor.py:6110-6119`), and `music_applied` is set True ONLY after the mux really succeeded (`:6683`). Same shape as the standing rule that a stage log proves a stage RAN and only a measurement proves its output landed (§v938.1).
+
+### Clause 3 — THE AUTHOR-TIME PLANNER, and the 2026-08-04 memory limit that no longer holds
+
+`code/beat_align.py` lifts the pure core of the operator's own `beat_drop_aligner_v5.py` (the AutoEditing project) — beat salience, downbeat phase, drop detection, pacing curves and both dynamic-programming boundary solvers — and drives it from a build md instead of a folder scan. Two modes:
+
+- **`snap`** (default, safe for narrative builds) — keeps the authored durations and moves each CUT BOUNDARY to the nearest strong beat, bounded by `tol_beats`. Each boundary snaps to its own ideal absolute time, so error never compounds down the reel (`beat_align.py:289-330`).
+- **`solve`** (music-led) — the music picks every duration inside `[min, max]`, clips accelerate into the drop, and a nominated clip lands ON the drop. Authored durations are discarded by design; anything timed to the original lengths desynchronises (`:350-410`).
+
+**CORRECTION, 2026-08-30 (dated, because the old sentence is still quoted in several places).** The original rule said "librosa is deliberately NOT in requirements.txt", and `beat_align.py`'s own module docstring still says so. **That is no longer true.** `librosa>=0.10` and `scipy>=1.10` entered `code/requirements.txt` on 2026-08-04 in `35d7d59` ("v890.2: beat analysis on-box, windowed + cached + memory-gated"), because the operator's requirement was that it work for someone who drags in a song and knows nothing about what is behind it — which rules out both a CLI step and a local worker. The 2 GB constraint was not waived; it was engineered around, with three safeguards in `main.py:12633-12687`:
+
+1. **WINDOW** — only `[music_start − 2s, + authored_total + 8s]` is ever analysed. Measured: 121 MB / 1.9s for a 45s window against 755 MB / 18.9s for a full 200s track. Downsampling instead is NOT viable (11 kHz reports 99.38 BPM and 8 kHz 93.75 against a true 95.70, and a 4% tempo error is ~1.2s of drift over a 30s reel); extrapolating a grid from one window is NOT viable either (0.30s error late in a track, about half a beat).
+2. **CACHE** — the grid is keyed by song content hash plus the exact window, so a re-export or a reused track never re-analyses (`main.py:12649-12659`). This is §v938.1's rule applied correctly: the cache name holds everything baked into it.
+3. **MEMORY GATE** — `mem_guard.headroom_ok(500)` is checked first; too little headroom raises and the export falls back to the authored timings. Falling back is always correct; an OOM is not.
+
+The import still lives INSIDE `analyze_song()` (`beat_align.py:179`), so `main.py` stays importable without librosa, and the whole block is wrapped in `except BaseException` (`main.py:12781`) — not `except Exception`. That is not sloppiness: the first version raised `SystemExit` on a missing librosa, `SystemExit` is a `BaseException`, it escaped the export worker's handler and SIGABRT'd gunicorn three times through a retry loop (`v890.1`, `a114d16`, 2026-08-04). **Beat alignment is an enhancement and must never be able to lose an export.**
+
+### Clause 4 — THE HEADROOM GUARD
+
+A clip renders at a fixed v861 bucket and is trimmed DOWN only, so an aligned target longer than its bucket is fatal (clause 1). `check_headroom()` catches it at PLAN time, where it is still cheap: it maps each scene's target to the smallest v861 bucket that can hold it and fails when the scene's declared `clip_duration_s` (or `--job-duration`) is smaller (`beat_align.py:96-133`). The failure prints the exact `clip_duration_s:` line to set for each scene, and repeats why it is fatal (`:528-547`). `--allow-drift` opts out and says so out loud: *"the reel WILL drift."*
+
+### Clause 5 — UI INTERPLAY: **RESOLVED 2026-08-05, was "UI CONFLICT (unresolved)"**
+
+The original v888 record ended with an open item: the Export Settings modal's **Speed Up Video** (a global `setpts` over the whole concat), **Trim Frames** (start/end per clip) and **Remove Silence** each re-time the finished cut and silently destroy beat alignment, and nothing said so. That item is **closed**. `b0c84cf` ("v890.5: a song makes it a music edit — hide the settings that fight it", 2026-08-05) added `_applyBeatAlignLock()` in `code/static/index.html:15555-15575`, wired to the music-file and beat-align controls (`:15533`, `:15607`). A loaded song makes the three re-timers mutually exclusive with beat alignment, and they are **hidden, not merely greyed out** — the comment above the function gives the reason, and it is worth keeping: *a greyed-out control still reads as "something I should think about."* Any doc still quoting "UI CONFLICT (unresolved)" is stale.
+
+### Known gaps, correctly attributed
+
+The 2026-08-04 record listed `--force-plan` / `--start-at` as parsed-but-never-read and `ffmpeg_setpts_factor` as stale by roughly 3× against `playback_speed`. **Those are gaps in the operator's upstream `beat_drop_aligner_v5.py`, not in this repo** — verified 2026-08-30: `force-plan` and `ffmpeg_setpts_factor` appear nowhere under `code/`, and our own `--start-at` is both declared and read (`beat_align.py:427`, `:461-462`). Carried here only so that anyone who goes back to the upstream project knows what they will find.
+
+**Tests.** `code/tests/test_beat_align.py` holds **28 test functions**, which pytest collects as **32 cases** (one test is parametrized five ways, `:237`). All are librosa-free. This resolves a 28-vs-29 disagreement in the older records: at the landing commit `bd4b5a3` the file had 25 functions and collected 29 cases, so the handoff's "29 tests" was the correct COLLECTED count on its date; three functions were added by `c6ae65e` the next day. Both numbers were right when written, and neither is right now.
+
+### NUMBERING NOTE (v861 fork realized) — v888 and v888.1 are each assigned TWICE
+
+Two unrelated live rules share this number. Neither is retired; both are enforced. Read the file name before assuming which one a comment means.
+
+| token | meaning A (this section) | meaning B (unrelated) |
+|---|---|---|
+| `v888` | beat-aligned export: fill-the-slot retime + music bed (`video_processor.py`), plus the `POST /api/jobs/{id}/upload-music` endpoint (`main.py:10169`) | **upload-reference binding guard** — every Ingredients row typed `character`/`product` with a non-empty Source declares an UPLOAD, and `missing_reference_bindings()` stops the run BEFORE import rather than shipping a build whose product renders as a generic bottle (`send_to_platform.py:218-263`, guard at `:1607`) |
+| `v888.1` | resolve the music bed from R2 before the export starts — the first bed shipped silently unscored because upload and export ran in different containers on ephemeral disk (`main.py:12568-12600`) | **generic reference resolver** — bridges row names, `~/.kaveno/aliases.json` aliases and live node ids so a self-describing build sends with zero flags (`send_to_platform.py:266-300`) |
+| `v888.2` | `music_applied` in the export stats (`video_processor.py:6110-6119`) | — |
+
+Same fork for the two neighbours, recorded here so all three sit in one place: **v890** is the decode START-FRAME-SPEC family in the wiki (canonical: the stage4d schema in `v589_video_understanding.py` + `wiki/meta/decode-grammar-checklist.md` + the `verify_decode_format.py` linter) AND, in `code/`, the beat-align export/UI family `v890`–`v890.7` (`bd4b5a3` … `c6ae65e`). **v893** is SPLIT-LANE DECODE in the wiki (canonical: `decode-grammar-checklist.md` §SPLIT-LANE + `READING_PROFILES`) AND, in `code/`, Flow error-page detection on stored projects (`07e1de5`, `code/tests/test_v893_project_error_page.py`). Both are recorded as reasoned entries in `code/check_rule_index.py` `KNOWN_NON_HEADING_RULES`.
+
+**Scope:** platform-internal (§C). Every export parameter defaults to off, so a build or decode needs no change and existing exports are byte-identical. Forward-only.
+
+**Touched:** this deep-dive (canonical), `code/beat_align.py`, `code/video_processor.py`, `code/main.py`, `code/static/index.html`, `code/finishing_models.py`, `code/requirements.txt`, `code/tests/test_beat_align.py`, `wiki/patterns/conventions.md` (index row, trimmed to budget 2026-08-30), `wiki/meta/build-rule-index.md` §C, `code/check_rule_index.py` (`ROW_BUDGET_EXCEPTIONS` entry deleted 2026-08-30).
+
+**Sources:** operator 2026-08-04 (their existing `AutoEditing` / `beat_drop_aligner_v5` project + "align to the beat and drop") · operator 2026-08-04 on the on-box move ("it has to work for a user who just drags in a song and knows nothing about what is behind it") · `docs/handoff-archive/2026-08.md:2733-2745` (rev 247, the original record incl. the empirical `-t` proof) · live code read 2026-08-30: `video_processor.py`, `beat_align.py`, `main.py`, `static/index.html`, `send_to_platform.py` · commits `bd4b5a3` / `a114d16` / `35d7d59` / `ce7634d` / `b0c84cf` / `c6ae65e` / `07e1de5` · `docs/audits/repair-matrix-2026-08-30.md` §2 (F11 ruling).
+
+---
+
 ## v901 — AUTOMATED PUBLISHING: staged media, brokered posting, and why neither uses our own Meta app (2026-08-22)
 
 **The ask.** Post finished reels automatically, from one machine, to accounts that must stay unlinkable to each other and must survive each other's bans.

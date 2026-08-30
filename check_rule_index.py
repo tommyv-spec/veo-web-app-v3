@@ -138,15 +138,12 @@ ROW_BUDGET = 300
 # repair backlog for the separate rule-content track — an entry here is a debt,
 # not a pass. Key = the row's first-cell v-token exactly as written.
 ROW_BUDGET_EXCEPTIONS: dict[str, str] = {
-    "v888": "2026-08-30 — BEAT-ALIGNED EXPORT has NO §v888 section in "
-            "template_reference.md (grep: 0 hits), so this row is the only "
-            "rule-level statement of it. Its 'UI CONFLICT (unresolved)' clause "
-            "— Speed Up Video / Trim Frames / Remove Silence each re-time the "
-            "finished cut and destroy beat alignment — is in no code file "
-            "either; it survives only in docs/handoff-archive/2026-08.md, "
-            "which is an archive, not a canonical home. REPAIR: write §v888 "
-            "into template_reference.md, then trim this row and delete this "
-            "entry.",
+    # (empty) — the v888 entry was deleted 2026-08-30 when its own repair
+    # instruction was carried out: §v888 now exists in template_reference.md
+    # (with the stale "UI CONFLICT (unresolved)" clause marked RESOLVED by
+    # v890.5 / b0c84cf), so the conventions row was trimmed to the budget and
+    # the excuse is no longer needed. Repair matrix: docs/audits/
+    # repair-matrix-2026-08-30.md §2, Wave 2.
 }
 
 
@@ -205,6 +202,13 @@ KNOWN_NON_HEADING_RULES = {
     "v578": "whisper transcription — decode pipeline; defined in code/CLAUDE.md "
             "+ template_new_format, not a template_reference heading",
     "v585": "Farneback motion detection — decode pipeline; same as v578",
+    "v890": "decode start-frame-spec family; canonical = stage4d schema "
+            "(v589_video_understanding.py) + decode-grammar-checklist + "
+            "verify_decode_format linter; code-side v890.x is the unrelated "
+            "beat-align UI (v861 note); 2026-08-30",
+    "v893": "split-lane decode; canonical = decode-grammar-checklist "
+            "§SPLIT-LANE + READING_PROFILES; code-side v893 is the unrelated "
+            "Flow error-page detection (v861 note); 2026-08-30",
 }
 
 # Rules legitimately classified in MORE THAN ONE primary bucket (§A/§B/§C)
