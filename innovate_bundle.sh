@@ -674,7 +674,15 @@ Step 6 — PRE-OUTPUT VALIDATION GATES (mandatory — fix and re-emit if any fai
     line (v707 Part B)
   Gate 11 — clip transitions are BLEND or FRESH only (v704)
   Gate 12 — HOOK passes v873 coherence + tension + audience filter; apply
-    v598 family-conditional checks only when their evidence trigger is present
+    v598 family-conditional checks only when their evidence trigger is present.
+    Declare the carrier on one line, routing segment last:
+    `HOOK CARRIER: <what it is> | kind: visible|audible|readable | delivers:
+    tension|proof|interruption — <how> | reads at opening speed because: <the
+    first-second cue> | next question opened: <the question> | family: catalyst
+    | text-card | overlay | UNLISTED — <source-derived name>`. The family routes
+    the catalyst check: family: catalyst means the action opens clip 1, while
+    every other family must stage the declared carrier in Scene 1. Declaring a
+    family is not an exemption.
   Gate 13 — Evidence Packet exists, every retrieval row has one of the four
     dispositions, packet/build paths point to each other, and PRIMARY DELTA
     matches exactly: `python tools/check_content_packet.py <build.md>` PASS

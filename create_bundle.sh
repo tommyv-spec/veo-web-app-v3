@@ -633,8 +633,14 @@ violated rules in past LLM outputs:
            | delivers: tension|proof|interruption — <how>
            | reads at opening speed because: <the first-second cue>
            | next question opened: <the question>
+           | family: catalyst | text-card | overlay | UNLISTED —
+             <source-derived name>
          A hook with NO carrier fails, always. UNLISTED — <source-
          derived carrier> is valid.
+         The family routes the catalyst check: family: catalyst means
+         the action opens clip 1, while every other family must stage
+         the declared carrier in Scene 1. Declaring a family is not an
+         exemption.
 
      FAMILY-CONDITIONAL (v598 Q1-Q8): run these only when their
      evidence trigger is present — i.e. the source, or the approved
