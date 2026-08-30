@@ -3182,6 +3182,12 @@
             position: absolute; top: 50%; transform: translateY(-50%);
             width: 44px; height: 44px; border: 0; border-radius: 50%;
             background: rgba(0,0,0,0.58); color: #fff; font-size: 28px;
+            /* z-index is load-bearing, not decoration. The <img> carries a
+               transform for zoom, which gives it its own stacking context, so
+               it paints OVER any positioned sibling that precedes it in the
+               DOM. Without this the ‹ prev button rendered underneath the
+               picture and was invisible while › (which follows it) was fine. */
+            z-index: 2;
         }
         .img-viewer-prev { left: 8px; }
         .img-viewer-next { right: 8px; }
@@ -3286,6 +3292,18 @@
             .app-container.tab-images #imagesTab input,
             .app-container.tab-images #imagesTab select,
             .app-container.tab-images #imagesTab textarea { font-size: 16px; }
+
+            /* The grid is auto-fit at minmax(min(280px,100%),1fr), which on a
+               390px screen fits exactly ONE column — combined with the 85vh
+               image cap that put a single variant per screenful, so comparing
+               four meant scrolling four times. Two up, shorter, so the set is
+               scannable; the viewer is where a picture gets judged properly. */
+            #imagesTab .img-variants-grid {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 8px;
+            }
+            #imagesTab .img-variant img { max-height: 34vh; }
+            #imagesTab .img-variant { border-width: 3px; }
         }
 
         @media (prefers-reduced-motion: reduce) {
@@ -25158,7 +25176,13 @@ async function renderAutoEditCard(jobId, hasExport) {
                         <span class="regen-ring" style="width:12px;height:12px;"></span> Still generating more variants… (showing what's ready)
                     </div>` : ''}
                     <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;font-weight:500;">
-                        ${refTileHtml ? 'Reference + Variants' : 'Variants'} — ${node.chosen_variant_id ? 'click to change selection' : 'click to select'} · drag &amp; drop an image to upload${qcNodeHint}
+                        ${refTileHtml ? 'Reference + Variants' : 'Variants'} — ${
+                            // v954: on touch a tap no longer selects, it opens the
+                            // viewer — so the old wording is simply untrue there.
+                            imgIsTouchDevice()
+                                ? 'tap to open it full screen, then pick'
+                                : (node.chosen_variant_id ? 'click to change selection' : 'click to select')
+                        } · drag &amp; drop an image to upload${qcNodeHint}
                     </div>
                     <div class="img-variants-grid" data-node-id="${node.id}">
                         ${refTileHtml}
