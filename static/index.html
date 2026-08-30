@@ -15029,7 +15029,18 @@ Ambient: same kitchen room tone, soft pour sound.
             if (_dNamed.has('frames_to_cut_start')) currentSettings.frames_to_cut_start = _dSet.frames_to_cut_start;
             if (_dNamed.has('frames_to_cut_end')) currentSettings.frames_to_cut_end = _dSet.frames_to_cut_end;
             if (_dNamed.has('smart_trim')) currentSettings.smart_trim = _dSet.smart_trim;
-            
+
+            // v957 — the lane's derived answers. The endpoint has already
+            // resolved precedence (derived < declared); apply every field it
+            // decided so the dialog opens on the video's own setup even when
+            // the build declared nothing.
+            const _dvNamed = new Set(declaredExport.derived || []);
+            for (const k of _dvNamed) {
+                if (k in currentSettings) currentSettings[k] = _dSet[k];
+            }
+            const _laneName = declaredExport.lane || null;
+            console.log('[v957] lane:', _laneName, 'derived:', declaredExport.derived);
+
             // Build toggle position based on smart_trim setting
             const togglePosition = currentSettings.smart_trim ? 'right:2px' : 'left:2px';
             const toggleBg = currentSettings.smart_trim ? 'var(--accent)' : 'var(--bg-elevated)';
@@ -15217,7 +15228,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                     </div>
 
                                     <!-- Speed -->
-                                    <div class="videoOnlySetting" style="background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;">
+                                    <div class="videoOnlySetting" id="modalSpeedCard" style="background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;">
                                         <div style="display:flex;justify-content:space-between;align-items:center;">
                                             <span style="font-size:11px;">⚡ Speed Up Video<span style="font-size:9px;color:var(--text-muted);display:block;">Make final video slightly faster</span></span>
                                             <div class="toggle" id="modalSpeedToggle" onclick="
@@ -15243,7 +15254,7 @@ Ambient: same kitchen room tone, soft pour sound.
                                     </div>
 
                                     <!-- Remove Silence -->
-                                    <div class="videoOnlySetting" style="background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;">
+                                    <div class="videoOnlySetting" id="modalSilenceCard" style="background:var(--bg-input);border-radius:var(--radius-sm);padding:12px;">
                                         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0;">
                                             <span style="font-size:11px;font-weight:600;">🔇 Remove Silence</span>
                                             <div class="toggle" id="modalRemoveSilence"></div>
@@ -15442,7 +15453,7 @@ Ambient: same kitchen room tone, soft pour sound.
                             ` : ''}
 
                             <!-- VOICE CLONE SECTION -->
-                            <div style="grid-column: 1 / -1; border-top: 1px solid var(--border-color); padding-top: 12px; margin-top: 4px;">
+                            <div id="modalVoiceCloneRow" style="grid-column: 1 / -1; border-top: 1px solid var(--border-color); padding-top: 12px; margin-top: 4px;">
                                 <div id="vcToggleRow" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;" onclick="document.getElementById('vcToggle').classList.toggle('active');document.getElementById('vcSettings').style.display=document.getElementById('vcToggle').classList.contains('active')?'block':'none';document.getElementById('confirmExportBtn').innerHTML=document.getElementById('vcToggle').classList.contains('active')?'🎬🎤 Export + Voice Clone':'🎬 Export';">
                                     <div style="display:flex;align-items:center;gap:8px;">
                                         <span style="font-size:13px;">🎤</span>
@@ -15886,56 +15897,105 @@ Ambient: same kitchen room tone, soft pour sound.
                     if (el) el.textContent = s;
                 };
 
-                if (_dNamed.has('smart_trim')) _setToggle('modalSmartTrim', _dSet.smart_trim);
-                if (_dNamed.has('frames_to_cut_start')) _setValue('modalFramesStart', _dSet.frames_to_cut_start);
-                if (_dNamed.has('frames_to_cut_end')) _setValue('modalFramesEnd', _dSet.frames_to_cut_end);
+                // v957 — one applier, used twice. The lane's DERIVED answers go
+                // on first, the build's DECLARED answers second, so a build
+                // that names a field still wins over the lane default. The
+                // endpoint already resolved that inside `settings`; this order
+                // just keeps the CONTROLS agreeing with it.
+                const _applyKeys = (keys) => {
+                    if (keys.has('smart_trim')) _setToggle('modalSmartTrim', _dSet.smart_trim);
+                    if (keys.has('frames_to_cut_start')) _setValue('modalFramesStart', _dSet.frames_to_cut_start);
+                    if (keys.has('frames_to_cut_end')) _setValue('modalFramesEnd', _dSet.frames_to_cut_end);
 
-                if (_dNamed.has('remove_silence')) {
-                    _setToggle('modalRemoveSilence', _dSet.remove_silence);
-                    const sc = document.getElementById('silenceControlsSection');
-                    if (sc) sc.style.display = _dSet.remove_silence ? 'block' : 'none';
-                }
-                if (_dNamed.has('silence_mode') && typeof window.setSilMode === 'function') {
-                    window.setSilMode(_dSet.silence_mode);
-                }
-                // The slider and its printed value are two elements; the
-                // localStorage restore above sets both, so this must too or
-                // the dialog shows a stale number next to a moved slider.
-                if (_dNamed.has('silence_trigger')) {
-                    _setValue('modalSilenceTrigger', _dSet.silence_trigger);
-                    _setText('silenceTriggerValue', Number(_dSet.silence_trigger).toFixed(1) + 's');
-                }
-                if (_dNamed.has('silence_keep')) {
-                    _setValue('modalSilenceKeep', _dSet.silence_keep);
-                    _setText('silenceKeepValue', Number(_dSet.silence_keep).toFixed(1) + 's');
-                }
-                if (_dNamed.has('silence_threshold')) _setValue('modalSilenceThreshold', _dSet.silence_threshold);
-
-                if (_dNamed.has('playback_speed')) {
-                    const on = _dSet.playback_speed > 1.01;
-                    _setToggle('modalSpeedToggle', on);
-                    const sec = document.getElementById('speedSliderSection');
-                    if (sec) sec.style.display = on ? 'block' : 'none';
-                    if (on) {
-                        _setValue('modalSpeed', Math.round(_dSet.playback_speed * 100));
-                        _setText('speedValue', Number(_dSet.playback_speed).toFixed(2) + '×');
+                    if (keys.has('remove_silence')) {
+                        _setToggle('modalRemoveSilence', _dSet.remove_silence);
+                        const sc = document.getElementById('silenceControlsSection');
+                        if (sc) sc.style.display = _dSet.remove_silence ? 'block' : 'none';
                     }
-                }
-
-                // Tell the operator which ones came from the build, so the
-                // choice stays checkable in front of him rather than after
-                // the fact in a log.
-                const banner = document.getElementById('v951DeclaredBanner');
-                if (banner) {
-                    if (_dNamed.size) {
-                        banner.style.display = 'block';
-                        banner.textContent = '📄 ' + _dNamed.size +
-                            ' setting' + (_dNamed.size === 1 ? '' : 's') +
-                            ' from this build: ' + [..._dNamed].join(', ');
-                    } else {
-                        banner.style.display = 'none';
+                    if (keys.has('silence_mode') && typeof window.setSilMode === 'function') {
+                        window.setSilMode(_dSet.silence_mode);
                     }
-                }
+                    // The slider and its printed value are two elements; the
+                    // localStorage restore above sets both, so this must too or
+                    // the dialog shows a stale number next to a moved slider.
+                    if (keys.has('silence_trigger')) {
+                        _setValue('modalSilenceTrigger', _dSet.silence_trigger);
+                        _setText('silenceTriggerValue', Number(_dSet.silence_trigger).toFixed(1) + 's');
+                    }
+                    if (keys.has('silence_keep')) {
+                        _setValue('modalSilenceKeep', _dSet.silence_keep);
+                        _setText('silenceKeepValue', Number(_dSet.silence_keep).toFixed(1) + 's');
+                    }
+                    if (keys.has('silence_threshold')) _setValue('modalSilenceThreshold', _dSet.silence_threshold);
+
+                    if (keys.has('playback_speed')) {
+                        // The toggle is what the submit path reads: OFF means
+                        // 1.0 whatever the slider says. So speed 1.0 must turn
+                        // the toggle off and fold the slider away, exactly as
+                        // the modal's own click handler does.
+                        const on = _dSet.playback_speed > 1.01;
+                        _setToggle('modalSpeedToggle', on);
+                        const sec = document.getElementById('speedSliderSection');
+                        if (sec) sec.style.display = on ? 'block' : 'none';
+                        if (on) {
+                            _setValue('modalSpeed', Math.round(_dSet.playback_speed * 100));
+                            _setText('speedValue', Number(_dSet.playback_speed).toFixed(2) + '×');
+                        }
+                    }
+                };
+                _applyKeys(_dvNamed);   // the lane's answers
+                _applyKeys(_dNamed);    // the build's answers — declared wins
+
+                // v957 — the summary strip: what this dialog opened on and WHY,
+                // one line per source. The operator reads this, then clicks Export.
+                (function fillSummaryStrip() {
+                    const el = document.getElementById('v951DeclaredBanner');
+                    if (!el) return;
+                    const laneLabels = {
+                        'charswap-music': 'character swap · keeps its own audio',
+                        'charswap-silent': 'character swap · silent',
+                        'spoken': 'spoken video',
+                        'mixed': 'mixed clips', 'unknown': null,
+                    };
+                    const names = {smart_trim: 'Smart Trim', frames_to_cut_start: 'Head trim',
+                        frames_to_cut_end: 'End trim', remove_silence: 'Silence removal',
+                        playback_speed: 'Speed', silence_mode: 'Silence mode'};
+                    const fmt = (k) => {
+                        const v = _dSet[k];
+                        const label = names[k] || k;
+                        if (typeof v === 'boolean') return `${label} ${v ? 'ON' : 'OFF'}`;
+                        if (k === 'playback_speed') return `${label} ${v}×`;
+                        return `${label} ${v}`;
+                    };
+                    const parts = [];
+                    const laneText = _laneName && laneLabels[_laneName];
+                    if (laneText) parts.push(`<b>This video: ${laneText}.</b>`);
+                    const decl = (declaredExport.declared || []);
+                    const derv = (declaredExport.derived || []);
+                    if (decl.length) parts.push(`From the build: ${decl.map(fmt).join(' · ')}.`);
+                    if (derv.length) parts.push(`Set for this lane: ${derv.map(fmt).join(' · ')}.`);
+                    if (!parts.length) return;      // nothing to say — strip stays hidden
+                    parts.push(`<span style="color:var(--success);">Ready — press Export to proceed, or adjust below.</span>`);
+                    el.innerHTML = parts.join(' ');
+                    el.style.display = 'block';
+                })();
+
+                // v957 — fold the cards that do not apply to this lane. Nothing
+                // is removed; one click reveals them.
+                (function collapseForLane() {
+                    if (!_laneName || !_laneName.startsWith('charswap')) return;
+                    const ids = ['modalSpeedCard', 'modalSilenceCard', 'modalVoiceCloneRow'];
+                    const cards = ids.map(id => document.getElementById(id)).filter(Boolean);
+                    if (!cards.length) return;
+                    cards.forEach(c => c.style.display = 'none');
+                    const strip = document.getElementById('v951DeclaredBanner');
+                    const link = document.createElement('a');
+                    link.href = 'javascript:void(0)';
+                    link.textContent = ` Show ${cards.length} hidden setting${cards.length > 1 ? 's' : ''} that don't apply to this video`;
+                    link.style.cssText = 'color:var(--text-muted);text-decoration:underline;font-size:11px;display:inline-block;margin-left:4px;';
+                    link.onclick = () => { cards.forEach(c => c.style.display = ''); link.remove(); };
+                    (strip && strip.style.display !== 'none' ? strip : document.querySelector('#exportSettingsModal h3'))?.appendChild(link);
+                })();
             } catch (e) { console.warn('[v951] could not apply declaration', e); }
 
             // Master audio mode: disable toggles that conflict with per-clip speed alignment
