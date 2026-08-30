@@ -15578,6 +15578,12 @@ Ambient: same kitchen room tone, soft pour sound.
                     if (fe) fe.value = 0;
                 }
                 document.querySelectorAll('.videoOnlySetting').forEach(el => {
+                    // v957 — a card folded away for this LANE stays folded. Without
+                    // this, picking a song and clearing it again restored the very
+                    // cards the lane fold had hidden, while the reveal link that is
+                    // supposed to bring them back was still sitting in the strip.
+                    // The reveal link clears the attribute, so it wins here too.
+                    if (el.dataset.v957Folded) return;
                     el.style.display = hasSong ? 'none' : '';
                 });
                 const note = document.getElementById('modalMusicOnlyNote');
@@ -15987,13 +15993,24 @@ Ambient: same kitchen room tone, soft pour sound.
                     const ids = ['modalSpeedCard', 'modalSilenceCard', 'modalVoiceCloneRow'];
                     const cards = ids.map(id => document.getElementById(id)).filter(Boolean);
                     if (!cards.length) return;
-                    cards.forEach(c => c.style.display = 'none');
+                    // The attribute is the flag: it marks the card as folded BY THE
+                    // LANE, so any code that shows a group of controls (today
+                    // _applyBeatAlignLock, tomorrow whatever else) can leave it alone.
+                    cards.forEach(c => { c.style.display = 'none'; c.dataset.v957Folded = '1'; });
                     const strip = document.getElementById('v951DeclaredBanner');
                     const link = document.createElement('a');
                     link.href = 'javascript:void(0)';
                     link.textContent = ` Show ${cards.length} hidden setting${cards.length > 1 ? 's' : ''} that don't apply to this video`;
                     link.style.cssText = 'color:var(--text-muted);text-decoration:underline;font-size:11px;display:inline-block;margin-left:4px;';
-                    link.onclick = () => { cards.forEach(c => c.style.display = ''); link.remove(); };
+                    link.onclick = () => {
+                        // Clearing the flag un-folds the card for good. The music
+                        // rule still governs after that: with a song loaded these
+                        // controls genuinely do not apply, so hand the final say
+                        // back to _applyBeatAlignLock rather than forcing them on.
+                        cards.forEach(c => { delete c.dataset.v957Folded; c.style.display = ''; });
+                        if (typeof window._applyBeatAlignLock === 'function') window._applyBeatAlignLock();
+                        link.remove();
+                    };
                     (strip && strip.style.display !== 'none' ? strip : document.querySelector('#exportSettingsModal h3'))?.appendChild(link);
                 })();
             } catch (e) { console.warn('[v951] could not apply declaration', e); }
