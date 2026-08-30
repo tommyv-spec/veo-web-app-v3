@@ -1196,9 +1196,11 @@ Existing `code/v589_video_understanding.py` cascade (LM Studio → Gemini → hu
 
 **Source: 2026-05-06 ChatGPT-output audit.** A bundle-driven create produced a menopause hot-flash video titled "When The Heat Hits At Night" with a generic woman-in-dim-bedroom HOOK image. No prop. No motion. No visual pun. No taboo trigger. No physical evidence. The 430KB of upstream rules were technically respected but the HOOK had zero scroll-stop power. **The hook image is the variable that decides 50 views vs 5M views.** Every other rule (chain-binding, action_note grammar, M ≤ N cardinality, persona consistency) is a ZERO-multiplier if the HOOK doesn't stop the scroll.
 
-### The test (5 questions, all must answer YES before locking the HOOK image)
+### The test (8 questions, all must answer YES before locking the HOOK image)
 
-Before emitting `### Image 1` for any video, the LLM must walk through these five questions. If ANY answers NO, the hook is too weak to ship — replace it.
+Before emitting `### Image 1` for any video, the LLM must walk through these questions. If ANY answers NO, the hook is too weak to ship — replace it.
+
+> **AMENDMENT (2026-08-30, forward-only — repair matrix F1, `docs/audits/repair-matrix-2026-08-30.md` §1 + §4 Wave 1 item 1).** **Q1–Q5 below are FAMILY-CONDITIONAL, not universal.** They are the observed contract of the **SPECTACLE-PROP HOOK FAMILY** — the family this test was derived from — and they apply when the source video, or the approved direction, shows a manipulated symptom/proxy object. **What IS universal for every hook is the CARRIER TEST:** frame one must carry an immediately legible attention device — visible, audible, or readable — that creates the next question. Declare it before locking the hook: `HOOK CARRIER: <what it is> | kind: visible | audible | readable | delivers: tension | proof | interruption — <how> | reads at opening speed because: <the cue the target viewer catches in the first second> | next question opened: <the question>`. **A hook with NO carrier still fails, always** — that clause never relaxes; only the assumption that the carrier must be a manipulated prop does. **Evidence — four proven videos from four DISTINCT producer chains, none of which has a manipulated prop in frame one:** `raw/videos/decoded_agegap-couple-71-52-nyc-venice-montage-menopause-readcaption-salvora-rhodiola-marianna-fb.md` (burned-in numeral pair over two bodies — a READABLE carrier); `raw/videos/decoded_nadja-76-quadruped-glute-series-captioned-drill-superwoman-track-barre-studio-ig.md` (number-vs-body contradiction); `raw/videos/decoded_reaction-duet-taken-down-three-herbs-lymph-evertide-comment-lymph-ig.md` (keyed shouting face — a VISIBLE emotional carrier, no prop); `raw/videos/decoded_5signs-sugar-dranaka-labcoat-apothecary-comment-yes-ig.md` (caption card + collage). **NOTE on that last decode (repair-matrix N6):** its persona is a lab-coat doctor, which root `CLAUDE.md` §8 hard-bans. It is cited here as FALSIFYING EVIDENCE against the universality claim ONLY — it is never a template, and nothing in it may be staged. **Operator-ratified precedent:** HANDOFF rev 279 and rev 290 (`docs/handoff-archive/2026-08.md`) already made Q6 and Q8 family-conditional and already replaced the closed Q1–Q8 language in `code/innovate_bundle.sh` with v873 plus family-conditional v598 checks; this amendment finishes that same move for Q1–Q5 and carries it into `create_bundle.sh` + `lift_bundle.sh`. **Unlisted carriers are valid**, on the wording the Q8 amendment already uses — *an unlisted mechanism derived from the source is valid* — declared as `UNLISTED — <source-derived carrier>`. **Combination:** v873 (coherence + tension + filter + desire) stays the universal hook decision test; the carrier declaration is how frame one satisfies it; Q1–Q5 are the spectacle-prop family's own way of building a carrier, and outside that family they are a comparison lens, never a gate.
 
 **Q1. PHYSICAL OBJECT in the hook?**
 
@@ -1394,6 +1396,8 @@ If ANY no → reject hook. Q8 fails most often when Q1-Q7 pass with
 "gentle gesture + clean kitchen + soft saffron pinch" — that's the
 psychologically-dead trap.
 ```
+
+**Read Q1–Q5 through the 2026-08-30 amendment block above** (repair matrix F1): they are the spectacle-prop family's contract, not a universal law — what every hook must answer is the CARRIER TEST (`HOOK CARRIER:` declared), and only a hook with no carrier at all fails on that clause.
 
 **Read Q6 and Q8 through their 2026-08-09 amendment blocks above**: Q6's clinical rows are retired (§8), its test is the authority-match principle; Q8's four-mechanism checklist is family-conditional (spectacle-prop hooks) — the universal hook gate is v873.
 
@@ -2625,7 +2629,7 @@ For every Image N where the prompt body, action_note (in any scene that uses ima
 
 The video frontmatter (or the `## Sources` block immediately under the title) MUST cite at minimum:
 
-1. **2 specific raw/decoded files** that this script adapts from — e.g. `raw/dr_kim_belly_burn_male_decoded.md (clinical-authority HOOK pattern)` + `raw/decoded_corella_saffron_blood_sugar_v584.md (podiatrist + patient active diagnostic)`. Each citation includes the parenthetical PATTERN being borrowed.
+1. **2 specific raw/decoded files** that this script adapts from — e.g. `raw/dr_kim_belly_burn_male_decoded.md (clinical-authority HOOK pattern)` *(historical label — source file no longer in raw/; kept as a shape example, do not cite it as a live source)* + `raw/decoded_corella_saffron_blood_sugar_v584.md (podiatrist + patient active diagnostic)`. Each citation includes the parenthetical PATTERN being borrowed. **Cite files that exist**: check the path before writing the citation — a citation to a missing file is not corpus grounding.
 2. **The niche voiceover-script wiki page** — `wiki/voiceover-scripts/<niche>.md` — this is the corpus-distilled hook library for the niche. The HOOK line should adapt one of the listed `Opening line` entries from that page's `## Hooks` table.
 3. **A "NOTE on cell honesty"** — explicit declaration of whether the cell is corpus-validated (✓ direct adaptation), corpus-adjacent (✓ adapted from neighboring niche), or speculative (⚠ novel territory). Speculative cells should be flagged so the operator knows it's an experiment.
 
@@ -3919,6 +3923,8 @@ In every case the corpus pattern is: **multiple cascading force-verbs + specific
 
 For every HOOK image and HOOK action_note, all 3 must answer YES. (This applies to spectacle-driven scenes too — RECIPE product-cascade, EXPLAIN demonstration. Anywhere the corpus uses force-verbs, magnitude must be cartoon-grade.)
 
+> **AMENDMENT (2026-08-30, forward-only — repair matrix F2, `docs/audits/repair-matrix-2026-08-30.md` §1 + §4 Wave 1 item 2).** **Q9a (2-3× scale-up), Q9b (pre-impact debris) and Q9c (3+ force-verb chain) are the DEFAULT TACTICS of the FORCE-SPECTACLE HOOK FAMILY — they are not validity conditions for every hook.** **Protected function:** when a hook's job IS a physical spectacle, realistic magnitude reads as real life and gets scrolled past; the tactics exist to push it past realism. **Trigger:** the source-derived hook job is force-spectacle, OR the approved direction chooses force-spectacle. Grade magnitude only then. **Precedent already in this canon:** §v601 above states the same thing for a different family — *"The HOOK magnitude (per v600) for SYMPTOM-DEMO videos is NOT cartoon-physics SLAM… The magnitude is in the AUTHORITY of the diagnostic moment, not in physical violence"* — and the "When v600 applies" list below already carves out CTA/OUTRO talking-head scenes and the Day-1 frame of a Day-1/Day-14 transformation. Family-relative magnitude is therefore the canon's existing reading, not a new one. **Further evidence — four proven videos from four distinct producer chains whose hooks carry NO force verb at all** (silent montage, caption card, talking-head, keyed reaction): `raw/videos/decoded_agegap-couple-71-52-nyc-venice-montage-menopause-readcaption-salvora-rhodiola-marianna-fb.md`; `raw/videos/decoded_nadja-76-quadruped-glute-series-captioned-drill-superwoman-track-barre-studio-ig.md`; `raw/videos/decoded_reaction-duet-taken-down-three-herbs-lymph-evertide-comment-lymph-ig.md`; `raw/videos/decoded_5signs-sugar-dranaka-labcoat-apothecary-comment-yes-ig.md` — this last one is a lab-coat doctor persona that root `CLAUDE.md` §8 hard-bans (repair-matrix N6): falsifying evidence only, NEVER a template. **Decision test:** name the hook's magnitude carrier and grade it in its own family's terms — `HOOK MAGNITUDE: force-spectacle | authority-of-the-finding | readable contradiction | emotional reaction | UNLISTED — <source-derived name>` plus the evidence for that read. When the answer is force-spectacle, Q9a+Q9b+Q9c all apply as written and none may be softened. **Boundary:** this scopes MAGNITUDE grading only. It lifts nothing else — v873's hook contract, §8 compliance, and the carrier test in the §v598 2026-08-30 amendment all still apply to every hook, force-verb or not. **Unlisted case:** a hook whose magnitude lives somewhere none of the above names is valid when declared `UNLISTED — <source-derived name>` with its evidence.
+
 **Q9a. PROP POSITION / SIZE / QUANTITY exaggerated past realism?**
 
 - Real: pillow at counter level. Viral: pillow HELD HIGH OVERHEAD with both arms fully extended.
@@ -3994,7 +4000,7 @@ This is what passes v600.
 ### When v600 applies
 
 v600 applies to any image/scene where the corpus rule calls for force-verb spectacle:
-- **Always** the HOOK (Scenes 1-2)
+- **Whenever the HOOK's own job is force-spectacle** (Scenes 1-2) — that is the trigger, not the scene number; a hook whose job is carried by a caption, a montage, a reaction or a spoken contradiction has no force verb for v600 to grade
 - **Often** the RECIPE product-reveal scene (saffron CASCADE, capsule POUR, banana SLAM)
 - **Sometimes** the EXPLAIN scene if it includes a demonstration (anatomy fat-melt, marker-trace)
 
@@ -11734,6 +11740,8 @@ The HOOK image then renders the soaked-sponge concept; v720c body-pose + v716 an
 6. **OBJECT's connection to symptom is RHETORICAL not LITERAL** — no biology-class metaphor; the spectacle IS the rhetorical move
 7. **8-second force-verb arc with visible state change** (squeeze→cascade / lift→drip / press→release)
 
+> **AMENDMENT (2026-08-30, forward-only — repair matrix F3, `docs/audits/repair-matrix-2026-08-30.md` §1 + §4 Wave 1 item 3).** **Invariants 1–7 above, and sub-rules v736e / v736f / v736g (plus v736a and v736c where they name prop and texture), are the ONE-GLANCE COMPOSITION CONTRACT OF THE SPECTACLE-PROP HOOK FAMILY — not a universal law of viral hooks.** Look at where they came from: all six derivation hooks named at the top of this section (chicken-in-pot · honeycomb-mass · dual-prostate-models · shirtless-strain · pickle-vs-belly · hanging-peanut-sack) are manipulated-prop concepts. That is one family's evidence, so the claims it supports are one family's claims. **What stays UNIVERSAL and machine-enforced: v736h.1** — prompt economy, the six-block render order, the three-layer depth limit, the detail budget, the meta-ban and the beat-ban. Those are RENDERER MECHANICS (Banana 2's attention budget), they hold whatever the hook is about, and they were already carved out of the DNA framing by the 2026-07-21 update — this amendment simply names why. This split follows the house precedent set when **v736b was made evidence-triggered** by its own 2026-08-09 amendment above (a trend must be evidenced and its grammar actually transferred; a catalog tag alone proves nothing). **Therefore the three universality claims in this section — "every viral hook in the 80/20 corpus satisfies all 7", "The DNA generalizes to ANY niche", and "the 7 invariants are constants" — are hereby qualified to the spectacle-prop family.** Those sentences are left standing as the dated 2026-05-14 record of that family's extraction, per the house convention that an amendment supersedes rather than rewrites; read them through this block. **Other hook families declare their own one-glance relation** instead of pretending to satisfy invariants 1–7: `ONE-GLANCE CONTRACT: <name> | what the eye lands on first | what it must read in one second | why that reading opens the next question`, with `UNLISTED — <source-derived name>` valid — for example the agegap numeral-pair-over-two-bodies (`raw/videos/decoded_agegap-couple-71-52-nyc-venice-montage-menopause-readcaption-salvora-rhodiola-marianna-fb.md`), where the burned-in numbers own the glance and no prop is held at all; also `raw/videos/decoded_nadja-76-quadruped-glute-series-captioned-drill-superwoman-track-barre-studio-ig.md`, `raw/videos/decoded_reaction-duet-taken-down-three-herbs-lymph-evertide-comment-lymph-ig.md`, and `raw/videos/decoded_5signs-sugar-dranaka-labcoat-apothecary-comment-yes-ig.md` (that last is a §8-banned lab-coat doctor persona per repair-matrix N6 — falsifying evidence only, never a template). **Boundary:** nothing here relaxes v736h.1, v873, the §v598 carrier test, or any compliance gate; and inside the spectacle-prop family invariants 1–7 apply in full, unsoftened. **Combination:** decide the family from the source first, then apply that family's one-glance contract; v736h.1 applies to the prompt either way.
+
 The DNA generalizes to ANY niche. Test (10 niches mapped against the 7 invariants):
 
 | Niche | Hero object (Inv 1+3) | Hands (Inv 2) | Force-verb arc (Inv 7) | Trend |
@@ -19060,3 +19068,63 @@ derivation a declared artifact and gate on its existence, not its correctness.
 **Touched:** this deep-dive (canonical), `code/image_platform.py` (`parse_finishing_section`),
 `code/tests/test_overlay_sense.py`, `code/test_finishing_spec.py` (fixture + scan-window repair),
 `wiki/synthesis/readcaption-caption-engine.md`, `wiki/patterns/conventions.md`, `wiki/log.md`.
+
+## v956.1 — THE OVERLAY STRUCTURE: AGE CLAIM → ONE AMPLIFIER → PROMISE + ROUTE (2026-08-30)
+
+**The operator's second correction, same day, verbatim:** *"this still doesn't make any sense and it
+can improve further … check other examples of accounts and videos i gave you already … to also change
+the message and overall structure"* — pointing at @evelyngraceafter60 and the mentor loom
+(`https://www.loom.com/share/fc6b8cc9ed84418db36279cad7ae4b17`, "Instagram - 10 August 2026"). v956
+fixed WHICH denials are legal; this fixes the SHAPE. Fixing the denial domain alone still produces a
+denial-led overlay, and the evidence says denial-led is the WEAKEST variant of the lane.
+
+**The evidence (evelyn grid, 15 reels with likes — `raw/marketing/competitor-readcaption-evelyn-2026-08-10.md`;
+likes are inference, not measurement):**
+- Her best post (34,069): `I'M 69` + `My metabolic age is 32.7` + `I eat my skincare every morning /
+  This is what I eat in a day 👇` — decimal biometric + contradiction, zero denials.
+- Second tier (12,090): `I'M 69` + `I eat my botox every morning.` + `My metabolic age is 35.7` +
+  route — contradiction-led.
+- Her WORST static post (760): `No Plastic Surgery / No Crash Diets / No Brutal Workouts` + age +
+  promise — the denial-LED shape, the one our martha reformer copied.
+
+**The structure (three slots, in order):**
+1. **AGE CLAIM** — big, top: `I'M 78`. (v944 `overlay_age`.)
+2. **ONE AMPLIFIER line** — the message; quantifies or dramatizes the gap between the claimed age and
+   the feat on screen. The observed classes, ranked by the source's own numbers (open list, §3.6):
+   - **language contradiction** — "I eat my skincare/botox every morning" (nonsense until the caption
+     resolves it; the caption then lists the foods);
+   - **precise-decimal biometric** — "My metabolic age is 32.7" (decimal reads truer than round);
+   - **symptom denial** — the mentor's noemi example: "No stiff joints, no ankle pains, no diabetes"
+     (denies the EXPECTED pains of the age, amplifying the gap);
+   - **objection pre-kill** — "No surgeries / No pain pills" (denies the suspected cheat; v956 rules
+     its domain). Legal, and measured WEAKEST as the lead — use it as seasoning, not the message.
+3. **PROMISE + ROUTE** — names the caption's payoff in the FEAT's domain and points:
+   "7 boring things I do daily to move like this" + `(READ CAPTION) 👇`. **The overlay never
+   delivers the value — it routes** (the lane's one invariant, `listicle-caption-growth-play` §narrows).
+
+**The mentor's own martha prescription (call 2026-08-13, precedence per §8):** *"big age claim top,
+minimal text — 'I'm 74, but my legs feel 20' + 'This is my secret. Read caption'."* So the martha
+reformer overlay becomes:
+```
+- **overlay_age:** I'M 78
+- **overlay_block:** but my body moves like 40 / This is my secret.
+- **overlay_footer:** (READ CAPTION)
+- **overlay_sense:** reformer mobility at 78 -> amplifier: contradiction (age vs how she moves) -> promise routes to caption; no denial lines
+```
+Test variant (evelyn's highest-liked class, via [[readcaption-split-test-method]] one variable at a
+time): `I eat my pain relief every morning / This is what I eat in a day` — the caption then resolves
+it (foods + the saffron slot).
+
+**What this changes about v956's gate: nothing mechanical.** `overlay_sense` is still required with
+any `overlay_block`; its derivation line now names WHICH amplifier class the block uses and why it
+fits the feat (see the example above). An overlay with no denial lines still writes the derivation —
+the amplifier, like the denial, is derived from the clip or it is borrowed.
+
+**Applies to** every readcaption overlay, all lane accounts, forward-only. The published reformer
+post keeps its burned overlay; the corrected block above is for the next version.
+
+**Touched:** this deep-dive (canonical), `wiki/synthesis/readcaption-caption-engine.md` §overlay
+structure, `wiki/synthesis/listicle-caption-growth-play.md` (loom URL recorded),
+`wiki/patterns/conventions.md`, `wiki/meta/build-rule-index.md`, `wiki/log.md`. Loom NOT yet
+ingested (download blocked by connection resets — the Surfshark MTU pattern); the evelyn grid scraped
+the same day is the standing ground truth.

@@ -31,6 +31,11 @@
         "what": "the first draft of v950 clause 4 — the 'CHAIN THE PREVIOUS SEGMENT for identity' heading and its claim that chaining stops 'a 78-year-old drifting back toward a generic forty-year-old between clips'",
         "superseded_by": "the narrowed v950 clause 4 in this checkout (2026-08-29, after an operator correction and a Codex peer review)",
         "why": "the retired lines assert something the lane's own mechanism inverts and that the one render did not show. The read-caption overlay CLAIMS a high age and the picture is SUPPOSED to look younger than the claim — that gap is the hook (control overlay 'I'M 74 ... I do daily to move like I'm 35'; amplifier 'my biological age is 41.3'; mentor's 'move like I'm 35'; the model account @agelessjudy; momohsen64 at 62 reading forty). So 'drifting younger' was never a defect to prevent. The peer review then caught that the replacement claim ('the drift that matters is identity') was ALSO unproven at n=1. The clause now separates PROVEN (wardrobe, footwear, room, light carry), UNPROVEN (face/identity fidelity, eye-checked against the avatar every time) and NOT A TARGET (apparent age). Rule coverage unchanged: v950 is still one section with one heading, and check_rule_index.py stays PASS."
+      },
+      {
+        "what": "four lines the Wave-1 rule-applicability repairs corrected in place: the §v598 heading 'The test (5 questions...)' and its 'walk through these five questions' intro; the §v600 'When v600 applies' bullet '**Always** the HOOK (Scenes 1-2)'; and the §v613b example citation line naming raw/dr_kim_belly_burn_male_decoded.md with no caveat",
+        "superseded_by": "the three dated 2026-08-30 AMENDMENT blocks in this checkout (§v598 F1, §v600 F2, §v736.1 F3), per docs/audits/repair-matrix-2026-08-30.md §4 Wave 1 items 1-3, operator-acked",
+        "why": "each retired line states as universal something the corpus falsifies, or points at a file that does not exist. (1)+(2) the heading and intro said FIVE questions while EIGHT follow — Q6/Q7/Q8 were added later and the count was never updated; the corrected lines say eight and the F1 amendment scopes Q1-Q5 to the spectacle-prop hook family, since four proven hooks from four distinct producer chains (agegap numeral pair, nadja number-vs-body, reaction-duet keyed face, 5signs caption card) open with no manipulated prop at all. (3) '**Always** the HOOK' contradicted the line directly above it ('applies to any image/scene where the corpus rule calls for force-verb spectacle'), the §v601 carve-out already in canon ('the magnitude is in the AUTHORITY of the diagnostic moment, not in physical violence') and the does-not-apply list three lines below; the replacement states the family trigger instead. (4) raw/dr_kim_belly_burn_male_decoded.md is not present anywhere under raw/ (find returns nothing), so the example taught authors to cite a missing file as corpus grounding; the line is KEPT with a '(historical label — source file no longer in raw/)' annotation plus a check-the-path instruction, not deleted. Nothing was removed in any of the four: every table, example and historical sentence stands, and each amendment supersedes in place per the house convention. check_rule_index.py stays PASS."
       }
     ],
     "retired_line_sha256_16": [
@@ -56,6 +61,7 @@
       "2efd9fa2bca4ca9f",
       "2fbea49f68946ed7",
       "303c658f68d722cb",
+      "306a76079860f02b",
       "310e7e0890eb74c6",
       "32536201ada55da2",
       "3679b605a23e9502",
@@ -95,6 +101,7 @@
       "82ba3d1a95395352",
       "8319455714f30698",
       "84ba65d643d28e22",
+      "8a062e86139076eb",
       "8b9733038343f3e5",
       "8e458f23cae266ca",
       "9224c5e45fdde52a",
@@ -119,6 +126,7 @@
       "b29cd149bc8d2476",
       "b5db14ee5f2c79b2",
       "b8e68ebd2521a4b8",
+      "b9bce39d877e9469",
       "ba722180168df058",
       "bae2bc13f66ed8e0",
       "bb4b40770881ff95",
@@ -152,9 +160,22 @@
       "f9a75a1750fad242",
       "fa79e3cedc6d72f9",
       "fbd9794a9b619c8f",
+      "fc5e323234ecd237",
       "fdbe670cc6b410b9",
       "fe414e71ff3c3199",
       "fea1646800696566"
+    ]
+  },
+  "template_new_format.md": {
+    "_reason_groups": [
+      {
+        "what": "the v883 Movie Style instruction comment's closed emotion list: `MOVIE STYLE EMOTION: admiration | jealousy | cheating`",
+        "superseded_by": "the same comment line extended with `| betrayal | UNLISTED — <source-derived name>` (2026-08-30, docs/audits/repair-matrix-2026-08-30.md §3 F10a, Wave 1 item 9, operator-acked)",
+        "why": "the list was missing `betrayal`, which the SAME comment block already routes two lines further down ('Betrayal uses: event | aftermath | comfort | age | need question | reveal | body open'), so the skeleton contradicted itself and an author following the emotion line could not declare the betrayal lane it then describes. UNLISTED follows root CLAUDE.md §3.6 (creative lists are open; closed lists stay closed only when truly exhaustive) and the auditor's emotion half was already fixed — the template comment was the lagging surface. Zero parser impact: the line lives inside an HTML comment, not in parsed grammar."
+      }
+    ],
+    "retired_line_sha256_16": [
+      "a916f8ded965de13"
     ]
   }
 }

@@ -619,13 +619,38 @@ violated rules in past LLM outputs:
 
 [11] HOOK-IMAGE POWER TEST (v598) — THIS IS THE BIGGEST VIRAL LEVER.
      Every other rule above is a ZERO-MULTIPLIER if the HOOK image
-     doesn't stop the scroll. Before locking Image 1 / Scene 1, all
-     FIVE questions must answer YES:
+     doesn't stop the scroll.
+
+     UNIVERSAL (every hook, no exceptions):
+       - v873 HOOK CONTRACT — coherence (image 1 SHOWS the object AND
+         the change the line names) + tension (<fact A> BUT <fact B>)
+         + filter (who self-selects, from what cue) + desire (fact B
+         names the result the customer is buying).
+       - CARRIER TEST — frame one must carry an immediately legible
+         attention device (visible / audible / readable) that creates
+         the next question. Declare it:
+           HOOK CARRIER: <what it is> | kind: visible|audible|readable
+           | delivers: tension|proof|interruption — <how>
+           | reads at opening speed because: <the first-second cue>
+           | next question opened: <the question>
+         A hook with NO carrier fails, always. UNLISTED — <source-
+         derived carrier> is valid.
+
+     FAMILY-CONDITIONAL (v598 Q1-Q8): run these only when their
+     evidence trigger is present — i.e. the source, or the approved
+     direction, is a SPECTACLE-PROP hook (a manipulated symptom /
+     proxy object). Outside that family they are a comparison lens,
+     NOT a gate: proven hooks carry the glance on a burned-in numeral
+     pair, a caption card, a montage or a keyed reaction face with no
+     prop in frame one. Canonical: template_reference.md §v598
+     2026-08-30 amendment (Q1-Q5) + 2026-08-09 amendments (Q6, Q8).
 
      Q1. PHYSICAL OBJECT in the hook? (foreground prop being held /
          manipulated / shown — banana / seed jar / papaya / anatomy
          torso / alarm clock / faucet / pill bottle / saffron thread).
-         Persona talking with empty hands FAILS — refuse the draft.
+         Inside the spectacle-prop family, persona talking with empty
+         hands FAILS — refuse the draft. Outside it, the declared
+         HOOK CARRIER answers this instead.
 
      Q2. VISIBLE MOTION at second 0-2s? (SLAM / POUR / SPRAY / GRIND /
          SMASH / DROP / LIFT / REVEAL / SQUEEZE / TWIST or rapid
@@ -798,7 +823,9 @@ violated rules in past LLM outputs:
          psychologically-dead trap. Spectacle requires VIOLENCE +
          SHAME + AGENT + TABOO, not just objects + motion.
 
-     If ANY of Q1-Q8 fail, REJECT the hook and propose 3 alternatives
+     If the v873 contract or the CARRIER TEST fails, REJECT the hook —
+     those are universal. If the hook IS spectacle-prop and any of
+     Q1-Q8 fail, REJECT it too, and propose 3 alternatives
      pulling from the corpus surrogate library in template_reference.md
      §"Corpus-grounded surrogate library" + persona x setting
      authority pairings + Q8 mechanism stack templates before emitting

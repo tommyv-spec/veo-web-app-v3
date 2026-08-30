@@ -833,7 +833,7 @@ Support-image stills usually differ from the 9:16 talking head — set their rea
      Standard lane:
      MOVIE STYLE: yes
      MOVIE STYLE VARIANT: standard
-     MOVIE STYLE EMOTION: admiration | jealousy | cheating
+     MOVIE STYLE EMOTION: admiration | jealousy | cheating | betrayal | UNLISTED — <source-derived name>
      VISIBLE AFTER-STATE: <what the hook already shows>
      MOVIE STYLE SEQUENCE: trigger=Scene N | answer=Scene N | wrong guess=Scene N | age=Scene N | press=Scene N | reveal=Scene N | body open=Scene N
      AGE PAYLOAD: <literal spoken age words> | scene=N
