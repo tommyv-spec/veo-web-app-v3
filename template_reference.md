@@ -19194,10 +19194,18 @@ minimal text — 'I'm 74, but my legs feel 20' + 'This is my secret. Read captio
 reformer overlay becomes:
 ```
 - **overlay_age:** I'M 78
-- **overlay_block:** but my body moves like 40 / This is my secret.
+- **overlay_block:** but I move like I'm 40 / This is my secret.
 - **overlay_footer:** (READ CAPTION)
 - **overlay_sense:** reformer mobility at 78 -> amplifier: contradiction (age vs how she moves) -> promise routes to caption; no denial lines
 ```
+
+**READ-CLEAN applies to overlay text (operator, same day: "this one is not really grammarly
+correct, be careful").** §5.4 names spoken `line:` fields; burned overlay text is MORE exposed —
+it sits on screen the whole clip. Every overlay line must parse aloud as English on its own. The
+specific trap: elliptical age comparisons drop the pronoun — "moves like 40" reads as "moves like
+the number 40"; write "like I'm 40" / "like it's 40". The mentor's spoken "my legs feel 20" is
+idiomatic in speech; written text keeps the full comparison. Read each overlay line aloud before
+locking, exactly as §5.4 requires for lines.
 Test variant (evelyn's highest-liked class, via [[readcaption-split-test-method]] one variable at a
 time): `I eat my pain relief every morning / This is what I eat in a day` — the caption then resolves
 it (foods + the saffron slot).
