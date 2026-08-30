@@ -3335,6 +3335,38 @@
         @media (prefers-reduced-motion: reduce) {
             #imagesTab .img-config-panel { transition: none; }
         }
+
+        /* The escape hatch. Forcing the desktop layout means every width-gated
+           rule above must lose, so this is the one place a wide selector and
+           !important are correct — it is a user override, not a style.
+           Layout ONLY: a finger tap still previews, because that gate is the
+           event's pointerType and nothing here touches it. */
+        body.force-desktop-layout #imagesTab .img-config-panel {
+            position: static !important; transform: none !important;
+            width: auto !important; height: calc(100vh - 64px - 42px) !important;
+            z-index: auto !important; border-right: 1px solid var(--border-color) !important;
+            border-bottom: 0 !important;
+        }
+        body.force-desktop-layout #imagesTab {
+            grid-template-columns: var(--img-sidebar-w, 380px) 1fr !important;
+            min-width: 1100px; /* explicit escape hatch: the page may pan */
+        }
+        body.force-desktop-layout #imagesTab .img-results-panel {
+            order: 0 !important; height: calc(100vh - 64px - 42px) !important;
+        }
+        body.force-desktop-layout #imagesTab .img-config-panel { order: 0 !important; }
+        body.force-desktop-layout .header { height: 64px !important; padding: 0 24px !important; }
+        body.force-desktop-layout .header .logo { display: flex !important; }
+        body.force-desktop-layout .action-bar { display: flex !important; height: 48px !important; }
+        /* Extra `.app-container` is load-bearing, not noise. The media rule is
+           `.app-container.tab-images .img-drawer-btn` and it ALSO carries
+           !important, so between two important declarations specificity
+           decides: (0,3,0) beat this override at (0,2,1) and the hamburger
+           stayed on screen next to a restored desktop layout. The neighbours
+           below need no such help because their media rules are not important. */
+        body.force-desktop-layout .app-container .img-drawer-btn { display: none !important; }
+        body.force-desktop-layout .img-drawer-close { display: none !important; }
+        body.force-desktop-layout .img-drawer-actions { display: none !important; }
     </style>
 </head>
 <body>
@@ -4180,6 +4212,7 @@ Example: A realistic vertical video of a professional presenter speaking directl
                 <div class="img-drawer-actions" style="display:none;gap:8px;margin-bottom:12px;">
                     <button class="btn btn-primary" style="flex:1;min-height:44px;" onclick="imgToggleDrawer(false);imgOpenImportModal();">&#128203; Import</button>
                     <button class="btn btn-secondary" style="min-height:44px;" aria-label="Open image tutorial" onclick="openTutorial()">&#128214;</button>
+                    <button class="btn btn-secondary" id="imgLayoutBtn" style="min-height:44px;" onclick="imgToggleDesktopLayout()">&#128421; Desktop layout (touch-safe)</button>
                 </div>
                 <!-- New-Node form (toggled by the #imgToggleNewNodeBtn button in the action bar) -->
                 <div class="card" id="imgNewNodeFormCard" style="display:none;">
@@ -6610,6 +6643,7 @@ Ambient: same kitchen room tone, soft pour sound.
           // is correct before anything renders. Spacing/fallback only -- it
           // never decides whether an activation may pick.
           imgApplyTouchClass();
+          imgRestoreLayoutPreference();
           // v954: settle the drawer closed once on startup, so in the narrow
           // layout the transformed-offscreen panel is marked inert instead of
           // sitting invisibly in the tab order.
@@ -25858,6 +25892,32 @@ async function renderAutoEditCard(jobId, hasExport) {
         function imgClearPickFailure() {
             const box = document.getElementById('imgViewerError');
             if (box) box.hidden = true;
+        }
+
+        // Remembered per device. If a phone layout ever gets in the way, the
+        // old one is one tap away and stays that way across reloads.
+        //
+        // LAYOUT ONLY. It does not re-enable tap-to-pick: that gate is the
+        // event's own pointerType, so a finger still previews here.
+        function imgToggleDesktopLayout() {
+            const on = !document.body.classList.contains('force-desktop-layout');
+            imgToggleDrawer(false); // also clears the drawer's inert/aria state
+            document.body.classList.toggle('force-desktop-layout', on);
+            try { localStorage.setItem('imgForceDesktopLayout', on ? '1' : '0'); } catch (e) {}
+            const btn = document.getElementById('imgLayoutBtn');
+            // \u only takes four hex digits, so an emoji above U+FFFF needs the
+            // braced form. '὚5' would silently render as garbage.
+            if (btn) btn.textContent = on ? '☰ Phone layout' : '\u{1F5A5} Desktop layout (touch-safe)';
+        }
+
+        function imgRestoreLayoutPreference() {
+            try {
+                if (localStorage.getItem('imgForceDesktopLayout') === '1') {
+                    document.body.classList.add('force-desktop-layout');
+                    const btn = document.getElementById('imgLayoutBtn');
+                    if (btn) btn.textContent = '☰ Phone layout';
+                }
+            } catch (e) { /* private mode — the default layout is fine */ }
         }
 
         // No confirmation step — operator's call, 2026-08-29. PICK & NEXT is a
