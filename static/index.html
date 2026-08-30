@@ -6382,6 +6382,10 @@ Ambient: same kitchen room tone, soft pour sound.
         });
 
         window.addEventListener("DOMContentLoaded", async () => {
+          // v954: first, so every mobile CSS rule that keys off body.is-touch
+          // is correct before anything renders. Spacing/fallback only -- it
+          // never decides whether an activation may pick.
+          imgApplyTouchClass();
           _kanbanOriginalHTML = document.getElementById("jobsList")?.innerHTML || null;
           // Auto re-render Instagram + local-folder panels on every page load /
           // hard refresh (operator 2026-07-25). Both are FREE backend re-fetches
@@ -25443,6 +25447,50 @@ async function renderAutoEditCard(jobId, hasExport) {
                 try { await imgRefreshNodes(); } catch (_) {}
             }
         }
+
+        // ====================================================================
+        // v954 — mobile. Two gates, deliberately different:
+        //   LAYOUT  switches on WIDTH (@media max-width: 900px)
+        //   ACTION  follows the actual PointerEvent in imgVariantTap
+        // body.is-touch is spacing/fallback only; it never authorizes a pick.
+        // ====================================================================
+
+        function imgIsTouchDevice() {
+            try {
+                return !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+            } catch (e) {
+                // A browser without matchMedia is a desktop browser old enough
+                // that guessing "touch" would be the worse mistake.
+                return false;
+            }
+        }
+
+        // What this exact activation should do. The real PointerEvent wins;
+        // media-query state is only a fallback for old/synthetic click events.
+        //
+        // This is one line on purpose. It is the entire safety fix — a tap
+        // used to approve the image with no confirmation and then auto-advance
+        // — and a decision that important should be checkable without a
+        // browser. See code/tests/ui/checks/mobile_tap.mjs.
+        function imgVariantTapAction(pointerType, coarseFallback) {
+            if (pointerType === 'mouse') return 'pick';
+            if (pointerType) return 'zoom';
+            return coarseFallback ? 'zoom' : 'pick';
+        }
+
+        function imgApplyTouchClass() {
+            try {
+                document.body.classList.toggle('is-touch', imgIsTouchDevice());
+            } catch (e) { /* body not ready yet — the DOMContentLoaded call covers it */ }
+        }
+
+        // A tablet can gain or lose a pointer mid-session (keyboard case on,
+        // stylus paired). Cheap to follow; the class is the only thing that
+        // has to stay true.
+        try {
+            const _ptr = window.matchMedia('(pointer: coarse)');
+            if (_ptr.addEventListener) _ptr.addEventListener('change', imgApplyTouchClass);
+        } catch (e) { /* no matchMedia — nothing to follow */ }
 
         // v940 — tag a NON-chosen variant 'still_good' or 'rejected'.
         //
