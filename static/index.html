@@ -3126,6 +3126,69 @@
             border-radius: 10px; background: rgba(255,255,255,0.22);
             font-size: 10px; font-weight: 700; letter-spacing: .4px;
         }
+
+        /* ====================================================================
+           v954 mobile — full-screen variant viewer.
+           This is an isolated dialog component. Width-only page changes remain
+           inside the Images-scoped media query; the closed dialog has no old path.
+           ==================================================================== */
+        .img-viewer {
+            position: fixed; inset: 0; z-index: 10000;
+            width: 100vw; height: 100dvh; max-width: none; max-height: none;
+            margin: 0; padding: 0; border: 0;
+            background: #000;
+            flex-direction: column;
+            user-select: none;
+        }
+        .img-viewer:not([open]) { display: none; }
+        .img-viewer[open] { display: flex; }
+        .img-viewer::backdrop { background: rgba(0,0,0,0.88); }
+        .img-viewer-top {
+            flex: 0 0 auto; height: 52px;
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 0 8px; color: #fff; font-size: 13px;
+        }
+        .img-viewer-close {
+            width: 44px; height: 44px;
+            display: flex; align-items: center; justify-content: center;
+            background: transparent; border: none; color: #fff;
+            font-size: 24px; line-height: 1; cursor: pointer;
+        }
+        .img-viewer-stage {
+            flex: 1 1 auto; position: relative; overflow: hidden;
+            display: flex; align-items: center; justify-content: center;
+            /* Horizontal pointer motion belongs to the carousel. Vertical
+               browser movement and pinch zoom remain available. */
+            touch-action: pan-y pinch-zoom;
+        }
+        .img-viewer-stage img {
+            width: 100%; height: 100%;
+            object-fit: contain;
+            transform-origin: 0 0;
+            will-change: transform;
+            -webkit-user-drag: none;
+        }
+        .img-viewer-dots {
+            position: absolute; left: 0; right: 0; bottom: 8px;
+            display: flex; justify-content: center; gap: 6px;
+            pointer-events: none;
+        }
+        .img-viewer-dots i {
+            width: 6px; height: 6px; border-radius: 50%;
+            background: rgba(255,255,255,0.35);
+        }
+        .img-viewer-dots i.on { background: #fff; }
+        .img-viewer-nav {
+            position: absolute; top: 50%; transform: translateY(-50%);
+            width: 44px; height: 44px; border: 0; border-radius: 50%;
+            background: rgba(0,0,0,0.58); color: #fff; font-size: 28px;
+        }
+        .img-viewer-prev { left: 8px; }
+        .img-viewer-next { right: 8px; }
+        .img-viewer-zoom {
+            min-width: 44px; min-height: 44px; border: 0; background: transparent;
+            color: #fff; font: inherit; font-size: 12px; font-weight: 600;
+        }
     </style>
 </head>
 <body>
@@ -25491,6 +25554,185 @@ async function renderAutoEditCard(jobId, hasExport) {
             const _ptr = window.matchMedia('(pointer: coarse)');
             if (_ptr.addEventListener) _ptr.addEventListener('change', imgApplyTouchClass);
         } catch (e) { /* no matchMedia — nothing to follow */ }
+
+        // The viewer is built once and reused. Rebuilding it per open would
+        // re-download the picture on every tap.
+        //
+        // A native <dialog> opened with showModal() gives the focus trap, the
+        // Escape key and the inert background for free -- all three are things
+        // a hand-rolled overlay gets wrong.
+        function imgViewerEl() {
+            let el = document.getElementById('imgViewer');
+            if (el) return el;
+            el = document.createElement('dialog');
+            el.className = 'img-viewer';
+            el.id = 'imgViewer';
+            el.setAttribute('aria-label', 'Review image variants');
+            el.innerHTML =
+                '<div class="img-viewer-top">' +
+                  '<button class="img-viewer-close" id="imgViewerClose" aria-label="Close">&times;</button>' +
+                  '<span id="imgViewerCount"></span>' +
+                  '<button class="img-viewer-zoom" id="imgViewerZoomBtn" type="button">Zoom</button>' +
+                '</div>' +
+                '<div class="img-viewer-stage" id="imgViewerStage">' +
+                  '<button class="img-viewer-nav img-viewer-prev" id="imgViewerPrev" type="button" aria-label="Previous variant">&lsaquo;</button>' +
+                  '<img id="imgViewerImg" alt="">' +
+                  '<button class="img-viewer-nav img-viewer-next" id="imgViewerNext" type="button" aria-label="Next variant">&rsaquo;</button>' +
+                  '<div class="img-viewer-dots" id="imgViewerDots"></div>' +
+                '</div>';
+            document.body.appendChild(el);
+            document.getElementById('imgViewerClose').addEventListener('click', imgCloseViewer);
+            document.getElementById('imgViewerPrev').addEventListener('click', () => imgViewerGo(-1));
+            document.getElementById('imgViewerNext').addEventListener('click', () => imgViewerGo(1));
+            document.getElementById('imgViewerZoomBtn').addEventListener('click', imgViewerZoomToggle);
+            // Fires for Escape and for close() alike, so the body class cannot
+            // be left behind by a dismissal we did not route through our button.
+            el.addEventListener('close', () => {
+                document.body.classList.remove('img-viewer-open');
+                imgViewerZoomReset();
+            });
+            imgWireViewerGestures(el);
+            return el;
+        }
+
+        // Which node and which variant the viewer is showing. Held here rather
+        // than read back out of the DOM so a background refresh re-rendering
+        // the detail pane cannot move the viewer out from under a thumb.
+        const imgViewerState = { nodeId: null, index: 0, variants: [] };
+
+        function imgOpenViewer(nodeId, variantId) {
+            const node = (imgState.nodes || []).find(n => n.id === nodeId);
+            if (!node || !node.variants || !node.variants.length) return;
+            imgViewerState.nodeId = nodeId;
+            imgViewerState.variants = node.variants.slice();
+            const i = imgViewerState.variants.findIndex(v => v.id === variantId);
+            imgViewerState.index = i >= 0 ? i : 0;
+            const el = imgViewerEl();
+            if (!el.open) el.showModal();
+            document.body.classList.add('img-viewer-open');
+            imgViewerRender();
+            document.getElementById('imgViewerClose').focus();
+        }
+
+        function imgCloseViewer() {
+            const el = document.getElementById('imgViewer');
+            if (el && el.open) el.close();
+            document.body.classList.remove('img-viewer-open');
+            imgViewerZoomReset();
+        }
+
+        function imgViewerRender() {
+            const el = imgViewerEl();
+            const v = imgViewerState.variants[imgViewerState.index];
+            if (!v) return;
+            // 1024 rather than 256: this is the size the picture is actually
+            // being judged at. The bucket is added in Task 9.
+            el.querySelector('#imgViewerImg').src = imgThumbUrl(v.image_url, 1024);
+            el.querySelector('#imgViewerCount').textContent =
+                (imgViewerState.index + 1) + ' / ' + imgViewerState.variants.length;
+            el.querySelector('#imgViewerDots').innerHTML =
+                imgViewerState.variants.map((_, i) =>
+                    '<i class="' + (i === imgViewerState.index ? 'on' : '') + '"></i>').join('');
+            imgViewerZoomReset();
+        }
+
+        function imgViewerGo(delta) {
+            const n = imgViewerState.variants.length;
+            if (!n) return;
+            imgViewerState.index = (imgViewerState.index + delta + n) % n;
+            imgViewerRender();
+        }
+
+        // Browser pinch remains enabled. Double-tap and the visible Zoom button
+        // toggle the same image-level 2.5x inspection state.
+        const imgViewerZoom = { scale: 1, x: 0, y: 0, panning: false, sx: 0, sy: 0 };
+
+        function imgViewerZoomApply() {
+            const im = document.getElementById('imgViewerImg');
+            if (!im) return;
+            im.style.transform = 'translate(' + imgViewerZoom.x + 'px,' + imgViewerZoom.y + 'px) scale(' + imgViewerZoom.scale + ')';
+        }
+
+        function imgViewerZoomReset() {
+            imgViewerZoom.scale = 1; imgViewerZoom.x = 0; imgViewerZoom.y = 0;
+            imgViewerZoomApply();
+            const btn = document.getElementById('imgViewerZoomBtn');
+            if (btn) btn.textContent = 'Zoom';
+        }
+
+        function imgViewerZoomToggle() {
+            if (imgViewerZoom.scale > 1) {
+                imgViewerZoomReset();
+                return;
+            }
+            imgViewerZoom.scale = 2.5;
+            imgViewerZoom.x = 0; imgViewerZoom.y = 0;
+            imgViewerZoomApply();
+            const btn = document.getElementById('imgViewerZoomBtn');
+            if (btn) btn.textContent = 'Reset zoom';
+        }
+
+        function imgWireViewerGestures(root) {
+            const stage = root.querySelector('#imgViewerStage');
+            let sx = 0, sy = 0, moved = false, lastTap = 0;
+
+            stage.addEventListener('touchstart', (e) => {
+                if (e.touches.length !== 1) return;
+                sx = e.touches[0].clientX; sy = e.touches[0].clientY;
+                moved = false;
+                imgViewerZoom.panning = imgViewerZoom.scale > 1;
+                imgViewerZoom.sx = imgViewerZoom.x; imgViewerZoom.sy = imgViewerZoom.y;
+            }, { passive: true });
+
+            stage.addEventListener('touchmove', (e) => {
+                if (e.touches.length !== 1) return;
+                const dx = e.touches[0].clientX - sx;
+                const dy = e.touches[0].clientY - sy;
+                if (Math.abs(dx) > 8 || Math.abs(dy) > 8) moved = true;
+                if (imgViewerZoom.panning) {
+                    imgViewerZoom.x = imgViewerZoom.sx + dx;
+                    imgViewerZoom.y = imgViewerZoom.sy + dy;
+                    imgViewerZoomApply();
+                }
+            }, { passive: true });
+
+            stage.addEventListener('touchend', (e) => {
+                const t = (e.changedTouches && e.changedTouches[0]) || null;
+                if (!t) return;
+                const dx = t.clientX - sx;
+                const dy = t.clientY - sy;
+
+                // Swipe between variants — only at 1x, and only when the
+                // gesture is clearly sideways. Diagonal drags do nothing,
+                // which is what stops an accidental variant change.
+                if (imgViewerZoom.scale === 1 && Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+                    imgViewerGo(dx < 0 ? 1 : -1);
+                    return;
+                }
+
+                if (moved) return;
+
+                // Double tap toggles zoom, anchored on the tap point so the
+                // thing you tapped is the thing you end up looking at.
+                const now = Date.now();
+                if (now - lastTap < 300) {
+                    lastTap = 0;
+                    if (imgViewerZoom.scale > 1) {
+                        imgViewerZoomReset();
+                    } else {
+                        const r = stage.getBoundingClientRect();
+                        imgViewerZoom.scale = 2.5;
+                        imgViewerZoom.x = (r.width / 2 - (t.clientX - r.left)) * 1.5;
+                        imgViewerZoom.y = (r.height / 2 - (t.clientY - r.top)) * 1.5;
+                        imgViewerZoomApply();
+                        const zoomBtn = document.getElementById('imgViewerZoomBtn');
+                        if (zoomBtn) zoomBtn.textContent = 'Reset zoom';
+                    }
+                } else {
+                    lastTap = now;
+                }
+            }, { passive: true });
+        }
 
         // v940 — tag a NON-chosen variant 'still_good' or 'rejected'.
         //
