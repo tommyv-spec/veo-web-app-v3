@@ -20691,8 +20691,22 @@ def charswap_fetch_inputs(clip, temp_dir, context="[v943]"):
         # v945.8 — `swap_start_frame_url` was read first here and is never sent
         # by any payload; see charswap_mode_blocked for why it was removed.
         image_url = clip.get("start_frame_url")
+        clip["image_binding"] = "start_frame"
     else:
-        image_url = clip.get("swap_avatar_url")
+        # v945.9 — video-led rides the clip's OWN start frame when the build
+        # has one; the raw avatar portrait is only the fallback for the
+        # image-less build shape v943.2 allows. The 2026-08-23 matrix measured
+        # the difference: B3 (text-stripped swapped start frame as the chip)
+        # was the winner, while B1 (raw avatar) inherited the source's
+        # burned-in text and thinned the identity. Job 302875cc
+        # (martha-reformer) shipped the old binding at its worst: the portrait
+        # carries no wardrobe, no room and no pose, so when the video chip did
+        # not make it into the generation, Flow invented an entire studio
+        # around a headshot — twice, and both clips were published that way.
+        image_url = clip.get("start_frame_url") or clip.get("swap_avatar_url")
+        clip["image_binding"] = ("start_frame" if clip.get("start_frame_url")
+                                 else "avatar_fallback")
+    print(f"{context} image chip binding: {clip.get('image_binding')}", flush=True)
     source_url = clip.get("swap_source_url")
     if not image_url or not source_url:
         print(f"{context} clip {clip.get('clip_index')} is charswap ({mode}) but is "
@@ -22033,6 +22047,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             charswap_write_diag(
                 stage="prompt_selected",
                 swap_source_repeat_of=_cs_src_repeat,
+                # v945.9 — WHICH image rode the chip: "start_frame" (the
+                # operator-approved composite; the measured B3 winner) or
+                # "avatar_fallback" (image-less builds only). The martha
+                # renders would have said avatar on a job that had frames.
+                image_binding=clip.get("image_binding"),
                 job_id=clip.get('job_id') or job_id,
                 clip_index=clip_index,
                 # v945.8 — this used to be a three-branch ternary whose first
