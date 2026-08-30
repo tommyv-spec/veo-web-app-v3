@@ -20021,23 +20021,45 @@ _CHARSWAP_CHIP_IDS_JS = """() => {
   // auto-excluded) and the tile/trash EXCLUDES (the fallback layer for a
   // page state where the root cannot be found, where band-alone would
   // otherwise recreate the phantom).
+  //
+  // v945.13 — the intersection then UNDER-counted. Job 8eb6b63e clip 2
+  // (2026-08-30 07:14): chips_before_clear 0 (phantom dead, .12 right) but
+  // the post-attach count read 1 while video_chip_badge was TRUE — the
+  // composerRoot subtree contained the image chip and not the video chip,
+  // so a chip another detector could SEE was starved out of the count and
+  // the clip refused on too_few_chips. So: TWO TIERS. Strict (root ∩
+  // excludes) answers when it finds 2+; when it starves, the excludes-only
+  // tier answers — never band-alone, so the fabc4c73 phantom stays dead
+  // (it was tile/trash furniture, which the excludes still kill). Every
+  // candidate records WHICH rule excluded it, so the next wrong count is
+  // evidence with names instead of a theory.
 """ + _CHARSWAP_COMPOSER_ROOT_JS_SNIPPET + """
   const dlg = document.querySelector('[role="dialog"]');
-  const out = new Set();
+  const strict = new Set(), loose = new Set(), excluded = [];
   for (const img of document.querySelectorAll('img')) {
-    if (dlg && dlg.contains(img)) continue;
-    if (composerRoot && !composerRoot.contains(img)) continue;
-    if (img.closest('[data-tile-id]') || img.closest('[data-index]')) continue;
+    const m = (img.src||'').match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+    if (!m) continue;
+    const id = m[0].toLowerCase();
+    if (dlg && dlg.contains(img)) { excluded.push({id, why: 'dialog'}); continue; }
+    if (img.closest('[data-tile-id]') || img.closest('[data-index]')) {
+      excluded.push({id, why: 'tile'}); continue; }
     const trashHost = img.closest('button, a, [role="button"]');
     if (trashHost && /trash|delete/i.test(
         (trashHost.getAttribute('aria-label') || '') + ' ' +
-        (trashHost.textContent || ''))) continue;
+        (trashHost.textContent || ''))) { excluded.push({id, why: 'trash'}); continue; }
     const r = img.getBoundingClientRect();
-    if (!(r.width > 20 && r.top > (window.innerHeight - 280))) continue;
-    const m = (img.src||'').match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
-    if (m) out.add(m[0].toLowerCase());
+    if (!(r.width > 20 && r.top > (window.innerHeight - 280))) {
+      excluded.push({id, why: 'geometry'}); continue; }
+    loose.add(id);
+    if (composerRoot && !composerRoot.contains(img)) {
+      excluded.push({id, why: 'outside-root'}); continue; }
+    strict.add(id);
   }
-  return Array.from(out);
+  const useStrict = strict.size >= 2 || strict.size === loose.size;
+  return { ids: Array.from(useStrict ? strict : loose),
+           tier: useStrict ? 'strict' : 'excludes-only',
+           strict_n: strict.size, loose_n: loose.size,
+           excluded: excluded.slice(0, 12) };
 }"""
 
 
@@ -20226,11 +20248,31 @@ def charswap_video_chip_present(page):
 
 
 def charswap_composer_chip_media_ids(page):
-    """mediaId uuids of every chip currently on the composer."""
+    """mediaId uuids of every chip currently on the composer.
+
+    v945.13 — the JS now returns {ids, tier, strict_n, loose_n, excluded}
+    instead of a bare list, so the read carries its own audit trail: which
+    tier answered and which rule excluded each rejected candidate. Callers
+    keep getting the plain id list; the detail is stashed on the page for
+    the evidence file. A plain-list result (an older constant somehow live)
+    still works.
+    """
     try:
-        return page.evaluate(_CHARSWAP_CHIP_IDS_JS) or []
+        res = page.evaluate(_CHARSWAP_CHIP_IDS_JS)
     except Exception:
         return []
+    if isinstance(res, dict):
+        try:
+            page._charswap_chip_read_detail = {
+                "tier": res.get("tier"),
+                "strict_n": res.get("strict_n"),
+                "loose_n": res.get("loose_n"),
+                "excluded": res.get("excluded"),
+            }
+        except Exception:
+            pass
+        return res.get("ids") or []
+    return res or []
 
 
 # v943.3 — the charswap evidence file.
@@ -20935,6 +20977,10 @@ def charswap_attach_and_prompt(page, avatar_path, video_path, prompt,
     print(f"{context} mode={swap_mode} composer chips: {chip_ids}", flush=True)
     _diag["chip_ids"] = chip_ids
     _diag["chip_count"] = len(chip_ids)
+    # v945.13 — the read's audit trail: which tier answered (strict vs
+    # excludes-only) and which rule excluded each rejected candidate. When a
+    # count is wrong again, this names the filter instead of leaving a theory.
+    _diag["chip_read"] = getattr(page, "_charswap_chip_read_detail", None)
     # Two chips carrying the SAME mediaId means the avatar got attached twice
     # and the video never landed — the shape that renders an avatar-only clip
     # while still satisfying a bare count check.
@@ -22082,6 +22128,52 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                    error_message="charswap inputs unavailable")
                 permanently_failed_clips.add(clip_index)
                 continue
+            # v945.13 — ONE PROJECT PER SWAP CLIP. Four rounds of evidence on
+            # one job (302875cc shipped garbage pre-gates; 1dafac92, dc2d336d,
+            # fabc4c73/8eb6b63e refused by three DIFFERENT facets: lingering
+            # chips, a phantom grid tile in the band, a scoped read seeing 1
+            # of 2 chips) against clip-0-in-a-fresh-project passing 4/4 with
+            # clean reads and confirmed submits. A reused project's composer
+            # is shared state this automation cannot reliably observe or
+            # clean; a fresh project is the one state we have never seen
+            # fail. Rotation uses the same API create the job start uses, and
+            # fails CLOSED (pre-click, costs no render) when it cannot.
+            if not first_submission_in_project:
+                _cs_new_url = None
+                try:
+                    _cs_new_url = _fa_try_create_new_project_api(
+                        page, context="v945.13-rotate")
+                except Exception as _cs_rot_e:
+                    print(f"{_cs_ctx} project rotation raised: {_cs_rot_e}",
+                          flush=True)
+                if not _cs_new_url:
+                    update_clip_status(clip['id'], 'failed', error_message=(
+                        "charswap project rotation failed — refusing to attach "
+                        "into a composer another clip already used"))
+                    permanently_failed_clips.add(clip_index)
+                    charswap_write_diag(stage="project_rotation_failed",
+                                        job_id=clip.get('job_id') or job_id,
+                                        clip_index=clip_index)
+                    continue
+                project_url = _cs_new_url
+                try:
+                    if job_id in cache.get('jobs', {}):
+                        cache['jobs'][job_id]['project_url'] = project_url
+                        save_cache(cache)
+                except Exception:
+                    pass
+                try:
+                    page._charswap_sources_this_job = {}
+                except Exception:
+                    pass
+                first_submission_in_project = True
+                _tiles_in_this_project = 0
+                charswap_write_diag(stage="project_rotated",
+                                    job_id=clip.get('job_id') or job_id,
+                                    clip_index=clip_index,
+                                    project_url_tail=_cs_new_url[-40:])
+                print(f"{_cs_ctx} rotated to a fresh project for this swap clip",
+                      flush=True)
             if first_submission_in_project:
                 # A swap still needs the project's render settings applied once.
                 check_and_dismiss_popup(page)
