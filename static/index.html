@@ -3214,6 +3214,57 @@
         .img-viewer-pick.is-chosen {
             background: var(--success); color: #04140a;
         }
+
+        /* The drawer's chrome exists only in the narrow layout. Hidden by
+           default so a desktop never renders a stray close button or scrim —
+           the media query below is what turns them on. */
+        .img-drawer-scrim,
+        .img-drawer-close { display: none; }
+
+        /* ---- layout gate: width only ---- */
+        @media (max-width: 900px) {
+            /* The two panels are grid children, so ordering is enough — no DOM
+               move, which is what keeps the desktop path untouched. */
+            #imagesTab .img-results-panel { order: 1; }
+            #imagesTab .img-config-panel  { order: 2; }
+
+            /* ...and the sidebar stops taking page space at all: it becomes a
+               drawer. Overrides (not edits) the height/border rules at :350. */
+            #imagesTab .img-config-panel {
+                position: fixed; top: 0; left: 0; bottom: 0;
+                width: min(88vw, 360px);
+                z-index: 9600;
+                background: var(--bg-surface);
+                border-right: 1px solid var(--border-color);
+                border-bottom: none;
+                transform: translateX(-100%);
+                transition: transform .18s ease;
+                overflow-y: auto;
+            }
+            body.img-drawer-open #imagesTab .img-config-panel { transform: translateX(0); }
+            /* The list had its own scroll cap sized off the desktop chrome
+               (:341). In a drawer the drawer scrolls. */
+            #imagesTab .img-config-panel .img-sidebar-list { max-height: none; }
+
+            .img-drawer-scrim {
+                position: fixed; inset: 0; z-index: 9500;
+                background: rgba(0,0,0,0.5); display: none;
+            }
+            body.img-drawer-open .img-drawer-scrim { display: block; }
+
+            .img-drawer-close {
+                display: inline-flex; align-items: center; justify-content: center;
+                width: 44px; height: 44px; margin-left: auto;
+                border: 0; background: transparent; color: var(--text-primary);
+                font-size: 24px;
+            }
+
+            #imagesTab .img-results-panel { padding: 12px; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            #imagesTab .img-config-panel { transition: none; }
+        }
     </style>
 </head>
 <body>
@@ -4041,10 +4092,15 @@ Example: A realistic vertical video of a professional presenter speaking directl
 
         <!-- ============ Images Tab ============ -->
         <div id="imagesTab">
+            <!-- v954 mobile: tapping outside the drawer closes it. Hidden on
+                 desktop by the media query — the drawer only exists there. -->
+            <div class="img-drawer-scrim" aria-hidden="true" onclick="imgToggleDrawer(false)"></div>
             <!-- Drag handle on the sidebar edge — widen to read full job titles -->
             <div class="img-sidebar-resizer" id="imgSidebarResizer" title="Drag to resize · double-click to reset"></div>
             <!-- Left sidebar: new-node button (collapsible), worker status, toolbar, job list -->
-            <div class="img-config-panel">
+            <div class="img-config-panel" id="imgConfigPanel">
+                <button type="button" class="img-drawer-close" id="imgDrawerClose"
+                        aria-label="Close builds" onclick="imgToggleDrawer(false)">&times;</button>
                 <!-- New-Node form (toggled by the #imgToggleNewNodeBtn button in the action bar) -->
                 <div class="card" id="imgNewNodeFormCard" style="display:none;">
                     <label class="field-label">Name <span style="color:var(--text-muted);font-weight:400;">(optional)</span></label>
@@ -6474,6 +6530,10 @@ Ambient: same kitchen room tone, soft pour sound.
           // is correct before anything renders. Spacing/fallback only -- it
           // never decides whether an activation may pick.
           imgApplyTouchClass();
+          // v954: settle the drawer closed once on startup, so in the narrow
+          // layout the transformed-offscreen panel is marked inert instead of
+          // sitting invisibly in the tab order.
+          try { imgToggleDrawer(false); } catch (e) { /* not on the images tab yet */ }
           _kanbanOriginalHTML = document.getElementById("jobsList")?.innerHTML || null;
           // Auto re-render Instagram + local-folder panels on every page load /
           // hard refresh (operator 2026-07-25). Both are FREE backend re-fetches
@@ -23059,6 +23119,11 @@ async function renderAutoEditCard(jobId, hasExport) {
             if (row) {
                 row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
             }
+            // v954: choosing a build from the drawer means you are done with the
+            // drawer. Here rather than in a mobile-aware wrapper, so there is
+            // one function and one way to select a node. On desktop the class
+            // is never set, so this is a no-op.
+            if (document.body.classList.contains('img-drawer-open')) imgToggleDrawer(false);
         }
 
         // Back-compat — older code paths may still call this
@@ -25840,6 +25905,51 @@ async function renderAutoEditCard(jobId, hasExport) {
             }
             return imgChooseVariant(event, nodeId, variantId);
         }
+
+        // The build list is a drawer in the narrow layout. It is a real modal,
+        // not just a panel that slides: a transformed-offscreen panel is still
+        // in the tab order, and the page behind an open drawer is still
+        // reachable, which are the two standard ways this goes wrong for
+        // anyone not using a mouse.
+        function imgToggleDrawer(open) {
+            const want = (open === undefined)
+                ? !document.body.classList.contains('img-drawer-open')
+                : !!open;
+            document.body.classList.toggle('img-drawer-open', want);
+            const panel = document.getElementById('imgConfigPanel');
+            const trigger = document.getElementById('imgDrawerBtn');
+            const narrow = window.matchMedia && window.matchMedia('(max-width: 900px)').matches;
+            if (trigger) trigger.setAttribute('aria-expanded', want ? 'true' : 'false');
+            if (panel && narrow) {
+                [document.querySelector('.header'),
+                 document.querySelector('.action-bar'),
+                 document.querySelector('#imagesTab .img-results-panel'),
+                 document.querySelector('#imagesTab .img-sidebar-resizer')]
+                    .filter(Boolean)
+                    .forEach(el => el.toggleAttribute('inert', want));
+                panel.toggleAttribute('inert', !want);
+                panel.setAttribute('aria-hidden', want ? 'false' : 'true');
+                if (want) {
+                    panel.setAttribute('role', 'dialog');
+                    panel.setAttribute('aria-modal', 'true');
+                    panel.setAttribute('aria-label', 'Builds and image controls');
+                    const closeBtn = document.getElementById('imgDrawerClose');
+                    if (closeBtn) closeBtn.focus();
+                } else {
+                    panel.removeAttribute('role');
+                    panel.removeAttribute('aria-modal');
+                    panel.removeAttribute('aria-label');
+                    if (trigger) trigger.focus();
+                }
+            }
+        }
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && document.body.classList.contains('img-drawer-open')) {
+                event.preventDefault();
+                imgToggleDrawer(false);
+            }
+        });
 
         // Browser pinch remains enabled. Double-tap and the visible Zoom button
         // toggle the same image-level 2.5x inspection state.
