@@ -3195,6 +3195,18 @@
             min-width: 44px; min-height: 44px; border: 0; background: transparent;
             color: #fff; font: inherit; font-size: 12px; font-weight: 600;
         }
+        .img-viewer-error {
+            padding: 10px 12px; border-left: 4px solid var(--error);
+            border-radius: 8px; background: rgba(239,68,68,0.14);
+            color: #fff;
+        }
+        .img-viewer-error strong, .img-viewer-error span { display: block; }
+        .img-viewer-error span { margin-top: 4px; font-size: 12px; }
+        .img-viewer-error button {
+            width: 100%; min-height: 44px; margin-top: 8px;
+            border: 0; border-radius: 8px; background: var(--error);
+            color: #fff; font: inherit; font-weight: 700;
+        }
         .img-viewer-compare {
             flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
             padding: 6px 12px; background: rgba(0,0,0,0.92);
@@ -25661,9 +25673,11 @@ async function renderAutoEditCard(jobId, hasExport) {
                 // On failure, refresh to revert UI to server state
                 try { await imgRefreshNodes(); } catch (_) {}
                 const error = String(e && e.message ? e.message : e);
-                // The viewer owns its own retry UI and must NOT be interrupted
-                // by a modal alert it cannot show behind. Desktop keeps the
-                // alert until Task 10 replaces it.
+                // The viewer owns its own retry UI (imgViewerError) and must NOT
+                // be interrupted by a modal alert it cannot show behind.
+                // Desktop deliberately keeps its existing alert: R1 says the
+                // mouse path does not change, and on a desktop the operator is
+                // not about to walk out of signal range mid-pick.
                 if (!options.viewer) alert('Error: ' + error);
                 return { ok: false, nextNodeId: null, error };
             }
@@ -25740,6 +25754,14 @@ async function renderAutoEditCard(jobId, hasExport) {
                 '</div>' +
                 '<div class="img-viewer-compare" id="imgViewerCompare"></div>' +
                 '<div class="img-viewer-actions">' +
+                  // Inside the dialog on purpose: a top-right toast is hidden
+                  // behind a full-screen viewer, and a lost pick is exactly the
+                  // thing the operator must not miss.
+                  '<div class="img-viewer-error" id="imgViewerError" role="alert" hidden>' +
+                    '<strong>Pick did not save.</strong>' +
+                    '<span id="imgViewerErrorBody"></span>' +
+                    '<button type="button" id="imgViewerRetry">Retry pick</button>' +
+                  '</div>' +
                   '<div class="img-viewer-verdicts">' +
                     '<button id="imgViewerGood" type="button">Keep as usable</button>' +
                     '<button id="imgViewerBad" type="button">Reject</button>' +
@@ -25749,6 +25771,7 @@ async function renderAutoEditCard(jobId, hasExport) {
             document.body.appendChild(el);
             document.getElementById('imgViewerClose').addEventListener('click', imgCloseViewer);
             document.getElementById('imgViewerPick').addEventListener('click', imgViewerPick);
+            document.getElementById('imgViewerRetry').addEventListener('click', imgViewerPick);
             document.getElementById('imgViewerGood').addEventListener('click', () => imgViewerVerdict('still_good'));
             document.getElementById('imgViewerBad').addEventListener('click', () => imgViewerVerdict('rejected'));
             document.getElementById('imgViewerPrev').addEventListener('click', () => imgViewerGo(-1));
