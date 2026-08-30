@@ -1050,6 +1050,39 @@ def promote(client, batch_id, report):
     return job_id
 
 
+def sync_finishing_after_promote(client, job_id, md_text, md_file, report):
+    """v951.1 — the new job must start on the FILE's ## Finishing, not the
+    batch's import-time snapshot.
+
+    promote copies batch.finishing_spec (v944), and a --resume-batch send
+    reuses a batch imported days earlier — job 8eb6b63e was born without the
+    export_* lines its md had carried for hours, so the Export dialog fell
+    back to another video's localStorage settings. The md this send just read
+    IS the current truth: re-parse it server-side through the v947.1
+    endpoint. An absent section clears the spec (same semantics as
+    update-finishing); a bad section fails the send CLOSED rather than
+    leaving the job on settings the operator already replaced.
+    """
+    try:
+        resp = client.post(f"/api/jobs/{job_id}/finishing", {"markdown": md_text})
+    except PlatformError as exc:
+        raise PlatformError(
+            exc.exit_code,
+            f"finishing re-sync FAILED after promote — job {job_id} exists "
+            f"but still carries the batch's import-time snapshot. Fix the "
+            f"## Finishing section, then run: python send_to_platform.py "
+            f"update-finishing {job_id} {md_file}",
+            exc.detail)
+    spec = resp.get("finishing_spec")
+    if spec:
+        print(f"finishing: synced from {md_file} ({len(spec)} fields"
+              f"{', export declared' if 'export' in spec else ''})", flush=True)
+    else:
+        print(f"finishing: none declared in {md_file} (spec cleared)", flush=True)
+    report["stages"].append("finishing:synced")
+    return spec
+
+
 def classify_clip_failures(clips):
     """Split failed clips into policy-terminal vs other render failures.
     flow_worker policy terminals arrive as clip error_message text."""
@@ -1662,6 +1695,8 @@ def main(argv=None):
         report["job_id"] = job_id
         print(f"promote: video job {job_id}", flush=True)
         report["stages"].append("promote:ok")
+
+        sync_finishing_after_promote(client, job_id, md_text, args.md_file, report)
 
         if args.no_render:
             return EXIT_OK

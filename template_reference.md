@@ -18392,6 +18392,56 @@ check what the callers actually send before believing the merge runs.**
 `code/tests/test_auto_finish.py`, `code/tests/test_export_defaults_endpoint.py`,
 `wiki/patterns/conventions.md`, `.claude/skills/build-video/SKILL.md`.
 
+## v951.1 — PROMOTE RE-SYNCS FINISHING FROM THE FILE, NOT THE BATCH SNAPSHOT (2026-08-30)
+
+**The day-after failure that proved v951 had a hole.** Operator, on the martha charswap review
+(job `8eb6b63e`): *"didn't we say that the export shouldn't appear if the info were already in the
+markdown?"* The markdown DID declare everything —
+`raw/decode_work/martha-reformer-DZVTwnbN72v/martha-reformer-swap-v2.md` carried
+`export_smart_trim: false`, `export_frames_to_cut_start: 7`, `auto_finish: on` since 04:52 that
+morning. The v951 endpoint answered `declared: []` anyway, so the dialog fell back to localStorage
+and offered the ED lane's Whisper + 1.10x on a silent music-only swap — the exact wrong-settings
+case v951 was written against.
+
+**Why the declaration never reached the job.** A job's `finishing_spec` is copied at promote from
+the IMAGE BATCH row (`main.py` ~2558, v944), and the batch's spec is parsed ONCE, at import
+(`image_platform.py` ~7402). The martha rounds ran `--resume-batch a81096cd` — a batch imported
+2026-08-29 02:42, BEFORE the export lines existed. So every re-promoted round-N job was born with
+the import-time snapshot: overlay + captions + auto_finish present, `export` block absent. The md
+edit sat in the working tree for hours and no code path ever read it again. **A snapshot copied
+from a snapshot is stale twice** — and the send had the current file OPEN in its hands the whole
+time (`md_text` is read even on resume).
+
+**The fix.** `send_to_platform.py` `sync_finishing_after_promote()`: immediately after
+`promote()`, POST the markdown the send just read to the v947.1 endpoint
+(`POST /api/jobs/{id}/finishing`). The server re-parses with the import parser and stores the
+CURRENT file's spec. An absent `## Finishing` clears the spec (update-finishing semantics — the
+file is the truth); a bad section **fails the send CLOSED** with the exact recovery command
+(`update-finishing <job-id> <md>`), rather than leaving the job silently on settings the operator
+already replaced (§v939.9 — logging and continuing is failing open). No server change: the
+endpoint existed since v947.1; the client just never called it at the moment that mattered.
+
+**What it deliberately does NOT cover.** A promote clicked in the UI still takes the batch
+snapshot — the browser has no md file to offer. An id-only `x --resume-batch` invocation crashes
+on the md open before reaching promote, so it cannot ship a stale spec either way. If UI promotes
+of long-lived batches start biting, the fix there is a batch-level finishing refresh, a separate
+change.
+
+**Recovery for an already-born job** (what fixed `8eb6b63e` live, and fired its declared
+`auto_finish: on` the same second):
+`python code/send_to_platform.py update-finishing <job-id> <build.md>`.
+
+**General lesson.** v951 fixed what the dialog OPENS ON; this fixes what the JOB carries. Both
+failures are the same shape: a value is parsed once, cached on a row, and every later reader
+trusts the row while the source file moves on. When a send holds the current file, re-assert the
+file onto everything it creates — the cache is for callers that don't have the file.
+
+**Applies to** every `send_to_platform.py` send that reaches promote (full and `--resume-batch`).
+
+**Touched:** this deep-dive (canonical), `code/send_to_platform.py`
+(`sync_finishing_after_promote` + call after promote),
+`code/tests/test_promote_finishing_sync.py`, `wiki/patterns/conventions.md`, `wiki/log.md`.
+
 ## v952 — THE OVERLAY STOPS COVERING THE BODY, AND THE MUSIC STOPS CUTTING OUT (2026-08-29)
 
 Three defects on one delivered file (job `bb159509`, `noemi-cablefly` — a 6s
