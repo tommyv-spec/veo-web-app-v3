@@ -19202,6 +19202,31 @@ Test variant (evelyn's highest-liked class, via [[readcaption-split-test-method]
 time): `I eat my pain relief every morning / This is what I eat in a day` — the caption then resolves
 it (foods + the saffron slot).
 
+**REFRAME, DON'T PATCH (operator, same day, third correction — the generative clause).** Operator:
+*"keep it generic (so understand the rule to make them), not just changing one details but reframing
+the overlays."* The rule is a PROCEDURE that builds each overlay from zero, not a template with
+swappable nouns — the reformer failure WAS a noun-patch (the beauty block carried over, one payoff
+line adjusted), and swapping "Fillers" for "Pain Pills" would have been the same mistake one layer
+deeper. Every new video walks all four steps fresh, in order, writing each answer before the next:
+1. **FEAT** — watch the clip: what does the footage PROVE, concretely? (Not the niche, not the
+   account — this clip.)
+2. **GAP** — what question or disbelief does that feat open in the target viewer's head, given the
+   claimed age? (This is the overlay's one job: hold that gap open and route.)
+3. **AMPLIFIER** — pick or invent the line that dramatizes THAT gap hardest. The four observed
+   classes are a library to compare against, not a menu (§3.6): an unlisted amplifier derived from
+   the clip is valid, declared as such in `overlay_sense`. If the best line for this clip is a
+   contradiction, write a NEW contradiction from this clip's world — never re-use last post's line
+   with a word changed.
+4. **PROMISE + ROUTE** — name what the caption pays off, in the feat's own domain, and point.
+Nothing survives from the previous overlay by default — not the denial pair, not the amplifier, not
+the promise wording. What MAY stay stable across an account is the FRAME (age claim + count-line
+style + "(READ CAPTION)"), because that is the account's identity ([[account-priming-discipline]]);
+everything inside the frame is re-derived per clip. A deliberate repeat (the caption-recycle cadence,
+a split-test control) is legal ONLY as a declared choice in `overlay_sense` — "control held from
+<post>, testing <variable>" — never as the unexamined default. Self-check before locking: cover the
+video and read the overlay alone — could it sit on your PREVIOUS post unchanged? If yes, it was
+patched, not derived; start again at step 1.
+
 **What this changes about v956's gate: nothing mechanical.** `overlay_sense` is still required with
 any `overlay_block`; its derivation line now names WHICH amplifier class the block uses and why it
 fits the feat (see the example above). An overlay with no denial lines still writes the derivation —
