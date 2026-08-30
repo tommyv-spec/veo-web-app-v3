@@ -3189,6 +3189,31 @@
             min-width: 44px; min-height: 44px; border: 0; background: transparent;
             color: #fff; font: inherit; font-size: 12px; font-weight: 600;
         }
+        .img-viewer-actions {
+            flex: 0 0 auto;
+            padding: 8px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+            display: flex; flex-direction: column; gap: 8px;
+            background: rgba(0,0,0,0.92);
+        }
+        .img-viewer-verdicts { display: flex; gap: 8px; }
+        .img-viewer-verdicts button {
+            flex: 1; min-height: 44px;
+            background: rgba(255,255,255,0.10); color: #e5e7eb;
+            border: 1px solid rgba(255,255,255,0.22); border-radius: 8px;
+            font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+        }
+        .img-viewer-verdicts button.on-good { background: var(--success); color: #04140a; border-color: transparent; }
+        .img-viewer-verdicts button.on-bad  { background: var(--error);   color: #fff;    border-color: transparent; }
+        .img-viewer-pick {
+            min-height: 56px; width: 100%;
+            background: linear-gradient(135deg, var(--accent), var(--accent2));
+            color: #fff; border: none; border-radius: 10px;
+            font-family: inherit; font-size: 16px; font-weight: 700;
+            letter-spacing: .3px; cursor: pointer;
+        }
+        .img-viewer-pick.is-chosen {
+            background: var(--success); color: #04140a;
+        }
     </style>
 </head>
 <body>
@@ -25452,7 +25477,11 @@ async function renderAutoEditCard(jobId, hasExport) {
             });
         }
 
-        async function imgChooseVariant(event, nodeId, variantId) {
+        // Returns { ok, nextNodeId, error }. The return is load-bearing: the
+        // mobile viewer may only advance or close after {ok:true}, so a save
+        // that failed leaves the operator on the exact choice they just made
+        // instead of silently moving on.
+        async function imgChooseVariant(event, nodeId, variantId, options = {}) {
             // v824 — was this a FRESH approval (node had no pick yet) or a
             // re-pick of an already-chosen node? Only fresh approvals
             // auto-advance to the next pending image; re-picking an approved
@@ -25495,19 +25524,40 @@ async function renderAutoEditCard(jobId, hasExport) {
                 // v824 — auto-advance to the next image in this build still
                 // waiting for a pick. Only on a fresh approval (not a re-pick),
                 // and only if there IS a next pending one; otherwise stay put.
+                //
+                // v954: refresh the ALL-TIME queue before deciding the work is
+                // done. The local node list is windowed to three days, so an
+                // older unapproved image would read as "nothing left".
+                await imgRefreshApprovalSummary();
+                let nextNodeId = null;
                 if (_wasUnchosen) {
                     try {
-                        const next = imgNextPendingNode(nodeId);
-                        console.log('[v824 auto-advance] chose node', nodeId, '→ next pending:', next ? next.id : 'none');
-                        if (next && next.id !== nodeId) imgSelectNode(next.id);
+                        const localNext = imgNextPendingNode(nodeId);
+                        const serverQueue = (imgState.approvalSummary && imgState.approvalSummary.queue) || [];
+                        const serverNext = serverQueue.find(n => n.id !== nodeId) || null;
+                        // If the server head is outside the loaded date window,
+                        // it wins. Otherwise local ordering has the deeper chain data.
+                        const next = (serverNext && !imgState.nodesById[serverNext.id])
+                            ? serverNext : (localNext || serverNext);
+                        nextNodeId = next ? next.id : null;
+                        console.log('[v824 auto-advance] chose node', nodeId, '→ next pending:', nextNodeId || 'none');
+                        if (!options.viewer && nextNodeId && nextNodeId !== nodeId) {
+                            imgSelectNode(nextNodeId);
+                        }
                     } catch (advErr) {
                         console.warn('[v824 auto-advance] skipped:', advErr);
                     }
                 }
+                return { ok: true, nextNodeId };
             } catch (e) {
-                alert('Error: ' + e.message);
                 // On failure, refresh to revert UI to server state
                 try { await imgRefreshNodes(); } catch (_) {}
+                const error = String(e && e.message ? e.message : e);
+                // The viewer owns its own retry UI and must NOT be interrupted
+                // by a modal alert it cannot show behind. Desktop keeps the
+                // alert until Task 10 replaces it.
+                if (!options.viewer) alert('Error: ' + error);
+                return { ok: false, nextNodeId: null, error };
             }
         }
 
@@ -25579,9 +25629,19 @@ async function renderAutoEditCard(jobId, hasExport) {
                   '<img id="imgViewerImg" alt="">' +
                   '<button class="img-viewer-nav img-viewer-next" id="imgViewerNext" type="button" aria-label="Next variant">&rsaquo;</button>' +
                   '<div class="img-viewer-dots" id="imgViewerDots"></div>' +
+                '</div>' +
+                '<div class="img-viewer-actions">' +
+                  '<div class="img-viewer-verdicts">' +
+                    '<button id="imgViewerGood" type="button">Keep as usable</button>' +
+                    '<button id="imgViewerBad" type="button">Reject</button>' +
+                  '</div>' +
+                  '<button class="img-viewer-pick" id="imgViewerPick" type="button">PICK &amp; NEXT</button>' +
                 '</div>';
             document.body.appendChild(el);
             document.getElementById('imgViewerClose').addEventListener('click', imgCloseViewer);
+            document.getElementById('imgViewerPick').addEventListener('click', imgViewerPick);
+            document.getElementById('imgViewerGood').addEventListener('click', () => imgViewerVerdict('still_good'));
+            document.getElementById('imgViewerBad').addEventListener('click', () => imgViewerVerdict('rejected'));
             document.getElementById('imgViewerPrev').addEventListener('click', () => imgViewerGo(-1));
             document.getElementById('imgViewerNext').addEventListener('click', () => imgViewerGo(1));
             document.getElementById('imgViewerZoomBtn').addEventListener('click', imgViewerZoomToggle);
@@ -25634,6 +25694,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                 imgViewerState.variants.map((_, i) =>
                     '<i class="' + (i === imgViewerState.index ? 'on' : '') + '"></i>').join('');
             imgViewerZoomReset();
+            imgViewerPaintVerdicts();
         }
 
         function imgViewerGo(delta) {
@@ -25641,6 +25702,126 @@ async function renderAutoEditCard(jobId, hasExport) {
             if (!n) return;
             imgViewerState.index = (imgViewerState.index + delta + n) % n;
             imgViewerRender();
+        }
+
+        // Defined here rather than with the rest of the retry UI (Task 10):
+        // imgViewerPick below calls both, so leaving them until later would
+        // make a failed save throw ReferenceError instead of showing the
+        // retry. Both no-op safely until Task 10 adds their markup.
+        function imgPickFailed(message) {
+            const box = document.getElementById('imgViewerError');
+            const body = document.getElementById('imgViewerErrorBody');
+            if (!box || !body) return;
+            body.textContent = (message || 'Network error') +
+                ' — you are still on this image. Check the signal and retry.';
+            box.hidden = false;
+            const retry = document.getElementById('imgViewerRetry');
+            if (retry) retry.focus();
+        }
+
+        function imgClearPickFailure() {
+            const box = document.getElementById('imgViewerError');
+            if (box) box.hidden = true;
+        }
+
+        // No confirmation step — operator's call, 2026-08-29. PICK & NEXT is a
+        // 56px button inside a viewer a tap had to open first, so the accident
+        // this replaces (a tap on the grid tile WAS the approval) is gone
+        // without adding a tap to every image of every build.
+        async function imgViewerPick() {
+            const v = imgViewerState.variants[imgViewerState.index];
+            if (!v) return;
+            const btn = document.getElementById('imgViewerPick');
+            btn.disabled = true;
+            btn.textContent = 'Picking…';
+            try {
+                const result = await imgChooseVariant(null, imgViewerState.nodeId, v.id, { viewer: true });
+                if (!result || !result.ok) {
+                    imgPickFailed((result && result.error) || 'Network error');
+                    return; // load-bearing: the viewer stays on this exact choice
+                }
+                imgClearPickFailure();
+                if (result.nextNodeId) {
+                    if (!imgState.nodesById[result.nextNodeId]) {
+                        await imgJumpToNextApproval(); // loads an out-of-window batch
+                    }
+                    imgSelectNode(result.nextNodeId);
+                    const next = imgState.nodesById[result.nextNodeId];
+                    const first = next && next.variants && next.variants[0];
+                    if (first) imgOpenViewer(next.id, first.id); // same dialog, next scene
+                    return;
+                }
+                imgCloseViewer();
+                imgShowToast('All picked', 'Nothing else is waiting for approval.');
+            } finally {
+                const liveBtn = document.getElementById('imgViewerPick');
+                if (liveBtn) liveBtn.disabled = false;
+                const dlg = document.getElementById('imgViewer');
+                if (dlg && dlg.open) imgViewerPaintVerdicts();
+            }
+        }
+
+        // The ONE place a verdict is saved. The grid buttons call it too, so
+        // the two surfaces cannot drift on what a toggle means or what an
+        // error looks like.
+        async function imgSaveVariantVerdict(nodeId, variantId, want, cur) {
+            const next = (cur === want) ? null : want;
+            try {
+                const res = await fetch('/api/images/nodes/' + nodeId +
+                                        '/variants/' + variantId + '/verdict', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ verdict: next }),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail || 'Could not save that verdict');
+                }
+                await imgRefreshNodes();
+                return { ok: true, verdict: next };
+            } catch (e) {
+                return { ok: false, error: String(e.message || e) };
+            }
+        }
+
+        async function imgViewerVerdict(verdict) {
+            const v = imgViewerState.variants[imgViewerState.index];
+            if (!v) return;
+            // Same toggle rule as the grid buttons: pressing the one already on
+            // clears it, so a mis-tap needs no third control to undo.
+            const result = await imgSaveVariantVerdict(
+                imgViewerState.nodeId, v.id, verdict, v.operator_verdict || null);
+            if (!result.ok) {
+                imgShowToastError('Could not save that', result.error);
+                return;
+            }
+            v.operator_verdict = result.verdict;
+            imgViewerPaintVerdicts();
+        }
+
+        function imgViewerPaintVerdicts() {
+            const v = imgViewerState.variants[imgViewerState.index];
+            const good = document.getElementById('imgViewerGood');
+            const bad = document.getElementById('imgViewerBad');
+            const pick = document.getElementById('imgViewerPick');
+            if (!v || !good || !bad || !pick) return;
+            good.classList.toggle('on-good', v.operator_verdict === 'still_good');
+            bad.classList.toggle('on-bad', v.operator_verdict === 'rejected');
+            const node = (imgState.nodes || []).find(n => n.id === imgViewerState.nodeId);
+            const isChosen = !!(node && node.chosen_variant_id === v.id);
+            pick.classList.toggle('is-chosen', isChosen);
+            let hasNext = false;
+            try {
+                const queue = (typeof imgApprovalQueueForHeader === 'function')
+                    ? imgApprovalQueueForHeader() : imgApprovalQueue();
+                hasNext = (queue || []).some(n => n.id !== imgViewerState.nodeId);
+            } catch (e) { /* queue unavailable — the plain label is still right */ }
+            pick.textContent = isChosen ? '✓ PICKED' : (hasNext ? 'PICK & NEXT' : 'PICK');
+            pick.disabled = isChosen;
+            // The server refuses to tag the variant that IS the pick
+            // (image_platform.py:4028) — so do not offer it.
+            good.disabled = isChosen;
+            bad.disabled = isChosen;
         }
 
         // Browser pinch remains enabled. Double-tap and the visible Zoom button
@@ -25752,21 +25933,16 @@ async function renderAutoEditCard(jobId, hasExport) {
         // variant the operator just rejected.
         async function imgSetVariantVerdict(ev, nodeId, variantId, want, cur) {
             if (ev) { ev.stopPropagation(); ev.preventDefault(); }
-            const next = (cur === want) ? null : want;
+            // The toggle (cur === want -> clear) now lives in
+            // imgSaveVariantVerdict, which both surfaces call.
             const btn = ev && ev.currentTarget ? ev.currentTarget : null;
             if (btn) btn.disabled = true;
             try {
-                const res = await fetch(
-                    `/api/images/nodes/${nodeId}/variants/${variantId}/verdict`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ verdict: next }),
-                    });
-                if (!res.ok) {
-                    const err = await res.json().catch(() => ({}));
-                    throw new Error(err.detail || 'Could not save that verdict');
-                }
-                await imgRefreshNodes();
+                // v954 — one implementation, shared with the mobile viewer, so
+                // the two surfaces cannot drift on what a toggle means or on
+                // what an error says. It also does the imgRefreshNodes call.
+                const result = await imgSaveVariantVerdict(nodeId, variantId, want, cur);
+                if (!result.ok) throw new Error(result.error);
                 // v940.1 — imgRefreshNodes only repaints the detail pane when
                 // its fingerprint (status / variant count / cg_status) changes,
                 // and a verdict changes none of the three. Without an explicit
