@@ -5445,6 +5445,29 @@ def parse_finishing_section(md_text: str):
         block = fields.get("overlay_block", "").strip()
         if block:
             spec["overlay_block"] = [p.strip() for p in block.split(" / ") if p.strip()]
+            # v956 — the denial lines must answer the FEAT ON SCREEN, and the
+            # author has to show the derivation. Twice now a block was carried
+            # from another lane instead of derived from the clip: "No Brutal
+            # Workouts" burned over heavy dumbbell curls, then "No Injections /
+            # No Fillers" (beauty-domain) over a 78-year-old's reformer
+            # mobility feat — published before anyone noticed. The engine rule
+            # existed in prose (readcaption-caption-engine: denials name what
+            # a viewer actually suspects watching THIS clip); prose did not
+            # hold, so it is a declaration now. overlay_sense is authoring
+            # evidence only — validated here, deliberately NOT stored in the
+            # spec, so nothing downstream (worker included) changes.
+            sense = fields.get("overlay_sense", "").strip()
+            if not sense:
+                raise ValueError(
+                    "## Finishing overlay_block requires overlay_sense (v956): "
+                    "one line deriving the denials from the clip, shaped "
+                    "'<feat shown> -> viewer suspects <shortcut> -> each denial "
+                    "answers it'. Copying another lane's block is the exact "
+                    "failure this field exists to stop.")
+            if "->" not in sense and "→" not in sense:
+                raise ValueError(
+                    f"## Finishing overlay_sense must show the derivation with "
+                    f"'->' (feat -> suspicion -> denial), got: {sense!r} (v956)")
         footer = fields.get("overlay_footer", "").strip()
         if footer:
             spec["overlay_footer"] = footer
@@ -5482,7 +5505,8 @@ def parse_finishing_section(md_text: str):
 
     # v947 — a bullet nobody recognizes fails at import, not at render time.
     recognized = {"captions", "overlay", "auto_finish",
-                  "overlay_age", "overlay_block", "overlay_footer", "overlay_pitch"}
+                  "overlay_age", "overlay_block", "overlay_footer",
+                  "overlay_pitch", "overlay_sense"}
     leftovers = sorted(
         k for k in fields
         if k not in recognized

@@ -19001,3 +19001,62 @@ and told us nothing. Scoped to the freshness window it inverts completely:
 `(account, reason)`), `code/models.py` (`sync_requested_at`, `sync_reason`),
 `code/main.py` (`POST …/request-sync`), `tools/publish_reel.py` (`_nudge_sync`),
 `code/tests/test_instagram_autosync.py` (23 tests).
+
+## v956 — THE OVERLAY DENIALS ANSWER THE FEAT ON SCREEN, AND THE AUTHOR SHOWS THE DERIVATION (2026-08-30)
+
+**The complaint, verbatim.** Operator, on the published martha reformer reel (job `8eb6b63e`):
+*"the overlays if you check other videos are related to what happens. this one in the same overlays
+doesn't make any sense the sentences."* He is right, and the rule already existed — in prose.
+
+**What shipped.** The overlay block burned onto a 78-year-old's reformer MOBILITY feat read
+`No Injections / No Fillers / 7 Boring Things / I do daily to move like this`. Injections and
+fillers are BEAUTY-domain shortcuts — they answer "how does her face look young", a claim this
+video never makes. Nobody watching a woman move athletically at 78 suspects fillers; they suspect
+surgery, joint replacements, hormones, pain meds. The block was carried from the martha beauty
+positioning instead of derived from the clip. Compare the same lane done right: the noemi swaps
+carry `No Steroids / No Peptides` over a muscular man lifting — exactly the shortcut that feat
+makes a viewer suspect.
+
+**The rule was already written, twice, and prose did not hold.**
+`wiki/synthesis/readcaption-caption-engine.md` §"How to apply": *"Overlay denials name what a
+viewer actually suspects watching THIS clip"* — written after the curls pilot burned
+`No Brutal Workouts` over a man doing heavy dumbbell curls (self-contradiction on screen), with
+the operator's own precedent (the mountain final's denials changed to `No Knee Braces / No
+Peptides` because the clip showed downhill running). The martha reformer build's own RECIPE even
+quoted the lane's control overlay and the age-vs-feat GAP mechanism — and the build still shipped
+beauty denials. Third occurrence of the §9.1 pattern: a rule that lives only in prose gets
+under-executed, so it becomes a check.
+
+**The check (parser, hard-fail).** `parse_finishing_section` (`image_platform.py`): a
+`## Finishing` that declares `- **overlay_block:**` now REQUIRES
+`- **overlay_sense:** <feat shown> -> viewer suspects <shortcut> -> each denial answers it`
+— non-empty, and it must contain the derivation arrow (`->` or `→`). The field is authoring
+evidence: validated at parse, deliberately NOT stored in the spec, so `overlay_spec` reaching the
+auto-edit worker is byte-identical and neither deploy target (§v948.2) changes. A checker cannot
+judge whether the derivation is TRUE (§v949 — that stays the author's and reviewer's job); what
+it can do is refuse the build that never derived at all, which is exactly how both failures
+happened.
+
+**Authoring rule.** Derive the denial pair from the FEAT the clip demonstrates, never from the
+persona's other lane and never by copying the previous post: name the feat, name the shortcut a
+skeptical viewer would credit it to, write the denials that kill that exact suspicion. The count
+line and payoff claim ("7 Boring Things / I do daily to move like…") stay stable — they are the
+account frame. Captions follow the sibling engine rule: item #1 names the on-screen action with a
+real mechanism. For the martha reformer feat the derived block is
+`No Surgeries / No Pain Pills / 7 Boring Things / I do daily to move like this`.
+
+**Forward-only, with a known bite.** Existing lane builds (~10 files in `raw/decode_work/`)
+declare blocks without the field; they hard-fail on their NEXT send or finishing re-sync (v951.1
+re-posts finishing on every promote), which is the intended moment — one derivation line, written
+while looking at the clip, before another render ships. The published martha post is not
+retro-fixed; its corrected block above is for the next version.
+
+**General lesson.** A coherence rule enforced only by the writer's memory fails exactly when the
+writer is reusing a proven template — reuse is when derivation feels least necessary. Make the
+derivation a declared artifact and gate on its existence, not its correctness.
+
+**Applies to** every `## Finishing` declaring `overlay_block`, all lanes, forward-only.
+
+**Touched:** this deep-dive (canonical), `code/image_platform.py` (`parse_finishing_section`),
+`code/tests/test_overlay_sense.py`, `code/test_finishing_spec.py` (fixture + scan-window repair),
+`wiki/synthesis/readcaption-caption-engine.md`, `wiki/patterns/conventions.md`, `wiki/log.md`.

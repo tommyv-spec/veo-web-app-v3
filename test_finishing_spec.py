@@ -17,6 +17,7 @@ FINISHING_OK = """## Finishing
 - **overlay:** readcaption
 - **overlay_age:** I'M 74
 - **overlay_block:** No supplements / No gym / 5 boring things / to feel 40
+- **overlay_sense:** daily-vitality feat -> viewer suspects pills or gym hours -> denials answer it (v956)
 - **overlay_footer:** (READ CAPTION)
 """
 
@@ -131,7 +132,11 @@ def test_finishing_spec_travels_import_to_job():
     imp = src.index("def _import_scene_table_impl")
     assert "parse_finishing_section" in src[imp:imp + 20000]
     prom = src.index("def promote_batch_to_video")
-    assert "finishing_spec" in src[prom:prom + 30000]
+    # window: the function grew past 30000 chars before finishing_spec (found
+    # failing 2026-08-30, pre-existing) — scope the scan to the function body
+    # instead of a fixed count so growth cannot silently break it again
+    nxt = src.find("\ndef ", prom + 1)
+    assert "finishing_spec" in src[prom:nxt if nxt != -1 else len(src)]
     main = _src("main.py")
     cj = main.index("def _create_job_impl")
     assert "finishing_spec" in main[cj:cj + 30000]
