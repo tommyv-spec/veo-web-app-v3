@@ -15966,12 +15966,18 @@ Ambient: same kitchen room tone, soft pour sound.
                     const names = {smart_trim: 'Smart Trim', frames_to_cut_start: 'Head trim',
                         frames_to_cut_end: 'End trim', remove_silence: 'Silence removal',
                         playback_speed: 'Speed', silence_mode: 'Silence mode'};
+                    // v957 review hardening: values ride into innerHTML, so
+                    // escape them — they come from our own validated API
+                    // today, but a filename field is one schema change away
+                    // from carrying user text.
+                    const esc = (x) => String(x).replace(/[&<>"']/g,
+                        (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
                     const fmt = (k) => {
                         const v = _dSet[k];
-                        const label = names[k] || k;
+                        const label = names[k] || esc(k);
                         if (typeof v === 'boolean') return `${label} ${v ? 'ON' : 'OFF'}`;
-                        if (k === 'playback_speed') return `${label} ${v}×`;
-                        return `${label} ${v}`;
+                        if (k === 'playback_speed') return `${label} ${esc(v)}×`;
+                        return `${label} ${esc(v)}`;
                     };
                     const parts = [];
                     const laneText = _laneName && laneLabels[_laneName];
