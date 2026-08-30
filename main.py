@@ -4022,16 +4022,43 @@ def _job_finishing_spec(job):
         return None
 
 
-def _export_defaults_payload(job):
-    """v951 — what the Export dialog should open on for this job: the
-    ExportSettings model defaults with the build's declared export_* folded on
-    top, plus the names of the declared keys.
+def _job_export_facts(clips):
+    """v957 — the three booleans derive_lane_defaults needs, off Clip rows.
 
-    Split out from the endpoint so it is unit-testable without a DB session —
-    it touches only job.finishing_spec.
+    Pure over a list so it is testable without a DB session. `all_charswap`
+    is False for an empty job on purpose — no clips, no lane claims.
+    """
+    clips = list(clips or [])
+    return {
+        "all_charswap": bool(clips) and all(
+            getattr(c, "render_method", None) == "charswap" for c in clips),
+        "any_source_audio": any(
+            getattr(c, "swap_audio", None) == "source-original" for c in clips),
+        "has_speech": any(
+            (getattr(c, "dialogue_text", "") or "").strip()
+            and getattr(c, "render_method", None) != "charswap"
+            for c in clips),
+    }
+
+
+def _export_defaults_payload(job, db=None):
+    """v951 + v957 — what the Export dialog should open on for this job:
+    model defaults, the lane's derived answers (from the job's own clips),
+    and the build's declared export_* on top. `declared`/`derived`/`lane`
+    name where each opening value came from. db=None (or a clip-query
+    failure) degrades to the pure v951 behaviour — never block the dialog.
     """
     from auto_finish import export_modal_defaults
-    return export_modal_defaults(_job_finishing_spec(job))
+    facts = None
+    if db is not None:
+        try:
+            from models import Clip
+            clips = db.query(Clip).filter(Clip.job_id == job.id).all()
+            facts = _job_export_facts(clips)
+        except Exception as e:
+            print(f"[v957] job={str(job.id)[:8]} clip-facts read failed "
+                  f"(non-fatal, plain v951 defaults): {e}", flush=True)
+    return export_modal_defaults(_job_finishing_spec(job), job_facts=facts)
 
 
 def _maybe_auto_finish_export(db, job):
@@ -4175,7 +4202,7 @@ async def export_defaults(
     those controls START at.
     """
     job = get_user_job(db, job_id, current_user)  # 404/403 if not the caller's
-    return _export_defaults_payload(job)
+    return _export_defaults_payload(job, db)
 
 
 @app.get("/api/jobs/{job_id}/config")

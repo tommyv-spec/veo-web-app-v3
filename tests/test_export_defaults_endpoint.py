@@ -58,3 +58,26 @@ def test_corrupt_stored_spec_degrades_to_defaults():
     out = main._export_defaults_payload(_Job("{not json"))
     assert out["declared"] == []
     assert out["settings"]["smart_trim"] is True
+
+
+def test_payload_gathers_facts_from_clip_rows():
+    """_job_export_facts reads render_method / swap_audio / dialogue_text
+    off the job's clips and _export_defaults_payload forwards them."""
+
+    class _Clip:
+        def __init__(self, rm, sa, txt):
+            self.render_method, self.swap_audio, self.dialogue_text = rm, sa, txt
+
+    clips = [_Clip("charswap", "source-original", ""),
+             _Clip("charswap", None, "")]
+    facts = main._job_export_facts(clips)
+    assert facts == {"all_charswap": True, "any_source_audio": True,
+                     "has_speech": False}
+
+    spoken = [_Clip(None, None, "my soldier stood down")]
+    assert main._job_export_facts(spoken) == {
+        "all_charswap": False, "any_source_audio": False, "has_speech": True}
+
+    # empty job: no lane claims
+    assert main._job_export_facts([]) == {
+        "all_charswap": False, "any_source_audio": False, "has_speech": False}
