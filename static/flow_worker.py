@@ -20812,10 +20812,52 @@ def charswap_attach_and_prompt(page, avatar_path, video_path, prompt,
             _stale = charswap_composer_chip_media_ids(page)
             if not _stale:
                 break
+        # v945.11 — the RELOAD tier. dc2d336d clip 2 (2026-08-30 05:26) proved
+        # the click rounds alone are not enough: ONE chip survived all three
+        # (chips_before_clear: 1, chips_after_clear: 1) — the id reader sees
+        # it, the cancel clicks cannot remove it, whatever its DOM is. Rather
+        # than guess a third selector, rebuild the composer: reload the
+        # project page and re-scan. Chips are client composer state, so a
+        # reload starts it empty; if Flow ever persists them server-side the
+        # re-scan still catches it and the refusal below still fires. Fail
+        # closed is unchanged — this only adds a recovery between clean-up
+        # and refusal.
+        if _stale:
+            print(f"{context} {len(_stale)} chip(s) survived the click rounds — "
+                  f"reloading the project page to rebuild the composer", flush=True)
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=45000)
+                page.wait_for_timeout(6000)
+                check_and_dismiss_popup(page)
+            except Exception as _rl_e:
+                print(f"{context} reload failed: {_rl_e}", flush=True)
+            try:
+                _stale = charswap_composer_chip_media_ids(page)
+            except Exception:
+                pass
+            _diag["cleared_by_reload"] = not _stale
         _diag["chips_after_clear"] = len(_stale)
         if _stale:
+            # v945.11 — capture WHAT the un-clearable chip actually is, so the
+            # next fix is written from evidence instead of a fourth guess. The
+            # clicker and the id reader disagree about this chip's controls;
+            # this records the controls.
+            try:
+                _diag["stale_chip_dom"] = page.evaluate(
+                    "() => Array.from(document.querySelectorAll('button'))"
+                    ".filter(b => { const r = b.getBoundingClientRect();"
+                    " return r.top > (window.innerHeight - 280) && r.width > 0; })"
+                    ".slice(0, 12).map(b => ({"
+                    " icons: Array.from(b.querySelectorAll('i,span'))"
+                    "  .map(i => (i.textContent || '').trim()).filter(Boolean).slice(0, 4),"
+                    " aria: b.getAttribute('aria-label'),"
+                    " card: b.hasAttribute('data-card-open'),"
+                    " html: (b.outerHTML || '').slice(0, 160) }))")[:12]
+            except Exception:
+                pass
             print(f"{context} composer STILL holds {len(_stale)} chip(s) after "
-                  f"clearing — refusing to attach onto a dirty composer", flush=True)
+                  f"clearing AND a reload — refusing to attach onto a dirty "
+                  f"composer", flush=True)
             page._charswap_block_reason = (
                 f"{len(_stale)} stale chip(s) from a previous clip would not "
                 f"clear; a dirty composer submits half-attached swaps")
