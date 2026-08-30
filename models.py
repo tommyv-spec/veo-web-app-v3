@@ -802,6 +802,13 @@ class InstagramAccount(Base):
     # the error is what makes a stale account explainable instead of mysterious.
     last_sync_attempt_at = Column(DateTime, nullable=True)
     last_sync_error      = Column(Text, nullable=True)
+    # 2026-08-30 — the nudge that replaced the timer. A caller that KNOWS a post
+    # went out (publish_reel, the reconciler) sets these, and the worker picks
+    # the account up on its next one-second tick instead of whenever a 6-hour
+    # clock came round. Self-clearing: the request stops firing once
+    # last_synced_at passes it, so there is no flag to lose.
+    sync_requested_at    = Column(DateTime, nullable=True)
+    sync_reason          = Column(String(64), nullable=True)
     added_at          = Column(DateTime, default=datetime.utcnow)
 
     user   = relationship("User", back_populates="instagram_accounts")
@@ -822,6 +829,9 @@ class InstagramAccount(Base):
             "last_sync_attempt_at": (self.last_sync_attempt_at.isoformat()
                                      if self.last_sync_attempt_at else None),
             "last_sync_error": self.last_sync_error,
+            "sync_requested_at": (self.sync_requested_at.isoformat()
+                                  if self.sync_requested_at else None),
+            "sync_reason": self.sync_reason,
             "added_at": self.added_at.isoformat() if self.added_at else None,
         }
 
@@ -1356,6 +1366,11 @@ def _run_migrations_postgresql(engine):
          "ALTER TABLE instagram_accounts ADD COLUMN IF NOT EXISTS last_sync_attempt_at TIMESTAMP"),
         ("instagram_accounts", "last_sync_error",
          "ALTER TABLE instagram_accounts ADD COLUMN IF NOT EXISTS last_sync_error TEXT"),
+        # 2026-08-30 — reason-driven sync (v953.4): the nudge that replaced the timer.
+        ("instagram_accounts", "sync_requested_at",
+         "ALTER TABLE instagram_accounts ADD COLUMN IF NOT EXISTS sync_requested_at TIMESTAMP"),
+        ("instagram_accounts", "sync_reason",
+         "ALTER TABLE instagram_accounts ADD COLUMN IF NOT EXISTS sync_reason VARCHAR(64)"),
         # v853 — duration discriminator for the IG->job matcher
         ("jobs", "export_duration_s",
          "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS export_duration_s DOUBLE PRECISION"),
@@ -1599,6 +1614,11 @@ def _run_migrations_sqlite(engine):
          "ALTER TABLE instagram_accounts ADD COLUMN last_sync_attempt_at DATETIME"),
         ("instagram_accounts", "last_sync_error",
          "ALTER TABLE instagram_accounts ADD COLUMN last_sync_error TEXT"),
+        # 2026-08-30 — reason-driven sync (see the Postgres list above).
+        ("instagram_accounts", "sync_requested_at",
+         "ALTER TABLE instagram_accounts ADD COLUMN sync_requested_at DATETIME"),
+        ("instagram_accounts", "sync_reason",
+         "ALTER TABLE instagram_accounts ADD COLUMN sync_reason TEXT"),
         # v853 — duration discriminator for the IG->job matcher
         ("jobs", "export_duration_s", "ALTER TABLE jobs ADD COLUMN export_duration_s REAL"),
         ("jobs", "export_probed_at",  "ALTER TABLE jobs ADD COLUMN export_probed_at DATETIME"),

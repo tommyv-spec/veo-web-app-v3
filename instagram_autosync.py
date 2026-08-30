@@ -35,24 +35,62 @@ DESIGN NOTES:
 import os
 from datetime import datetime, timedelta
 
-# Every 6 hours per account: four accounts is ~16 syncs a day and a reel is
-# never more than 6 hours from being seen.
+# ---------------------------------------------------------------------------
+# WHY THIS IS NOT A TIMER (2026-08-30)
 #
-# BE HONEST ABOUT THE COST — a sync is not one API call. Each one runs
-# fetch_recent_clips(limit=0), which walks the account's WHOLE history over
-# several passes of up to 50 pages (the /refresh-stats docstring says the same:
-# "up to 50 HikerAPI calls" where that endpoint wants 1-3). So the real figure
-# is pages, not syncs, and roughly an order of magnitude above "a couple of
-# cents". It is still small, and this repo's standing rule is that paid calls
-# get named rather than waved at. Turning the routine tick into a shallow fetch
-# with one deep pass a day would cut it further; that is an operator call, not
-# a defect, and the page counts behind it are inferred rather than measured.
-DEFAULT_INTERVAL_HOURS = float(os.environ.get("IG_AUTOSYNC_INTERVAL_HOURS", "6"))
+# The first version synced the stalest account every 6 hours. That is a blind
+# poll, and it is wrong in both directions at once: it spends HikerAPI pages
+# when nothing has happened, and it is still up to SIX HOURS late when something
+# has. A sync is not one call — fetch_recent_clips(limit=0) walks the account's
+# whole history over several passes of up to 50 pages — so the waste is real.
+#
+# The system already KNOWS when a sync is worth doing. Three signals, strongest
+# first, and a clock only as a backstop:
+#
+#   requested     Someone told us a post just went out for this account
+#                 (publish_reel and the reconciler both nudge
+#                 POST /api/instagram/accounts/{id}/request-sync). The worker
+#                 ticks every second, so this lands in about a second instead
+#                 of up to six hours.
+#   never-synced  No picture at all yet.
+#   waiting-jobs  A RECENT exported job has no published_at, so a reel for it
+#                 may exist. Measured 2026-08-30 on the live platform: 252 jobs
+#                 are exported-and-unpublished in total, but only 2 within 14
+#                 days and ZERO within 3 — so scoped to the freshness window
+#                 this gate is CLOSED almost always, while the unscoped version
+#                 would have been permanently open and told us nothing.
+#   backstop      Nothing said anything for a long time. This is the honest role
+#                 of a clock: catching what no signal reports — a reel posted by
+#                 hand from a phone, a repost, a deleted reel — not being the
+#                 mechanism. Hence 24h, not 6.
+#
+# Net effect: faster when it matters, and it stops paying when it does not.
+# ---------------------------------------------------------------------------
+
+# The backstop, NOT the mechanism. Kept on the old env var so an operator who
+# tuned it still controls the same thing.
+BACKSTOP_HOURS = float(os.environ.get("IG_AUTOSYNC_INTERVAL_HOURS", "24"))
+# Floor under the `waiting-jobs` signal. An exported job that is never going to
+# be posted would otherwise hold the gate open on every one-second tick.
+DISCOVERY_MINUTES = float(os.environ.get("IG_AUTOSYNC_DISCOVERY_MINUTES", "30"))
+# Only jobs this fresh count as "a reel may exist for this". Matches the §R0.1
+# 3-day freshness cap the posting lane already works to.
+FRESH_DAYS = float(os.environ.get("IG_AUTOSYNC_FRESH_DAYS", "3"))
 # How long a FAILED account waits before it is tried again.
 DEFAULT_RETRY_MINUTES = float(os.environ.get("IG_AUTOSYNC_RETRY_MINUTES", "30"))
 ENABLED = os.environ.get("IG_AUTOSYNC", "1").strip().lower() not in ("0", "false", "no")
 
+# Back-compat: pick_account still accepts interval_hours, and callers that pass
+# nothing get the backstop.
+DEFAULT_INTERVAL_HOURS = BACKSTOP_HOURS
+
 _ERROR_MAX = 500
+
+# The candidate query scans the jobs table, and the worker ticks every SECOND.
+# Memoised briefly so the cheap gate stays cheap — the answer cannot change
+# meaningfully inside a minute, and a stale "yes" only costs one early sync.
+_CAND_CACHE = {"at": None, "by_user": {}}
+_CAND_TTL_S = 60.0
 
 
 def _rollback(db) -> None:
@@ -91,37 +129,115 @@ def apply_counts(row, clip: dict) -> None:
             setattr(row, field, incoming)
 
 
+def request_sync(db, acc, reason="requested"):
+    """Mark an account as owing a sync. The cheap half of the whole design.
+
+    Costs one column write and no API call, so the caller that KNOWS something
+    happened — publish_reel after a publish, the reconciler when it finds a live
+    reel the platform has never seen — can say so directly instead of leaving
+    the platform to discover it on a clock.
+    """
+    acc.sync_requested_at = datetime.utcnow()
+    acc.sync_reason = (reason or "requested")[:64]
+    return acc
+
+
+def has_fresh_unpublished_export(db, user_id, now=None, fresh_days=None):
+    """Could a reel plausibly exist that we have not matched yet?
+
+    A reel on Instagram corresponds to a job that was EXPORTED. If that job also
+    has no published_at, a sync might discover its reel. Scoped to recent jobs
+    on purpose: unscoped this is true 252 times over on the live platform (old
+    abandoned exports) and never closes, which would make it no gate at all.
+    """
+    from models import Job
+    now = now or datetime.utcnow()
+    fresh_days = FRESH_DAYS if fresh_days is None else fresh_days
+    cutoff = now - timedelta(days=fresh_days)
+
+    cached = _CAND_CACHE["by_user"].get(user_id)
+    if (cached is not None and _CAND_CACHE["at"]
+            and (now - _CAND_CACHE["at"]).total_seconds() < _CAND_TTL_S):
+        return cached
+
+    hit = (db.query(Job.id)
+           .filter(Job.user_id == user_id,
+                   Job.has_export == True,            # noqa: E712
+                   Job.published_at.is_(None),
+                   Job.archived == False,             # noqa: E712
+                   Job.created_at >= cutoff)
+           .first()) is not None
+    if _CAND_CACHE["at"] is None or (now - _CAND_CACHE["at"]).total_seconds() >= _CAND_TTL_S:
+        _CAND_CACHE["at"] = now
+        _CAND_CACHE["by_user"] = {}
+    _CAND_CACHE["by_user"][user_id] = hit
+    return hit
+
+
+def sync_reason_for(db, acc, now=None, retry_minutes=None, backstop_hours=None):
+    """(priority, reason) for syncing this account now, or None to leave it.
+
+    Lower priority number wins. Returning None is the common and correct answer:
+    most of the time there is genuinely nothing to find, and a sync then is pure
+    spend.
+    """
+    now = now or datetime.utcnow()
+    retry_minutes = DEFAULT_RETRY_MINUTES if retry_minutes is None else retry_minutes
+    backstop_hours = BACKSTOP_HOURS if backstop_hours is None else backstop_hours
+
+    # A failing account backs off from EVERY reason, including a nudge — a
+    # broken handle must not spin on a request it cannot satisfy.
+    if (acc.last_sync_attempt_at
+            and acc.last_sync_attempt_at > now - timedelta(minutes=retry_minutes)):
+        return None
+
+    requested = getattr(acc, "sync_requested_at", None)
+    if requested and (not acc.last_synced_at or requested > acc.last_synced_at):
+        # Self-clearing: once last_synced_at passes the request, this stops
+        # firing. No second write, and no way to lose the flag.
+        return (0, getattr(acc, "sync_reason", None) or "requested")
+
+    if acc.last_synced_at is None:
+        return (1, "never-synced")
+
+    if acc.last_synced_at < now - timedelta(minutes=DISCOVERY_MINUTES):
+        if has_fresh_unpublished_export(db, acc.user_id, now=now):
+            return (2, "waiting-jobs")
+
+    if acc.last_synced_at < now - timedelta(hours=backstop_hours):
+        return (3, "backstop")
+
+    return None
+
+
 def pick_account(db, interval_hours=None, retry_minutes=None, now=None,
                  user_id=None):
-    """The one account most worth syncing right now, or None.
+    """(account, reason) most worth syncing right now, or (None, "").
 
-    Stalest first, skipping anything synced inside `interval_hours` and anything
-    ATTEMPTED inside `retry_minutes`. The retry gate applies per account, so one
-    permanently broken handle cannot starve the others.
+    Strongest reason first; stalest account breaks a tie. `interval_hours` is
+    kept as the backstop knob so existing callers and tests still mean what they
+    meant.
     """
     from models import InstagramAccount
     now = now or datetime.utcnow()
-    interval_hours = DEFAULT_INTERVAL_HOURS if interval_hours is None else interval_hours
-    retry_minutes = DEFAULT_RETRY_MINUTES if retry_minutes is None else retry_minutes
-    sync_cutoff = now - timedelta(hours=interval_hours)
-    retry_cutoff = now - timedelta(minutes=retry_minutes)
-
     q = db.query(InstagramAccount)
     if user_id:
         q = q.filter(InstagramAccount.user_id == user_id)
-    # Ordering in Python, not SQL: NULL ordering differs between Postgres and
-    # SQLite, and "never synced" must mean FIRST on both. The account table is
-    # a handful of rows.
+
     best = None
     for acc in q.all():
-        if acc.last_synced_at and acc.last_synced_at > sync_cutoff:
+        got = sync_reason_for(db, acc, now=now, retry_minutes=retry_minutes,
+                              backstop_hours=interval_hours)
+        if got is None:
             continue
-        if acc.last_sync_attempt_at and acc.last_sync_attempt_at > retry_cutoff:
-            continue
-        key = acc.last_synced_at or datetime.min
+        priority, reason = got
+        # Ordering in Python, not SQL: NULL ordering differs between Postgres
+        # and SQLite, and "never synced" must sort FIRST on both. The account
+        # table is a handful of rows.
+        key = (priority, acc.last_synced_at or datetime.min)
         if best is None or key < best[0]:
-            best = (key, acc)
-    return best[1] if best else None
+            best = (key, acc, reason)
+    return (best[1], best[2]) if best else (None, "")
 
 
 def _fetch_and_store(acc, db):
@@ -272,7 +388,8 @@ def sync_account_once(acc, db, fetcher=None):
 
 def process_instagram_autosync(db, interval_hours=None, retry_minutes=None,
                                fetcher=None):
-    """One worker tick: sync at most one stale account. Returns how many ran.
+    """One worker tick: sync at most one account THAT HAS A REASON. Returns how
+    many ran — usually 0, which is the point.
 
     Wrapped end to end — this is called from the worker's main loop, so an
     exception escaping here would stop job processing.
@@ -280,10 +397,12 @@ def process_instagram_autosync(db, interval_hours=None, retry_minutes=None,
     if not ENABLED:
         return 0
     try:
-        acc = pick_account(db, interval_hours=interval_hours,
-                           retry_minutes=retry_minutes)
+        acc, reason = pick_account(db, interval_hours=interval_hours,
+                                   retry_minutes=retry_minutes)
         if acc is None:
             return 0
+        print(f"[ig-autosync] account={acc.id} @{acc.handle} syncing "
+              f"reason={reason}", flush=True)
         sync_account_once(acc, db, fetcher=fetcher)
         return 1
     except Exception as exc:

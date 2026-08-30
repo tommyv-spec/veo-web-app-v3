@@ -4550,6 +4550,35 @@ async def delete_instagram_account(
     return {"deleted": account_id}
 
 
+@app.post("/api/instagram/accounts/{account_id}/request-sync")
+def request_instagram_sync(
+    account_id: int,
+    reason: str = "requested",
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Tell the platform a post just went out for this account (v953.4).
+
+    THE CHEAP HALF OF THE SYNC DESIGN. One column write, no HikerAPI call, and
+    the worker picks it up on its next one-second tick — where the old 6-hour
+    timer left a reel invisible for up to six hours and paid for a full history
+    walk whether or not anything had happened.
+
+    Deliberately NOT the sync itself: the caller does not wait, does not pay,
+    and cannot time out. A publisher on a flaky link should be able to say "look
+    at account 2" for free. `async def` is safe here — nothing blocks.
+    """
+    from instagram_autosync import request_sync
+    acc = _get_user_ig_account(db, account_id, current_user)
+    request_sync(db, acc, reason)
+    db.commit()
+    print(f"[ig-autosync] account={acc.id} @{acc.handle} sync REQUESTED "
+          f"reason={acc.sync_reason}", flush=True)
+    return {"requested": True, "account_id": acc.id,
+            "reason": acc.sync_reason,
+            "requested_at": acc.sync_requested_at.isoformat()}
+
+
 @app.post("/api/instagram/accounts/{account_id}/sync")
 def sync_instagram_account(
     account_id: int,
@@ -4562,6 +4591,8 @@ def sync_instagram_account(
     from instagram_autosync import sync_account_once
     acc = _get_user_ig_account(db, account_id, current_user)
     res = sync_account_once(acc, db)
+    # A manual sync satisfies any outstanding nudge as well; sync_account_once
+    # advances last_synced_at, which is what clears it (see sync_reason_for).
     if not res["ok"]:
         # sync_account_once swallows the exception on purpose (its other caller
         # is a worker loop that must not die), so the HTTP surface is unchanged:

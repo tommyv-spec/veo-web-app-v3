@@ -46,25 +46,121 @@ def account(s, handle, synced=None, attempted=None, error=None):
 
 
 class TestPickAccount:
-    def test_picks_the_stalest_account_first(self, db):
+    """v953.4 — the picker is REASON-driven, not a clock.
+
+    pick_account returns (account, reason). The old version synced the stalest
+    account every 6 hours whether or not anything had happened: it paid for a
+    full history walk on an idle account AND still left a real post invisible
+    for up to six hours. `interval_hours` now means the BACKSTOP.
+    """
+
+    def test_the_stalest_account_wins_a_tie_on_the_backstop(self, db):
         now = datetime.utcnow()
         account(db, "recent", synced=now - timedelta(hours=7))
         old = account(db, "ancient", synced=now - timedelta(days=56))
-        assert autosync.pick_account(db, interval_hours=6, now=now).id == old.id
+        acc, reason = autosync.pick_account(db, interval_hours=6, now=now)
+        assert acc.id == old.id
+        assert reason == "backstop"
 
-    def test_an_account_synced_inside_the_interval_is_skipped(self, db):
+    def test_an_idle_account_with_nothing_to_find_is_LEFT_ALONE(self, db):
+        # The whole point. Nothing happened, no fresh unpublished export, inside
+        # the backstop -> do not spend a history walk to learn nothing.
+        autosync._CAND_CACHE["at"] = None
         now = datetime.utcnow()
-        account(db, "fresh", synced=now - timedelta(hours=1))
-        assert autosync.pick_account(db, interval_hours=6, now=now) is None
+        account(db, "idle", synced=now - timedelta(hours=7))
+        acc, reason = autosync.pick_account(db, interval_hours=24, now=now)
+        assert acc is None, f"synced an idle account for no reason ({reason})"
+
+    def test_a_nudge_beats_everything_and_fires_immediately(self, db):
+        # publish_reel says "I just posted to this account". The worker ticks
+        # every second, so this must be pickable AT ONCE, not on a clock.
+        autosync._CAND_CACHE["at"] = None
+        now = datetime.utcnow()
+        account(db, "stale", synced=now - timedelta(days=9))
+        fresh = account(db, "just-posted", synced=now - timedelta(minutes=1))
+        autosync.request_sync(db, fresh, "published")
+        db.commit()
+        acc, reason = autosync.pick_account(db, interval_hours=24, now=now)
+        assert acc.id == fresh.id, "a nudge must outrank a stale account"
+        assert reason == "published"
+
+    def test_a_nudge_stops_firing_once_the_sync_has_happened(self, db):
+        # Self-clearing by design: last_synced_at passing the request retires
+        # it, so there is no flag to lose and no second write.
+        autosync._CAND_CACHE["at"] = None
+        now = datetime.utcnow()
+        a = account(db, "done", synced=now - timedelta(minutes=1))
+        autosync.request_sync(db, a, "published")
+        db.commit()
+        assert autosync.pick_account(db, interval_hours=24, now=now)[0] is not None
+        a.last_synced_at = datetime.utcnow()
+        db.commit()
+        acc, _ = autosync.pick_account(db, interval_hours=24, now=datetime.utcnow())
+        assert acc is None, "the nudge fired twice"
 
     def test_a_never_synced_account_is_picked(self, db):
         # NULL last_synced_at must sort as infinitely stale, not as "no opinion".
         now = datetime.utcnow()
         a = account(db, "new")
-        assert autosync.pick_account(db, interval_hours=6, now=now).id == a.id
+        acc, reason = autosync.pick_account(db, interval_hours=6, now=now)
+        assert acc.id == a.id
+        assert reason == "never-synced"
+
+    def test_a_fresh_unpublished_export_is_a_reason_to_look(self, db):
+        # A reel can only exist for a job that was EXPORTED. If one is recent
+        # and still unpublished, a sync might find its reel — a signal, not a
+        # guess.
+        from models import Job
+        autosync._CAND_CACHE["at"] = None
+        now = datetime.utcnow()
+        account(db, "waiting", synced=now - timedelta(hours=2))
+        db.add(Job(id="j1", user_id="u1", status="completed", has_export=True,
+                   config_json="{}", dialogue_json="[]", api_keys_json="{}",
+                   images_dir="x", output_dir="x", published_at=None, archived=False,
+                   created_at=now))
+        db.commit()
+        acc, reason = autosync.pick_account(db, interval_hours=24, now=now)
+        assert acc is not None and reason == "waiting-jobs"
+
+    def test_an_OLD_unpublished_export_is_not_a_reason(self, db):
+        # Measured on the live platform: 252 jobs are exported-and-unpublished,
+        # but only 2 within 14 days and ZERO within 3. Unscoped, this gate would
+        # never close and would be no gate at all.
+        from models import Job
+        autosync._CAND_CACHE["at"] = None
+        now = datetime.utcnow()
+        account(db, "waiting", synced=now - timedelta(hours=2))
+        db.add(Job(id="j-old", user_id="u1", status="completed", has_export=True,
+                   config_json="{}", dialogue_json="[]", api_keys_json="{}",
+                   images_dir="x", output_dir="x", published_at=None, archived=False,
+                   created_at=now - timedelta(days=40)))
+        db.commit()
+        acc, reason = autosync.pick_account(db, interval_hours=24, now=now)
+        assert acc is None, f"a 40-day-old abandoned export triggered a sync ({reason})"
+
+    def test_a_published_job_is_not_a_reason(self, db):
+        from models import Job
+        autosync._CAND_CACHE["at"] = None
+        now = datetime.utcnow()
+        account(db, "waiting", synced=now - timedelta(hours=2))
+        db.add(Job(id="j-done", user_id="u1", status="completed", has_export=True,
+                   config_json="{}", dialogue_json="[]", api_keys_json="{}",
+                   images_dir="x", output_dir="x", published_at=now, archived=False,
+                   created_at=now))
+        db.commit()
+        assert autosync.pick_account(db, interval_hours=24, now=now)[0] is None
+
+    def test_the_backstop_still_catches_what_no_signal_reports(self, db):
+        # A reel posted by hand from a phone tells us nothing. The clock's
+        # honest job is to catch exactly that — and only that.
+        autosync._CAND_CACHE["at"] = None
+        now = datetime.utcnow()
+        account(db, "quiet", synced=now - timedelta(hours=30))
+        acc, reason = autosync.pick_account(db, interval_hours=24, now=now)
+        assert acc is not None and reason == "backstop"
 
     def test_no_accounts_at_all_is_not_an_error(self, db):
-        assert autosync.pick_account(db, interval_hours=6) is None
+        assert autosync.pick_account(db, interval_hours=6)[0] is None
 
     def test_a_failing_account_backs_off_and_does_not_spin(self, db):
         # The failure clock is last_sync_attempt_at, NOT last_synced_at: a sync
@@ -73,9 +169,17 @@ class TestPickAccount:
         now = datetime.utcnow()
         account(db, "broken", synced=None, attempted=now - timedelta(minutes=5))
         assert autosync.pick_account(db, interval_hours=6, retry_minutes=30,
-                                     now=now) is None
+                                     now=now)[0] is None
         assert autosync.pick_account(db, interval_hours=6, retry_minutes=1,
-                                     now=now) is not None
+                                     now=now)[0] is not None
+
+    def test_backoff_gates_a_NUDGE_too(self, db):
+        # A broken handle must not spin on a request it cannot satisfy.
+        now = datetime.utcnow()
+        a = account(db, "broken", synced=None, attempted=now - timedelta(minutes=2))
+        autosync.request_sync(db, a, "published")
+        db.commit()
+        assert autosync.pick_account(db, retry_minutes=30, now=now)[0] is None
 
     def test_a_recent_attempt_does_not_hold_back_a_healthy_stale_account(self, db):
         # Retry backoff must gate only the account that just failed, never the
@@ -84,8 +188,9 @@ class TestPickAccount:
         account(db, "broken", synced=None, attempted=now - timedelta(minutes=1))
         stale = account(db, "stale", synced=now - timedelta(days=3),
                         attempted=now - timedelta(days=3))
-        assert autosync.pick_account(db, interval_hours=6, retry_minutes=30,
-                                     now=now).id == stale.id
+        acc, _ = autosync.pick_account(db, interval_hours=6, retry_minutes=30,
+                                       now=now)
+        assert acc.id == stale.id
 
 
 class TestSyncAccountOnce:
