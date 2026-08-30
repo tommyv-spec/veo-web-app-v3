@@ -18,7 +18,9 @@ Reports:
   1. DEFINED but NOT INDEXED       -> conventions.md is blind on these
   2. INDEXED but NOT DEFINED       -> an index row with no heading anchor
   3. DEFINED but NOT CLASSIFIED    -> build-rule-index.md is blind on these
-Exit is nonzero if EITHER index has a gap.
+  4. ROW OVER THE LENGTH BUDGET    -> conventions.md stopped being an index
+                                      and became a second rulebook
+Exit is nonzero if either index has a gap or any row busts its budget.
 
 Rule numbers are BASE-normalized (v791.2 -> v791, v681e -> v681) so a family's
 sub-rules collapse onto the one row the index actually carries.
@@ -110,6 +112,89 @@ def indexed_rules(text: str) -> set[str]:
         for vm in VTOKEN.finditer(first_cell):
             out.add(base(vm.group(1)))
     return out
+
+
+# --------------------------------------------------------------------------
+# ROW LENGTH BUDGET  (P4, 2026-08-30)
+#
+# conventions.md promises "one row per v-rule". Rows kept growing into full
+# deep-dives — measured before this check: 218 rows, median 418 chars, p90
+# 1680, longest 17916, and 117 rows over 300. That prose is a SECOND copy of
+# the canonical section the row already points at, so it goes stale silently
+# and it is paid for on every read of the index.
+#
+# The budget is per ROW, not per file: a rule earns one plain-language line
+# plus its source + canonical link. Deep-dive content belongs in the canonical
+# home named in the row's last cell.
+#
+# 300 chars: measured, the non-summary part of a row (rule id + source cell +
+# canonical link + pipes) has a median of ~130 chars, which leaves ~170 for an
+# honest one-line summary.
+ROW_BUDGET = 300
+
+# Rows that legitimately stay over budget: they carry information that is NOT
+# in the canonical home they point at, so trimming them would DELETE knowledge.
+# Each entry is named + dated + says what the unique content is. These are the
+# repair backlog for the separate rule-content track — an entry here is a debt,
+# not a pass. Key = the row's first-cell v-token exactly as written.
+ROW_BUDGET_EXCEPTIONS: dict[str, str] = {
+    "v888": "2026-08-30 — BEAT-ALIGNED EXPORT has NO §v888 section in "
+            "template_reference.md (grep: 0 hits), so this row is the only "
+            "rule-level statement of it. Its 'UI CONFLICT (unresolved)' clause "
+            "— Speed Up Video / Trim Frames / Remove Silence each re-time the "
+            "finished cut and destroy beat alignment — is in no code file "
+            "either; it survives only in docs/handoff-archive/2026-08.md, "
+            "which is an archive, not a canonical home. REPAIR: write §v888 "
+            "into template_reference.md, then trim this row and delete this "
+            "entry.",
+}
+
+
+def index_rows(text: str) -> list[tuple[int, str, str]]:
+    """(line_no, first-cell v-token, full source line) for every v-rule row.
+
+    Same row definition the coverage check uses (a table row whose FIRST cell
+    names a v-rule), so the two checks can never disagree about what a row is.
+    """
+    out: list[tuple[int, str, str]] = []
+    for i, line in enumerate(text.splitlines(), 1):
+        s = line.lstrip()
+        if not s.startswith("|") or s.count("|") < 2:
+            continue
+        first_cell = s.split("|")[1]
+        vm = VTOKEN.search(first_cell)
+        if not vm:
+            continue
+        out.append((i, vm.group(0).lower(), line))
+    return out
+
+
+def row_budget_report(text: str, budget: int = ROW_BUDGET,
+                      exceptions: dict[str, str] | None = None) -> dict:
+    """Every row over `budget`, split into real offenders and named exceptions.
+
+    Reports ALL offenders — never stops at the first — because a checker that
+    reports one fault per run trains you to fix them one commit at a time.
+    """
+    exc = ROW_BUDGET_EXCEPTIONS if exceptions is None else exceptions
+    rows = index_rows(text)
+    over = [(ln, tok, len(line)) for ln, tok, line in rows if len(line) > budget]
+    offenders = [r for r in over if r[1] not in exc]
+    excepted = [r for r in over if r[1] in exc]
+    # an exception key that no longer matches an over-budget row is stale —
+    # report it so the list cannot quietly outlive the problem it excused
+    over_toks = {t for _, t, _ in over}
+    stale = sorted(k for k in exc if k not in over_toks)
+    lens = sorted(len(line) for _, _, line in rows)
+    return {
+        "budget": budget,
+        "row_count": len(rows),
+        "max_len": lens[-1] if lens else 0,
+        "median_len": lens[len(lens) // 2] if lens else 0,
+        "offenders": offenders,
+        "excepted": excepted,
+        "stale_exceptions": stale,
+    }
 
 
 # Rules that are real + classified in build-rule-index but have NO defining
@@ -331,6 +416,45 @@ def selftest() -> int:
     r = build_index_report({"v300"}, _mini_index(a=["v300"], b=["v300"]))
     check("conflict:non-allowlisted-flagged", r["conflict"] == ["v300"])
 
+    # --- row-length budget (P4) ---
+    short = "| v100 | short summary | src | `canonical.md` |"
+    longr = "| v200 | " + ("x" * 400) + " | src | `canonical.md` |"
+    longr2 = "| v300 | " + ("y" * 500) + " | src | `canonical.md` |"
+    tbl = "\n".join(["| v-rule | s | src | canon |", "|---|---|---|---|",
+                     short, longr, longr2])
+
+    r = row_budget_report(tbl, budget=300, exceptions={})
+    check("budget:counts-all-rows", r["row_count"] == 3)
+    # ALL offenders reported, not just the first
+    check("budget:reports-every-offender",
+          [t for _, t, _ in r["offenders"]] == ["v200", "v300"])
+    check("budget:short-row-not-flagged",
+          "v100" not in [t for _, t, _ in r["offenders"]])
+    check("budget:reports-line-and-length",
+          all(isinstance(ln, int) and L > 300 for ln, _, L in r["offenders"]))
+
+    # a named exception moves a row out of offenders, not out of sight
+    r = row_budget_report(tbl, budget=300, exceptions={"v200": "reason, 2026-08-30"})
+    check("budget:exception-clears-offender",
+          [t for _, t, _ in r["offenders"]] == ["v300"])
+    check("budget:exception-still-listed",
+          [t for _, t, _ in r["excepted"]] == ["v200"])
+    check("budget:no-stale-when-used", r["stale_exceptions"] == [])
+
+    # an exception for a row that is now under budget is STALE and reported
+    r = row_budget_report(tbl, budget=300, exceptions={"v100": "obsolete, 2026-08-30"})
+    check("budget:stale-exception-detected", r["stale_exceptions"] == ["v100"])
+
+    # a row header / separator line must never count as a rule row
+    r = row_budget_report("| v-rule | one | scope |\n|---|---|---|\n" + short,
+                          budget=300, exceptions={})
+    check("budget:ignores-header-and-separator", r["row_count"] == 1)
+
+    # the real index parses and the check runs on it
+    if INDEX.exists():
+        rr = row_budget_report(INDEX.read_text(encoding="utf-8"))
+        check("budget:real-index-parses", rr["row_count"] > 100)
+
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
@@ -369,7 +493,8 @@ def main() -> int:
         return 2
 
     defined = defined_rules(MASTERS.read_text(encoding="utf-8"))
-    indexed = indexed_rules(INDEX.read_text(encoding="utf-8"))
+    index_text = INDEX.read_text(encoding="utf-8")
+    indexed = indexed_rules(index_text)
 
     if args.toc:
         # A navigation map INTO template_reference.md: jump straight to any
@@ -416,11 +541,25 @@ def main() -> int:
     if bri_present:
         bri = build_index_report(def_set, BUILD_INDEX.read_text(encoding="utf-8"))
 
+    # Third target: the ROW LENGTH BUDGET on conventions.md — the index only
+    # stays an index if a row stays a row.
+    budget = row_budget_report(index_text)
+
     fail = (bool(missing) or bool(bri["missing"]) or bool(bri["unknown"])
             or bool(bri["duplicate"]) or bool(bri["conflict"])
-            or bool(bri["contradiction"]))
+            or bool(bri["contradiction"])
+            or bool(budget["offenders"]) or bool(budget["stale_exceptions"]))
 
     result = {
+        "row_budget": budget["budget"],
+        "row_count": budget["row_count"],
+        "row_median_len": budget["median_len"],
+        "row_max_len": budget["max_len"],
+        "rows_over_budget": [{"line": ln, "rule": r, "len": L}
+                             for ln, r, L in budget["offenders"]],
+        "rows_over_budget_excepted": [{"line": ln, "rule": r, "len": L}
+                                      for ln, r, L in budget["excepted"]],
+        "stale_row_budget_exceptions": budget["stale_exceptions"],
         "defined_count": len(def_set),
         "indexed_count": len(indexed),
         "missing_from_index": missing,
@@ -495,6 +634,29 @@ def main() -> int:
                          + ", ".join(sorted(allow)) + ")") if allow else ""
                 print("✓ build-rule-index.md classifies every defined rule "
                       "(no missing/unknown/duplicate/conflict/contradiction)" + extra)
+        # 3. row length budget on conventions.md
+        print(f"\nrow budget — {budget['row_count']} rows, "
+              f"median {budget['median_len']} chars, longest {budget['max_len']}, "
+              f"budget {budget['budget']}")
+        if budget["offenders"]:
+            print(f"✗ {len(budget['offenders'])} row(s) OVER the {budget['budget']}-char "
+                  f"budget (move the deep-dive prose into the canonical home the row "
+                  f"points at, or add a dated ROW_BUDGET_EXCEPTIONS entry saying what "
+                  f"is unique about it):")
+            for ln, tok, L in budget["offenders"]:
+                print(f"    {tok:<10} L{ln:<5} {L:>6} chars  (+{L - budget['budget']})")
+        else:
+            print(f"✓ every row fits the {budget['budget']}-char budget")
+        if budget["excepted"]:
+            print(f"\n⚠ {len(budget['excepted'])} row(s) over budget by NAMED exception "
+                  f"(unique content with no canonical home yet — repair backlog):")
+            for ln, tok, L in budget["excepted"]:
+                print(f"    {tok:<10} L{ln:<5} {L:>6} chars — "
+                      f"{ROW_BUDGET_EXCEPTIONS[tok]}")
+        if budget["stale_exceptions"]:
+            print(f"\n✗ {len(budget['stale_exceptions'])} STALE ROW_BUDGET_EXCEPTIONS "
+                  f"entr(ies) — the row is under budget now, so delete the excuse:")
+            print("    " + " ".join(budget["stale_exceptions"]))
         print()
         print("RESULT:", "FAIL — coverage incomplete" if fail else "PASS")
 
