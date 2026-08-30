@@ -19957,17 +19957,42 @@ _CHARSWAP_VIDEO_CHIP_JS = """() => {
   return false;
 }"""
 
+_CHARSWAP_COMPOSER_ROOT_JS_SNIPPET = """
+  const composerRoot = (() => {
+    // v945.12 — anchor on the composer SHELL: the nearest ancestor of the
+    // prompt box that also holds a dialog-opening button (add_2 / settings).
+    // Why geometry alone is not enough: fabc4c73 clip 2 (2026-08-30) proved
+    // the media grid's lowest tile sits PERMANENTLY inside the bottom-280px
+    // band once the project holds enough media — a reload does not move it
+    // (cleared_by_reload: false) and it has no cancel, so it read as an
+    // un-clearable chip forever. The composer subtree excludes the grid.
+    // Used as an INTERSECTION with the band rule: root found -> both filters
+    // apply (strictly fewer false positives); root not found -> band alone,
+    // i.e. exactly the pre-v945.12 behavior.
+    for (const ta of document.querySelectorAll('textarea, [contenteditable="true"]')) {
+      let el = ta;
+      for (let i = 0; i < 8 && el; i++) {
+        el = el.parentElement;
+        if (el && el.querySelector("button[aria-haspopup='dialog']")) return el;
+      }
+    }
+    return null;
+  })();
+"""
+
 _CHARSWAP_CLEAR_CHIPS_JS = """() => {
   // v945.10 — click the cancel control of every chip in the composer band.
   // Same geometry rule as _CHARSWAP_CHIP_IDS_JS (bottom 280px, outside any
   // dialog), so it removes exactly the chips that reader would count —
   // image AND video chips, however each is rendered.
+""" + _CHARSWAP_COMPOSER_ROOT_JS_SNIPPET + """
   const dlg = document.querySelector('[role="dialog"]');
   let clicked = 0;
   for (const icon of document.querySelectorAll('button i, button span')) {
     if ((icon.textContent || '').trim() !== 'cancel') continue;
     const btn = icon.closest('button');
     if (!btn || (dlg && dlg.contains(btn))) continue;
+    if (composerRoot && !composerRoot.contains(btn)) continue;
     const r = btn.getBoundingClientRect();
     if (!(r.top > (window.innerHeight - 280))) continue;
     btn.click(); clicked++;
@@ -19978,10 +20003,35 @@ _CHARSWAP_CLEAR_CHIPS_JS = """() => {
 _CHARSWAP_CHIP_IDS_JS = """() => {
   // mediaId uuids from the composer chips' thumbnail URLs (outside any dialog,
   // bottom band). Endpoint-agnostic: works however the media was uploaded.
+  //
+  // v945.12 — geometry alone OVER-COUNTS. Proven on job fabc4c73 clip 2
+  // (2026-08-30): one counted "chip" survived every cancel click AND a full
+  // page reload, and the refusal-time DOM dump showed what it was — a control
+  // whose icons read 'delete' / 'View Trash', card:false. Client composer
+  // state cannot survive a reload; page furniture can. A mediaId img that
+  // lives inside the project's tile grid ([data-tile-id]/[data-index]
+  // ancestor) or inside a trash-labelled container is NOT a composer chip,
+  // and counting it made a CLEAN composer read dirty — clip 2 was refused on
+  // a phantom. Structure now excludes what geometry cannot tell apart.
+  //
+  // Two structural guards, merged from two sessions reading the same dump
+  // (see HANDOFF 2026-08-30 ~05:42): the composerRoot INTERSECTION (count
+  // only inside the composer's own subtree when it can be identified — a
+  // positive include beats enumerating furniture, and unknown furniture is
+  // auto-excluded) and the tile/trash EXCLUDES (the fallback layer for a
+  // page state where the root cannot be found, where band-alone would
+  // otherwise recreate the phantom).
+""" + _CHARSWAP_COMPOSER_ROOT_JS_SNIPPET + """
   const dlg = document.querySelector('[role="dialog"]');
   const out = new Set();
   for (const img of document.querySelectorAll('img')) {
     if (dlg && dlg.contains(img)) continue;
+    if (composerRoot && !composerRoot.contains(img)) continue;
+    if (img.closest('[data-tile-id]') || img.closest('[data-index]')) continue;
+    const trashHost = img.closest('button, a, [role="button"]');
+    if (trashHost && /trash|delete/i.test(
+        (trashHost.getAttribute('aria-label') || '') + ' ' +
+        (trashHost.textContent || ''))) continue;
     const r = img.getBoundingClientRect();
     if (!(r.width > 20 && r.top > (window.innerHeight - 280))) continue;
     const m = (img.src||'').match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
