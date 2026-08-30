@@ -3337,6 +3337,52 @@
             }
             #imagesTab .img-variant img { max-height: 34vh; }
             #imagesTab .img-variant { border-width: 3px; }
+
+            /* ---- reclaim the top of the review panel ----
+               Measured on the LIVE page 2026-08-30, real node 5170: the first
+               variant began 540px down a 792px panel. 68% of the review area
+               was a 4-line title, a status row, three FULL-WIDTH parent rows
+               and a prompt row, so the operator saw one and a half pictures.
+               The information is all still here — it is just no longer laid
+               out as if there were a 1400px screen to spend.
+               `!important` throughout because every one of these blocks is
+               built with inline styles, which otherwise win. */
+
+            /* Title: two lines maximum, and the buttons stop being full-size. */
+            .app-container.tab-images .img-detail-head { padding: 4px 0 !important; margin-bottom: 8px !important; }
+            .app-container.tab-images .img-detail-head h2 {
+                font-size: 15px !important; line-height: 1.2 !important;
+                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+                overflow: hidden;
+            }
+            .app-container.tab-images .img-detail-head .btn { padding: 6px 8px !important; font-size: 11px !important; }
+
+            /* The meta row is reference, not review. One line, scrollable. */
+            .app-container.tab-images .img-detail-meta {
+                flex-wrap: nowrap !important; overflow-x: auto;
+                margin-bottom: 8px !important; gap: 10px !important;
+            }
+            .app-container.tab-images .img-detail-meta > span { white-space: nowrap; }
+
+            /* Parents: a strip of thumbs, not three stacked rows. The names are
+               long filenames that wrap; the picture is what identifies them,
+               and the full name stays in the chip's title attribute. */
+            .app-container.tab-images .img-parents-block { margin-bottom: 8px !important; }
+            .app-container.tab-images .img-parents-row {
+                flex-wrap: nowrap !important; overflow-x: auto; gap: 6px !important;
+                padding-bottom: 2px;
+            }
+            .app-container.tab-images .img-parent-chip { padding: 4px !important; flex-shrink: 0; }
+            .app-container.tab-images .img-parent-text { display: none !important; }
+            .app-container.tab-images .img-parent-thumb {
+                width: 44px !important; height: 44px !important;
+            }
+            .app-container.tab-images .img-parents-head { margin-bottom: 4px !important; }
+
+            /* The prompt is a reference lookup on a phone, never the reason
+               the screen is open. */
+            .app-container.tab-images #imgDetailArea > details { margin-bottom: 8px !important; }
+            .app-container.tab-images #imgDetailArea > details > summary { font-size: 11px !important; }
         }
 
         @media (prefers-reduced-motion: reduce) {
@@ -24858,22 +24904,22 @@ async function renderAutoEditCard(jobId, hasExport) {
                     ? `<button class="img-parent-dl" title="Download every parent image as a separate file" data-track="parent_download_all" onclick="imgDownloadParents(event, ${node.id})">⬇ Download parents</button>`
                     : '';
                 parentsHtml = `
-                    <div style="margin-bottom:16px;">
-                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+                    <div class="img-parents-block" style="margin-bottom:16px;">
+                        <div class="img-parents-head" style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
                             <div style="font-size:12px;color:var(--text-secondary);font-weight:500;">Parents</div>
                             ${dlAllBtn}
                         </div>
-                        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                        <div class="img-parents-row" style="display:flex;gap:8px;flex-wrap:wrap;">
                             ${node.parents.map(e => {
                                 const p = imgState.nodesById[e.parent_node_id];
                                 const thumb = p && p.chosen_variant ? p.chosen_variant.image_url : null;
                                 const pname = p ? imgEscape(p.name || ('Node ' + p.id)) : `#${e.parent_node_id}`;
                                 return `
-                                    <div style="display:flex;align-items:center;gap:6px;background:var(--bg-input);padding:6px 10px;border-radius:6px;border:1px solid var(--border-color);cursor:pointer;" onclick="imgSelectNode(${e.parent_node_id})">
-                                        <div style="width:32px;height:32px;border-radius:4px;overflow:hidden;background:var(--bg-elevated);">
+                                    <div class="img-parent-chip" title="${pname}" style="display:flex;align-items:center;gap:6px;background:var(--bg-input);padding:6px 10px;border-radius:6px;border:1px solid var(--border-color);cursor:pointer;" onclick="imgSelectNode(${e.parent_node_id})">
+                                        <div class="img-parent-thumb" style="width:32px;height:32px;border-radius:4px;overflow:hidden;background:var(--bg-elevated);flex-shrink:0;">
                                             ${thumb ? `<img src="${imgThumbUrl(thumb, 128)}" loading="lazy" decoding="async" style="width:100%;height:100%;object-fit:cover;">` : ''}
                                         </div>
-                                        <div>
+                                        <div class="img-parent-text">
                                             <div style="font-size:12px;">${pname}</div>
                                             ${e.role ? `<div style="font-size:10px;color:var(--text-muted);">${imgEscape(e.role)}</div>` : ''}
                                         </div>
@@ -25334,13 +25380,13 @@ async function renderAutoEditCard(jobId, hasExport) {
                 : '';
 
             area.innerHTML = `
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;position:sticky;top:0;background:var(--bg-surface);padding:8px 0;z-index:10;border-bottom:1px solid var(--border-color);">
+                <div class="img-detail-head" style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;position:sticky;top:0;background:var(--bg-surface);padding:8px 0;z-index:10;border-bottom:1px solid var(--border-color);">
                     ${backToJobBtn}
                     <h2 title="${nameTitleSafe}" style="overflow-wrap:anywhere;word-break:break-word;line-height:1.25;flex:1;min-width:0;">${nameSafe}${titleSuffix}</h2>
                     ${deleteBtnTop}
                 </div>
                 ${imgVerdictHistoryBannerHtml(node)}
-                <div style="font-size:11px;color:var(--text-muted);display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
+                <div class="img-detail-meta" style="font-size:11px;color:var(--text-muted);display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
                     <span>Status: <span class="node-status-badge status-${node.kind==='upload'?'upload':node.status}">${node.kind==='upload'?'upload':node.status}</span></span>
                     <span title="node id — use with send_to_platform.py (--subject / --product-node)">node id: <strong>${node.id}</strong></span>
                     ${node.kind !== 'upload' ? `<span>${imgEscape(node.model||'')}</span><span>${node.aspect_ratio||''} · ${node.resolution||''}</span><span>x${node.n_variants||1}</span>` : ''}
