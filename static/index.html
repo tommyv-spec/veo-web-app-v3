@@ -2742,6 +2742,19 @@
         .line-tag { display: inline-block; font-size: 8px; font-weight: 700; letter-spacing: 0.5px; background: var(--bg-input); color: var(--text-muted); border-radius: 4px; padding: 1px 4px; flex-shrink: 0; }
         .clip-line.active .line-tag { background: var(--accent); color: #fff; }
         .badge-variant { display: inline-block; background: var(--bg-input); color: var(--text-muted); font-size: 9px; font-weight: 600; text-transform: none; letter-spacing: 0; padding: 2px 6px; border-radius: 8px; margin-left: 4px; }
+        /* prompt+ingredients panel — what this clip's render actually used
+           (route, frame names, full prompt text). Rendered on every card but
+           shown only in the expanded grid, where there is room for it. */
+        .clip-prompt-info { display: none; margin: 0 0 10px; padding: 8px; background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 6px; font-size: 10px; }
+        .clips-grid.expanded-mode .clip-prompt-info { display: block; }
+        .clip-prompt-head { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: .5px; font-size: 9px; }
+        .clip-prompt-route { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--text-secondary); background: var(--bg-elevated); padding: 2px 6px; border-radius: 8px; white-space: nowrap; }
+        .clip-prompt-ingr { color: var(--text-muted); margin-bottom: 6px; }
+        .clip-prompt-block { display: flex; gap: 5px; align-items: flex-start; opacity: .55; margin-bottom: 4px; }
+        .clip-prompt-block:last-child { margin-bottom: 0; }
+        .clip-prompt-block.active { opacity: 1; }
+        .clip-prompt-pre { flex: 1; margin: 0; white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: 10px; line-height: 1.45; color: var(--text-secondary); max-height: 180px; overflow-y: auto; user-select: text; cursor: text; }
+        .clip-prompt-block.active .clip-prompt-pre { color: var(--text-primary); }
         .clip-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
         .clip-actions .btn { flex: 1; padding: 6px; font-size: 11px; min-width: 36px; }
         
@@ -12418,7 +12431,51 @@ Ambient: same kitchen room tone, soft pour sound.
                    </div>`
                 : '';
 
-            return `<div class="clip-card ${rejected&&!redoQueued?'clip-rejected':''} ${approved?'clip-approved':''} ${generating?'clip-generating':''} ${redoQueued?'clip-redo_queued':''} ${pending||waitingApproval||preparing?'clip-pending':''} ${skipped?'clip-skipped':''}" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"><div class="clip-video-collapsed"><div class="clip-video">${vid}</div>${variantNav}<div class="clip-upload-own" style="margin-top:6px;text-align:center;">${uploadVideoCtl}</div></div><div class="clip-video-expanded">${expandedVid}</div><div class="clip-content"><div class="clip-header"><span class="clip-idx">#${c.clip_index+1}</span><span class="badge badge-${badgeClass}">${status.replace('_',' ')}</span>${_v698aPairedBadge}${_v821VariantBadge}${_v939Badge}${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="Copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}</div>${frameInfo}${_v815AutoRetryBadge}${_v939Detail}<div class="clip-text">${_v698aDisplayText}</div>${_v821AbLines}${_v853Ctl}<div class="clip-actions-collapsed">${acts}</div><div class="clip-actions-expanded">${expandedActs}</div></div></div>`;
+            // Prompt+ingredients panel (expanded grid only) — the exact prompt
+            // and input images this clip's render used. Everything shown here
+            // already rides the /clips payload; nothing extra is fetched. The
+            // Flow videoModelKey itself is NOT persisted server-side (it only
+            // lands in the local worker's flow-api capture file), so the route
+            // chip shows what the server does know: backend + input shape.
+            // c.render_method is read defensively — the API doesn't return it
+            // yet; when it does, charswap clips label themselves automatically.
+            let _promptInfo = '';
+            if (c.prompt_text || c.render_method === 'charswap') {
+                const _pBase = k => (k || '').split('/').pop();
+                let _route;
+                if (c.render_method === 'charswap') {
+                    _route = `character swap · ${c.swap_mode || 'video-led'}`;
+                } else {
+                    const _be = currentJobBackend === 'flow' ? 'Flow'
+                              : currentJobBackend === 'api' ? 'Veo API'
+                              : (currentJobBackend || 'Veo');
+                    const _shape = c.end_frame ? 'start + end frames'
+                                 : c.start_frame ? 'start frame'
+                                 : 'text only';
+                    _route = `${_be} · ${_shape}`;
+                }
+                if (c.veo_render_duration_s) _route += ` · ${c.veo_render_duration_s}s`;
+                const _ingr = [];
+                if (c.start_frame) _ingr.push(`start: ${_pBase(c.start_frame)}`);
+                if (c.end_frame) _ingr.push(`end: ${_pBase(c.end_frame)}`);
+                const _piHasB = !!c.prompt_text_b;
+                const _piVariant = c.rendered_prompt_variant || 'A';
+                const _piBlock = (tag, txt, active) =>
+                    `<div class="clip-prompt-block ${active ? 'active' : ''}">`
+                    + (_piHasB ? `<span class="line-tag">${tag}</span>` : '')
+                    + `<pre class="clip-prompt-pre">${escapeHtml(txt)}</pre></div>`;
+                _promptInfo = `<div class="clip-prompt-info" onclick="event.stopPropagation()">`
+                    + `<div class="clip-prompt-head"><span>🎬 prompt &amp; ingredients</span>`
+                    + `<span class="clip-prompt-route" title="what the server knows about this clip's render route">${escapeHtml(_route)}</span>`
+                    + (clipId && c.prompt_text ? `<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="copy prompt" style="background:none;border:none;cursor:pointer;font-size:11px;opacity:0.6;padding:0 2px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.6'">📋</button>` : '')
+                    + `</div>`
+                    + (_ingr.length ? `<div class="clip-prompt-ingr">${escapeHtml(_ingr.join(' · '))}</div>` : '')
+                    + (c.prompt_text ? _piBlock('A', c.prompt_text, _piVariant !== 'B') : '')
+                    + (_piHasB ? _piBlock('B', c.prompt_text_b, _piVariant === 'B') : '')
+                    + `</div>`;
+            }
+
+            return `<div class="clip-card ${rejected&&!redoQueued?'clip-rejected':''} ${approved?'clip-approved':''} ${generating?'clip-generating':''} ${redoQueued?'clip-redo_queued':''} ${pending||waitingApproval||preparing?'clip-pending':''} ${skipped?'clip-skipped':''}" data-clip-id="${clipId}" data-clip-index="${c.clip_index}"><div class="clip-video-collapsed"><div class="clip-video">${vid}</div>${variantNav}<div class="clip-upload-own" style="margin-top:6px;text-align:center;">${uploadVideoCtl}</div></div><div class="clip-video-expanded">${expandedVid}</div><div class="clip-content"><div class="clip-header"><span class="clip-idx">#${c.clip_index+1}</span><span class="badge badge-${badgeClass}">${status.replace('_',' ')}</span>${_v698aPairedBadge}${_v821VariantBadge}${_v939Badge}${clipId?`<button onclick="event.stopPropagation();copyPrompt(${clipId})" title="Copy prompt" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:12px;opacity:0.5;padding:2px 4px" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.5'">📋</button>`:''}</div>${frameInfo}${_v815AutoRetryBadge}${_v939Detail}<div class="clip-text">${_v698aDisplayText}</div>${_v821AbLines}${_promptInfo}${_v853Ctl}<div class="clip-actions-collapsed">${acts}</div><div class="clip-actions-expanded">${expandedActs}</div></div></div>`;
 
         }
 
