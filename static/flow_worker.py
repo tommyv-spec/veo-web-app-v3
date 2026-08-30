@@ -19957,6 +19957,24 @@ _CHARSWAP_VIDEO_CHIP_JS = """() => {
   return false;
 }"""
 
+_CHARSWAP_CLEAR_CHIPS_JS = """() => {
+  // v945.10 — click the cancel control of every chip in the composer band.
+  // Same geometry rule as _CHARSWAP_CHIP_IDS_JS (bottom 280px, outside any
+  // dialog), so it removes exactly the chips that reader would count —
+  // image AND video chips, however each is rendered.
+  const dlg = document.querySelector('[role="dialog"]');
+  let clicked = 0;
+  for (const icon of document.querySelectorAll('button i, button span')) {
+    if ((icon.textContent || '').trim() !== 'cancel') continue;
+    const btn = icon.closest('button');
+    if (!btn || (dlg && dlg.contains(btn))) continue;
+    const r = btn.getBoundingClientRect();
+    if (!(r.top > (window.innerHeight - 280))) continue;
+    btn.click(); clicked++;
+  }
+  return clicked;
+}"""
+
 _CHARSWAP_CHIP_IDS_JS = """() => {
   // mediaId uuids from the composer chips' thumbnail URLs (outside any dialog,
   // bottom band). Endpoint-agnostic: works however the media was uploaded.
@@ -20751,6 +20769,58 @@ def charswap_attach_and_prompt(page, avatar_path, video_path, prompt,
         "job_id": getattr(page, "_charswap_job_id", None),
         "clip_index": getattr(page, "_charswap_clip_index", None),
     }
+
+    # v945.10 — START FROM A PROVEN-EMPTY COMPOSER, or refuse. Measured on job
+    # 1dafac92 clip 2 (2026-08-30): clip 1's avatar AND video chips were still
+    # on the composer when clip 2 attached its own, the scan saw 4 chips, and
+    # Flow's generate went out carrying ONE known media id — a half-attached
+    # swap the submit gate then failed closed (media_binding: contradicted).
+    # The generic clear inside attach_ingredient_image_with_check could not be
+    # trusted with this: its whole loop sits in one try/except-pass, so the
+    # first bad click silently abandons ALL clearing, it stops after 4 clicks
+    # whatever remains, and nothing ever re-checks the composer afterwards.
+    # Here: click every cancel, re-scan, repeat; still dirty after 3 rounds →
+    # REFUSE, because attaching onto a dirty composer is how a wrong render
+    # gets submitted with our name on it.
+    _stale = charswap_composer_chip_media_ids(page)
+    _diag["chips_before_clear"] = len(_stale)
+    if _stale:
+        print(f"{context} composer holds {len(_stale)} stale chip(s) from a "
+              f"previous clip — clearing before attach", flush=True)
+        for _round in range(3):
+            # v945.10 merge — geometry-scoped clear FIRST: clicks the cancel of
+            # every chip in the composer band (same bottom-280px rule the id
+            # reader uses), so it reaches the VIDEO chip too. The locator loop
+            # below only matches image cards (button[data-card-open]) and can
+            # never remove the video chip the 1dafac92 evidence shows lingering.
+            try:
+                page.evaluate(_CHARSWAP_CLEAR_CHIPS_JS)
+                page.wait_for_timeout(400)
+            except Exception:
+                pass
+            try:
+                _cancels = page.locator(
+                    "button[data-card-open] i:text-is('cancel')")
+                for _ci in range(_cancels.count()):
+                    try:
+                        _cancels.nth(0).click(timeout=2000)
+                        page.wait_for_timeout(400)
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            _stale = charswap_composer_chip_media_ids(page)
+            if not _stale:
+                break
+        _diag["chips_after_clear"] = len(_stale)
+        if _stale:
+            print(f"{context} composer STILL holds {len(_stale)} chip(s) after "
+                  f"clearing — refusing to attach onto a dirty composer", flush=True)
+            page._charswap_block_reason = (
+                f"{len(_stale)} stale chip(s) from a previous clip would not "
+                f"clear; a dirty composer submits half-attached swaps")
+            charswap_write_diag(stage="stale_chips_not_cleared", **_diag)
+            return False, []
 
     ok, reason = attach_ingredient_image_with_check(
         page, avatar_path, context=f"{context}-avatar", clear_existing=True)

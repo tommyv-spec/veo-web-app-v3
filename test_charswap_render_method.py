@@ -2833,6 +2833,49 @@ def test_cli_skips_the_image_stage_for_an_imageless_charswap_build():
     assert "elif not poll_images(" in window
 
 
+# --- 15. v945.10: a clip attaches onto a PROVEN-EMPTY composer, or not at all
+#
+# Job 1dafac92 clip 2 (2026-08-30): clip 1's chips were still on the composer,
+# the scan saw 4 chip ids, and Flow's generate carried ONE known media id — a
+# half-attached swap. The submit gate failed it closed (media_binding:
+# contradicted), which is the instrument working; this fixes the cause. The
+# generic clear inside attach_ingredient_image_with_check wraps its whole loop
+# in one try/except-pass (first bad click abandons ALL clearing, silently),
+# stops after 4 clicks regardless, and never re-checks the composer.
+
+
+def _attach_fn_body():
+    src = WORKER_SRC.read_text(encoding="utf-8", errors="replace")
+    start = src.index("def charswap_attach_and_prompt(")
+    return src[start:src.index("\ndef ", start + 1)]
+
+
+def test_attach_refuses_a_composer_that_will_not_come_clean():
+    body = _attach_fn_body()
+    assert "stale_chips_not_cleared" in body, (
+        "a dirty composer must be a refusal with evidence, not an attach")
+    # the refusal must come BEFORE the avatar attach, or the wrong render
+    # is already in motion by the time anyone notices
+    assert body.index("stale_chips_not_cleared") < body.index(
+        "attach_ingredient_image_with_check(")
+
+
+def test_attach_verifies_the_clear_by_rescanning_not_by_hoping():
+    """The v881 clear was click-and-hope: no re-scan, one try around the whole
+    loop. The charswap clear must re-scan chip ids after each round and only
+    proceed on a PROVEN-empty composer."""
+    body = _attach_fn_body()
+    clear_block = body[body.index("chips_before_clear"):
+                       body.index("attach_ingredient_image_with_check(")]
+    assert clear_block.count("charswap_composer_chip_media_ids(page)") >= 1, (
+        "the clear must re-scan the composer, not assume the clicks worked")
+    assert "chips_after_clear" in clear_block, (
+        "the evidence file must record what the clear achieved")
+    # each cancel click is individually guarded so one bad click cannot
+    # silently abandon the rest of the clearing
+    assert clear_block.count("except Exception") >= 2
+
+
 def test_two_clips_sharing_one_swap_source_is_announced_on_the_run():
     """Job 302875cc declared two segments and rendered the same movement
     twice. Recording the key in a file only helps someone who already suspects
