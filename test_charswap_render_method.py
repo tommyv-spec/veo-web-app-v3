@@ -2757,6 +2757,82 @@ def test_both_clip_creators_guard_the_charswap_prompt_not_just_promote():
         "sentence: two copies are already kept in sync by test at ~2365")
 
 
+# --- 14. v945.9: the pilot shape needs NO image at all -----------------------
+#
+# The placeholder image was the last remnant of the image-led apparatus on a
+# video-led build: never read by the render, but promote refused a batch with
+# zero generated nodes, so every build carried a throwaway image to satisfy
+# it. On 2026-08-30 a real send sat 10 MINUTES waiting for that placeholder to
+# generate before it could promote — the frame nobody needs became the
+# pipeline's slowest stage. Operator, twice: "not even the image should have
+# been created". The fix lets the avatar upload node (which import already
+# binds to video-led charswap scenes, f798f94) stand in for the scene node.
+
+
+def _promote_fn_body():
+    src = (pathlib.Path(__file__).parent / "image_platform.py").read_text(
+        encoding="utf-8", errors="replace")
+    start = src.index("def promote_batch_to_video(")
+    end = src.index("\ndef ", start + 1)
+    return src[start:end]
+
+
+def test_promote_no_longer_refuses_a_batch_with_zero_generated_nodes_outright():
+    """The refusal must consider the v945.9 upload-node fallback. The bare
+    `if not nodes:` form refuses the pilot shape unconditionally."""
+    body = _promote_fn_body()
+    assert "if not nodes and not _v945_9_upload_nodes:" in body
+    # and the fallback is resolved BEFORE the refusal fires
+    assert body.index("_v945_9_upload_nodes: list = []") < body.index(
+        "if not nodes and not _v945_9_upload_nodes:")
+
+
+def test_promote_fetches_stand_in_nodes_owner_scoped_and_upload_only():
+    """The stand-in fetch must carry the same discipline as
+    _v943_swap_avatar_response: the caller's own nodes, kind='upload' only —
+    an id that resolves to anything else means it came from somewhere it
+    should not have."""
+    body = _promote_fn_body()
+    block = body[body.index("_v945_9_upload_nodes: list = []"):
+                 body.index("if not nodes and not _v945_9_upload_nodes:")]
+    assert "ImageNode.user_id == current_user.id" in block
+    assert 'ImageNode.kind == "upload"' in block
+    # only assignments that DECLARE video-led charswap may pull one in
+    assert '"charswap"' in block and '"video-led"' in block
+
+
+def test_promote_scene_plan_can_resolve_an_upload_backed_scene():
+    """_scene_plan joins assignments against _nodes_by_id. Before v945.9 that
+    index held generated nodes only, so an avatar-bound assignment silently
+    dropped out of the plan — the exact zero-clips shape f798f94 fixed at
+    import, recreated one hop later."""
+    body = _promote_fn_body()
+    idx_build = body.index("_nodes_by_id = {n.id: (i, n) for i, n in enumerate(nodes)}")
+    plan_build = body.index("_scene_plan = []")
+    joined = body[idx_build:plan_build]
+    assert "_v945_9_upload_nodes" in joined, (
+        "upload stand-in nodes must join _nodes_by_id before _scene_plan is built")
+    assert "len(nodes) + _j" in joined, (
+        "stand-in indices must continue after the generated nodes so "
+        "image_{idx:02d} filenames cannot collide")
+
+
+def test_cli_skips_the_image_stage_for_an_imageless_charswap_build():
+    """poll_images raises IMAGE_GEN_FAIL on zero generated nodes — correct for
+    a mistyped --resume-batch, fatal for a build that declares no images on
+    purpose. The skip must be detected from the BUILD TEXT and must not apply
+    to --resume-batch invocations (where the text was never read)."""
+    src = (pathlib.Path(__file__).parent / "send_to_platform.py").read_text(
+        encoding="utf-8", errors="replace")
+    i = src.index("_v945_9_imageless = False")
+    window = src[i:i + 1600]
+    assert "not args.resume_batch" in window
+    assert r"^###\s+Image\s+\d+" in window
+    assert "render_method" in window
+    # the skip branch must bypass poll_images, not fake its success
+    assert "elif not poll_images(" in window
+
+
 def test_two_clips_sharing_one_swap_source_is_announced_on_the_run():
     """Job 302875cc declared two segments and rendered the same movement
     twice. Recording the key in a file only helps someone who already suspects

@@ -1625,10 +1625,31 @@ def main(argv=None):
         if not args.auto_choose:
             args.review = True
 
-        if not poll_images(client, batch_id, args, report):
+        # v945.9 — the pilot shape: a video-led charswap build may declare NO
+        # images at all (video-led never reads a start frame; the avatar upload
+        # is the reference). There is nothing to generate, poll, QC or choose —
+        # polling would sit the full timeout waiting for zero nodes and then
+        # call it a wrong-batch error. Detected from the build text, so a
+        # --resume-batch of an id-only invocation (md not read) keeps the old
+        # guard against a mistyped batch id.
+        _v945_9_imageless = False
+        try:
+            _v945_9_imageless = (
+                not args.resume_batch
+                and not re.search(r'^###\s+Image\s+\d+', md_text, re.MULTILINE)
+                and bool(re.search(r'\*\*render_method:\*\*\s*charswap', md_text))
+            )
+        except NameError:
+            _v945_9_imageless = False
+        if _v945_9_imageless:
+            print("images: none declared (video-led charswap, v945.9 pilot shape) "
+                  "- skipping the image stage", flush=True)
+            report["stages"].append("images:none_declared")
+        elif not poll_images(client, batch_id, args, report):
             report["stages"].append("images:awaiting_review")
             return EXIT_OK
-        report["stages"].append("images:ok")
+        else:
+            report["stages"].append("images:ok")
 
         # promotion is OPERATOR-TRIGGERED (2026-08-03) — never automatic
         if not args.promote:

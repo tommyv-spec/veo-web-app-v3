@@ -11890,10 +11890,51 @@ def promote_batch_to_video(
         ImageNode.kind == "generated",
     ).order_by(ImageNode.scene_index_in_batch).all()
 
-    if not nodes:
+    # v945.9 — a batch whose scenes are ALL video-led charswap may hold ZERO
+    # generated nodes, on purpose. video-led never reads a start frame (the
+    # avatar upload IS the reference the worker attaches), so the import
+    # (v943.2 / f798f94) binds those scene assignments to the AVATAR UPLOAD
+    # node instead of demanding an image. Before this, the build had to carry
+    # a throwaway placeholder image whose only job was to satisfy this
+    # refusal — and on 2026-08-30 a real send sat 10 minutes waiting for that
+    # placeholder to render before it could promote. Operator, twice: "not
+    # even the image should have been created". So: when an assignment row
+    # says charswap/video-led and points at a node outside the generated set,
+    # fetch that node (owner-scoped, kind='upload' only — the same discipline
+    # as _v943_swap_avatar_response) and let it stand in. Its chosen variant
+    # is the avatar image itself, so the copy loop below works unchanged and
+    # the clip's start frame IS the avatar — never sent to Flow for a
+    # video-led swap, but honest in the UI.
+    _v945_9_upload_nodes: list = []
+    try:
+        _gen_ids = {n.id for n in nodes}
+        _want_ids = set()
+        for _a in db.query(ImageSceneAssignment).filter(
+                ImageSceneAssignment.batch_id == batch_id).all():
+            if ((getattr(_a, "render_method", None) or "").strip().lower() == "charswap"
+                    and (getattr(_a, "swap_mode", None) or "video-led").strip().lower() == "video-led"
+                    and _a.image_node_id and _a.image_node_id not in _gen_ids):
+                _want_ids.add(_a.image_node_id)
+        if _want_ids:
+            _v945_9_upload_nodes = db.query(ImageNode).filter(
+                ImageNode.id.in_(_want_ids),
+                ImageNode.user_id == current_user.id,
+                ImageNode.kind == "upload",
+            ).all()
+            log.info(
+                f"[v945.9 PROMOTE] batch={batch_id}: {len(_v945_9_upload_nodes)} "
+                f"video-led charswap scene(s) backed by avatar upload node(s) "
+                f"{sorted(n.id for n in _v945_9_upload_nodes)} — no generated image required"
+            )
+    except Exception as _v945_9_e:
+        log.warning(f"[v945.9 PROMOTE] upload-node resolution failed: {_v945_9_e}")
+
+    if not nodes and not _v945_9_upload_nodes:
         raise HTTPException(400, f"Batch {batch_id} has no scene nodes")
 
-    # 2. Verify every scene is ready + chosen
+    # 2. Verify every scene is ready + chosen (generated nodes only — an
+    # avatar upload has no variant race to wait on; its chosen image existed
+    # before the batch did, and the copy loop 500s loudly if it is missing)
     missing = []
     for n in nodes:
         if n.status != "ready" or n.chosen_variant_id is None:
@@ -11975,6 +12016,11 @@ def promote_batch_to_video(
     # scene 6 share image 4), so grouping by node would reorder the video —
     # the iteration itself has to run in scene order.
     _nodes_by_id = {n.id: (i, n) for i, n in enumerate(nodes)}
+    # v945.9 — avatar upload nodes standing in for video-led charswap scenes
+    # join the index AFTER the generated nodes, so their image_{idx:02d}
+    # filenames never collide with a real scene image's.
+    for _j, _un in enumerate(_v945_9_upload_nodes):
+        _nodes_by_id.setdefault(_un.id, (len(nodes) + _j, _un))
     _scene_plan = []
     for _a in sorted(assignments_by_scene_idx.values(), key=lambda a: a.scene_index):
         _hit = _nodes_by_id.get(_a.image_node_id)
