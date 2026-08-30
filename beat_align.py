@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """beat_align.py — author-time beat alignment for a videos/*.md build.
 
-WHY THIS IS NOT A RUNTIME MODULE
---------------------------------
+WHERE THIS RUNS
+---------------
 This is the bridge between a build md and the AutoEditing beat planner
-(`C:/Users/tomma/Documents/AutoEditing/beat_drop_aligner_v5.py`). It NEVER runs
-on Render and `librosa` is deliberately NOT in requirements.txt.
+(`C:/Users/tomma/Documents/AutoEditing/beat_drop_aligner_v5.py`).
 
-Reason: v5's analysis computes an HPSS split plus three independent full-song
-STFTs (drop detection, beat salience, chroma). Measured peak RSS for a 3-minute
-track is ~0.5-1 GB. The render box is 2 GB with a documented OOM history, and
-`main.py` must stay importable without librosa — so the librosa import lives
-INSIDE `analyze_song()`, not at module scope. Importing this file on the server
-is harmless; calling `analyze_song` there is not.
+It USED to be author-machine-only, with `librosa` deliberately kept out of
+requirements.txt. **That is no longer true since v890.2 (`35d7d59`,
+2026-08-04):** `librosa>=0.10` + `scipy>=1.10` are in `code/requirements.txt`
+and the analysis runs on-box, because a user who drags in a song cannot be
+asked to run a local CLI step first.
+
+The 2 GB render box was engineered around, not waived — `main.py:12633-12687`
+gates the on-box call behind an analysis WINDOW, a content-hash CACHE and a
+free-memory check. Reason it needs all three: v5's analysis computes an HPSS
+split plus three independent full-song STFTs (drop detection, beat salience,
+chroma), and measured peak RSS for a 3-minute track is ~0.5-1 GB against a box
+with a documented OOM history. The librosa import still lives INSIDE
+`analyze_song()`, not at module scope, so `main.py` stays importable without
+it. Canonical: `code/template_reference.md` §v888 (see the dated 2026-08-30
+correction) + §v890.2.
 
 THE SPLIT
 ---------
@@ -22,7 +30,9 @@ THE SPLIT
     solve cut boundaries                 (the existing v668 `_trim_one` path,
     write target_duration_s               unchanged — no new dependency)
 
-Everything expensive happens here; the platform only reads seconds.
+Running the analysis here is still the CHEAP path — the platform then only
+reads seconds. Since v890.2 the server can also run the left column itself
+when no plan was authored.
 
 TWO MODES
 ---------

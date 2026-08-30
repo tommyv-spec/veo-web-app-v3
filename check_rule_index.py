@@ -224,6 +224,20 @@ DUAL_BUCKET_ALLOWLIST = {
     "v934": "the two layers ARE the rule: the model-agnostic performance/action read is §B decode; the Veo prompt dialect that renders it is §A authoring, and swapping the video model changes only the §A half",
 }
 
+def dangling_rules(indexed: set[str], def_set: set[str]) -> list[str]:
+    """Indexed ids with no defining heading in the masters — the ⚠ dead-pointer list.
+
+    KNOWN_NON_HEADING_RULES are exactly the ids that are real but deliberately
+    defined outside template_reference.md, each with a written reason, and the
+    build-index unknown-ID check already validates that map. Leaving them in
+    here made v890/v893 warn forever with no action a human could take, and a
+    warning that can never be cleared trains people to ignore the whole line.
+    Flagged 2026-08-30.
+    """
+    return sorted((r for r in indexed - def_set if r not in KNOWN_NON_HEADING_RULES),
+                  key=lambda r: int(r[1:]))
+
+
 _SECTION_RX = {
     "A": re.compile(r"^##\s+§A\b"),
     "B": re.compile(r"^##\s+§B\b"),
@@ -454,6 +468,13 @@ def selftest() -> int:
                           budget=300, exceptions={})
     check("budget:ignores-header-and-separator", r["row_count"] == 1)
 
+    # 12. DANGLING — a real dead pointer is reported; an allow-listed
+    # non-heading rule is not (it has a written reason and cannot be "fixed").
+    check("dangling:dead-pointer-reported",
+          dangling_rules({"v100", "v999"}, {"v100"}) == ["v999"])
+    check("dangling:allowlisted-not-reported",
+          dangling_rules({"v100", "v890", "v893"}, {"v100"}) == [])
+
     # the real index parses and the check runs on it
     if INDEX.exists():
         rr = row_budget_report(INDEX.read_text(encoding="utf-8"))
@@ -532,7 +553,7 @@ def main() -> int:
 
     def_set = set(defined)
     missing = sorted(def_set - indexed, key=lambda r: int(r[1:]))   # defined, not indexed
-    dangling = sorted(indexed - def_set, key=lambda r: int(r[1:]))  # indexed, no heading
+    dangling = dangling_rules(indexed, def_set)                     # indexed, no heading
 
     # Second target: build-rule-index.md (the /build authoring denominator),
     # which went stale exactly like conventions.md did. Real bucket parsing
