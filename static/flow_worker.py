@@ -20536,7 +20536,7 @@ def charswap_install_submit_probe(page, chip_ids):
        binary-framed submit is not silently scored as "no media".
     """
     state = {"seen": False, "hits": 0, "want": len(chip_ids or []),
-             "n_requests": 0, "first_seen_at": None}
+             "n_requests": 0, "first_seen_at": None, "body_media_ids": []}
     ids = [i for i in (chip_ids or []) if i]
 
     def _on_request(req):
@@ -20555,7 +20555,25 @@ def charswap_install_submit_probe(page, chip_ids):
             if state["first_seen_at"] is None:
                 state["first_seen_at"] = time.time()
             # Keep the strongest evidence any submit produced (see 2 above).
-            state["hits"] = max(state["hits"], sum(1 for i in ids if i in body))
+            n_hits = sum(1 for i in ids if i in body)
+            # v945.14 DIAG — record every media-uuid-shaped id the body carried,
+            # kept from the strongest submit. On 2026-08-31 three video-led
+            # swaps in a row scored hits=1/2 ("generate request missing both
+            # media ids") on the first runs after the v945.13 chip-read change,
+            # where the previous day scored 2/2 seven times. This field is the
+            # discriminator the verdict lacks: body ids ⊇ two distinct media →
+            # the READ handed the probe a wrong id (false fail); body ids = one
+            # media → the attach really dropped the video. Next contradicted
+            # verdict answers the question instead of re-raising it.
+            if n_hits >= state["hits"]:
+                try:
+                    state["body_media_ids"] = sorted(set(
+                        m.lower() for m in re.findall(
+                            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                            r"[0-9a-f]{4}-[0-9a-f]{12}", body, re.I)))[:12]
+                except Exception:
+                    pass
+            state["hits"] = max(state["hits"], n_hits)
         except Exception:
             pass
 
@@ -22422,6 +22440,9 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                        or {}).get('hits', 0)),
                 chip_ids_wanted=int((getattr(page, "_charswap_submit_probe", None)
                                      or {}).get('want', 0)),
+                # v945.14 DIAG — what the request body ACTUALLY carried, so a
+                # contradicted verdict says whether the read or the attach lied.
+                body_media_ids=_cs_probe.get('body_media_ids') or [],
             )
             if not _cs_accept and not _cs_seen:
                 # v945.6 (Codex rev 532 finding 1) — the tile fallback runs

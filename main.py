@@ -16987,15 +16987,18 @@ async def local_worker_get_redo_clips(
             print(f"[redo-pending] age cap: skipped {_skipped} clip(s) "
                   f"on jobs older than {_age_cutoff.isoformat()}", flush=True)
 
+    # v945.14 — a charswap clip must never leave through this door.
+    redo_clips = _v945_14_reject_charswap_redos(db, redo_clips, "local-worker")
+
     if not redo_clips:
         return {"clips": []}
-    
+
     base_url = str(request.base_url).rstrip('/')
-    
+
     clips_data = []
     for clip in redo_clips:
         job = clip.job
-        
+
         # If this is a failed clip being recovered, reset its status to flow_redo_queued
         if clip.status == 'failed':
             print(f"[LocalWorker] Recovering Flow redo: clip {clip.id} (job {job.id[:8]})", flush=True)
@@ -17720,6 +17723,57 @@ def _v943_charswap_payload(clip, base_url: str, lane: str) -> dict:
         # short render instead of a refused one.
         "swap_max_source_s": 10,
     }
+
+
+def _v945_14_reject_charswap_redos(db, redo_clips, lane):
+    """v945.14 — the redo lane has NO swap arm; never hand it a swap clip.
+
+    v945.6 fails a broken charswap CLOSED and v945.8 makes the redo REQUEST
+    endpoint refuse them, but clips still reach flow_redo_queued through the
+    recovery machinery (retry-stuck, worker auto-requeues, stale-claim
+    resets). Measured 2026-08-31 on jobs e36ec587 + 8c85f514: all three daily
+    charswap clips failed closed at submit ("generate request missing both
+    media ids"), something requeued them ~30 min later, and the redo lane —
+    whose payload carries no swap keys and whose worker path has no swap arm —
+    silently delivered plain i2v renders of the start frame OVER the honest
+    failures. The operator saw the swap prompt with no clip attached.
+
+    So the door itself now refuses: any charswap clip found in the redo queue
+    is flipped back to 'failed' with the recreate instruction, never handed
+    out. This is deliberately status-destructive — a swap clip in this queue
+    is ALREADY wrong, and 'failed' is the only honest state it can hold.
+    """
+    kept = []
+    flipped = 0
+    for clip in redo_clips:
+        if (getattr(clip, "render_method", None) or "").strip().lower() != "charswap":
+            kept.append(clip)
+            continue
+        clip.status = ClipStatus.FAILED.value
+        clip.claimed_by_worker = None
+        clip.claimed_at = None
+        clip.approval_status = "pending_review"
+        clip.error_code = "CHARSWAP_NO_REDO"
+        clip.error_message = (
+            "charswap cannot render via the redo lane (no swap arm — it would "
+            "deliver a plain render of the start image). Recreate this clip as "
+            "a FRESH job instead; v945.14.")
+        flipped += 1
+        try:
+            add_job_log(db, clip.job_id,
+                        f"Clip {clip.clip_index + 1} is charswap — refused by the "
+                        f"redo lane ({lane}), marked failed; recreate as a fresh "
+                        f"job (v945.14)",
+                        "ERROR", "redo")
+        except Exception:
+            pass
+    if flipped:
+        db.commit()
+        # v945.14 TEMP DIAG — remove once operator-side evidence shows the door
+        # refusing (or a month passes with no swap clip ever reaching it).
+        print(f"[v945.14] {lane} redo poll refused {flipped} charswap clip(s) "
+              f"— flipped to failed with recreate instruction", flush=True)
+    return kept
 
 
 @app.get("/api/local-worker/swap-source")
@@ -18961,14 +19015,17 @@ async def user_worker_get_redo_clips(
                                Clip.redo_reason.like('v933 modify%')))
         redo_clips = _q.order_by(Clip.id.asc()).all()
 
+    # v945.14 — a charswap clip must never leave through this door.
+    redo_clips = _v945_14_reject_charswap_redos(db, redo_clips, "user-worker")
+
     if not redo_clips:
         return {"clips": []}
-    
+
     base_url = str(request.base_url).rstrip('/')
     clips_data = []
     for clip in redo_clips:
         job = clip.job
-        
+
         if clip.status == 'failed':
             clip.status = ClipStatus.FLOW_REDO_QUEUED.value
             clip.error_message = None
