@@ -19360,3 +19360,43 @@ jobs. Forward-only, no schema change, no worker change.
 lane folding), `code/tests/test_lane_defaults.py`, `code/tests/test_export_defaults_endpoint.py`,
 `wiki/patterns/conventions.md`, `wiki/meta/build-rule-index.md`, `wiki/log.md`,
 plan `code/docs/superpowers/plans/2026-08-30-lane-aware-export-settings.md`.
+
+## v945.14 — A FAIL-CLOSED VERDICT MUST ALSO CLOSE THE QUEUES AROUND IT (2026-08-31)
+
+**The incident, end to end.** The first daily-claude morning run sent two video-led charswap
+jobs (martha `e36ec587`, 2 clips; noemi `8c85f514`, 1 clip). The worker's swap arm did its job:
+attached both media, submitted, and — when the submit probe matched only 1 of the 2 chip ids in
+the generate request body — FAILED all three clips CLOSED with "charswap submit not proven"
+(the v945.6 rule, working as designed). Then, ~30 minutes later, the recovery machinery
+requeued those failed clips as `flow_redo_queued`. The redo poll handed them to the worker
+**without any swap keys** (its payload never carried them), the worker's redo path (which has
+no swap arm at all) rendered plain image-to-video of the start frame with the literal
+swap-instruction prompt as text, and the uploads overwrote the honest 'failed' state with
+"completed". The operator opened the platform and saw exactly that: the swap prompt, no clip.
+
+**The lesson.** v945.6 decided a broken charswap is terminal ("recreated as a FRESH job, never
+redone"). v945.8 guarded the redo REQUEST endpoint. Neither guarded the QUEUE — and clips reach
+`flow_redo_queued` through at least four other doors (retry-stuck, the worker's own glitch
+requeues, stale-claim resets, the v812 anchor swap). A fail-closed verdict that any janitor
+process can silently flip back open is not fail-closed; it is fail-delayed. The guard belongs
+at the last door the wrong path must pass through, because that is the one door every route
+shares.
+
+**The fix.** `_v945_14_reject_charswap_redos()` in `main.py`, called by BOTH flow redo polls
+(user-worker and local-worker) before any handout: a charswap clip found in the redo queue is
+flipped back to `failed` with `error_code=CHARSWAP_NO_REDO` and the recreate instruction,
+logged to the job log, and never handed out. It does not matter who requeued it or why.
+
+**The open half (diagnosed, not yet closed).** Why did the submit gate score 1/2 at all? These
+were the FIRST charswap runs after the v945.13 two-tier chip read (worker restarted onto it
+2026-08-30 16:32); the previous day the same gate scored 2/2 seven times in a row. Either the
+attach really dropped the video, or v945.13 hands the probe a wrong chip id (a false fail —
+and the abandoned Flow projects then hold real, correct renders). The probe now records
+`body_media_ids` — every media-uuid-shaped id the strongest generate request body actually
+carried — into `charswap_diag.jsonl`, so the next contradicted verdict names the culprit
+instead of re-raising the question: body holds two media, one unmatched → the READ is wrong;
+body holds one → the ATTACH is wrong.
+
+**Touched:** this deep-dive (canonical), `code/main.py` (guard + both redo polls),
+`code/static/flow_worker.py` (probe `body_media_ids`), commit `bec6f26`,
+`wiki/patterns/conventions.md`, `wiki/log.md`, HANDOFF rev 709.
