@@ -8435,12 +8435,30 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                         # MODEL_SELECTORS can be fixed from evidence next time a
                         # genuine model switch is needed.
                         _dump_open_menu(page, "model-submenu")
+                        # v945.15 — stash the failure for the charswap diag file;
+                        # this worker's console is not always captured (the
+                        # 2026-08-31 runs printed to a lost console window).
+                        try:
+                            page._model_apply_debug = (
+                                f"option-missing target={target!r} "
+                                f"model_text={model_text!r}")
+                        except Exception:
+                            pass
                         page.keyboard.press("Escape")
                         time.sleep(0.3)
                     else:
                         settings_applied['Model'] = True
+                        try:
+                            page._model_apply_debug = None
+                        except Exception:
+                            pass
             except:
                 print(f"{prefix}⚠ Model button not found", flush=True)
+                # v945.15 — same durable stash for the button-missing branch.
+                try:
+                    page._model_apply_debug = "model-button-missing-in-settings-menu"
+                except Exception:
+                    pass
                 # DIAG (remove after model-selector fix verified): dump buttons/menuitems
                 # in the open settings menu so we can see the real model-control markup.
                 try:
@@ -8510,6 +8528,16 @@ def select_frames_to_video_mode(page, context="", **kwargs):
             # actually selected.
             mode_key = 'Ingredients' if _omni_ingredients_mode(page) else 'Frames'
             critical = ['Video', mode_key, 'Portrait']
+            # v945.15 — an Omni-requesting job cannot ship on the default model.
+            # Measured 2026-08-31 (jobs e36ec587 + 8c85f514, post-click
+            # screenshots charswap_submit_fail_147*.png): the generation ran on
+            # "Veo 3.1 - Lite [Lower Priority]" with ONLY the image ingredient —
+            # Lite drops the video chip at submit — while this pass returned
+            # "All settings verified", because Model was never in the critical
+            # list. Model becomes critical exactly when the job asked for Omni,
+            # so a normal Lite job gains no new failure mode.
+            if (getattr(page, "_veo_model", "") or "").strip() == "Omni Flash":
+                critical.append('Model')
             all_ok = all(settings_applied.get(k) for k in critical)
 
             if all_ok:
@@ -8594,6 +8622,18 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                     page.keyboard.press("Escape")
                 except:
                     pass
+                # v945.15 — this recovery path sets variants ONLY; it cannot
+                # prove the model. An Omni-requesting job must not proceed on
+                # an unproven model (a non-Omni submit drops the video
+                # ingredient), so for those the recovery is a False, not a True.
+                if (getattr(page, "_veo_model", "") or "").strip() == "Omni Flash":
+                    print(f"{prefix}⚠ post-reload recovery cannot verify Omni Flash "
+                          f"— treating settings as NOT verified", flush=True)
+                    try:
+                        page._model_apply_debug = "post-reload-recovery-cannot-verify-model"
+                    except Exception:
+                        pass
+                    return False
                 return True
         except Exception:
             pass
@@ -22196,13 +22236,37 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # A swap still needs the project's render settings applied once.
                 check_and_dismiss_popup(page)
                 try:
-                    select_frames_to_video_mode(
+                    _cs_settings_ok = select_frames_to_video_mode(
                         page, variants_count=job.get('flow_variants_count', 2))
                     page._duration_applied = page._duration
                 except Exception as _cs_serr:
                     print(f"{_cs_ctx} settings failed: {_cs_serr}", flush=True)
                     update_clip_status(clip['id'], 'failed',
                                        error_message=f"Settings failed: {str(_cs_serr)[:100]}")
+                    permanently_failed_clips.add(clip_index)
+                    continue
+                # v945.15 — the return value was ignored here, which is how the
+                # 2026-08-31 swaps shipped on the DEFAULT model: with 'Model' now
+                # in the critical list for Omni jobs, a False return means the
+                # composer could not be proven on Omni Flash — and a non-Omni
+                # submit drops the video ingredient (measured, 3/3). Refusing
+                # BEFORE the attach costs no render and leaves the evidence in
+                # the diag file, where a lost console window cannot eat it.
+                if not _cs_settings_ok:
+                    _cs_model_dbg = getattr(page, "_model_apply_debug", None)
+                    charswap_write_diag(
+                        stage="settings_failed",
+                        job_id=clip.get('job_id') or job_id,
+                        clip_index=clip_index,
+                        model_debug=_cs_model_dbg,
+                        veo_model_wanted=getattr(page, "_veo_model", None))
+                    _cs_set_why = ("charswap settings not verified — the model "
+                                   "could not be proven Omni Flash and a non-Omni "
+                                   "submit drops the video ingredient (v945.15). "
+                                   f"{str(_cs_model_dbg or '')[:80]}")
+                    print(f"{_cs_ctx} FAILED CLOSED: {_cs_set_why}", flush=True)
+                    update_clip_status(clip['id'], 'failed',
+                                       error_message=_cs_set_why[:200])
                     permanently_failed_clips.add(clip_index)
                     continue
                 first_submission_in_project = False
