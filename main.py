@@ -17749,6 +17749,18 @@ def _v945_14_reject_charswap_redos(db, redo_clips, lane):
         if (getattr(clip, "render_method", None) or "").strip().lower() != "charswap":
             kept.append(clip)
             continue
+        # v945.15.1 — PRESERVE WHY BEFORE CLEARING (the v899.5 lesson, again).
+        # The first firing of this door (noemi 278b3bc6, 2026-08-31 13:15Z)
+        # destroyed the one clue that mattered: WHICH recovery path had parked
+        # an in-flight, successfully-submitted swap clip into the redo queue
+        # 63s after its confirmed 2/2 submit. The parking reason lives in
+        # error_message at flip time and survives in redo_reason.
+        _prior = (clip.error_message or clip.error_code or "").strip()
+        if _prior:
+            _stamp = f"parked-with: {_prior}"[:400]
+            clip.redo_reason = (
+                f"{clip.redo_reason} | {_stamp}" if clip.redo_reason else _stamp
+            )[:1000]
         clip.status = ClipStatus.FAILED.value
         clip.claimed_by_worker = None
         clip.claimed_at = None
