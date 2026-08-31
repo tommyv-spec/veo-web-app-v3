@@ -19412,7 +19412,24 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         #       (A) and (B) both fail.
         # Ghost is declared only when ALL THREE signals fail.
         _is_ghost = False
-        if not clip_failed:
+        # v945.15.2 — a charswap clip whose OWN submit gate already confirmed
+        # the request (both media in the body, or tile-delta proof) can never
+        # be a ghost: that verdict is stronger than any of the three signals
+        # below, and signal (B)'s [data-tile-id] selector is dead in the
+        # current Flow DOM (tiles: 0 on projects visibly holding tiles), which
+        # was false-flagging real swap submits whenever (A) missed its window.
+        _cs_ghost_exempt = False
+        try:
+            _cs_ghost_exempt = bool(charswap_selected(clip) and (
+                (getattr(page, "_charswap_submit_confirmed", None) or {})
+                .get(clip.get('id'))))
+        except Exception:
+            _cs_ghost_exempt = False
+        if _cs_ghost_exempt:
+            print(f"[{account_name}] [v945.15.2] clip {clip_index+1} charswap submit "
+                  f"already CONFIRMED by the arm's own gate — ghost check skipped",
+                  flush=True)
+        if not clip_failed and not _cs_ghost_exempt:
             try:
                 # (A) v700 uuid binding
                 _v700g_bound = False
@@ -22619,6 +22636,21 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 continue
             human_delay(1, 2)
             _tiles_in_this_project += 1
+            # v945.15.2 — remember that THIS clip's submit was proven by the
+            # arm's own verdict (request body carried both media, or tile-delta
+            # proof). The shared post-submit ghost check downstream runs on a
+            # dead [data-tile-id] selector in the current Flow DOM, and when the
+            # v700 uuid binding misses its drain window it false-flags a REAL
+            # swap submit as a ghost and parks it for the redo lane — which
+            # v945.14 rightly refuses, so the clip dies. Measured twice on
+            # 2026-08-31 (jobs 278b3bc6 and 859d4687: submit_verdict accepted
+            # 2/2, then "Ghost submission — clip never appeared in project").
+            try:
+                _cs_map = getattr(page, "_charswap_submit_confirmed", None) or {}
+                _cs_map[clip.get('id')] = True
+                page._charswap_submit_confirmed = _cs_map
+            except Exception:
+                pass
 
         elif first_submission_in_project:
             # First clip actually being submitted to this project — needs frames and full setup.
