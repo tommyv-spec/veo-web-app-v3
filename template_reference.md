@@ -19400,3 +19400,42 @@ body holds one → the ATTACH is wrong.
 **Touched:** this deep-dive (canonical), `code/main.py` (guard + both redo polls),
 `code/static/flow_worker.py` (probe `body_media_ids`), commit `bec6f26`,
 `wiki/patterns/conventions.md`, `wiki/log.md`, HANDOFF rev 709.
+
+## v945.15 — AN OMNI JOB CANNOT SHIP ON THE DEFAULT MODEL (2026-08-31)
+
+**The answer to v945.14's open half — it was neither the read nor the attach. It was the
+MODEL.** The worker's own post-click screenshots (`charswap_submit_fail_14719/20/21.png`)
+showed every failed generation running on "Veo 3.1 - Lite [Lower Priority]" with ONLY the
+image ingredient in the submission, the uploaded source video sitting unattached in the
+project library. A non-Omni model silently drops the video chip at submit — the composer
+happily shows both chips, then submits one. The operator confirmed the same from the Flow UI.
+
+**Why the settings pass vouched for it anyway.** `select_frames_to_video_mode` verified
+`['Video', mode_key, 'Portrait']` — 'Model' was never in the critical list, so a silently
+failed model click still returned "All settings verified". And the charswap arm ignored the
+return value entirely. Three stacked fail-opens (model click → critical list → ignored
+return), each individually old, first aligned on the 2026-08-31 morning runs.
+
+**The fix (commit `8edb9f6`), scoped so only Omni-requesting jobs change behavior** (v945.3:
+only charswap asks for Omni — ordinary Lite jobs gain no new failure mode):
+1. 'Model' joins the critical list when `page._veo_model == "Omni Flash"` — a pass that
+   cannot prove the model returns False, and the 3-attempt retry loop now actually retries
+   the model until it lands (which is what made the very next probe run pass 2/2).
+2. The post-reload recovery path (variants-only) returns False for Omni jobs — it cannot
+   prove the model, so it must not vouch for it.
+3. The charswap arm honors the settings return: False → the clip fails CLOSED **before the
+   attach** (costs no render) and writes `stage: settings_failed` + `model_debug` into
+   `charswap_diag.jsonl` — durable evidence, because the worker's `start_worker.bat` runs it
+   in a console window whose output is lost (the 2026-08-31 morning evidence died that way).
+
+**Proof, same day:** the first post-fix probe (noemi `278b3bc6`) logged
+`both_media_in_body: true, media_ids_matched: 2/2, media_binding: confirmed` — against 1/2
+on all three pre-fix runs. The `body_media_ids` diag from v945.14 carried four ids
+(both ingredients + both output variants), which is what a healthy Omni submit looks like.
+
+**The general lesson:** a verifier whose critical list omits the setting that varies is a
+rubber stamp for exactly that setting; and a boolean nobody reads is not a gate (same class
+as v945.14 — the queue nobody guarded — one layer up).
+
+**Touched:** this deep-dive (canonical), `code/static/flow_worker.py`, commit `8edb9f6`,
+`wiki/patterns/conventions.md`, `wiki/log.md`, HANDOFF revs 710-711.
