@@ -798,7 +798,16 @@ def main():
     ap.add_argument("--model", default=DEFAULT_MODEL, help="model to select in the picker")
     ap.add_argument("--note", default="", help="extra context appended to the prompt (source URL, operator note)")
     ap.add_argument("--allow-stale", action="store_true", help="run even if the pack no longer matches repo canon")
-    ap.add_argument("--headless", action="store_true", help="not recommended; Google flags it")
+    # HEADLESS IS THE DEFAULT — see the same block in gemini_decode_worker.py.
+    # The old "Google flags it" help text is Chrome-era lore, disproven for
+    # Camoufox/Firefox across 14 headless decodes on 2026-08-31/09-01 with zero
+    # sign-outs. Minimized is the state that actually breaks Playwright, and
+    # headless avoids it entirely.
+    ap.add_argument("--headless", dest="headless", action="store_true", default=True,
+                    help="run the browser with no window (DEFAULT)")
+    ap.add_argument("--no-headless", "--show-window", dest="headless",
+                    action="store_false",
+                    help="show the browser window (debugging only; never minimize it)")
     args = ap.parse_args()
 
     if not (args.login or args.learn or args.decode):

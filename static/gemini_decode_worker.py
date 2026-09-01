@@ -1244,7 +1244,22 @@ def main():
     ap.add_argument("--no-reseed", action="store_true",
                     help="skip the per-run Firefox profile pull (it is on by default; "
                          "the transplanted session only survives one launch)")
-    ap.add_argument("--headless", action="store_true", help="not recommended; Google flags it")
+    # HEADLESS IS THE DEFAULT (operator directive, said four+ times; 2026-09-01).
+    # The old help text said "not recommended; Google flags it" — that is Chrome-era
+    # lore and is DISPROVEN for Camoufox/Firefox: 9 of 15 decodes ran headless on
+    # 2026-08-31 with zero sign-outs, and 5 more on 09-01. The three real window
+    # states are: behind other windows OK · headless OK · MINIMIZED fatal (a
+    # minimized window makes Playwright clicks time out — measured 0.1s visible vs
+    # timeout minimized). Headless avoids the minimized trap entirely.
+    #
+    # `decode_batch.py` already defaulted to headless, but a DIRECT worker call did
+    # not, so the flag was honoured at one entry point out of two and a hand-run
+    # decode still opened a window. Default lives here now, so both paths agree.
+    ap.add_argument("--headless", dest="headless", action="store_true", default=True,
+                    help="run the browser with no window (DEFAULT)")
+    ap.add_argument("--no-headless", "--show-window", dest="headless",
+                    action="store_false",
+                    help="show the browser window (debugging only; never minimize it)")
     ap.add_argument("--profile-dir",
                     help="launch on THIS Firefox profile and keep it. Implies no pull "
                          "and no per-run directory, so a sign-in done here survives. "

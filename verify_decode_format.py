@@ -30,11 +30,38 @@ REQUIRED_SECTIONS = [
     ("## Veo 3.1 Final Prompts", "## Google Omni Final Prompts"),
 ]
 
+# A LITERAL anchor: a measured amount, a fraction of the frame, a coverage or
+# projection verb, an explicit comparison, an in-frame A/B control, or a spatial
+# relation to a named landmark. It must still reject bare severity words
+# ("severe", "noticeable", "5/5") — that is the whole point of the check.
+#
+# 2026-09-01: widened after it rejected three genuine anchors in one decode batch
+# (measured: only 3 decodes in 207 failed on it, so this loosens nothing that was
+# passing). The misses were (a) inflected verbs — the list had `covers?` but the
+# row said "covering", (b) an in-frame A/B control, which is the STRONGEST anchor
+# a side-by-side demo can have ("floats while the identical fish beside it reaches
+# the tank bottom"), and (c) a body-to-body comparison quoted from the script
+# ("chest sagging lower than your wife's"). A checker that rejects real evidence
+# teaches writers to reword for the parser — the exact failure mode that
+# `check_ingest._has_evidence_locator` carries its own warning comment about.
 ANCHOR_RE = re.compile(
     r"(?:"
+    # a measured quantity
     r"\b\d+(?:\.\d+)?\s*(?:%|percent|inches?|cm|mm|feet|foot|thirds?|quarters?|halves?|times?)\b"
+    # a fraction of the frame / body / screen
     r"|\b(?:half|third|quarter|two[- ]thirds?|three[- ]quarters?)\s+(?:of\s+)?(?:the\s+)?(?:frame|body|screen)\b"
-    r"|\b(?:fills?|occupies|covers?|spans?|projects?|extends?|reaches?|dwarfs?|dwarfing|larger\s+than|smaller\s+than|relative\s+to|compared\s+(?:with|to)|past\s+the|beyond\s+the|(?:nearly\s+)?erases?|erasing\s+the|visible\s+through)\b"
+    # a coverage or projection verb, any inflection
+    r"|\b(?:fill|cover|span|project|extend|reach|dwarf|engulf|pack|overhang|protrud)(?:e|es|s|ed|ing)?\b"
+    r"|\boccup(?:y|ies|ied|ying)\b"
+    # an explicit comparison ("lower than", "wider than"), minus the false friends
+    r"|\b(?!(?:other|rather)\b)\w+er\s+than\b"
+    r"|\b(?:relative\s+to|compared\s+(?:with|to)|than\s+the\s+(?:other|second|identical))\b"
+    # an in-frame A/B control — the reference state visible in the same shot
+    r"|\bwhile\s+the\s+(?:other|second|identical|same)\b"
+    r"|\bbeside\s+(?:it|him|her|them)\b"
+    # a spatial relation to a named landmark
+    r"|\b(?:past|beyond|above|below|over|under)\s+(?:the|his|her|their|its)\b"
+    r"|\b(?:nearly\s+)?erases?\b|\berasing\s+the\b|\bvisible\s+through\b"
     r")",
     re.I,
 )

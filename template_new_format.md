@@ -391,6 +391,17 @@
     it. Every row cites a clip or frame. If the video truly shows no
     demonstrated process and no meaningful object, emit one row:
     `none observed | n/a | n/a | n/a`. Never omit the ledger.
+    SOURCE-DERIVED STRUCTURE MAP + LOGIC CARD (canonical beat unit,
+    2026-09-01): every new decode MUST also emit `### Source-derived
+    structure map` and `### Source logic card` under
+    `## Adaptation-extraction` — both are SHOWN in full in that section
+    below. One map row = one viewer-state change, and that row IS the
+    beat unit every downstream count uses (adapt fidelity, SCRIPT
+    DECISION MAP rows, compression checks). Derive the sections from
+    the frames and speech BEFORE naming any framework; a camera cut
+    alone is not a section boundary. Measured 2026-09-01: only 36 of
+    207 decodes carried these, because the requirement lived in the
+    prose grammar and was never shown in this skeleton.
   • GENERATE-SIDE CHAIN OPTIONALITY (v590, parallel-generation
     enablement, GENERATE-SIDE ONLY):
     ASYMMETRIC RULE — applies to generate side ONLY (videos/*.md
@@ -1101,6 +1112,56 @@ The portable-abstraction layer — what makes this video INNOVATABLE. For each l
 - **Symptom-proxy state read:** proxy: <what stands in for the invisible symptom, and its state — or `none observed`>
 - **Recurring-character chain map:** chain: <who recurs across frames and what anchors them — or `none observed`>
 - **HOOK-angle / swap-layer map:** angle: <the hook angle + which layer a port would swap — or `none observed`>
+
+### Source-derived structure map
+
+> **MANDATORY on every decode — and the SAME omission as the heading above, one year on.**
+> Measured 2026-09-01: only **36 of 207** decodes carry this section, and the 36 that do also
+> carry the logic card below — they land together, by luck, when the model happens to follow the
+> prose grammar. The requirement was written in `wiki/meta/decode-grammar-checklist.md` and
+> reached the decoder only through that prose; it was never SHOWN here, in the file that defines
+> the shape the model fills in. Same lesson as the 2026-08-24 note above: **the model copies what
+> the skeleton shows.**
+>
+> This map is the CANONICAL BEAT UNIT. One row = one viewer-state change (a new question, job,
+> owner, visible state, proof mode, or offer). Anything that counts a source's "beats" — adapt
+> fidelity, a SCRIPT DECISION MAP row count, a compression check — counts ROWS OF THIS TABLE.
+> Scene headers count cuts and Shown-beats rows count actions; neither is the beat unit. A decode
+> without this map is UNMEASURABLE on beats.
+>
+> Derive the sections from the frames, speech and actions BEFORE any framework label. A boundary
+> exists when a causal fact changes; a camera cut alone is not a boundary, and one continuous shot
+> may hold several sections. Use as many rows as the source needs. Mark an uncertain boundary
+> `INFERRED`. The final row explains the payoff/CTA rather than inventing a next section.
+
+| Section ID | Clip / frame / time evidence | Input state or open question | What happens | Section job | New output or open question | Why the next section follows |
+|---|---|---|---|---|---|---|
+| S1 | <exact evidence> | <what is true before> | <observed action, line or change> | <job in this video> | <what is newly true or withheld> | <dependency that earns S2> |
+
+### Source logic card
+
+> Written ONLY from the rows above — never from a catalog example. The optional family labels are
+> attached afterward for retrieval; `UNLISTED — <plain source-derived name>` is valid and leaves the
+> decode complete.
+
+- **FORMAT SHELL / DELIVERY STYLE:**
+- **SOURCE SECTIONS / EXACT ORDER:**
+- **SOURCE CAUSAL CHAIN:**
+- **SECTION BOUNDARY EVIDENCE:**
+- **HOOK JOB / SCROLL-STOP MECHANIC:**
+- **VIEWER ENTRY / PRIMARY TENSION:**
+- **OPEN LOOP / WITHHELD ANSWER:**
+- **PROOF / CREDIBILITY DEVICE:**
+- **PIVOT / HANDOFF:**
+- **BODY JOB / PERSUASION SHAPE:**
+- **HOOK→BODY SEAM:**
+- **LOAD-BEARING INVARIANTS:**
+- **SAFE SWAP VARIABLES:**
+- **BREAK CONDITIONS:**
+- **OPTIONAL HOOK FAMILY LABEL + CONFIDENCE:**
+- **OPTIONAL BODY FAMILY LABEL + CONFIDENCE:**
+- **OPTIONAL CONDITIONAL CHECK(S) APPLIED:**
+- **EVIDENCE STATUS + CONFIDENCE:**
 
 ### Hero-symptom intensity ledger
 
