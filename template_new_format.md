@@ -1143,6 +1143,11 @@ The portable-abstraction layer — what makes this video INNOVATABLE. For each l
 > Written ONLY from the rows above — never from a catalog example. The optional family labels are
 > attached afterward for retrieval; `UNLISTED — <plain source-derived name>` is valid and leaves the
 > decode complete.
+>
+> **Emit each field EXACTLY ONCE, as a `- **FIELD:** value` bullet.** This card is shown both here
+> and in the decode grammar, and the first decode after this section was added rendered every field
+> twice (once with the leading `- `, once without). The table above merged cleanly; only the bullet
+> list doubled. One bullet per field.
 
 - **FORMAT SHELL / DELIVERY STYLE:**
 - **SOURCE SECTIONS / EXACT ORDER:**
