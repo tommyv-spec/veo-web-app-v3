@@ -272,6 +272,38 @@ def fetch_job_files(job_id, work: Path, music_filename=None, hook_bg_filename=No
     if st.get("state") != "done":
         raise AutoEditError(f"export not done for this job (state={st.get('state')}) — export it in the platform first")
     base_fn = st["result"]["filename"]
+
+    # v958 — THE STAGE CACHE IS KEYED ON THE INPUT EXPORT, NOT JUST THE JOB.
+    #
+    # The work dir deliberately caches every stage (v938.8: the downloaded
+    # source, scan.json, the layout, the cleaned audio, the composed video)
+    # so a redeploy resumes instead of redoing 20 minutes. But the dir is
+    # per JOB, and on 2026-09-01 (job 248198f6) that shipped stale content
+    # THREE times: the operator switched the clip to variant 2, both fresh
+    # exports provably carried the new take (frame-probed yellow dress),
+    # and every re-run still delivered the variant-1 cut in ~40s — the
+    # cached stages built from the FIRST export were reused wholesale.
+    # §v938.1's own words: name a cache after everything baked into it.
+    #
+    # The input's identity is the export basename (exports mint unique
+    # names per run, v856). A marker records which export this work dir's
+    # stages were built from; a different one wipes the dir before any
+    # download. Same export → marker matches → deploy-resume still works.
+    work.mkdir(parents=True, exist_ok=True)
+    _marker = work / ".input_export"
+    _prev = _marker.read_text(encoding="utf-8").strip() if _marker.exists() else None
+    if _prev is not None and _prev != base_fn:
+        print(f"  input export changed ({_prev} -> {base_fn}) — "
+              f"wiping the cached stages (v958)")
+        for _child in work.iterdir():
+            try:
+                if _child.is_dir():
+                    shutil.rmtree(_child, ignore_errors=True)
+                else:
+                    _child.unlink()
+            except OSError as _we:
+                print(f"  (could not remove {_child.name}: {_we})")
+    _marker.write_text(base_fn, encoding="utf-8")
     outs = api_get(f"/api/jobs/{job_id}/list-outputs", token).json()["files"]
     sup_fn = next((f for f in outs if f.startswith("support_track_") and f.endswith(".mp4")), None)
     # v938.15 — jobs also export `final_broll_<job>_<stamp>.mp4`: the b-roll as a
