@@ -19439,3 +19439,32 @@ as v945.14 — the queue nobody guarded — one layer up).
 
 **Touched:** this deep-dive (canonical), `code/static/flow_worker.py`, commit `8edb9f6`,
 `wiki/patterns/conventions.md`, `wiki/log.md`, HANDOFF revs 710-711.
+
+## v958 — THE AUTOEDIT STAGE CACHE IS KEYED ON THE INPUT EXPORT (2026-09-01)
+
+**The incident.** Martha-stairs job `248198f6`: the operator-side reviewer switched clip 1 to
+variant 2 (the variant-1 take carried ~2s of leaked source text). The re-approve chain re-exported
+correctly — BOTH post-switch exports were frame-probed and carried the new take — yet THREE
+auto-edit runs in a row delivered the variant-1 cut, each in ~40s. Nothing cached the RESULT;
+the per-job work dir cached every intermediate STAGE (v938.8, deliberately, so a redeploy
+resumes instead of redoing 20 minutes), and a re-run for the same job reused stages composed
+from the FIRST export. §v938.1's own sentence, one stage later: *name a cache after everything
+baked into it.*
+
+**The fix (code `c9f445e`).** `autoedit_pipeline.fetch_job_files` writes a `.input_export`
+marker naming the export basename the work dir's stages were built from (exports mint unique
+names, v856). A different basename wipes the work dir before any download; the same basename
+keeps it, so deploy-resume for an unchanged input still works. Applied to BOTH deploy targets —
+the server AND the local worker's own copy (`~\veo-worker\autoedit\`, §v948.2), worker
+restarted.
+
+**How it was found:** measuring the artifact at each stage boundary (the §v938.1 method) —
+clip file v2 ✓ → export v2 ✓ → autoedit output v1 ✗ — pins the lying stage in three probes.
+The delivery workaround while diagnosing: `tools/readcaption_overlay.py` burned the lane
+overlay onto the proven-good export directly.
+
+**Sibling fixes, same day (wiki commit):** `finish_ready_jobs.build_for` now resolves builds
+living in `raw/decode_work/<folder>/` via the batch-name prefix (v958.1 — the 10:00 net had
+refused every daily-lane job with "no build .md maps"), and `tools/daily_finish_prompt.md`
+forbids ScheduleWakeup-waiting in the headless wrapper (the 08:10 process exits with the turn
+and the wakeup dies with it — the 2026-09-01 three-videos-stranded incident).
