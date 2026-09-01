@@ -9124,6 +9124,14 @@ def _rendered_variant_for(clip_id):
     return "B" if clip_id in _PROMPT_B_TRIED else "A"
 
 
+# v945.15.3 — every clip the charswap arm ever touched, and the subset whose
+# submit its gate CONFIRMED (body carried both media / tile-delta proof).
+# Read by update_clip_status to refuse flow_redo_queued parks; see its
+# docstring for why the refusal lives at this choke point and nowhere else.
+_CHARSWAP_CLIP_IDS = set()
+_CHARSWAP_SUBMIT_CONFIRMED_IDS = set()
+
+
 def update_clip_status(clip_id, status, output_url=None, error_message=None, retries=3):
     """Update clip status via API with retry on failure.
 
@@ -9136,7 +9144,31 @@ def update_clip_status(clip_id, status, output_url=None, error_message=None, ret
     clip on a deleted job — burning Veo credits and fighting Flow's
     UI for nothing. The clip→job mapping is populated by
     register_clip_for_job() at the start of each submission cycle.
+
+    v945.15.3 — THE ONE DOOR FOR EVERY PARKING PATH. A charswap clip must
+    never enter flow_redo_queued: the redo lane has no swap arm, and the
+    server (v945.14) flips any swap clip found there to failed. Six separate
+    recovery paths park clips this way (mid-loop ghost ×2, end-of-job orphan
+    sweep, 300s API sweep, frame-glitch retries, policy retries); patching
+    them one by one lost two real renders on 2026-08-31 (noemi v3 + v4, both
+    with CONFIRMED 2/2 submits, both killed by sweeps a per-site patch
+    missed). So the refusal lives here, where every path must pass:
+    - submit already CONFIRMED by the arm's gate → the render is in flight;
+      leave the status untouched so the harvest can still complete it.
+    - not confirmed → 'failed' straight away (what the server door would do
+      anyway), keeping the parking reason in the message.
     """
+    if status == 'flow_redo_queued' and clip_id in _CHARSWAP_CLIP_IDS:
+        if clip_id in _CHARSWAP_SUBMIT_CONFIRMED_IDS:
+            print(f"[v945.15.3] clip {clip_id}: REFUSING flow_redo_queued park — "
+                  f"charswap with a confirmed submit; status left untouched so the "
+                  f"harvest can finish (park reason was: {str(error_message)[:120]!r})",
+                  flush=True)
+            return True
+        status = 'failed'
+        error_message = ("charswap cannot be redone and its submit was never "
+                         "confirmed (v945.15.3); park reason: "
+                         + str(error_message or ''))[:200]
     data = {
         "status": status,
         "output_url": output_url,
@@ -22188,6 +22220,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         if charswap_selected(clip):
             print(f"[v943] clip {clip_index+1}: charswap "
                   f"(mode={clip.get('swap_mode') or 'video-led'})", flush=True)
+            # v945.15.3 — register with the parking refusal in update_clip_status.
+            try:
+                _CHARSWAP_CLIP_IDS.add(clip.get('id'))
+            except Exception:
+                pass
             _cs_ctx = f"[v943 clip {clip_index+1}]"
             # Fail CLOSED on a mode this worker does not actually implement.
             # Before the inputs are fetched: a refusal should cost nothing.
@@ -22649,6 +22686,10 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 _cs_map = getattr(page, "_charswap_submit_confirmed", None) or {}
                 _cs_map[clip.get('id')] = True
                 page._charswap_submit_confirmed = _cs_map
+                # v945.15.3 — module-level twin, read by update_clip_status's
+                # parking refusal (page objects don't cross all the paths that
+                # park; a module set does).
+                _CHARSWAP_SUBMIT_CONFIRMED_IDS.add(clip.get('id'))
             except Exception:
                 pass
 
