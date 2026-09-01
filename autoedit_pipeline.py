@@ -292,18 +292,27 @@ def fetch_job_files(job_id, work: Path, music_filename=None, hook_bg_filename=No
     work.mkdir(parents=True, exist_ok=True)
     _marker = work / ".input_export"
     _prev = _marker.read_text(encoding="utf-8").strip() if _marker.exists() else None
+    _wipe_clean = True
     if _prev is not None and _prev != base_fn:
         print(f"  input export changed ({_prev} -> {base_fn}) — "
               f"wiping the cached stages (v958)")
         for _child in work.iterdir():
             try:
                 if _child.is_dir():
-                    shutil.rmtree(_child, ignore_errors=True)
+                    shutil.rmtree(_child)
                 else:
                     _child.unlink()
             except OSError as _we:
-                print(f"  (could not remove {_child.name}: {_we})")
-    _marker.write_text(base_fn, encoding="utf-8")
+                # A survivor the next stage could silently reuse — do NOT
+                # claim the cache is clean (the marker stays absent below,
+                # so every later run re-attempts the wipe).
+                _wipe_clean = False
+                print(f"  WIPE INCOMPLETE — could not remove {_child.name}: {_we}")
+    # The marker is (re)written at the END of this function, after the
+    # downloads land — a run that dies mid-download must leave the old/no
+    # marker so the next run wipes again instead of trusting partial files.
+    # Concurrency note: the queue admits ONE run per job (the FOR UPDATE
+    # can_queue read + the 409 guard), so no second run races this marker.
     outs = api_get(f"/api/jobs/{job_id}/list-outputs", token).json()["files"]
     sup_fn = next((f for f in outs if f.startswith("support_track_") and f.endswith(".mp4")), None)
     # v938.15 — jobs also export `final_broll_<job>_<stamp>.mp4`: the b-roll as a
@@ -336,6 +345,9 @@ def fetch_job_files(job_id, work: Path, music_filename=None, hook_bg_filename=No
         print("  no full-frame b-roll (final_broll_*) — hook-corner layout will blur a fallback")
     if music_fn:
         download(f"/api/jobs/{job_id}/outputs/{music_fn}", token, music)
+    # v958 — only NOW may the marker vouch for this cache (see the wipe above).
+    if _wipe_clean:
+        _marker.write_text(base_fn, encoding="utf-8")
     return base, sup, music, broll
 
 
