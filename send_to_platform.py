@@ -824,6 +824,39 @@ def cmd_set_alias(name, node_id):
     return EXIT_OK
 
 
+def cmd_upload(client, path, alias=None):
+    """Put ONE local image on the platform as a reference node, and name it.
+
+    Why this exists (2026-09-02): `Client.upload_image` has been here since v912
+    but nothing on the command line could reach it, so a build for a brand with
+    no persona yet was unshippable from a terminal — `--subject` is required for
+    import, `list-uploads` could only show what already existed, and `set-alias`
+    needs a node id that does not exist until something uploads. The gap only
+    shows up on the FIRST build of a new brand, which is why it survived this
+    long. Uploading through the web UI still works and is unchanged.
+
+    `origin="manual"` is correct here: a person chose this file (v912.1).
+    """
+    if not path:
+        print("usage: send_to_platform.py upload <image-path> [alias]", file=sys.stderr)
+        return EXIT_UNKNOWN
+    if not os.path.isfile(path):
+        print(f"no such file: {path}", file=sys.stderr)
+        return EXIT_UNKNOWN
+    display = Path(path).stem
+    node = client.upload_image(path, display, origin="manual")
+    node_id = node.get("id") or node.get("node_id") or node.get("nodeId")
+    print(f"uploaded {path} -> node {node_id} (name '{display}')")
+    if not node_id:
+        print(f"WARNING: no node id in the response; raw: {node}", file=sys.stderr)
+        return EXIT_UNKNOWN
+    if alias:
+        cmd_set_alias(alias, node_id)
+    print(f"use it with: --subject {node_id}"
+          + (f"   or   --avatar {alias}" if alias else ""))
+    return EXIT_OK
+
+
 def resolve_upload_ref(client, ref, uploads=None):
     """Turn a human ref (alias, name fragment, or numeric id) into a node id.
     Saved alias wins; then exact name match; then substring. Several uploads
@@ -1378,7 +1411,7 @@ def parse_clip_id_list(raw):
 def main(argv=None):
     p = argparse.ArgumentParser(description="Send a videos/*.md build to the platform and render it.")
     p.add_argument("md_file", help="path to videos/<build>.md, or one of: "
-                                    "list-uploads, set-token, set-alias, autoedit, "
+                                    "list-uploads, upload, set-token, set-alias, autoedit, "
                                     "update-finishing, approve-clip, reject-clip")
     p.add_argument("token_value", nargs="?",
                     help="the token (set-token) / alias name (set-alias) / "
@@ -1496,6 +1529,9 @@ def main(argv=None):
 
         if args.md_file == "list-uploads":
             return cmd_list_uploads(client, args.as_json)
+
+        if args.md_file == "upload":
+            return cmd_upload(client, args.token_value, args.extra_value)
 
         if args.md_file == "autoedit":
             args.job_id = args.token_value
