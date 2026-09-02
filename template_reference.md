@@ -19311,6 +19311,51 @@ structure, `wiki/synthesis/listicle-caption-growth-play.md` (loom URL recorded),
 ingested (download blocked by connection resets — the Surfshark MTU pattern); the evelyn grid scraped
 the same day is the standing ground truth.
 
+## v956.2 — THE OVERLAY_BLOCK MUST BE NEW: THE AGE ANCHOR REPEATS, THE HOOK DOES NOT (2026-09-02)
+
+**The evidence.** Mentor account review, 2026-09-02 ([[mentor-call-liam-2026-09-02]], timestamp
+04:30). Reviewing our read-caption grids he said the captions need fixing and pointed at the
+reference accounts as the contrast. The frames show what he meant: `lilly.timeless` changes the
+hook LINE on every post while keeping only the age as the anchor — "Having legs like this is my
+biggest flex" (139k views, age not even shown) · "I'M 91 / 'It's just her genetics'" (48.9k) ·
+"the sh*t i wish someone had told me in my 40s" (44.8k) · "No Plastic surgery / No Ozempic / No
+Ice Bath" (29.9k) · "SAVE THIS VIDEO" (30.3k). Our `@noemi_healthy_men` and
+`@martha_health_style` grids repeat ONE five-line stack on nearly every tile, at 1-9k views.
+
+**Why a gate and not a sentence.** §v956/.1 already said overlays are reframed per video and
+never noun-patched. It was doctrine and nothing enforced it, so it did not happen. Measured
+2026-09-02 across every build artifact that declares an overlay (docs quoting the format
+excluded, `-vN` iterations collapsed to one build):
+
+    17 builds declare overlay_block · 9 distinct blocks
+     5 SEPARATE noemi builds share ONE identical block:
+       "No Steroids / No Peptides / 7 Boring Things / I do daily to move like I'm 35"
+       (boulder, cablefly, cablepush, curls, venice)
+     2 martha builds share another
+
+Five different videos, five different feats, one caption. That is the grid the mentor was
+looking at, and it is the distance between a rule and a gate.
+
+**The rule.** A build's `overlay_block` may not be identical — after normalising case, spacing
+and the `/` line splits — to the `overlay_block` of any other build.
+
+- **`overlay_age` is EXEMPT and SHOULD repeat.** It is the identity anchor; it is what makes the
+  account recognisable across the grid. Only the block, which carries the hook, has to be new.
+- **Deliberate repeats are legal when declared:** `- **overlay_repeat_ack:** <why>`. Re-posting a
+  proven winner is a real tactic; doing it by accident on five builds is not.
+- **Forward-only.** Only the build being checked is judged; the existing collisions are history
+  and are never rewritten (same treatment as v884).
+
+**The gate.** `python tools/check_overlay_rotation.py <build.md>` — exit 1 on a repeat, naming
+every colliding build. `--all` surveys the corpus for duplicate groups and never fails. Wired
+into `tools/run_build_checks.py` as the `[overlay ]` gate, so every delivery runs it; builds that
+declare no `overlay_block` SKIP.
+
+**What it deliberately does NOT check.** Whether the new block is any GOOD — only that it is not
+a copy. Quality stays with §v956's derivation requirement (`overlay_sense`) and §v956.1's shape.
+A checker that verified an author had *changed* the words could never verify they had *reframed*
+the video, and pretending otherwise is the §v949 trap.
+
 ## v957 — THE EXPORT DIALOG OPENS LANE-CONFIGURED, AND THE STEP READS AS A SUMMARY (2026-08-30)
 
 **The operator ask, verbatim:** *"in the platform the settings goes directly into the right set up
