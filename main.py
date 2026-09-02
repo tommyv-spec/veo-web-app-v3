@@ -243,6 +243,10 @@ class DialogueLineInput(BaseModel):
     voiceover_anchor_image_node_id: Optional[int] = None
     voiceover_anchor_image_local_index: Optional[int] = None
     voiceover_line: Optional[str] = None
+    # v698A many-to-one - the scene whose clip supplies this silent
+    # visual's audio. MUST be declared on EVERY receiving model or
+    # pydantic drops it and the field never lands (the v892.2 lesson).
+    audio_from_scene: Optional[int] = None
     # v789 — operator-authored audio-twin prompt (markdown
     # `### Clip S.L.audio` block). When set, Phase 3b uses it verbatim as
     # the audio_pair Clip's prompt_text instead of build_prompt
@@ -422,6 +426,10 @@ class ClipResponse(BaseModel):
     paired_clip_id: Optional[int] = None
     voiceover_anchor_image_node_id: Optional[int] = None
     voiceover_line: Optional[str] = None
+    # v698A many-to-one - the scene whose clip supplies this silent
+    # visual's audio. MUST be declared on EVERY receiving model or
+    # pydantic drops it and the field never lands (the v892.2 lesson).
+    audio_from_scene: Optional[int] = None
     # v718i (NEW 2026-05-18) — Veo native end-frame interpolation binding.
     end_frame_image_node_id: Optional[int] = None
     # v701 — when error_code == 'CONTENT_POLICY_VIOLATION', the previously
@@ -2458,6 +2466,10 @@ async def _create_job_impl(
         voiceover_line_val = (
             line.get('voiceover_line') if isinstance(line, dict) else None
         )
+        # v698A many-to-one - None on every scene that mints its own twin.
+        audio_from_scene_val = (
+            line.get('audio_from_scene') if isinstance(line, dict) else None
+        )
         # v718i (NEW 2026-05-18) — v718h-C Option C Veo native end-frame
         # interpolation per-clip binding. When the source Scene declared
         # `- **end_frame_image:** image_K+1`, the parsed ImageSceneAssignment
@@ -2490,6 +2502,7 @@ async def _create_job_impl(
             clip_role=clip_role_val,
             voiceover_anchor_image_node_id=voiceover_anchor_node_id,
             voiceover_line=voiceover_line_val,
+            audio_from_scene=audio_from_scene_val,     # v698A many-to-one
             # v892 — background layer of an assembled frame. Set only when the
             # Scene declared `composite_plate_image:`; the Phase 3a sibling
             # loop renders it as a 'composite_plate' clip.
@@ -6733,6 +6746,10 @@ class UpdateClipRequest(BaseModel):
     clip_role: Optional[str] = None
     voiceover_anchor_image_node_id: Optional[int] = None
     voiceover_line: Optional[str] = None
+    # v698A many-to-one - the scene whose clip supplies this silent
+    # visual's audio. MUST be declared on EVERY receiving model or
+    # pydantic drops it and the field never lands (the v892.2 lesson).
+    audio_from_scene: Optional[int] = None
     clear_fields: Optional[List[str]] = None
 
 
@@ -6884,6 +6901,11 @@ async def update_clip(
         clip.caption = req.caption
     if req.voiceover_line is not None:
         clip.voiceover_line = req.voiceover_line
+    # v698A many-to-one. check_field_plumbing caught this one: declaring the
+    # field on UpdateClipRequest without applying it here means the API accepts
+    # it and silently drops it.
+    if req.audio_from_scene is not None:
+        clip.audio_from_scene = req.audio_from_scene
 
     # ─── Auto-clear anchor + voiceover_line when leaving visual_pair ─────
     # Mirror v725 auto-clear: flipping clip_role away from visual_pair
@@ -6906,14 +6928,25 @@ async def update_clip(
                 flush=True,
             )
             clip.voiceover_line = None
+        # v698A many-to-one — same orphan problem as the anchor above.
+        if req.audio_from_scene is None and clip.audio_from_scene is not None:
+            print(
+                f"[v735] Auto-clearing audio_from_scene on clip {clip_id} "
+                f"(clip_role={clip.clip_role!r} is not 'visual_pair')",
+                flush=True,
+            )
+            clip.audio_from_scene = None
 
-    # ─── Validation: visual_pair requires anchor ─────────────────────────
-    if clip.clip_role == "visual_pair" and clip.voiceover_anchor_image_node_id is None:
+    # ─── Validation: visual_pair needs an anchor OR an audio source ──────
+    if (clip.clip_role == "visual_pair"
+            and clip.voiceover_anchor_image_node_id is None
+            and clip.audio_from_scene is None):
         raise HTTPException(
             400,
             "clip_role='visual_pair' requires voiceover_anchor_image_node_id "
-            "to be set (per v698A). Set it in the same PATCH or change "
-            "clip_role to 'single'.",
+            "(mint an audio twin) or audio_from_scene (ride under an existing "
+            "spoken clip) — declare exactly one. Set it in the same PATCH or "
+            "change clip_role to 'single'.",
         )
 
     # ─── Validation: text_card requires caption + bg_color ───────────────
@@ -6986,6 +7019,7 @@ async def update_clip(
                 "cut_mode", "target_duration_s", "veo_render_duration_s",
                 "caption", "scene_type", "bg_color", "clip_role",
                 "voiceover_anchor_image_node_id", "voiceover_line",
+                "audio_from_scene",     # v698A many-to-one
             ) if getattr(req, f) is not None
         ],
         "cleared_fields": cleared,
@@ -7357,6 +7391,12 @@ class AddVoiceoverRequest(BaseModel):
     voiceover_line_b: Optional[str] = None   # v821 reworded line for Prompt B
     audio_prompt: Optional[str] = None       # v789 authored twin prompt (verbatim when given)
     audio_prompt_b: Optional[str] = None     # v821 Prompt B for the twin
+    # v698A many-to-one — declared here so this endpoint can ALSO make a clip
+    # ride under an existing spoken clip instead of only ever minting a twin.
+    # Undeclared, pydantic would drop it and this path would silently stay
+    # 1:1-only (the v892.2 failure). Found by check_audio_from_scene_plumbing,
+    # which asserts every model declaring voiceover_line declares this too.
+    audio_from_scene: Optional[int] = None
 
 
 @app.post("/api/jobs/{job_id}/clips/{clip_index}/add-voiceover")

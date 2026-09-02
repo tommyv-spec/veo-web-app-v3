@@ -395,6 +395,11 @@ class Clip(Base):
     # kept OUT of the concat, exactly as an audio_pair twin is.
     composite_plate_image_node_id = Column(Integer, ForeignKey("image_nodes.id"), nullable=True)
     voiceover_line = Column(Text, nullable=True)
+    # v698A many-to-one — the scene_index whose clip supplies this visual's
+    # audio. NULL = the 1:1 path (mint a twin) or no pairing at all. Several
+    # clips may carry the same value; the export divides that source clip's
+    # window between them (pairing_resolver.split_span).
+    audio_from_scene = Column(Integer, nullable=True)
     # v718i (NEW 2026-05-18): per-clip explicit end-frame image binding for
     # v718h-C Option C Veo native end-frame interpolation. When the Scene
     # block carries an `- **end_frame_image:** image_K+1` bullet, the

@@ -10903,6 +10903,16 @@ Ambient: same kitchen room tone, soft pour sound.
                                 ? promoteMeta.voiceover_anchor_image_local_index
                                 : null),
                         voiceover_line: promoteMeta.voiceover_line || null,
+                        // v698A many-to-one — the scene whose clip supplies
+                        // this silent visual's audio. A key that is NOT listed
+                        // here is dropped before the backend sees it, exactly
+                        // as the comment above warns for the v700b fields.
+                        // `!== undefined` rather than `|| null`: scene 0 is a
+                        // legitimate value and `0 || null` is null.
+                        audio_from_scene:
+                            (promoteMeta.audio_from_scene !== undefined
+                                ? promoteMeta.audio_from_scene
+                                : null),
                         // v789 — operator-authored audio-twin prompt
                         // (markdown `### Clip S.L.audio` block). Backend
                         // Phase 3b uses it as the audio_pair Clip's

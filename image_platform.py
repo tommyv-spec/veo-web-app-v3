@@ -266,6 +266,11 @@ def run_image_platform_migrations():
         # building dialogue_json.
         ("image_scene_assignments", "voiceover_anchor_image_node_id",
          "ALTER TABLE image_scene_assignments ADD COLUMN voiceover_anchor_image_node_id INTEGER"),
+        # v698A many-to-one — the source scene_index a silent visual rides under.
+        ("image_scene_assignments", "audio_from_scene",
+         "ALTER TABLE image_scene_assignments ADD COLUMN audio_from_scene INTEGER"),
+        ("clips", "audio_from_scene",
+         "ALTER TABLE clips ADD COLUMN audio_from_scene INTEGER"),
         # v718i (NEW 2026-05-18): end_frame_image_node_id on clips +
         # image_scene_assignments. When a Scene block carries an
         # `- **end_frame_image:** image_K+1` bullet (v718h-C Option C
@@ -492,6 +497,11 @@ def run_image_platform_migrations():
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS role VARCHAR(40)"),
         ("image_scene_assignments", "voiceover_anchor_image_node_id",
          "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS voiceover_anchor_image_node_id INTEGER"),
+        # v698A many-to-one — the source scene_index a silent visual rides under.
+        ("image_scene_assignments", "audio_from_scene",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS audio_from_scene INTEGER"),
+        ("clips", "audio_from_scene",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS audio_from_scene INTEGER"),
         # v718i (NEW 2026-05-18): see SQLite migration above.
         ("clips", "end_frame_image_node_id",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS end_frame_image_node_id INTEGER"),
@@ -1683,6 +1693,13 @@ class ImageSceneAssignment(Base):
     voiceover_anchor_image_node_id = Column(
         Integer, ForeignKey("image_nodes.id"), nullable=True
     )
+    # v698A many-to-one: when speaker_mode='voiceover' and no anchor is given,
+    # this is the SCENE INDEX whose already-spoken clip supplies the audio.
+    # Several visuals may name the same source; the export divides that clip's
+    # window between them. NULL on every non-voiceover assignment and on every
+    # scene that names an anchor instead. Deliberately a plain int, not an FK:
+    # it is a scene index inside this batch, not a row id.
+    audio_from_scene = Column(Integer, nullable=True)
     # v892 — background layer of an assembled (green-screen composite) frame.
     # NULL on every single-render scene.
     composite_plate_image_node_id = Column(
@@ -1798,6 +1815,7 @@ class ImageSceneAssignment(Base):
             # v698A — anchor binding for voiceover-paired scenes. NULL on
             # non-voiceover assignments.
             "voiceover_anchor_image_node_id": self.voiceover_anchor_image_node_id,
+            "audio_from_scene": self.audio_from_scene,   # v698A many-to-one
             # v892 — background layer of an assembled frame. NULL on every
             # single-render scene.
             "composite_plate_image_node_id": self.composite_plate_image_node_id,
@@ -5768,6 +5786,33 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                     flush=True,
                 )
 
+        # v698A many-to-one — `audio_from_scene: N` is the OTHER way a
+        # voiceover scene gets its audio: it rides under scene N's already
+        # spoken clip instead of minting an audio twin. Several visuals may
+        # name the same source; the export divides that clip's window between
+        # them (pairing_resolver.split_span). Mutually exclusive with the
+        # anchor above - an anchor means "mint me a twin", this means "do not".
+        audio_from_scene: Optional[int] = None
+        _afs_match = _re.search(
+            r"^\s*[-*]\s*\*\*audio_from_scene:\*\*\s*(\d+)\s*$",
+            block, flags=_re.MULTILINE,
+        )
+        if _afs_match:
+            audio_from_scene = int(_afs_match.group(1))
+            if voiceover_anchor_image is not None:
+                raise ValueError(
+                    f"Scene {scene_index}: declares both audio_from_scene="
+                    f"{audio_from_scene} and voiceover_anchor_image="
+                    f"image_{voiceover_anchor_image}. An anchor means 'mint me "
+                    f"an audio twin' and audio_from_scene means 'do not' - "
+                    f"declare exactly one."
+                )
+            print(
+                f"[v698A/parse] scene_{scene_index} "
+                f"audio_from_scene={audio_from_scene} (no audio twin)",
+                flush=True,
+            )
+
         # v718i (NEW 2026-05-18): end_frame_image bullet. When the Scene
         # declares an `- **end_frame_image:** image_K+1` field, the platform
         # binds the named ImageNode as Veo's explicit end_frame for native
@@ -6036,11 +6081,14 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
 
         # v698A Gate 9 — voiceover scenes MUST have voiceover_anchor_image
         # field (the audio twin's start frame).
-        if is_voiceover_scene and voiceover_anchor_image is None:
+        if (is_voiceover_scene and voiceover_anchor_image is None
+                and audio_from_scene is None):
             raise ValueError(
-                f"Scene {scene_index}: speaker=voiceover requires "
-                f"`- **voiceover_anchor_image:** image_N` field pointing at "
-                f"a persona-on-camera image with role=voiceover_anchor "
+                f"Scene {scene_index}: speaker=voiceover requires either "
+                f"`- **voiceover_anchor_image:** image_N` pointing at a "
+                f"persona-on-camera image with role=voiceover_anchor (mint an "
+                f"audio twin), or `- **audio_from_scene:** N` naming a spoken "
+                f"scene this visual rides under (v698A many-to-one) "
                 f"(see template_reference.md §v698A Gate 9)"
             )
         # v698A Gate 11 — voiceover scenes MUST have at least one line:
@@ -6083,6 +6131,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "bg_color": bg_color,         # v681 — text_card bg color (CSS / hex)
             "duration_s": duration_s,     # v681 — text_card duration in seconds (None → 1.0 at render)
             "voiceover_anchor_image": voiceover_anchor_image,  # v698A — None | int
+            "audio_from_scene": audio_from_scene,  # v698A many-to-one — None | source scene_index
             "composite_plate_image": composite_plate_image,  # v892 — None | int; background layer of an assembled frame
             "end_frame_image": end_frame_image,  # v718i (NEW 2026-05-18) — None | int; explicit end-frame image for Veo native interpolation
             # v943 — charswap declaration. All three None on a normal scene.
@@ -9231,6 +9280,9 @@ def _import_scene_table_impl(
             # v698A — anchor binding for voiceover-paired scenes; NULL on
             # all non-voiceover assignments.
             voiceover_anchor_image_node_id=anchor_node_id_resolved,
+            # v698A many-to-one — the source scene this silent visual rides
+            # under. NULL on every scene that mints its own audio twin.
+            audio_from_scene=s.get("audio_from_scene"),
             # v718i (NEW 2026-05-18) — explicit end-frame image binding for
             # v718h-C Option C Veo native end-frame interpolation; NULL on
             # all non-Option-C assignments (default = sequential auto-inference).
@@ -10326,6 +10378,9 @@ def prepare_batch_for_video(
         # uploaded image list) for voiceover-paired scenes. None on every
         # non-voiceover scene.
         _anchor_node_id = scene.get("voiceover_anchor_image_node_id")
+        # v698A many-to-one — read off the SAME prepared scene dict the anchor
+        # comes from (it round-trips through ImageSceneAssignment.to_dict()).
+        _asg_audio_from_scene = scene.get("audio_from_scene")
         # v892 — the composite plate node for this scene, read from the same
         # prepared scene dict the anchor comes from.
         _asg_composite_plate_node_id = scene.get("composite_plate_image_node_id")
@@ -10654,6 +10709,15 @@ def prepare_batch_for_video(
                 "composite_plate_prompt_override": (
                     (vp or {}).get("plate_prompt")
                     if _asg_composite_plate_node_id
+                    else None
+                ),
+                # v698A many-to-one — the SCENE whose clip supplies this
+                # silent visual's audio. When set, Phase 3a mints no audio
+                # twin and the export divides that clip's window between the
+                # sharers. None on every non-voiceover line.
+                "audio_from_scene": (
+                    _asg_audio_from_scene
+                    if (scene_speaker_mode or "").lower() == "voiceover"
                     else None
                 ),
                 "voiceover_anchor_image_node_id": (
