@@ -1190,15 +1190,38 @@ def amazon_deeplink(asin: str, tracking_id: str, p: str = ""):
 (function(){{
   var ua = navigator.userAgent || "";
   var deep = /Android/i.test(ua) ? {android!r} : {ios!r};
-  // The app link is armed on the BUTTON, and nothing navigates on its own.
+  var web  = {web!r};
+  var btn  = document.getElementById("app");
+  btn.setAttribute("href", deep);
+
+  // Two measured facts shape this, both found by testing on a real phone
+  // inside Instagram on 2026-09-02:
   //
-  // Measured 2026-09-02 inside Instagram: a scripted
-  // `window.location = <custom scheme>` is silently blocked in the in-app
-  // webview, and the timed web fallback then fired and dumped the shopper into
-  // Instagram's browser — the exact outcome this page exists to avoid. iOS only
-  // honours a custom scheme from a real user gesture, so the tap IS the
-  // mechanism. linktw.in's own page works the same way, for the same reason.
-  document.getElementById("app").setAttribute("href", deep);
+  // 1. A scripted `window.location = <custom scheme>` on page load is silently
+  //    blocked in the in-app webview. iOS honours a custom scheme only from a
+  //    REAL USER GESTURE — so the tap has to be the thing that fires it.
+  // 2. With no Amazon app installed, that same tap does nothing at all. The
+  //    scheme has no handler, iOS fails silently, and the shopper is stranded
+  //    on this page with a button that appears broken.
+  //
+  // So: the tap launches the app, and ONLY IF we are still here a moment later
+  // — meaning nothing handled the scheme — do we fall through to the web. The
+  // timer is armed by the gesture, never on load, which is what makes it legal
+  // and what stops it hijacking someone the app already swallowed.
+  var went = false;
+  function cancel(){{ went = true; }}
+  document.addEventListener("visibilitychange", function(){{
+    if (document.hidden) cancel();          // the app took them: stop
+  }});
+  window.addEventListener("pagehide", cancel);
+
+  btn.addEventListener("click", function(e){{
+    e.preventDefault();
+    try {{ window.location.href = deep; }} catch (err) {{}}
+    setTimeout(function(){{
+      if (!went && !document.hidden) window.location.replace(web);
+    }}, 1200);
+  }});
 }})();
 </script></body></html>"""
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
