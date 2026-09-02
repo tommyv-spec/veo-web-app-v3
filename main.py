@@ -984,7 +984,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # which enforces DIAG_TOKEN itself (inert unless the env var is set).
         "/api/diag/local-match",
     }
-    PUBLIC_PREFIXES = {"/static/", "/auth/", "/api/local-worker/", "/api/user-worker/", "/api/images/worker/"}
+    # "/g/" = the Amazon deep-link interstitial. It MUST be public: it is the
+    # link customers tap from a DM or a caption, and they have no account here.
+    PUBLIC_PREFIXES = {"/static/", "/auth/", "/api/local-worker/", "/api/user-worker/",
+                       "/api/images/worker/", "/g/"}
     
     async def dispatch(self, request: Request, call_next):
         # Skip auth if Google OAuth is not configured
@@ -1101,6 +1104,102 @@ static_dir.mkdir(exist_ok=True)
 
 # Mount static files
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
+# === /g/ — open the Amazon APP, carrying our tracking id (2026-09-02) ===
+#
+# Why this exists: a link tapped inside Instagram opens in Instagram's own
+# webview, where the shopper is often NOT signed into Amazon. They meet a
+# sign-in wall and most of them leave. A deep link hands them to the native
+# Amazon app instead, where they are already signed in with one-tap checkout.
+# That is the single job here.
+#
+# We used linktw.in for this, but it STRIPS unknown query params (measured
+# 2026-09-02), so our per-post Amazon tracking id never reached Amazon and every
+# sale booked to the account-level tag. This route keeps the deep link AND the
+# tag, and needs no dashboard: the URL carries everything.
+#
+#     /g/B0GVKNB82S/korella-p001-20?p=6653896
+#
+# Deliberately NO server-side mapping table. Putting the ASIN and tag in the URL
+# means a link exists the moment a post exists — nothing to store, nothing to
+# deploy per post, nothing to fall out of sync.
+def _valid_asin(s: str) -> bool:
+    """B0 + 8 uppercase alphanumerics. No regex: main.py has no module-level
+    `import re` (only aliased imports inside functions), and a NameError here
+    would take down app startup."""
+    return (len(s or "") == 10 and s[:2] == "B0"
+            and all(c.isdigit() or (c.isupper() and c.isalpha()) for c in s[2:]))
+
+
+def _valid_tag(s: str) -> bool:
+    """An Amazon tracking id: allowed chars, ending in the -NN locale suffix."""
+    s = s or ""
+    if not (5 <= len(s) <= 50) or s[-3] != "-" or not s[-2:].isdigit():
+        return False
+    return all(c.isalnum() or c in "._-" for c in s) and s[0].isalnum()
+
+
+@app.get("/g/{asin}/{tracking_id}", response_class=HTMLResponse, include_in_schema=False)
+def amazon_deeplink(asin: str, tracking_id: str, p: str = ""):
+    """Interstitial that opens the Amazon app on the product, tag intact."""
+    # Validate before building any URL. This route must only ever be able to
+    # send someone to amazon.com/dp/<real ASIN> — never an attacker-chosen
+    # destination, and never a malformed tag that silently loses attribution.
+    if not _valid_asin(asin) or not _valid_tag(tracking_id):
+        return HTMLResponse("Not found", status_code=404,
+                            headers={"Cache-Control": "no-store"})
+
+    web = f"https://www.amazon.com/dp/{asin}?tag={tracking_id}"
+    ios = f"com.amazon.mobile.shopping.web://www.amazon.com/dp/{asin}?tag={tracking_id}"
+    android = (f"intent://www.amazon.com/dp/{asin}?tag={tracking_id}"
+               f"#Intent;scheme=https;package=com.amazon.mShop.android.shopping;end")
+
+    # Click log: stdout only, so a logging fault can never cost a sale. Render
+    # captures stdout. `p` is the post id, which is what makes a click
+    # attributable to a VIDEO rather than just to the account.
+    try:
+        print(json.dumps({"evt": "deeplink", "post": p[:32], "asin": asin,
+                          "tag": tracking_id,
+                          "at": datetime.utcnow().isoformat() + "Z"}), flush=True)
+    except Exception:
+        pass
+
+    html = f"""<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><title>Opening Amazon…</title>
+<style>
+ body{{margin:0;min-height:100svh;display:flex;flex-direction:column;align-items:center;
+ justify-content:center;gap:18px;font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+ background:#fff;color:#111;padding:24px;text-align:center}}
+ a{{display:block;width:100%;max-width:320px;padding:15px 20px;border-radius:12px;
+ text-decoration:none;font-weight:600}}
+ .p{{background:#ff9900;color:#111}} .s{{background:#f2f2f2;color:#111}}
+ p{{margin:0;color:#555}}
+</style></head><body>
+<p>Opening Amazon…</p>
+<a class="p" id="app" href="{web}">Open in the Amazon app</a>
+<a class="s" href="{web}">Continue on Amazon.com</a>
+<script>
+(function(){{
+  var ua = navigator.userAgent || "";
+  var deep = /Android/i.test(ua) ? {android!r} : {ios!r};
+  document.getElementById("app").setAttribute("href", deep);
+  var done = false;
+  function stop(){{ done = true; }}
+  // If the app opens, this page is hidden — never navigate again, or the
+  // shopper comes back to a browser tab that also went to Amazon.
+  document.addEventListener("visibilitychange", function(){{
+    if (document.hidden) stop();
+  }});
+  window.addEventListener("pagehide", stop);
+  try {{ window.location.href = deep; }} catch (e) {{}}
+  setTimeout(function(){{
+    if (!done && !document.hidden) window.location.replace({web!r});
+  }}, 1600);
+}})();
+</script></body></html>"""
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 # === PWA install support (2026-06-02) ===
