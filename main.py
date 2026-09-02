@@ -1152,8 +1152,14 @@ def amazon_deeplink(asin: str, tracking_id: str, p: str = ""):
 
     web = f"https://www.amazon.com/dp/{asin}?tag={tracking_id}"
     ios = f"com.amazon.mobile.shopping.web://www.amazon.com/dp/{asin}?tag={tracking_id}"
+    # S.browser_fallback_url matters: without it, an Android device with no
+    # Amazon app shows an error page instead of falling back to the web.
+    # Local import on purpose: main.py has no module-level urllib import.
+    from urllib.parse import quote as _q
+    _fallback = _q(web, safe="")
     android = (f"intent://www.amazon.com/dp/{asin}?tag={tracking_id}"
-               f"#Intent;scheme=https;package=com.amazon.mShop.android.shopping;end")
+               f"#Intent;scheme=https;package=com.amazon.mShop.android.shopping;"
+               f"S.browser_fallback_url={_fallback};end")
 
     # Click log: stdout only, so a logging fault can never cost a sale. Render
     # captures stdout. `p` is the post id, which is what makes a click
@@ -1177,26 +1183,22 @@ def amazon_deeplink(asin: str, tracking_id: str, p: str = ""):
  .p{{background:#ff9900;color:#111}} .s{{background:#f2f2f2;color:#111}}
  p{{margin:0;color:#555}}
 </style></head><body>
-<p>Opening Amazon…</p>
+<p>Open this in the Amazon app so you stay signed in 👇</p>
 <a class="p" id="app" href="{web}">Open in the Amazon app</a>
 <a class="s" href="{web}">Continue on Amazon.com</a>
 <script>
 (function(){{
   var ua = navigator.userAgent || "";
   var deep = /Android/i.test(ua) ? {android!r} : {ios!r};
+  // The app link is armed on the BUTTON, and nothing navigates on its own.
+  //
+  // Measured 2026-09-02 inside Instagram: a scripted
+  // `window.location = <custom scheme>` is silently blocked in the in-app
+  // webview, and the timed web fallback then fired and dumped the shopper into
+  // Instagram's browser — the exact outcome this page exists to avoid. iOS only
+  // honours a custom scheme from a real user gesture, so the tap IS the
+  // mechanism. linktw.in's own page works the same way, for the same reason.
   document.getElementById("app").setAttribute("href", deep);
-  var done = false;
-  function stop(){{ done = true; }}
-  // If the app opens, this page is hidden — never navigate again, or the
-  // shopper comes back to a browser tab that also went to Amazon.
-  document.addEventListener("visibilitychange", function(){{
-    if (document.hidden) stop();
-  }});
-  window.addEventListener("pagehide", stop);
-  try {{ window.location.href = deep; }} catch (e) {{}}
-  setTimeout(function(){{
-    if (!done && !document.hidden) window.location.replace({web!r});
-  }}, 1600);
 }})();
 </script></body></html>"""
     return HTMLResponse(html, headers={"Cache-Control": "no-store"})
