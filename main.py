@@ -3480,6 +3480,40 @@ async def _setup_job_background(
             # dispatch render; Phase 3d adds atomic completion gating. Until
             # Phase 3b lands, audio_pair Clips sit dormant — visible in DB,
             # not yet rendered, no UI surfacing.
+            #
+            # v698A many-to-one — VALIDATE EVERY DECLARED SOURCE FIRST, OUTSIDE
+            # THE TRY BELOW. That block ends with `except Exception … (non-fatal)`,
+            # so an error raised inside it is caught, logged, and setup carries on
+            # to export a BLACK window (an unpaired visual has no target, and the
+            # whole b-roll stage is itself wrapped non-fatal further down). This
+            # pass is deliberately outside it so an unresolvable pairing stops the
+            # job instead of quietly losing a picture.
+            _afs_unresolved = []
+            for _vp in db.query(Clip).filter(
+                    Clip.job_id == job_id,
+                    Clip.clip_role == 'visual_pair',
+                    Clip.audio_from_scene.isnot(None)).all():
+                _hit = db.query(Clip).filter(
+                    Clip.job_id == job_id,
+                    Clip.scene_index == _vp.audio_from_scene,
+                    Clip.clip_role.in_((None, "", "single")),
+                    Clip.dialogue_text.isnot(None),
+                    Clip.dialogue_text != "",
+                ).first()
+                if _hit is None:
+                    _afs_unresolved.append(
+                        (_vp.id, _vp.scene_index, _vp.audio_from_scene))
+            if _afs_unresolved:
+                raise HTTPException(
+                    status_code=400,
+                    detail="; ".join(
+                        f"clip {cid} (scene {sidx}) declares audio_from_scene={want} "
+                        f"but that scene has no spoken clip in job {job_id}"
+                        for cid, sidx, want in _afs_unresolved
+                    ) + ". Refusing setup: an unpaired visual exports a black "
+                        "window and the export's b-roll stage is non-fatal.",
+                )
+
             try:
                 visual_pair_clips = db.query(Clip).filter(
                     Clip.job_id == job_id,
@@ -3496,6 +3530,36 @@ async def _setup_job_background(
                         # Skip if already paired (idempotent — re-runs of
                         # _setup_job_background after a partial failure)
                         if vp.paired_clip_id is not None:
+                            continue
+                        # v698A many-to-one — this visual rides under an
+                        # existing spoken clip. Point at it and mint NOTHING:
+                        # paired_clip_id is a plain FK, so several visuals
+                        # sharing one audio clip needs no schema change. The
+                        # export divides that clip's window between the sharers
+                        # (pairing_resolver.split_span). The source is
+                        # guaranteed to resolve — the pass above already
+                        # refused the job otherwise — so a miss here is a plain
+                        # skip, never a raise: a raise inside this try would be
+                        # swallowed by its own non-fatal handler.
+                        if vp.audio_from_scene is not None:
+                            _src = db.query(Clip).filter(
+                                Clip.job_id == job_id,
+                                Clip.scene_index == vp.audio_from_scene,
+                                Clip.clip_role.in_((None, "", "single")),
+                                Clip.dialogue_text.isnot(None),
+                                Clip.dialogue_text != "",
+                            ).first()
+                            if _src is None:
+                                continue
+                            vp.paired_clip_id = _src.id
+                            # [TEMP v698A] remove once operator-side evidence
+                            # lands (root CLAUDE.md section 2).
+                            print(
+                                f"[v698A/Phase3a/many-to-one] visual_pair clip "
+                                f"{vp.id} -> spoken clip {_src.id} (scene "
+                                f"{vp.audio_from_scene}); no twin minted",
+                                flush=True,
+                            )
                             continue
                         if not vp.voiceover_line:
                             print(
@@ -13434,10 +13498,43 @@ async def _do_export_final_impl(
                 # speaker) is also skipped.
                 broll_clip_info: List[Dict[str, Any]] = []
                 broll_dialogue_lines: List[str] = []
+
+                # v698A many-to-one — work out WHO shares WHAT before the list
+                # is built. The filter just below needs `_afs_covered_sources`,
+                # and target construction (which needs `_pos_by_db_id`) does not
+                # run until much later, so only the WINDOW maths can wait.
+                # EVERY non-empty group covers its source, including a group of
+                # one: a lone sharer already receives the source's full window
+                # through paired_clip_id, so placing the source too would double
+                # it.
+                _afs_sharers = {}
+                for _c in clip_info:
+                    if ((_c.get("clip_role") or "").lower() == "visual_pair"
+                            and _c.get("audio_from_scene") is not None):
+                        _sid = _c.get("paired_clip_id")
+                        if _sid is not None:
+                            _afs_sharers.setdefault(_sid, []).append(_c)
+                _afs_covered_sources = set(_afs_sharers)
+
                 for c in clip_info:
                     role = (c.get("clip_role") or "single").lower()
                     if role != "visual_pair":
-                        continue  # singles + audio_pair + everything else
+                        # v698A — a SPOKEN clip is placed in its own window so
+                        # this output is the finished ad rather than a b-roll
+                        # track with black holes where the speaker was. But a
+                        # source whose sentence is already covered by sharers
+                        # must NOT also be placed at its full span, or its
+                        # window overlaps theirs and the timeline carries two
+                        # videos for one interval.
+                        if role in ("single", ""):
+                            if c.get("_clip_db_id") in _afs_covered_sources:
+                                continue
+                            _own_line = (c.get("dialogue_text") or "").strip()
+                            if _own_line:
+                                _rehydrate_path(c)
+                                broll_clip_info.append(dict(c))
+                                broll_dialogue_lines.append(_own_line)
+                        continue  # audio_pair + text_card + everything else
                     paired_id = c.get("paired_clip_id")
                     if not paired_id:
                         print(
@@ -13535,6 +13632,44 @@ async def _do_export_final_impl(
                     #   - single (HOOK/CTA): match by own clip_db_id
                     #   - visual_pair: match by paired_clip_id (the audio_pair
                     #     sibling held that position in the speaker concat)
+                    # v698A many-to-one — divide each SHARED window between
+                    # its sharers, in order, weighted by line length. Targets
+                    # are looked up by clip id below, so without this every
+                    # sharer of one spoken clip would receive that clip's
+                    # identical full-sentence window and they would all stack.
+                    # Keyed by _clip_db_id, NOT by id(): broll_clip_info holds
+                    # dict() COPIES, so object identity does not survive.
+                    _afs_subspan = {}
+                    if _afs_sharers:
+                        try:
+                            from pairing_resolver import split_span
+                            for _pid, _group in _afs_sharers.items():
+                                _spos = _pos_by_db_id.get(_pid)
+                                if _spos is None:
+                                    continue   # _all_mapped below reports it
+                                _frags = [(g.get("voiceover_line") or "")
+                                          for g in _group]
+                                _wins = split_span(_spos[0], _spos[1], _frags)
+                                for _g, _w in zip(_group, _wins):
+                                    _afs_subspan[_g.get("_clip_db_id")] = _w
+                                # [TEMP v698A] remove once operator-side
+                                # evidence lands (root CLAUDE.md section 2).
+                                print(
+                                    f"[Export/v698A/many-to-one] spoken clip "
+                                    f"{_pid} window {_spos[0]:.3f}-{_spos[1]:.3f}s "
+                                    f"split between {len(_group)} visual(s): "
+                                    + ", ".join(f"{a:.3f}-{b:.3f}"
+                                                for a, b in _wins),
+                                    flush=True,
+                                )
+                        except Exception as _afs_err:
+                            # Fail LOUD rather than silently stacking every
+                            # sharer on one window.
+                            raise RuntimeError(
+                                f"v698A many-to-one sub-span split failed: "
+                                f"{_afs_err}"
+                            ) from _afs_err
+
                     _pre_targets = []
                     _all_mapped = True
                     for _bc in broll_clip_info:
@@ -13554,7 +13689,10 @@ async def _do_export_final_impl(
                                 flush=True,
                             )
                             break
-                        _start, _end = _pos
+                        # v698A many-to-one — a sharer takes its own slice of
+                        # the source's window, not the whole thing.
+                        _start, _end = _afs_subspan.get(
+                            _bc.get("_clip_db_id"), _pos)
                         _pre_targets.append({
                             "start": _start,
                             "end": _end,
