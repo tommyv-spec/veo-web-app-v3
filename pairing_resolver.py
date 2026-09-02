@@ -22,25 +22,50 @@ timings would be better and are deliberately future work.
 """
 from __future__ import annotations
 
-# Normalised forms (hyphens and underscores stripped) of the speaker modes whose
-# clip carries real audio of its own. `voiceover` is NOT one of them: a
-# voiceover scene's audio comes from somewhere else by definition, so allowing
-# it as a source would let pairings chain, and a chain has no single span to
-# place a visual inside.
-SPEAKING_MODES = {"oncamera", "dialogue", "speaks", "spoken",
-                  "lipsync", "character", "characterspeaks"}
+# A `speaker:` cell is often a PHRASE, not a bare token — builds write
+# "the main character on-camera", and the platform's own normaliser
+# (image_platform._normalize_speaker_mode, mirrored in
+# verify_video_format._speaker_mode) handles that by looking at the whole
+# string, then the last token, then every token with the priority
+# voiceover > on-camera > silent > auto. This module mirrors that priority,
+# because a resolver that only understood bare tokens read
+# "the main character on-camera" as NOT speaking and rejected a perfectly
+# good build (caught on the first real build to use audio_from_scene).
+SPEAKING_TOKENS = {"oncamera", "dialogue", "speaks", "spoken",
+                   "lipsync", "character", "characterspeaks"}
+# `voiceover` is not a speaking source: its audio comes from somewhere else by
+# definition, so allowing it would let pairings chain, and a chain has no
+# single span to place a visual inside.
+VOICEOVER_TOKENS = {"voiceover", "vo", "narration", "offscreen",
+                    "narrator", "narrated"}
+SILENT_TOKENS = {"silent", "mute", "nodialogue", "nospeech", "music",
+                 "musiconly", "sfx", "sfxonly", "broll", "brolloverlay"}
 
 
 class PairingError(ValueError):
     """A pairing the export could not resolve. Raised at lint and at job setup."""
 
 
-def _mode(scene: dict) -> str:
-    return (scene.get("speaker_mode") or "").strip().lower().replace("-", "").replace("_", "")
+def _tokens(scene: dict) -> list:
+    raw = (scene.get("speaker_mode") or "").strip().lower()
+    return [t.strip(",.;:()").replace("-", "").replace("_", "")
+            for t in raw.split()]
 
 
 def _speaks(scene: dict) -> bool:
-    return _mode(scene) in SPEAKING_MODES
+    """True when this scene's own clip carries real speech.
+
+    Same priority the platform uses: voiceover beats on-camera beats silent.
+    A phrase like "the main character on-camera" resolves through its tokens.
+    """
+    toks = _tokens(scene)
+    if not toks:
+        return False
+    if any(t in VOICEOVER_TOKENS for t in toks):
+        return False
+    if any(t in SILENT_TOKENS for t in toks):
+        return False
+    return any(t in SPEAKING_TOKENS for t in toks)
 
 
 def resolve_audio_sources(scenes: list[dict]) -> dict:

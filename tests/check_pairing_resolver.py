@@ -46,6 +46,25 @@ expect_error(lambda: resolve_audio_sources(
      scene(3, "voiceover", audio_from=2, line="b")]),
     "does not speak")
 
+# a PHRASE speaker resolves through its tokens - builds really write this, and
+# a bare-token-only resolver rejected the first real build to use the feature
+s = [scene(1, "the main character on-camera", line="a spoken line"),
+     scene(2, "voiceover", audio_from=1, line="a spoken")]
+out = resolve_audio_sources(s)
+assert out[2]["audio_source_scene"] == 1, out
+
+# voiceover beats on-camera in a phrase, matching the platform's priority
+expect_error(lambda: resolve_audio_sources(
+    [scene(1, "the main character voiceover", line="x"),
+     scene(2, "voiceover", audio_from=1, line="a")]),
+    "does not speak")
+
+# a silent phrase is not a source either
+expect_error(lambda: resolve_audio_sources(
+    [scene(1, "the guides, silent", line=""),
+     scene(2, "voiceover", audio_from=1, line="a")]),
+    "does not speak")
+
 # --- split_span ------------------------------------------------------------
 # one sharer takes the whole span - this is why a one-visual group needs no
 # special case anywhere in the export
