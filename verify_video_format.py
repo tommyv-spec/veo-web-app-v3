@@ -9,6 +9,7 @@ v718d anti-platonic, v752 pacing, v586 grammar) still need a human read.
 Usage:  python code/verify_video_format.py videos/<file>.md
 Exit 0 = all mechanical gates pass. Exit 1 = one or more FAIL.
 """
+import os
 import re
 import sys
 
@@ -136,6 +137,7 @@ def lint(path: str) -> int:
     used_imgs: set[int] = set()
     end_frames: list[tuple[int, int]] = []
     voiceover_anchor_targets: list[tuple[str, int]] = []  # (scene_no, target_img)
+    pair_scenes: list[dict] = []   # v698A many-to-one, resolved after the loop
     line_count = 0
     for b in sblocks:
         h = re.match(r"^###\s+Scene\s+(\d+)\s*$", b, re.M)
@@ -177,18 +179,49 @@ def lint(path: str) -> int:
         # for diegetic off-camera voices; builds must NOT copy that — use an
         # in-scene speaker value instead (e.g. "the wife in-scene (diegetic)").
         sp = re.search(r"^-\s+\*\*speaker:\*\*\s*(.+)$", blk, re.M)
+        # v698A many-to-one — `audio_from_scene: N` is the OTHER legal way for a
+        # voiceover scene to get its audio: it rides under scene N's spoken clip
+        # instead of minting a twin, so it has no anchor by design. Collected
+        # here for the resolver pass after the loop.
+        audio_from = re.search(
+            r"^-\s+\*\*audio_from_scene:\*\*\s*(\d+)\s*$", blk, re.M)
+        anchor = re.search(
+            r"^-\s+\*\*voiceover_anchor_image:\*\*\s*image_(\d+)", blk, re.M)
+        pair_scenes.append({
+            "scene_index": int(sn),
+            "speaker_mode": sp.group(1).strip() if sp else "",
+            "audio_from_scene": int(audio_from.group(1)) if audio_from else None,
+            "anchor_node_id": int(anchor.group(1)) if anchor else None,
+            "line": scene_lines[0] if scene_lines else "",
+        })
         if sp and _speaker_mode(sp.group(1)) == "voiceover":
-            anchor = re.search(
-                r"^-\s+\*\*voiceover_anchor_image:\*\*\s*image_(\d+)", blk, re.M)
-            if not anchor:
+            if not anchor and not audio_from:
                 fails.append(
-                    f"v698A: Scene {sn} speaker reads as voiceover but has no "
-                    f"`- **voiceover_anchor_image:** image_N` — platform import "
-                    f"will reject it (Gate 9). If the voice is diegetic "
-                    f"(spoken in-scene, e.g. off-camera interviewer), use an "
-                    f"in-scene speaker value instead of 'voiceover'")
-            else:
+                    f"v698A: Scene {sn} speaker reads as voiceover but has neither "
+                    f"`- **voiceover_anchor_image:** image_N` (mint an audio twin) "
+                    f"nor `- **audio_from_scene:** N` (ride under an existing spoken "
+                    f"clip) — platform import will reject it (Gate 9). If the voice "
+                    f"is diegetic (spoken in-scene, e.g. off-camera interviewer), use "
+                    f"an in-scene speaker value instead of 'voiceover'")
+            elif anchor:
                 voiceover_anchor_targets.append((sn, int(anchor.group(1))))
+
+    # v698A many-to-one — validate every `audio_from_scene: N` with the SAME
+    # resolver Phase 3a uses (code/pairing_resolver.py), so lint and job setup
+    # cannot drift apart. It rejects: an anchor and audio_from_scene together,
+    # a scene that does not exist, a source that does not speak, and a pairing
+    # chained through another voiceover scene.
+    if pair_scenes:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        try:
+            from pairing_resolver import resolve_audio_sources, PairingError
+        except ImportError:
+            pass    # older checkout without the module; nothing to enforce
+        else:
+            try:
+                resolve_audio_sources(pair_scenes)
+            except PairingError as exc:
+                fails.append(f"v698A: {exc}")
 
     # end_frame_image validity (v718i)
     for start, end in end_frames:
