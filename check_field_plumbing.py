@@ -241,7 +241,15 @@ def main():
     # Checked when written and found CLEAN — this guards it from here on.
     recognised = set(re.findall(r"\\\*\\\*([a-z_0-9]+):\\\*\\\*", imgp_src))
 
-    def dict_keys(call):
+    def dict_keys(call, union=False):
+        """Object keys of a `call({...})` literal.
+
+        Default is the LARGEST match, because a call written twice is usually
+        one full version and one stub. `union=True` when several call sites are
+        genuinely different rows of the same payload — prepare's flat builder
+        has one branch for a silent scene and one per spoken line, and a field
+        either branch emits can reach the payload.
+        """
         best = set()
         for m in re.finditer(re.escape(call) + r"\(\{", imgp_src):
             i, depth = m.end(), 1
@@ -252,7 +260,9 @@ def main():
                     depth -= 1
                 i += 1
             keys = set(re.findall(r'^\s*"([a-z_0-9]+)":', imgp_src[m.end():i], re.M))
-            if len(keys) > len(best):
+            if union:
+                best |= keys
+            elif len(keys) > len(best):
                 best = keys
         return best
 
@@ -286,6 +296,37 @@ def main():
             problems.append(
                 "CHECK3 {0}: ImageSceneAssignment column is never emitted by to_dict() — "
                 "nothing downstream can read it".format(c))
+
+    # ---- CHECK 5 — prepare EMITS every field the from-batch path forwards -
+    # The v892.12 endpoint builds its job payload by passing each of prepare's
+    # `scenes_metadata` rows through DialogueLineInput BY NAME, which is what
+    # stops it from drifting the way three hand-written payload maps already
+    # have. The gap that leaves is the opposite one: a field DECLARED on the
+    # model that prepare never puts on a row simply arrives as None on that
+    # path, quietly, on every job. So the flat builder is the surface that has
+    # to keep up, and this is the check that says so.
+    FLAT_EXEMPT = {
+        "id": "assigned by the payload builder — it is the line's position, "
+              "not a per-scene value prepare could know",
+        "text": "comes from prepare's parallel `dialogue_lines` list, not from "
+                "the metadata row",
+        "start_image_idx": "resolved by the payload builder from the row's "
+                           "`image_local_index` through prepare's "
+                           "`uploaded[]` list, exactly as the browser does",
+    }
+    flat_keys = dict_keys("scenes_metadata_flat.append", union=True)
+    if not flat_keys:
+        notes.append("scenes_metadata_flat.append not found — CHECK5 skipped")
+    else:
+        for f in crossing:
+            if f in flat_keys or f in FLAT_EXEMPT:
+                continue
+            problems.append(
+                "CHECK5 {0}: DialogueLineInput declares it and main.py reads it "
+                "back, but prepare's scenes_metadata rows never carry it — the "
+                "from-batch endpoint passes prepare's rows through by name, so "
+                "a field prepare never emits arrives as None on that path "
+                "(v892.12)".format(f))
 
     # ---- CHECK 6 — the parsed scene dict reaches the assignment row ------
     # The boundary CHECK 3 and CHECK 4 leave open. CHECK 4 proves the parser's
@@ -324,8 +365,10 @@ def main():
     print("=" * 74)
     print("UpdateClipRequest      : {0} fields | {1} applied | {2} reported".format(
         len(ucr), len(applied), len(reported)))
-    print("DialogueLineInput      : {0} fields | {1} cross the frontend boundary".format(
-        len(dli), len(crossing)))
+    print("DialogueLineInput      : {0} fields | {1} cross the frontend boundary "
+          "| {2} emitted by prepare's flat rows".format(
+              len(dli), len(crossing),
+              len([f for f in crossing if f in flat_keys])))
     print("ImageSceneAssignment   : {0} columns | {1} to_dict keys | {2} "
           "same-named scene-dict keys reach the constructor".format(
               len(cols), len(keys) if keys is not None else "n/a",

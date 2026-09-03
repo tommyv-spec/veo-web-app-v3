@@ -2337,6 +2337,220 @@ async def create_job(
         )
 
 
+class CreateJobFromBatchRequest(BaseModel):
+    """Exactly one of these two must be given. There is no default.
+
+    A job config decides the Veo model, how many variants each clip renders,
+    the backend and the resolution — real money and real quality. Every field
+    of VideoConfigInput has a default, so an omitted config does not fail, it
+    silently becomes a full config nobody chose. So this endpoint refuses to
+    guess: either the caller sends one, or it names an earlier job to copy.
+    """
+    config: Optional[dict] = None
+    config_from_job: Optional[str] = None
+
+
+@app.post("/api/jobs/from-batch/{batch_id}")
+async def create_job_from_batch(
+    batch_id: str,
+    request: CreateJobFromBatchRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v892.12 — promote an image batch to a video job the way the BROWSER
+    does, in-process, and prove the written rows before anything renders.
+
+    WHY THIS EXISTS. The older `promote-to-video` endpoint writes Clip rows
+    itself and carries none of the per-scene bindings (its own v892.8 comment
+    says so: "clip_role, composite plate, v698A anchor, v718i end frame ...
+    are not carried at all"). On 2026-09-03 a many-to-one build promoted from
+    the CLI produced 24 clips with clip_role NULL and audio_from_scene NULL.
+    Setup succeeded. Every gate was green. Veo was asked to lip-sync sentence
+    fragments onto shots with no face, and the video was wrong.
+
+    So this handler runs the browser's own chain — prepare_batch_for_video,
+    then a CreateJobRequest, then `_create_job_impl` — and then does the thing
+    the browser cannot: with the background task NOT yet spawned, it compares
+    the Clip rows against what `prepare` said, and DELETES the job on any
+    mismatch. The verification is not advisory; a job never survives a failed
+    check.
+    """
+    from image_platform import (ImageJobBatch, ImageSceneAssignment,
+                                prepare_batch_for_video)
+    from promote_from_prepare import (build_create_job_request,
+                                      check_prepare_transport,
+                                      expected_rows_from_prepare,
+                                      missing_config_keys,
+                                      verify_promoted_clips)
+
+    # 1. exactly one config source
+    if bool(request.config) == bool(request.config_from_job):
+        raise HTTPException(
+            400,
+            "send exactly one of `config` (an explicit job config) or "
+            "`config_from_job` (the id of an earlier job whose config to "
+            "copy). There is no default: an omitted config would silently "
+            "become a full one nobody chose.")
+
+    # 2. copy a named job's config, owner-scoped
+    if request.config_from_job:
+        src_job = get_user_job(db, request.config_from_job, current_user)
+        try:
+            config = json.loads(src_job.config_json) if src_job.config_json else {}
+        except Exception as exc:
+            raise HTTPException(
+                400,
+                f"job {request.config_from_job} has an unreadable config_json "
+                f"({type(exc).__name__}) — pass an explicit `config` instead")
+        config_source = f"job:{request.config_from_job}"
+    else:
+        config = request.config
+        config_source = "explicit"
+
+    # 3. completeness, computed from the model — never a hand-written key list.
+    #    A field added to VideoConfigInput is required here the moment it
+    #    exists, which is the whole reason this is not a tuple.
+    missing = missing_config_keys(config, set(VideoConfigInput.model_fields))
+    if missing:
+        raise HTTPException(
+            400,
+            {"error": "job config is incomplete",
+             "missing": missing,
+             "why": "every VideoConfigInput field has a default, so a missing "
+                    "key does not fail — it silently picks a model, a variant "
+                    "count or a backend nobody chose. Name all of them."})
+    if config.get("storyboard_mode") is not True:
+        raise HTTPException(
+            400,
+            "storyboard_mode must be true on this path — the payload carries "
+            "`scenes`, which is what storyboard mode means. Refused rather "
+            "than corrected, because silently changing a config the operator "
+            "wrote is the failure this endpoint exists to stop.")
+
+    # 4. the browser's own first step, called in-process
+    prepared = prepare_batch_for_video(batch_id, db, current_user)
+
+    # 4b. the v889 transport check, BEFORE any job exists — so a problem here
+    #     costs a 400 and there is nothing to tear down. It is also the only
+    #     place that can see a DROPPED authored duration: the post-create
+    #     verifier only checks rows that declare one, so a lost key would make
+    #     that check quietly skip itself.
+    assignment_rows = [
+        a.to_dict() for a in db.query(ImageSceneAssignment)
+        .filter(ImageSceneAssignment.batch_id == batch_id)
+        .order_by(ImageSceneAssignment.scene_index).all()
+    ]
+    transport_problems = check_prepare_transport(
+        assignment_rows, prepared.get("scenes_metadata") or [])
+    if transport_problems:
+        for p in transport_problems:
+            print(f"[v892.12 TRANSPORT FAIL] {p}", flush=True)
+        raise HTTPException(
+            400,
+            {"error": "prepare dropped an authored value",
+             "problems": transport_problems})
+
+    # 5. the payload — built by name off the pydantic model, never enumerated
+    try:
+        body = build_create_job_request(
+            prepared, config, batch_id,
+            allowed=set(DialogueLineInput.model_fields))
+    except ValueError as exc:
+        raise HTTPException(400, f"cannot build a job from this batch: {exc}")
+
+    # 6. the SAME code the browser's POST /api/jobs runs — so the backend
+    #    choice, the Clip writer, the v943 owner check, the batch stamping and
+    #    the v944 finishing_spec copy all come for free. spawn_setup=False:
+    #    the rows are committed, but no background task exists yet.
+    resp, setup_ctx = await _create_job_impl(
+        CreateJobRequest(**body), db, current_user, spawn_setup=False)
+    job_id = resp.id
+
+    # 7. verify, then either start the work or destroy the job
+    clip_rows = [{
+        "clip_index": c.clip_index,
+        "scene_index": c.scene_index,
+        "clip_role": c.clip_role,
+        "dialogue_text": c.dialogue_text,
+        "audio_from_scene": c.audio_from_scene,
+        "target_duration_s": c.target_duration_s,
+    } for c in db.query(Clip)
+        .filter(Clip.job_id == job_id, Clip.clip_index < 100000)
+        .order_by(Clip.clip_index).all()]
+
+    expected_rows = expected_rows_from_prepare(prepared)
+    scene_position = {sa.get("scene_index"): pos for pos, sa
+                      in enumerate(prepared.get("scene_assignments") or [])}
+    problems = verify_promoted_clips(expected_rows, clip_rows, scene_position)
+
+    roles = {}
+    for c in clip_rows:
+        key = c["clip_role"] or "null"
+        roles[key] = roles.get(key, 0) + 1
+    afs_list = [[c["clip_index"], c["audio_from_scene"]] for c in clip_rows
+                if c["audio_from_scene"] is not None]
+    # [TEMP v892.12 FROM-BATCH] remove once a real many-to-one build has been
+    # promoted through here and the Render log shows base_ok=True (Task 7).
+    print(f"[TEMP v892.12 FROM-BATCH] job={job_id[:8]} batch={batch_id} "
+          f"clips={len(clip_rows)} roles={roles} afs={afs_list} "
+          f"base_ok={not problems}", flush=True)
+
+    if problems:
+        for p in problems:
+            print(f"[v892.12 VERIFY FAIL] job={job_id[:8]} {p}", flush=True)
+        # Tear the job down: the same three steps delete_job takes, plus
+        # un-stamping the batch. Nothing has been spawned, so nothing is
+        # racing this, and no job may survive a failed check.
+        try:
+            batch = db.query(ImageJobBatch).filter(
+                ImageJobBatch.id == batch_id,
+                ImageJobBatch.user_id == current_user.id,
+            ).first()
+            if batch and batch.promoted_video_job_id == job_id:
+                batch.promoted_video_job_id = None
+                db.commit()
+            dead = db.query(Job).filter(Job.id == job_id).first()
+            if dead:
+                images_dir = safe_images_dir(dead.images_dir)
+                output_dir = safe_images_dir(dead.output_dir)
+                db.delete(dead)          # cascades to the Clip rows
+                db.commit()
+                if images_dir and images_dir.exists():
+                    shutil.rmtree(images_dir, ignore_errors=True)
+                if output_dir and output_dir.exists():
+                    shutil.rmtree(output_dir, ignore_errors=True)
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print(f"[v892.12 VERIFY FAIL] job={job_id[:8]} teardown itself "
+                  f"failed ({type(exc).__name__}: {exc}) — DELETE the job by "
+                  f"hand", flush=True)
+        raise HTTPException(
+            500,
+            {"error": "promoted clips do not match prepare",
+             "problems": problems,
+             "job_deleted": job_id})
+
+    # 8. only now does the background work exist — the identical call
+    #    _create_job_impl makes when spawn_setup=True
+    asyncio.create_task(_setup_job_background(**asdict(setup_ctx)))
+
+    # 9. `video_job_id` is the key send_to_platform.promote() already reads
+    return {
+        "video_job_id": job_id,
+        "batch_id": batch_id,
+        "config_applied": config,
+        "config_source": config_source,
+        "verification": {
+            "clips": len(clip_rows),
+            "roles": roles,
+            "audio_from_scene": afs_list,
+        },
+    }
+
+
 async def _create_job_impl(
     request: "CreateJobRequest",
     db: "DBSession",
