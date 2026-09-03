@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Union
 from contextlib import asynccontextmanager
+from dataclasses import asdict, dataclass
 
 
 # =============================================================================
@@ -2284,6 +2285,31 @@ async def delete_single_image(job_id: str, filename: str):
 
 # ============ Job Management ============
 
+
+@dataclass
+class _SetupContext:
+    """Everything _setup_job_background needs, captured but not yet spawned.
+
+    Deliberately a PLAIN dataclass and deliberately private. It carries
+    `api_keys_data`, so it must never become a pydantic model and must never
+    appear in a `response_model=` — a field on a serialisable response object is
+    a path for API keys to leave the server. It exists only so an internal
+    caller can create a job, CHECK the rows that were written, and only then
+    start the background work with the identical arguments
+    `_create_job_impl` would have used.
+    """
+    job_id: str
+    images_dir: str
+    output_dir: str
+    backend_str: str
+    backend_preference: str
+    config_dict: dict
+    dialogue_list: list
+    scenes_list: list
+    last_frame_index: Optional[int]
+    api_keys_data: dict
+
+
 @app.post("/api/jobs", response_model=JobResponse)
 async def create_job(
     request: CreateJobRequest,
@@ -2315,8 +2341,18 @@ async def _create_job_impl(
     request: "CreateJobRequest",
     db: "DBSession",
     current_user: "User",
+    spawn_setup: bool = True,
 ):
-    """Actual implementation — wrapped by create_job for error handling."""
+    """Actual implementation — wrapped by create_job for error handling.
+
+    v892.12 — `spawn_setup` defaults to True, so `create_job` and every other
+    existing caller behave exactly as before (a mandatory argument would be an
+    API break, and the unattended caller cannot complain). An internal caller
+    passing False gets `(JobResponse, _SetupContext)` instead of a bare
+    `JobResponse`: the rows are written and committed, but no background task
+    exists yet, so the caller can verify what was written before anything can
+    render. It then spawns `_setup_job_background(**asdict(ctx))` itself.
+    """
     # Use provided job_id (from upload) or generate new one
     job_id = request.job_id if request.job_id else str(uuid.uuid4())
     
@@ -2758,9 +2794,11 @@ async def _create_job_impl(
         stuck_days=compute_stuck_days(job, datetime.utcnow()),
     )
     
-    # Spawn background task for frame upload + prompt generation
-    import asyncio
-    asyncio.create_task(_setup_job_background(
+    # The background work's arguments, captured once. Built either way so the
+    # two paths cannot drift: `spawn_setup=True` starts it here and returns the
+    # response alone; `spawn_setup=False` hands the context back and the caller
+    # starts the identical call after it has checked the rows.
+    setup_ctx = _SetupContext(
         job_id=job_id,
         images_dir=str(images_dir),
         output_dir=str(output_dir),
@@ -2771,8 +2809,15 @@ async def _create_job_impl(
         scenes_list=scenes_list,
         last_frame_index=request.last_frame_index,
         api_keys_data=api_keys_data,
-    ))
-    
+    )
+
+    if not spawn_setup:
+        return response, setup_ctx
+
+    # Spawn background task for frame upload + prompt generation
+    import asyncio
+    asyncio.create_task(_setup_job_background(**asdict(setup_ctx)))
+
     return response
 
 
