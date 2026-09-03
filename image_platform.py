@@ -12158,6 +12158,43 @@ def promote_batch_to_video(
         a.scene_index for a in assignments_by_scene_idx.values()
         if getattr(a, "end_frame_image_node_id", None)
     )
+
+    # v892.11 — REFUSE a v698A many-to-one build on this path, do not warn.
+    #
+    # Applying this file's own rule from the block above ("the honest thing is
+    # to refuse to fail quietly"), because for `audio_from_scene` the quiet
+    # failure is worse than for a composite. This path carries no clip_role, so
+    # every cutaway loses `visual_pair` while KEEPING the line fragment in
+    # dialogue_text. Phase 3c then reads them as spoken clips and Veo is asked
+    # to lip-sync a fragment onto a shot with no face in it. The job does not
+    # fail — it renders the wrong video, and every gate upstream still says the
+    # build is clean.
+    #
+    # Measured 2026-09-03 on garnissa v4 (batch ef5ff43b): promoted from the
+    # BROWSER the job carried 15 visual_pair + 9 spoken clips; re-promoted
+    # through THIS endpoint minutes later, the same batch produced 24 clips with
+    # clip_role NULL, audio_from_scene NULL, `warnings: []`, and started
+    # rendering. Two renders were spent before it was caught by hand.
+    #
+    # The browser path (prepare-batch-for-video -> POST /api/jobs) runs main.py's
+    # background setup, which is where v698A Phase 3a lives. Send the operator
+    # there rather than degrading their build.
+    _v892_11_afs = sorted(
+        a.scene_index for a in assignments_by_scene_idx.values()
+        if getattr(a, "audio_from_scene", None) is not None
+    )
+    if _v892_11_afs:
+        raise HTTPException(
+            400,
+            f"This batch is a v698A many-to-one build: scenes {_v892_11_afs} "
+            f"declare `audio_from_scene`. This promote path cannot carry "
+            f"clip_role or audio_from_scene, so the cutaways would lose their "
+            f"pairing, keep their line fragments, and render as lip-sync clips "
+            f"— a wrong video rather than a failed job. Promote it from the "
+            f"batch review page instead (prepare-batch-for-video -> POST "
+            f"/api/jobs), which runs the Phase 3a pairing."
+        )
+
     _v892_8_warnings = []
     # v892.10 — composites ARE supported on this path now (plate frames get
     # materialised and a composite_plate sibling is created inline below), so

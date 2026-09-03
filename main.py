@@ -3628,16 +3628,80 @@ async def _setup_job_background(
             # 0-based (image_platform.py:1639 "# 0, 1, 2, ..."). Comparing them
             # directly is off by one, so with only Defect 1 fixed each cutaway
             # would have ridden under the NEXT sentence.
+            # WHO decides the pairing: pairing_resolver, the same module the
+            # linter uses. This function only FETCHES what it decided.
+            #
+            # That split is the point. pairing_resolver exists so "lint and job
+            # setup cannot drift apart" (its own docstring), but setup never
+            # called it — it re-implemented the rules in SQL, and the two copies
+            # disagreed in ways no test could see, because the resolver is pure
+            # and the copy needed a database. Rules live in one place now.
             from sqlalchemy import or_ as _or_
+            from pairing_resolver import (PairingError,
+                                          resolve_audio_sources as _resolve)
 
-            def _spoken_source_for(_afs):
-                """The spoken clip a visual's `audio_from_scene: N` names, or None."""
-                if _afs is None:
+            # THE ONE PLACE THE TWO NUMBERINGS MEET.
+            # Clip.scene_index is 0-based (image_platform.py:1639 "# 0, 1, 2,
+            # ..."). Everything the author writes — `### Scene N` and the
+            # `audio_from_scene: N` that points at it — is 1-based, and the
+            # resolver works in the author's numbering because that is what the
+            # linter feeds it. So convert here, once, and nowhere else.
+            def _to_scene_no(_db_scene_index):
+                return _db_scene_index + 1
+
+            def _to_db_index(_scene_no):
+                return _scene_no - 1
+
+            _clips_all = db.query(Clip).filter(Clip.job_id == job_id).all()
+
+            def _db_speaks(_c):
+                """A clip carries real speech: not a cutaway, and has a line."""
+                return (_c.clip_role in (None, "", "single")
+                        and bool((_c.dialogue_text or "").strip()))
+
+            # One entry per scene, in the resolver's vocabulary. Where a scene
+            # has several clips, a speaking one wins — that is what "does this
+            # scene speak?" means.
+            _scene_rows = {}
+            for _c in _clips_all:
+                if _c.scene_index is None:
+                    continue
+                _no = _to_scene_no(_c.scene_index)
+                _prev = _scene_rows.get(_no)
+                if _prev is not None and not _db_speaks(_c):
+                    continue
+                _scene_rows[_no] = {
+                    "scene_index": _no,
+                    "speaker_mode": ("voiceover" if _c.clip_role == "visual_pair"
+                                     else ("on-camera" if _db_speaks(_c) else "silent")),
+                    "audio_from_scene": _c.audio_from_scene,
+                    "anchor_node_id": getattr(
+                        _c, "voiceover_anchor_image_node_id", None),
+                }
+
+            try:
+                _pairing = _resolve(list(_scene_rows.values()))
+            except PairingError as _pe:
+                # The linter should have caught this before the build was sent.
+                # Reaching here means lint and setup disagree — say which, and
+                # stop, rather than exporting a black window.
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"v698A pairing is unresolvable at job setup: {_pe}",
+                )
+
+            def _spoken_source_for(_afs, _scene_no):
+                """The spoken clip supplying this visual's audio, or None.
+
+                `_afs` is the declared 1-based scene; `_scene_no` is the 1-based
+                scene of the visual doing the declaring.
+                """
+                _decided = (_pairing.get(_scene_no) or {}).get("audio_source_scene")
+                if _decided is None:
                     return None
                 return db.query(Clip).filter(
                     Clip.job_id == job_id,
-                    # 1-based build scene number -> 0-based DB scene_index
-                    Clip.scene_index == _afs - 1,
+                    Clip.scene_index == _to_db_index(_decided),
                     _or_(Clip.clip_role.is_(None),
                          Clip.clip_role.in_(("", "single"))),
                     Clip.dialogue_text.isnot(None),
@@ -3649,7 +3713,8 @@ async def _setup_job_background(
                     Clip.job_id == job_id,
                     Clip.clip_role == 'visual_pair',
                     Clip.audio_from_scene.isnot(None)).all():
-                _hit = _spoken_source_for(_vp.audio_from_scene)
+                _hit = _spoken_source_for(_vp.audio_from_scene,
+                                          _to_scene_no(_vp.scene_index))
                 if _hit is None:
                     _afs_unresolved.append(
                         (_vp.id, _vp.scene_index, _vp.audio_from_scene))
@@ -3692,7 +3757,9 @@ async def _setup_job_background(
                         # skip, never a raise: a raise inside this try would be
                         # swallowed by its own non-fatal handler.
                         if vp.audio_from_scene is not None:
-                            _src = _spoken_source_for(vp.audio_from_scene)
+                            _src = _spoken_source_for(
+                                vp.audio_from_scene,
+                                _to_scene_no(vp.scene_index))
                             if _src is None:
                                 continue
                             vp.paired_clip_id = _src.id
