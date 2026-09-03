@@ -269,6 +269,10 @@ def run_image_platform_migrations():
         # v698A many-to-one — the source scene_index a silent visual rides under.
         ("image_scene_assignments", "audio_from_scene",
          "ALTER TABLE image_scene_assignments ADD COLUMN audio_from_scene INTEGER"),
+        # v889 — the authored `- **target_duration_s:**` bullet. Assignments
+        # only; Clip already carries its own target_duration_s.
+        ("image_scene_assignments", "explicit_target_s",
+         "ALTER TABLE image_scene_assignments ADD COLUMN explicit_target_s REAL"),
         ("clips", "audio_from_scene",
          "ALTER TABLE clips ADD COLUMN audio_from_scene INTEGER"),
         # v718i (NEW 2026-05-18): end_frame_image_node_id on clips +
@@ -500,6 +504,9 @@ def run_image_platform_migrations():
         # v698A many-to-one — the source scene_index a silent visual rides under.
         ("image_scene_assignments", "audio_from_scene",
          "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS audio_from_scene INTEGER"),
+        # v889 — see SQLite migration above.
+        ("image_scene_assignments", "explicit_target_s",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS explicit_target_s REAL"),
         ("clips", "audio_from_scene",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS audio_from_scene INTEGER"),
         # v718i (NEW 2026-05-18): see SQLite migration above.
@@ -1681,6 +1688,21 @@ class ImageSceneAssignment(Base):
     caption = Column(Text, nullable=True)
     bg_color = Column(String(20), nullable=True)
     duration_s = Column(Float, nullable=True)
+    # v889: the AUTHORED `- **target_duration_s:**` bullet, in seconds, exactly
+    # as the build wrote it. The parser already reads it and prints it as
+    # "(explicit, authoritative)", but before this column it had nowhere to
+    # live: the assignment row dropped it, so prepare_batch_for_video's
+    # `scene.get("explicit_target_s")` was always None and the v889 override
+    # never fired on the promote path. Measured on batch ef5ff43b -> job
+    # 15333490: a build declaring 8/4/6/8/8/4/8/4/8 stored 1.1s on every
+    # spoken clip (nine sentences reuse one image, so nine sentences got one
+    # anchor gap).
+    #
+    # NOT the same number as to_dict()'s "target_duration_s": that one stays
+    # the DERIVED value prepare computes (v667 anchor diff, then this bullet
+    # overriding it). This column is the raw declaration, independent of any
+    # anchor and of the 1-based/0-based scene numbering.
+    explicit_target_s = Column(Float, nullable=True)
     # v681e.10: per-scene speaker_mode (NULL | 'on-camera' | 'voiceover' |
     # 'silent' | 'auto'). Denorm of the parsed value so prepare_batch_for_video
     # can detect silent scenes after assignments are loaded back from DB.
@@ -1808,6 +1830,9 @@ class ImageSceneAssignment(Base):
             "caption": self.caption,
             "bg_color": self.bg_color,
             "duration_s": self.duration_s,
+            # v889 — the AUTHORED bullet, not the derived duration. prepare
+            # asks for exactly this key at the v667 anchor site.
+            "explicit_target_s": self.explicit_target_s,
             # v681e.10 — silent scenes are detected by prepare_batch_for_video
             # via this field; without it, silent scenes never reach the
             # synthetic flat-row branch and disappear from the storyboard editor.
@@ -9270,6 +9295,11 @@ def _import_scene_table_impl(
             caption=s.get("caption"),
             bg_color=s.get("bg_color"),
             duration_s=s.get("duration_s"),
+            # v889 — the authored bullet; prepare reads it back as
+            # `scene.get("explicit_target_s")` where it outranks the v667
+            # anchor diff. Before this line the parser read it and the row
+            # threw it away, so the override never fired on this path.
+            explicit_target_s=s.get("explicit_target_s"),
             # v681e.10 — denorm speaker_mode so prepare_batch_for_video
             # can detect silent scenes when assignments are loaded back
             # from DB. Without this, silent scenes are dropped from the
@@ -10340,6 +10370,13 @@ def prepare_batch_for_video(
         # site for why: image reuse makes the anchor jump backwards and the
         # diff balloons (job d8f1b043 scene 6: 11.63s derived for a 1.83s beat).
         _explicit = scene.get("explicit_target_s")
+        # [TEMP v889.1] remove once a real build proves the authored bullet
+        # reaches the Clip row (Task 7). Until the assignment row gained the
+        # column this was ALWAYS None, so the override below never fired and
+        # the anchor gap won silently.
+        print(f"[TEMP v889.1] scene_{scene['scene_index']} "
+              f"explicit_target_s={_explicit} "
+              f"anchor_derived={target_duration_s}", flush=True)
         if _explicit:
             if target_duration_s is not None and abs(_explicit - target_duration_s) > 0.05:
                 print(f"[v889] scene_{scene['scene_index']} target_duration_s "
@@ -10548,6 +10585,11 @@ def prepare_batch_for_video(
                 # downstream branch in video_processor handles it correctly.
                 "cut_mode": cut_mode if scene_is_silent else None,
                 "target_duration_s": target_duration_s if scene_is_silent else None,
+                # v889 — the AUTHORED bullet travels beside the derived value.
+                # The from-batch promote path (v892.12) verifies the written
+                # Clip row against this row, and it cannot check a promise the
+                # transport never carried.
+                "explicit_target_s": _explicit,
                 # v861 — a silent scene has no spoken line, so the pick comes
                 # from an explicit bullet if the author set one, else the v667
                 # anchor bucket, else NULL (job-level duration applies).
@@ -10660,6 +10702,10 @@ def prepare_batch_for_video(
                 # branch.
                 "cut_mode": cut_mode,
                 "target_duration_s": target_duration_s,
+                # v889 — the AUTHORED bullet travels beside the derived value,
+                # so the v892.12 verifier can compare the written Clip row to
+                # what the build actually declared.
+                "explicit_target_s": _explicit,
                 "veo_render_duration_s": _v861_line_duration,
                 # v681 — text-card / caption denorm onto the flat row.
                 # Scene-scoped (same as clip_mode/transition convention):

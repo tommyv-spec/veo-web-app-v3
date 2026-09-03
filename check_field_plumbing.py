@@ -126,6 +126,24 @@ def sa_columns(tree, cls):
     return out
 
 
+def call_kwargs(tree, name):
+    """Keyword-argument names of every call to `name(...)`, unioned.
+
+    Read off the AST rather than the text because a constructor call spanning
+    eighty lines of comments is exactly where a `re` scan starts matching
+    prose. The union is right: one call site is the writer, and if a second
+    ever appears, a field either side sets is genuinely wired.
+    """
+    out = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            fn = n.func
+            nm = getattr(fn, "id", None) or getattr(fn, "attr", None)
+            if nm == name:
+                out |= {k.arg for k in n.keywords if k.arg}
+    return out
+
+
 def main():
     problems, notes = [], []
 
@@ -269,6 +287,37 @@ def main():
                 "CHECK3 {0}: ImageSceneAssignment column is never emitted by to_dict() — "
                 "nothing downstream can read it".format(c))
 
+    # ---- CHECK 6 — the parsed scene dict reaches the assignment row ------
+    # The boundary CHECK 3 and CHECK 4 leave open. CHECK 4 proves the parser's
+    # `- **name:**` lands as a key on the scene dict; CHECK 3 proves an
+    # assignment COLUMN survives to_dict(). Neither one watches the step in
+    # between — the `ImageSceneAssignment(...)` call — and that is where v889's
+    # `explicit_target_s` fell off: parsed, printed as "(explicit,
+    # authoritative)", emitted on the scene dict, and then simply not passed to
+    # the constructor. Nothing failed. Every spoken clip of a build declaring
+    # 8/4/6/8/8/4/8/4/8 seconds stored 1.1s instead, and a `cut_mode: timeline`
+    # build WOULD have been trimmed to it.
+    #
+    # The rule is deliberately narrow: only a scene-dict key that has a
+    # SAME-NAMED column is checked. A renamed key (`lines` -> `lines_json`,
+    # `image_index` -> `image_node_id`) is a deliberate transform the checker
+    # has no way to verify, and guessing at those is how a checker earns its
+    # false positives.
+    ctor = call_kwargs(imgp_tree, "ImageSceneAssignment")
+    scene_dict_keys = dict_keys("scenes.append")
+    same_named = sorted((scene_dict_keys & cols) - {"id", "batch_id", "created_at"})
+    if not ctor:
+        notes.append("ImageSceneAssignment(...) call not found — CHECK6 skipped")
+    else:
+        for f in same_named:
+            if f not in ctor:
+                problems.append(
+                    "CHECK6 {0}: the parsed scene dict carries it and "
+                    "ImageSceneAssignment has a column for it, but the "
+                    "constructor never passes it — the value is parsed and "
+                    "thrown away, and every reader downstream sees NULL "
+                    "(this is v889)".format(f))
+
     # ---- report ---------------------------------------------------------
     print("=" * 74)
     print("FIELD PLUMBING  —  do the hand-maintained surfaces still agree?")
@@ -277,8 +326,10 @@ def main():
         len(ucr), len(applied), len(reported)))
     print("DialogueLineInput      : {0} fields | {1} cross the frontend boundary".format(
         len(dli), len(crossing)))
-    print("ImageSceneAssignment   : {0} columns | {1} to_dict keys".format(
-        len(cols), len(keys) if keys is not None else "n/a"))
+    print("ImageSceneAssignment   : {0} columns | {1} to_dict keys | {2} "
+          "same-named scene-dict keys reach the constructor".format(
+              len(cols), len(keys) if keys is not None else "n/a",
+              len(same_named)))
     if diverged:
         print("  DIVERGENT (browser promote sends these, server-side promote does NOT —")
         print("  a build using them must be promoted from the UI; v892.8 warns at promote):")
