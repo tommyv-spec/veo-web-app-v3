@@ -43,6 +43,18 @@ WORKER_VERSION = "v793+identity"
 
 import subprocess, sys, shutil
 
+# Pin the console encoding INSIDE the program (CLAUDE.md §9.1.1), before the first
+# print. start_worker.bat launches this with stdout redirected to a log under cmd's
+# cp1252, and the "[Init] ✓ Patchright" line below raised UnicodeEncodeError at
+# import — every relaunch on 2026-09-03 died there, silently, behind the bat's
+# `pause`, while the Flow lane sat at 49 pending clips for nine hours and the
+# launcher reported the worker "running". Measured by running it in the foreground.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
+
 def _ensure_patchright():
     """Auto-install patchright if not already installed. REQUIRED for reCAPTCHA bypass."""
     try:
