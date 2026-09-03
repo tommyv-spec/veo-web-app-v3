@@ -46,6 +46,31 @@ class PairingError(ValueError):
     """A pairing the export could not resolve. Raised at lint and at job setup."""
 
 
+# THE ONE PLACE THE TWO NUMBERINGS MEET.
+# Clip.scene_index is 0-based because the browser assigns it BY POSITION: a
+# line's scene_index is the position of its scene in the ordered scene list
+# (static/index.html:10795-10802 `sceneIdx = s`, over sceneBreaks built from
+# scene_assignments in order). Everything the AUTHOR writes — `### Scene N`
+# and the `audio_from_scene: N` that points at it — is 1-based, and the
+# resolver works in the author's numbering because that is what the linter
+# feeds it.
+#
+# These live HERE, not inside a caller, for the same reason the pairing rules
+# do: three places now need the conversion (Phase 3a in main.py, the
+# from-batch payload builder, and the verifier that checks the written rows),
+# and three private copies of `- 1` is exactly how an off-by-one goes
+# unnoticed — it produces a job that renders the WRONG video instead of an
+# error.
+def scene_no_to_db_index(scene_no: int) -> int:
+    """The author's 1-based `### Scene N` -> the 0-based Clip.scene_index."""
+    return scene_no - 1
+
+
+def db_index_to_scene_no(db_index: int) -> int:
+    """The 0-based Clip.scene_index -> the author's 1-based `### Scene N`."""
+    return db_index + 1
+
+
 def _tokens(scene: dict) -> list:
     raw = (scene.get("speaker_mode") or "").strip().lower()
     return [t.strip(",.;:()").replace("-", "").replace("_", "")

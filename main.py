@@ -3638,19 +3638,26 @@ async def _setup_job_background(
             # and the copy needed a database. Rules live in one place now.
             from sqlalchemy import or_ as _or_
             from pairing_resolver import (PairingError,
-                                          resolve_audio_sources as _resolve)
+                                          db_index_to_scene_no,
+                                          resolve_audio_sources as _resolve,
+                                          scene_no_to_db_index)
 
-            # THE ONE PLACE THE TWO NUMBERINGS MEET.
-            # Clip.scene_index is 0-based (image_platform.py:1639 "# 0, 1, 2,
-            # ..."). Everything the author writes — `### Scene N` and the
-            # `audio_from_scene: N` that points at it — is 1-based, and the
-            # resolver works in the author's numbering because that is what the
-            # linter feeds it. So convert here, once, and nowhere else.
+            # THE TWO NUMBERINGS MEET IN pairing_resolver, NOT HERE.
+            # Clip.scene_index is 0-based because the browser assigns it BY
+            # POSITION (static/index.html:10802 `sceneIdx = s`) — NOT because
+            # of the "# 0, 1, 2, ..." comment on
+            # ImageSceneAssignment.scene_index, which is stale for new-format
+            # imports (the parser stores the author's `### Scene N` there
+            # unchanged, image_platform.py:5555-5567). Everything the author
+            # writes is 1-based, and the resolver works in the author's
+            # numbering because that is what the linter feeds it. The two
+            # converters below are thin wrappers so this function keeps
+            # reading the way it did; the definitions live in one place.
             def _to_scene_no(_db_scene_index):
-                return _db_scene_index + 1
+                return db_index_to_scene_no(_db_scene_index)
 
             def _to_db_index(_scene_no):
-                return _scene_no - 1
+                return scene_no_to_db_index(_scene_no)
 
             _clips_all = db.query(Clip).filter(Clip.job_id == job_id).all()
 

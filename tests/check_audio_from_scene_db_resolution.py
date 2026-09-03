@@ -155,6 +155,18 @@ if "resolve_audio_sources" not in main_src:
 if "Clip.clip_role.in_((None," in main_src:
     failures.append("main.py still has a `clip_role.in_((None, ...))` filter, "
                     "which never matches a NULL role")
+# 5b. the 1-based/0-based conversion has ONE definition, and it is the
+# resolver's. Three call sites need it now (Phase 3a, the from-batch payload
+# builder, the verifier); a private `- 1` in any of them is an off-by-one that
+# renders the wrong video instead of erroring.
+if "scene_no_to_db_index" not in main_src:
+    failures.append("main.py no longer imports scene_no_to_db_index from "
+                    "pairing_resolver — the base conversion has drifted back "
+                    "into a private copy")
+if "return _db_scene_index + 1" in main_src or "return _scene_no - 1" in main_src:
+    failures.append("main.py defines the base conversion privately again "
+                    "(`return _scene_no - 1` / `return _db_scene_index + 1`) — "
+                    "it must call pairing_resolver's converters")
 
 if failures:
     print("FAIL")

@@ -2,7 +2,24 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from pairing_resolver import resolve_audio_sources, split_span, PairingError  # noqa: E402
+from pairing_resolver import (  # noqa: E402
+    PairingError,
+    db_index_to_scene_no,
+    resolve_audio_sources,
+    scene_no_to_db_index,
+    split_span,
+)
+
+# --- the base converters ---------------------------------------------------
+# They live here so Phase 3a, the from-batch payload builder and the verifier
+# share ONE definition. A private `- 1` in any of the three renders the wrong
+# video instead of erroring, which is why the round-trip is asserted.
+assert scene_no_to_db_index(1) == 0
+assert db_index_to_scene_no(0) == 1
+for _n in range(1, 30):
+    assert db_index_to_scene_no(scene_no_to_db_index(_n)) == _n
+for _i in range(0, 30):
+    assert scene_no_to_db_index(db_index_to_scene_no(_i)) == _i
 
 
 def scene(idx, speaker, audio_from=None, anchor=None, line=""):
