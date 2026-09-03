@@ -2489,11 +2489,10 @@ async def create_job_from_batch(
         roles[key] = roles.get(key, 0) + 1
     afs_list = [[c["clip_index"], c["audio_from_scene"]] for c in clip_rows
                 if c["audio_from_scene"] is not None]
-    # [TEMP v892.12 FROM-BATCH] remove once a real many-to-one build has been
-    # promoted through here and the Render log shows base_ok=True (Task 7).
-    print(f"[TEMP v892.12 FROM-BATCH] job={job_id[:8]} batch={batch_id} "
-          f"clips={len(clip_rows)} roles={roles} afs={afs_list} "
-          f"base_ok={not problems}", flush=True)
+    # Evidence landed 2026-09-03 17:26Z (job d74ab616 from batch ef5ff43b:
+    # clips=24 roles={'null': 9, 'visual_pair': 15} base_ok=True), so the
+    # [TEMP v892.12 FROM-BATCH] diagnostic that printed it is gone. The same
+    # facts are returned in the response's `verification` block.
 
     if problems:
         for p in problems:

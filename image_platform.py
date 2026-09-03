@@ -10370,13 +10370,11 @@ def prepare_batch_for_video(
         # site for why: image reuse makes the anchor jump backwards and the
         # diff balloons (job d8f1b043 scene 6: 11.63s derived for a 1.83s beat).
         _explicit = scene.get("explicit_target_s")
-        # [TEMP v889.1] remove once a real build proves the authored bullet
-        # reaches the Clip row (Task 7). Until the assignment row gained the
-        # column this was ALWAYS None, so the override below never fired and
-        # the anchor gap won silently.
-        print(f"[TEMP v889.1] scene_{scene['scene_index']} "
-              f"explicit_target_s={_explicit} "
-              f"anchor_derived={target_duration_s}", flush=True)
+        # Until the assignment row gained the `explicit_target_s` column
+        # (v889.1, 2026-09-03) this was ALWAYS None, so the override below
+        # never fired and the anchor gap won silently. Proven fixed on batch
+        # ef5ff43b (all 24 scenes: authored value won, 124.0s stored); the
+        # [TEMP v889.1] diagnostic that showed it has been removed.
         if _explicit:
             if target_duration_s is not None and abs(_explicit - target_duration_s) > 0.05:
                 print(f"[v889] scene_{scene['scene_index']} target_duration_s "
