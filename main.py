@@ -3612,18 +3612,44 @@ async def _setup_job_background(
             # whole b-roll stage is itself wrapped non-fatal further down). This
             # pass is deliberately outside it so an unresolvable pairing stops the
             # job instead of quietly losing a picture.
+            # ONE lookup used by BOTH the validation pass and the pairing pass
+            # below. They were two copies of the same query and both carried the
+            # same two defects; a helper is what stops them drifting again.
+            #
+            # DEFECT 1 (why every many-to-one job failed setup) — the role test
+            # was `clip_role.in_((None, "", "single"))`. In SQL a NULL never
+            # matches an IN list: `NULL IN (NULL, '', 'single')` is UNKNOWN, not
+            # TRUE. Spoken clips carry clip_role = NULL, so the source was never
+            # found and EVERY pairing reported unresolved.
+            #
+            # DEFECT 2 (worse — it would have shipped a wrong video, not a failed
+            # job) — `audio_from_scene` is stored exactly as the build author
+            # wrote it, a 1-based `### Scene N` number, while Clip.scene_index is
+            # 0-based (image_platform.py:1639 "# 0, 1, 2, ..."). Comparing them
+            # directly is off by one, so with only Defect 1 fixed each cutaway
+            # would have ridden under the NEXT sentence.
+            from sqlalchemy import or_ as _or_
+
+            def _spoken_source_for(_afs):
+                """The spoken clip a visual's `audio_from_scene: N` names, or None."""
+                if _afs is None:
+                    return None
+                return db.query(Clip).filter(
+                    Clip.job_id == job_id,
+                    # 1-based build scene number -> 0-based DB scene_index
+                    Clip.scene_index == _afs - 1,
+                    _or_(Clip.clip_role.is_(None),
+                         Clip.clip_role.in_(("", "single"))),
+                    Clip.dialogue_text.isnot(None),
+                    Clip.dialogue_text != "",
+                ).first()
+
             _afs_unresolved = []
             for _vp in db.query(Clip).filter(
                     Clip.job_id == job_id,
                     Clip.clip_role == 'visual_pair',
                     Clip.audio_from_scene.isnot(None)).all():
-                _hit = db.query(Clip).filter(
-                    Clip.job_id == job_id,
-                    Clip.scene_index == _vp.audio_from_scene,
-                    Clip.clip_role.in_((None, "", "single")),
-                    Clip.dialogue_text.isnot(None),
-                    Clip.dialogue_text != "",
-                ).first()
+                _hit = _spoken_source_for(_vp.audio_from_scene)
                 if _hit is None:
                     _afs_unresolved.append(
                         (_vp.id, _vp.scene_index, _vp.audio_from_scene))
@@ -3666,22 +3692,22 @@ async def _setup_job_background(
                         # skip, never a raise: a raise inside this try would be
                         # swallowed by its own non-fatal handler.
                         if vp.audio_from_scene is not None:
-                            _src = db.query(Clip).filter(
-                                Clip.job_id == job_id,
-                                Clip.scene_index == vp.audio_from_scene,
-                                Clip.clip_role.in_((None, "", "single")),
-                                Clip.dialogue_text.isnot(None),
-                                Clip.dialogue_text != "",
-                            ).first()
+                            _src = _spoken_source_for(vp.audio_from_scene)
                             if _src is None:
                                 continue
                             vp.paired_clip_id = _src.id
                             # [TEMP v698A] remove once operator-side evidence
-                            # lands (root CLAUDE.md section 2).
+                            # lands (root CLAUDE.md section 2). Prints BOTH the
+                            # declared 1-based scene and the 0-based scene_index
+                            # it resolved to, so an off-by-one is visible in the
+                            # log instead of only in the finished video.
                             print(
                                 f"[v698A/Phase3a/many-to-one] visual_pair clip "
-                                f"{vp.id} -> spoken clip {_src.id} (scene "
-                                f"{vp.audio_from_scene}); no twin minted",
+                                f"{vp.id} -> spoken clip {_src.id} "
+                                f"(declared scene {vp.audio_from_scene} -> "
+                                f"scene_index {_src.scene_index}, "
+                                f"line={(_src.dialogue_text or '')[:40]!r}); "
+                                f"no twin minted",
                                 flush=True,
                             )
                             continue
