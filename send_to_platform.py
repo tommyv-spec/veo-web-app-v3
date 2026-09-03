@@ -16,6 +16,7 @@ Usage:
   python send_to_platform.py videos/build.md --subject 42 --review
   python send_to_platform.py list-uploads
   python send_to_platform.py set-token <token>   # save once, forget forever
+  python send_to_platform.py set-job-config --from-job 15333490  # v892.12
   python send_to_platform.py set-alias nuri 1313 # name an upload once...
   python send_to_platform.py videos/build.md --avatar nuri --product korella
   python send_to_platform.py autoedit 1234                       # queue + wait
@@ -55,6 +56,25 @@ variant 1 of every image unattended.
 Promotion: also operator-triggered. Even with all variants chosen the run
 STOPS before creating the video job; promote in the UI or rerun with
 --resume-batch <id> --promote. Nothing renders until the operator says so.
+
+--promote REQUIRES a job config and will not guess one (v892.12). The config
+decides the Veo model, how many variants each clip renders, the backend and the
+resolution — real money and real quality — and every one of those settings has
+a server-side default, so an omitted config does not fail: it silently becomes
+a full config nobody chose. Three sources, in this order:
+  1. --job-config <path>          a JSON file you wrote or confirmed
+  2. --config-from-job <job_id>   copy an earlier job's settings
+  3. ~/.kaveno/job_config.json    your standing file, created once with
+                                  `set-job-config --from-job <id>`
+None of them present -> the run STOPS before sending anything. Whichever wins
+is printed IN FULL before the request goes out.
+
+--promote also no longer uses the old batch promote endpoint. It posts to
+/api/jobs/from-batch/<batch_id>, which runs the browser's own chain in-process
+and CHECKS the written clip rows before the render can start (v892.12). On
+2026-09-03 the old path produced 24 clips with clip_role NULL and
+audio_from_scene NULL: nothing failed, every gate was green, and the video was
+wrong.
 
 Exit codes:
   0 OK | 1 unknown/server | 2 parse | 3 auth | 4 worker-offline/stall
@@ -133,6 +153,13 @@ def classify_http_error(resp):
 
 
 _SAVED_TOKEN_PATH = os.path.join(os.path.expanduser("~"), ".kaveno", "token")
+
+# v892.12 — the operator's standing job config, same home as the token. It is
+# created ONLY by the operator (by hand, or with `set-job-config --from-job`),
+# never written automatically, and its full contents are printed before every
+# promote so a wrong setting is visible in the terminal rather than silent.
+_SAVED_JOB_CONFIG_PATH = os.path.join(
+    os.path.expanduser("~"), ".kaveno", "job_config.json")
 
 
 _TOKEN_KEYS = ("KAVENO_API_TOKEN", "VEO_TOKEN", "USER_WORKER_TOKEN")
@@ -1068,18 +1095,175 @@ def poll_images(client, batch_id, args, report):
         time.sleep(args.poll_interval)
 
 
-def promote(client, batch_id, report):
-    res = client.post(f"/api/images/batches/{batch_id}/promote-to-video")
+def _load_job_config_file(path, why):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except OSError as exc:
+        raise PlatformError(EXIT_PARSE, f"{why}: cannot read {path} ({exc})")
+    except ValueError as exc:
+        raise PlatformError(EXIT_PARSE, f"{why}: {path} is not valid JSON ({exc})")
+    if not isinstance(data, dict) or not data:
+        raise PlatformError(
+            EXIT_PARSE,
+            f"{why}: {path} must contain a JSON object of config settings")
+    # A file saved straight from `GET /api/jobs/<id>/config` has the settings
+    # nested under "config". Accept both shapes rather than making the operator
+    # remember which one they saved.
+    if "config" in data and isinstance(data["config"], dict):
+        return data["config"]
+    return data
+
+
+def resolve_job_config(args, client):
+    """Where the job config comes from — never a silent guess.
+
+    A job config decides the Veo model, how many variants each clip renders,
+    the backend and the resolution: real money and real quality. Every field of
+    the server's model has a default, so an omitted config does not fail — it
+    silently becomes a full config nobody chose. Three sources, fixed
+    precedence, and a STOP when none applies.
+
+    This function performs NO completeness check and holds NO list of config
+    key names. Completeness is the server's job, against its own model, so the
+    CLI cannot fall behind a field the model gained. On a 400 the CLI prints
+    the server's `missing` list verbatim.
+    """
+    path = getattr(args, "job_config", None)
+    if path:
+        return _load_job_config_file(path, "--job-config"), f"--job-config {path}"
+
+    from_job = getattr(args, "config_from_job", None)
+    if from_job:
+        res = client.get(f"/api/jobs/{from_job}/config")
+        cfg = res.get("config")
+        if not isinstance(cfg, dict) or not cfg:
+            raise PlatformError(
+                EXIT_PARSE,
+                f"--config-from-job {from_job}: that job has no stored config")
+        return cfg, f"--config-from-job {from_job}"
+
+    if os.path.exists(_SAVED_JOB_CONFIG_PATH):
+        return (_load_job_config_file(_SAVED_JOB_CONFIG_PATH, "the saved job config"),
+                _SAVED_JOB_CONFIG_PATH)
+
+    raise PlatformError(
+        EXIT_PARSE,
+        "--promote needs a job config. Pass --job-config <file>, "
+        "--config-from-job <job_id>, or create ~/.kaveno/job_config.json "
+        "(python send_to_platform.py set-job-config --from-job <id>). "
+        "There is no default: every setting has one server-side, so an "
+        "omitted config would silently pick a Veo model, a variant count and "
+        "a backend nobody chose.")
+
+
+def cmd_set_job_config(client, job_id):
+    """Copy a named job's config into ~/.kaveno/job_config.json, and show it."""
+    if not job_id:
+        print("usage: python send_to_platform.py set-job-config --from-job <job_id>",
+              file=sys.stderr)
+        return EXIT_PARSE
+    res = client.get(f"/api/jobs/{job_id}/config")
+    cfg = res.get("config")
+    if not isinstance(cfg, dict) or not cfg:
+        print(f"job {job_id} has no stored config", file=sys.stderr)
+        return EXIT_PARSE
+    os.makedirs(os.path.dirname(_SAVED_JOB_CONFIG_PATH), exist_ok=True)
+    with open(_SAVED_JOB_CONFIG_PATH, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    print(f"saved job {job_id}'s config to {_SAVED_JOB_CONFIG_PATH}")
+    print_job_config(cfg)
+    print("every --promote from now on uses this unless you pass "
+          "--job-config or --config-from-job")
+    return EXIT_OK
+
+
+def print_job_config(config):
+    """Print the config IN FULL, one setting per line.
+
+    In full, and never a chosen subset: a hand-picked shortlist is the same
+    drift the server-side rule avoids by computing its required set from the
+    model, and the setting that costs money is exactly the one a shortlist
+    forgets.
+    """
+    for key in sorted(config):
+        print(f"    {key} = {config[key]!r}")
+
+
+def _readback_clips(client, job_id, verification, report):
+    """Print the clip shape the operator can SEE, from a second read.
+
+    Informational only, never the gate: the server already proved these rows
+    before the background setup existed. It is here because the 2026-09-03
+    failure was invisible in the terminal — 24 clips, every role NULL, and the
+    run looked exactly like a good one.
+    """
+    try:
+        clips = _as_list(client.get(f"/api/jobs/{job_id}/clips"), "clips")
+    except PlatformError as exc:
+        print(f"  read-back skipped: {exc.message}", flush=True)
+        return
+    visual = [c for c in clips if (c.get("clip_index") or 0) < 100000]
+    visual.sort(key=lambda c: c.get("clip_index") or 0)
+    print("  clip_index | scene_index | clip_role   | audio_from_scene", flush=True)
+    for c in visual:
+        print("  {0:>10} | {1:>11} | {2:<11} | {3}".format(
+            c.get("clip_index"), c.get("scene_index"),
+            c.get("clip_role") or "-", c.get("audio_from_scene")), flush=True)
+    roles = {}
+    for c in visual:
+        key = c.get("clip_role") or "null"
+        roles[key] = roles.get(key, 0) + 1
+    afs = [[c.get("clip_index"), c.get("audio_from_scene")] for c in visual
+           if c.get("audio_from_scene") is not None]
+    report["clip_readback"] = {"clips": len(visual), "roles": roles,
+                               "audio_from_scene": afs}
+    if verification and (verification.get("clips") != len(visual)
+                         or verification.get("roles") != roles
+                         or verification.get("audio_from_scene") != afs):
+        print("  WARNING: read-back differs from server verification — "
+              "report this", flush=True)
+
+
+def promote(client, batch_id, report, config, source):
+    """v892.12 — create the video job through the endpoint that CHECKS itself.
+
+    The old batch promote endpoint wrote Clip rows directly and carried none of the
+    per-scene bindings; on 2026-09-03 it produced 24 clips with clip_role NULL
+    and audio_from_scene NULL, and the wrong video rendered with nothing
+    failing. `/api/jobs/from-batch/{id}` runs the browser's own chain and
+    verifies the written rows BEFORE the background setup is allowed to start,
+    deleting the job on any mismatch.
+    """
+    print(f"promote: job config from {source}", flush=True)
+    print_job_config(config)
+    report["job_config"] = {"source": source, "config": config}
+    try:
+        res = client.post(f"/api/jobs/from-batch/{batch_id}", {"config": config})
+    except PlatformError as exc:
+        det = exc.detail or {}
+        for miss in (det.get("missing") or []):
+            print(f"  missing config key: {miss}", file=sys.stderr, flush=True)
+        for problem in (det.get("problems") or []):
+            print(f"  PROBLEM: {problem}", file=sys.stderr, flush=True)
+        if det.get("job_deleted"):
+            print(f"  the job was DELETED server-side "
+                  f"({det['job_deleted']}) — nothing rendered", file=sys.stderr,
+                  flush=True)
+        raise
     report["promote"] = res
-    # v892.8 — this promote path cannot honour per-scene bindings (composite
-    # plate, v698A anchor, v718i end frame). The server now says which scenes
-    # lose what; print it loudly rather than let the operator find out from a
-    # render with no background layer.
-    for _w in (res.get("warnings") or []):
-        print(f"  WARNING (v892.8): {_w}")
     job_id = res.get("video_job_id")
     if not job_id:
         raise PlatformError(EXIT_UNKNOWN, f"promote response missing video_job_id: {str(res)[:200]}")
+    verification = res.get("verification") or {}
+    print(f"  verified server-side: {verification.get('clips')} clips, "
+          f"roles={verification.get('roles')}", flush=True)
+    afs = verification.get("audio_from_scene") or []
+    if afs:
+        print(f"  audio_from_scene: {afs}", flush=True)
+    print(f"  config applied from: {res.get('config_source')}", flush=True)
+    _readback_clips(client, job_id, verification, report)
     return job_id
 
 
@@ -1411,7 +1595,8 @@ def parse_clip_id_list(raw):
 def main(argv=None):
     p = argparse.ArgumentParser(description="Send a videos/*.md build to the platform and render it.")
     p.add_argument("md_file", help="path to videos/<build>.md, or one of: "
-                                    "list-uploads, upload, set-token, set-alias, autoedit, "
+                                    "list-uploads, upload, set-token, set-alias, "
+                                    "set-job-config, autoedit, "
                                     "update-finishing, approve-clip, reject-clip")
     p.add_argument("token_value", nargs="?",
                     help="the token (set-token) / alias name (set-alias) / "
@@ -1447,7 +1632,21 @@ def main(argv=None):
     p.add_argument("--auto-choose", action="store_true", dest="auto_choose",
                    help="pick variant 1 automatically (default is STOP and let the operator choose in the UI)")
     p.add_argument("--promote", action="store_true",
-                   help="promote the batch to a video job once all variants are chosen (default is STOP — the operator triggers promotion)")
+                   help="promote the batch to a video job once all variants are chosen "
+                        "(default is STOP — the operator triggers promotion). REQUIRES a "
+                        "job config: --job-config <file>, --config-from-job <job_id>, or "
+                        "~/.kaveno/job_config.json. There is no default — every setting "
+                        "has one server-side, so an omitted config would silently pick a "
+                        "Veo model, a variant count and a backend nobody chose.")
+    p.add_argument("--job-config", dest="job_config", metavar="PATH",
+                   help="v892.12: JSON file holding the job config to promote with "
+                        "(highest precedence)")
+    p.add_argument("--config-from-job", dest="config_from_job", metavar="JOB_ID",
+                   help="v892.12: copy the job config of an earlier job (GET "
+                        "/api/jobs/<id>/config) instead of writing one")
+    p.add_argument("--from-job", dest="from_job", metavar="JOB_ID",
+                   help="set-job-config: the job whose config to save into "
+                        "~/.kaveno/job_config.json")
     p.add_argument("--resync-batch", dest="resync_batch", default=None,
                    help="v891: re-import this build INTO an existing batch instead of "
                         "creating a new one. Scenes whose prompt changed are rewritten "
@@ -1529,6 +1728,9 @@ def main(argv=None):
 
         if args.md_file == "list-uploads":
             return cmd_list_uploads(client, args.as_json)
+
+        if args.md_file == "set-job-config":
+            return cmd_set_job_config(client, args.from_job or args.token_value)
 
         if args.md_file == "upload":
             return cmd_upload(client, args.token_value, args.extra_value)
@@ -1727,7 +1929,8 @@ def main(argv=None):
                   f"  python send_to_platform.py x --resume-batch {batch_id} --promote", flush=True)
             return EXIT_OK
 
-        job_id = promote(client, batch_id, report)
+        job_config, job_config_source = resolve_job_config(args, client)
+        job_id = promote(client, batch_id, report, job_config, job_config_source)
         report["job_id"] = job_id
         print(f"promote: video job {job_id}", flush=True)
         report["stages"].append("promote:ok")
