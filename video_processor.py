@@ -137,6 +137,37 @@ def _v708_min_edit_dist_to_script(token: str, script_words_set) -> int:
     return best
 
 
+def _v708_match_script(tokens, heard_texts):
+    """v773.1 — the ONE script-vs-heard comparison used by the v708/v709 audit.
+
+    `tokens` = script tokens (already lowercased/punctuation-stripped).
+    `heard_texts` = plain strings of what the transcriber actually heard.
+    A script token counts as matched when ANY heard word is within
+    rapidfuzz.fuzz.ratio >= 78 of it; everything else is missing.
+
+    Returns (matched:int, missing:list[str], trust:float). trust is
+    matched/len(tokens), and 1.0 when there are no tokens to check.
+    Without rapidfuzz installed we cannot compare, so we report everything
+    matched rather than inventing a fake "all missing" verdict.
+
+    Factored out of the action backend (2026-08-25) so the whisper_anchor
+    backend can run the SAME comparison instead of writing constant zeros.
+    """
+    tokens = list(tokens or [])
+    heard = [h for h in (heard_texts or []) if h]
+    matched, missing = 0, []
+    try:
+        from rapidfuzz import fuzz as _fz
+        for t in tokens:
+            if any(_fz.ratio(t, h) >= 78 for h in heard):
+                matched += 1
+            else:
+                missing.append(t)
+    except ImportError:
+        matched, missing = len(tokens), []
+    trust = (matched / len(tokens)) if tokens else 1.0
+    return matched, missing, trust
+
 
 def run(cmd: List[str]) -> Tuple[int, str, str]:
     """Run a command and return (returncode, stdout, stderr)."""
@@ -1170,33 +1201,57 @@ def detect_speech_segments_whisper(
         # the trim boundary is correct even when chemistry/brand names in the
         # middle were misheard.
         if _mode == "whisper_anchor":
-            _seg_list = _whisper_anchor_trim(
+            # v773.1 — ask for details so the v708/v709 word audit gets REAL
+            # numbers. Before this the branch called without return_details and
+            # wrote constant zeros into the sink, so every export logged
+            # `[v709-AUDIT] DEAF` and the missing-word check was blind.
+            _seg_list, _wa_details = _whisper_anchor_trim(
                 video_path,
                 dialogue_texts or [],
                 whisper_model=whisper_model,
                 language=language,
+                return_details=True,
             )
+            # return_details hands US the extracted 16k wav; we own the cleanup.
+            _wa_wav = _wa_details.get("wav_path")
+            if _wa_wav:
+                try:
+                    import os as _os_wa
+                    _os_wa.unlink(_wa_wav)
+                except Exception:
+                    pass
+            # heard words are dicts {"text","start","end","prob"}; be tolerant
+            # of a plain-string shape too.
+            _wa_heard = [
+                (_w.get("text", "") if isinstance(_w, dict) else str(_w or ""))
+                for _w in (_wa_details.get("heard_words") or [])
+            ]
+            _wa_tokens = _wa_details.get("script_tokens") or []
+            _wa_matched, _wa_missing, _wa_trust = _v708_match_script(
+                _wa_tokens, _wa_heard)
             if v709_audit_sink is not None:
                 _wa_dur = sum(e - s for s, e in _seg_list)
                 v709_audit_sink.update({
                     "script_provided": bool(dialogue_texts and any(dialogue_texts)),
                     "backend": "whisper-anchor",
                     "script_words": sum(len((t or "").split()) for t in (dialogue_texts or [])),
-                    "aligned_words": 0,
+                    "aligned_words": _wa_matched,
                     "low_confidence_words": [],
                     "audio_duration": 0.0,
                     "speech_duration": _wa_dur,
                     "trim_ratio": 1.0,
                     "fallback_reason": None,
-                    "trust": 1.0,
-                    "matched": 0,
-                    "heard_words": 0,
-                    "missing": [],
+                    "trust": round(_wa_trust, 2),
+                    "matched": _wa_matched,
+                    "heard_words": len(_wa_heard),
+                    "missing": _wa_missing,
                     "failsafe": None,
                 })
             print(
                 f"[Align/v773] backend=whisper-anchor "
-                f"segments={len(_seg_list)} kept={sum(e-s for s,e in _seg_list):.2f}s",
+                f"segments={len(_seg_list)} kept={sum(e-s for s,e in _seg_list):.2f}s "
+                f"heard={len(_wa_heard)} matched={_wa_matched}/{len(_wa_tokens)} "
+                f"missing={_wa_missing[:8]}",
                 flush=True,
             )
             return _seg_list
@@ -3765,21 +3820,12 @@ def detect_speech_segments_action(
     )
 
     if v709_audit_sink is not None:
-        # A REAL word audit (the whisper_anchor sink fills constants): fuzzy-
-        # match every script token against what Whisper actually heard.
+        # A REAL word audit: fuzzy-match every script token against what
+        # Whisper actually heard. Shared with the whisper_anchor backend
+        # since v773.1 via _v708_match_script.
         heard = [w.get("text", "") for w in details.get("heard_words", [])]
         tokens = details.get("script_tokens") or []
-        matched, missing = 0, []
-        try:
-            from rapidfuzz import fuzz as _fz
-            for t in tokens:
-                if any(_fz.ratio(t, h) >= 78 for h in heard):
-                    matched += 1
-                else:
-                    missing.append(t)
-        except ImportError:
-            matched, missing = len(tokens), []
-        trust = (matched / len(tokens)) if tokens else 1.0
+        matched, missing, trust = _v708_match_script(tokens, heard)
         v709_audit_sink.update({
             "script_provided": bool(script),
             "backend": "action",
