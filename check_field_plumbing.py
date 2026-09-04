@@ -359,6 +359,42 @@ def main():
                     "thrown away, and every reader downstream sees NULL "
                     "(this is v889)".format(f))
 
+    # ---- CHECK 7 — the export's clip dict carries what the export READS ---
+    # v698A.2.1. _do_export_final builds one hand-written dict per clip (the
+    # one ending in `"_clip_db_id": clip.id`) and its many-to-one sharer
+    # detection then reads `clip_role`, `audio_from_scene`, `paired_clip_id`
+    # and `voiceover_line` back off that dict. `audio_from_scene` was never put
+    # on it, so the first many-to-one export (d74ab616, 2026-09-04) found ZERO
+    # shared sentences: every cutaway took its whole sentence window and the
+    # spoken clip was placed on top of them. The row had the value; the dict
+    # dropped it; nothing failed. Same class as v889, one surface further on.
+    # The same field is also checked on the ClipResponse rows the review page
+    # and the tools read — it was declared on the model and never passed.
+    EXPORT_READS = ("clip_role", "audio_from_scene", "paired_clip_id",
+                    "voiceover_line", "_clip_db_id")
+    _anchor = main_src.find('"_clip_db_id": clip.id')
+    if _anchor < 0:
+        notes.append("export clip dict (`\"_clip_db_id\": clip.id`) not found — CHECK7 skipped")
+    else:
+        _start = main_src.rfind("return {", 0, _anchor)
+        _export_dict = main_src[_start:_anchor + 40]
+        _export_keys = set(re.findall(r'"([A-Za-z_][A-Za-z_0-9]*)"\s*:', _export_dict))
+        for f in EXPORT_READS:
+            if f not in _export_keys:
+                problems.append(
+                    "CHECK7 {0}: _do_export_final's clip dict never carries it, "
+                    "but the export's many-to-one sharer detection reads it back "
+                    "off that dict — shared sentences silently count as zero "
+                    "(v698A.2.1)".format(f))
+    _n_pair = len(re.findall(r"paired_clip_id=c\.paired_clip_id", main_src))
+    _n_afs = len(re.findall(r"audio_from_scene=c\.audio_from_scene", main_src))
+    if _n_pair and _n_afs < _n_pair:
+        problems.append(
+            "CHECK7 audio_from_scene: ClipResponse is built {0} time(s) with "
+            "paired_clip_id but only {1} with audio_from_scene — the field is "
+            "declared on the model and arrives as None on the rows the review "
+            "page and the tools read (v698A.2.1)".format(_n_pair, _n_afs))
+
     # ---- report ---------------------------------------------------------
     print("=" * 74)
     print("FIELD PLUMBING  —  do the hand-maintained surfaces still agree?")

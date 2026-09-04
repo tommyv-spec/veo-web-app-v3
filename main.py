@@ -6661,6 +6661,7 @@ async def get_job_clips(
             # v698A
             clip_role=c.clip_role,
             paired_clip_id=c.paired_clip_id,
+            audio_from_scene=c.audio_from_scene,  # v698A.2.1 — was never passed; rows read None
             voiceover_anchor_image_node_id=c.voiceover_anchor_image_node_id,
             voiceover_line=c.voiceover_line,
             # v718i (NEW 2026-05-18) — Veo native end-frame interpolation binding
@@ -6763,6 +6764,7 @@ async def get_job_clips_active(
             in_lineup=c.id in lineup_set if lineup_set else True,
             clip_role=c.clip_role,
             paired_clip_id=c.paired_clip_id,
+            audio_from_scene=c.audio_from_scene,  # v698A.2.1 — was never passed; rows read None
             voiceover_anchor_image_node_id=c.voiceover_anchor_image_node_id,
             voiceover_line=c.voiceover_line,
             # v718i (NEW 2026-05-18) — Veo native end-frame interpolation binding
@@ -13112,6 +13114,13 @@ async def _do_export_final_impl(
                 # the audio_pair sibling.
                 "clip_role": clip.clip_role,
                 "paired_clip_id": clip.paired_clip_id,
+                # v698A.2.1 — many-to-one: the export's sharer detection
+                # (`_afs_sharers`) keys on THIS field. It was never carried
+                # here, so the first many-to-one export (d74ab616, 2026-09-04)
+                # saw zero shared sentences: every cutaway took its whole
+                # sentence window and the spoken clip was placed on top of
+                # them. The row had the value all along; the dict dropped it.
+                "audio_from_scene": clip.audio_from_scene,
                 "voiceover_anchor_image_node_id": clip.voiceover_anchor_image_node_id,
                 "voiceover_line": clip.voiceover_line,
                 "scene_index": clip.scene_index,
