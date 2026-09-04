@@ -511,7 +511,14 @@ def lint(path: str) -> int:
             # or a house block sitting in a later section (`## Captions`,
             # `## Notes`) counted as that clip's own and the checks below
             # passed on text the clip never carried.
-            head = rf"^### Clip {n}\.{m}\b" if m else rf"^### Clip {n}\b(?!\.)"
+            #
+            # The head has to tolerate the same spacing `clips` does (it is
+            # built with `\s+` up at the top). With a literal single space here,
+            # a `###  Clip 1.2` header IS in `clips` but its block never
+            # matched — and `continue` then skipped every v750 and v865 check
+            # for that clip in silence. A header that the file lists must be a
+            # header this loop can read.
+            head = rf"^###\s+Clip\s+{n}\.{m}\b" if m else rf"^###\s+Clip\s+{n}\b(?!\.)"
             cb = re.search(head + r".*?(?=^###\s+Clip|^##\s|\Z)", veo, re.M | re.S)
             if not cb:
                 continue

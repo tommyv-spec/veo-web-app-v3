@@ -1150,24 +1150,6 @@ class _ArmJob:
         self.clips = [_RedoClip(render_method=m) for m in methods]
 
 
-class _FakeOrderedQuery:
-    """The two reads the gate makes on an ordered query: first() and limit().all()."""
-
-    def __init__(self, jobs):
-        self.jobs = list(jobs)
-        self._limit = None
-
-    def first(self):
-        return self.jobs[0] if self.jobs else None
-
-    def limit(self, n):
-        self._limit = n
-        return self
-
-    def all(self):
-        return self.jobs[:self._limit] if self._limit is not None else list(self.jobs)
-
-
 def test_a_job_needs_the_arm_when_any_clip_on_it_is_a_section():
     from main import _v959_job_needs_arm
     assert _v959_job_needs_arm(_ArmJob("j", ("movie-section",))) is True
@@ -1177,76 +1159,224 @@ def test_a_job_needs_the_arm_when_any_clip_on_it_is_a_section():
 
 
 def test_a_job_whose_clips_cannot_be_read_counts_as_needing_the_arm():
-    """Guessing 'no' here hands out the exact render this gate exists to stop."""
+    """Guessing 'no' here hands out the exact render this gate exists to stop.
+    A MISSING attribute is no better evidence than a raised one — both mean the
+    clips were never read."""
     from main import _v959_job_needs_arm
 
-    class _Broken:
+    class _Raises:
         id = "j"
 
         @property
         def clips(self):
             raise RuntimeError("detached from the session")
 
-    assert _v959_job_needs_arm(_Broken()) is True
+    class _NoAttribute:
+        id = "j"
+
+    assert _v959_job_needs_arm(_Raises()) is True
+    assert _v959_job_needs_arm(_NoAttribute()) is True
 
 
-def test_a_section_job_is_not_handed_to_a_poller_without_the_arm():
+# --- 14.1 the pending gate is one SQL query, not a walk ---------------------
+#
+# The first cut walked 25 jobs in Python and lazy-loaded each one's clips: a
+# query per candidate on a poll that runs every 5-8s, AND a real hole — a queue
+# holding more than 25 section jobs starved every ordinary job behind them. A
+# correlated NOT EXISTS lets the database answer in the query that picks the
+# job: one round trip, LIMIT 1, no window.
+
+class _RecordingQuery:
+    """Records what the gate does to a query, so 'the filter was applied' and
+    'the filter was NOT applied' are both observable."""
+
+    def __init__(self):
+        self.filters = []
+        self.ordered = False
+
+    def filter(self, clause):
+        self.filters.append(clause)
+        return self
+
+    def order_by(self, *a):
+        self.ordered = True
+        return self
+
+    def first(self):
+        return "HEAD"
+
+
+def test_an_armless_poller_gets_the_section_filter_and_an_armed_one_does_not():
     from main import _v959_next_job_for_poller
-    q = _FakeOrderedQuery([_ArmJob("aaaaaaaa", ("movie-section",))])
-    assert _v959_next_job_for_poller(q, None, "w1", "local-worker") is None
-    assert _v959_next_job_for_poller(q, "charswap", "w1", "local-worker") is None
+    q = _RecordingQuery()
+    assert _v959_next_job_for_poller(q, None, "w1", "local-worker") == "HEAD"
+    assert len(q.filters) == 1 and q.ordered
+
+    armed = _RecordingQuery()
+    assert _v959_next_job_for_poller(armed, "movie-section", "w1", "local-worker") == "HEAD"
+    assert armed.filters == [], "an armed poller must take the query untouched"
+    assert armed.ordered
 
 
-def test_the_same_section_job_is_handed_over_once_the_poller_says_it_has_the_arm():
+def _sqlite_session():
+    """A real in-memory database with the real Job and Clip tables.
+
+    image_platform is imported first because the clips table carries foreign
+    keys into ITS tables; without them registered on the shared metadata,
+    create_all cannot resolve them.
+    """
+    import datetime
+    import main  # noqa: F401
+    import image_platform  # noqa: F401
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from models import Base
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)(), datetime
+
+
+def _row(model, **kw):
+    """Fill every NOT NULL column the caller did not name.
+
+    The fixture is about two columns — Clip.render_method and Job.created_at —
+    and must not break every time an unrelated column is added to either table.
+    """
+    import datetime
+    for col in model.__table__.columns:
+        if (col.name in kw or col.nullable or col.primary_key
+                or col.default is not None or col.server_default is not None):
+            continue
+        try:
+            py = col.type.python_type
+        except Exception:
+            py = str
+        kw[col.name] = {str: "", int: 0, float: 0.0, bool: False,
+                        datetime.datetime: datetime.datetime(2020, 1, 1)}.get(py, "")
+    return model(**kw)
+
+
+def _queue_with_a_section_job():
+    """Oldest job first carries a section clip; the newer one is legacy."""
+    from models import Job, Clip
+    s, dt = _sqlite_session()
+    s.add_all([
+        _row(Job, id="j-section", backend="flow", status="pending",
+             created_at=dt.datetime(2019, 1, 1)),
+        _row(Job, id="j-legacy", backend="flow", status="pending",
+             created_at=dt.datetime(2020, 1, 1)),
+    ])
+    s.add_all([
+        _row(Clip, id=1, job_id="j-section", clip_index=0, render_method="movie-section"),
+        _row(Clip, id=2, job_id="j-section", clip_index=1),
+        _row(Clip, id=3, job_id="j-legacy", clip_index=0),
+    ])
+    s.commit()
+    return s
+
+
+def _pending_query(session):
+    from models import Job
+    return session.query(Job).filter(Job.backend == "flow")
+
+
+def test_against_a_real_database_the_armless_poller_skips_the_section_job():
+    """The section job is the OLDEST, so `.first()` would hand it over. The
+    armless poller gets the newer legacy job instead and the section job is
+    left untouched, queued, for a worker that can render it."""
+    from models import Job
     from main import _v959_next_job_for_poller
-    job = _ArmJob("aaaaaaaa", ("movie-section",))
-    q = _FakeOrderedQuery([job])
-    assert _v959_next_job_for_poller(q, "movie-section", "w1", "local-worker") is job
+    s = _queue_with_a_section_job()
+    q = _pending_query(s)
+    assert _v959_next_job_for_poller(q, "movie-section", "w1", "local-worker").id == "j-section"
+    assert _v959_next_job_for_poller(q, None, "w1", "local-worker").id == "j-legacy"
+    held = s.query(Job).filter(Job.id == "j-section").one()
+    assert held.claimed_by_worker is None and held.status == "pending"
 
 
-def test_a_legacy_job_behind_a_held_section_job_is_still_handed_out():
-    """Returning nothing on a section job at the head would starve every
-    ordinary job behind it — the queue must keep moving."""
+def test_the_filter_reads_a_render_method_the_way_every_other_door_does():
+    """lower() + coalesce: mixed case is still a section, NULL is still the
+    ordinary renderer."""
+    from models import Clip
     from main import _v959_next_job_for_poller
-    held = _ArmJob("aaaaaaaa", ("movie-section",))
-    legacy = _ArmJob("bbbbbbbb", (None,))
-    q = _FakeOrderedQuery([held, legacy])
-    assert _v959_next_job_for_poller(q, None, "w1", "user-worker") is legacy
+    s = _queue_with_a_section_job()
+    q = _pending_query(s)
+    s.query(Clip).filter(Clip.id == 1).update({"render_method": "Movie-Section"})
+    s.commit()
+    assert _v959_next_job_for_poller(q, None, "w1", "local-worker").id == "j-legacy"
+    s.query(Clip).filter(Clip.id == 1).update({"render_method": None})
+    s.commit()
+    assert _v959_next_job_for_poller(q, None, "w1", "local-worker").id == "j-section"
 
 
-def test_an_armed_poller_takes_the_head_of_the_queue_exactly_as_before():
-    """No behaviour change for a worker that has the arm: same query, same
-    first(). The walk is only for the workers that would render it wrong."""
+def test_a_queue_with_no_section_job_reads_identically_for_both_pollers():
+    """The regression contract: nothing changes for anyone until a section job
+    is actually in the queue."""
+    from models import Clip
     from main import _v959_next_job_for_poller
-    head = _ArmJob("aaaaaaaa", (None,))
-    q = _FakeOrderedQuery([head, _ArmJob("bbbbbbbb", (None,))])
-    assert _v959_next_job_for_poller(q, "movie-section", "w1", "local-worker") is head
-    assert q._limit is None      # first(), not a walk
-    # …and an ordinary queue reads the same for an armless poller.
-    q2 = _FakeOrderedQuery([head, _ArmJob("bbbbbbbb", (None,))])
-    assert _v959_next_job_for_poller(q2, None, "w1", "local-worker") is head
+    s = _queue_with_a_section_job()
+    s.query(Clip).filter(Clip.id == 1).update({"render_method": None})
+    s.commit()
+    q = _pending_query(s)
+    armed = _v959_next_job_for_poller(q, "movie-section", "w1", "local-worker")
+    armless = _v959_next_job_for_poller(q, None, "w1", "local-worker")
+    assert armed.id == armless.id == "j-section"
 
 
-def test_the_walk_is_bounded_so_one_poll_cannot_scan_the_table():
-    from main import _v959_next_job_for_poller
-    q = _FakeOrderedQuery([_ArmJob(f"job{i:04d}", ("movie-section",)) for i in range(60)])
-    assert _v959_next_job_for_poller(q, None, "w1", "local-worker") is None
-    assert q._limit == 25
+def test_the_sql_clause_and_the_python_predicate_give_the_same_answer():
+    """Two statements of one rule. If they ever disagree, the fast one is
+    handing out a job the readable one says is held."""
+    from main import _v959_job_needs_arm, _v959_no_section_clip
+    s = _queue_with_a_section_job()
+    passed = {j.id for j in _pending_query(s).filter(_v959_no_section_clip()).all()}
+    by_python = {j.id for j in _pending_query(s).all() if not _v959_job_needs_arm(j)}
+    assert passed == by_python == {"j-legacy"}
 
 
-def test_a_section_redo_clip_is_held_from_a_worker_without_the_arm():
+# --- 14.2 the redo lane refuses a section for EVERYONE ----------------------
+
+def test_a_section_redo_clip_is_held_from_every_worker_armed_or_not():
+    """Unconditional, like the v945.14 door beside it: the redo renderer is
+    plain image-to-video and has no section arm for ANY worker. Gating this on
+    the arms param would hand a section to the one path that cannot render it."""
     from main import _v959_hold_section_redos
     section = _RedoClip(render_method="movie-section")
     section.id = "c1"
     legacy = _RedoClip(render_method=None)
     legacy.id = "c2"
-    kept = _v959_hold_section_redos([section, legacy], None, "w1", "user-worker")
-    assert kept == [legacy]
+    assert _v959_hold_section_redos(
+        [section, legacy], None, "w1", "user-worker") == [legacy]
+    assert _v959_hold_section_redos(
+        [section, legacy], "movie-section", "w2", "user-worker") == [legacy]
     # Held, not flipped — the v945.14 door owns the status change.
     assert section.status == "flow_redo_queued"
-    # An armed worker sees the list untouched.
-    assert _v959_hold_section_redos(
-        [section, legacy], "movie-section", "w1", "user-worker") == [section, legacy]
+
+
+# --- 14.3 the held log is one line, not one every 5-8 seconds ---------------
+
+def test_the_held_log_prints_once_per_worker_not_once_per_poll(capsys):
+    """An armless worker polls on a timer forever. Without this the same
+    sentence about the same job fills the log until someone restarts it."""
+    import main
+    main._V959_HELD_LOGGED.clear()
+    q = _RecordingQuery()
+    for _ in range(5):
+        main._v959_next_job_for_poller(q, None, "worker-a", "local-worker")
+    out = capsys.readouterr().out
+    assert out.count("[v959] worker worker-a") == 1
+    # a DIFFERENT worker still gets its own line
+    main._v959_next_job_for_poller(_RecordingQuery(), None, "worker-b", "local-worker")
+    assert "[v959] worker worker-b" in capsys.readouterr().out
+
+
+def test_the_held_log_set_cannot_grow_without_bound(capsys):
+    """A long-lived process must not accumulate a key per job forever."""
+    import main
+    main._V959_HELD_LOGGED.clear()
+    for i in range(main._V959_HELD_LOG_CAP + 10):
+        main._v959_log_held_once(("k", i), "x")
+    capsys.readouterr()
+    assert len(main._V959_HELD_LOGGED) <= main._V959_HELD_LOG_CAP
 
 
 def test_both_pending_routes_and_both_redo_routes_call_the_gate():
@@ -1272,6 +1402,34 @@ def test_the_worker_advertises_the_arm_on_both_polls():
     never sends the param is held out of every section job."""
     src = (_HERE / "static" / "flow_worker.py").read_text(encoding="utf-8")
     assert 'WORKER_ARMS = ("movie-section",)' in src
-    assert 'f"/jobs/pending?worker_id={WORKER_ID}&arms={\',\'.join(WORKER_ARMS)}"' in src
-    assert 'f"/clips/redo-pending?worker_id={WORKER_ID}&arms={\',\'.join(WORKER_ARMS)}"' in src
+    assert 'f"/jobs/pending?worker_id={WORKER_ID}&{_worker_arms_q()}"' in src
+    assert 'f"/clips/redo-pending?worker_id={WORKER_ID}&{_worker_arms_q()}"' in src
+
+
+def test_every_worker_that_polls_this_queue_declares_its_arms():
+    """The gemini stand-in claims the SAME queue. It renders through the Gemini
+    API and has no section arm at all, so an EMPTY tuple is the honest answer —
+    and saying it out loud is what stops the next reader from 'fixing' the
+    missing param by adding the arm."""
+    src = (_HERE / "static" / "gemini_video_worker.py").read_text(encoding="utf-8")
+    assert "WORKER_ARMS = ()" in src
+    assert "EMPTY ON PURPOSE" in src
+    for poll in ("/jobs/pending?worker_id={WORKER_ID}",
+                 "/clips/redo-pending?worker_id={WORKER_ID}"):
+        for line in src.splitlines():
+            if poll in line:
+                assert "_worker_arms_q()" in line, line
+    # an empty tuple reads as "no arm" on the server side
+    from main import _v959_poller_has_arm
+    assert _v959_poller_has_arm(",".join(())) is False
+
+
+def test_the_arms_param_is_percent_encoded_on_every_poll():
+    """A query string built by hand and never escaped is how a later arm name
+    with a space or an `&` in it silently truncates the URL."""
+    for worker in ("flow_worker.py", "gemini_video_worker.py"):
+        src = (_HERE / "static" / worker).read_text(encoding="utf-8")
+        body = src[src.index("def _worker_arms_q("):]
+        body = body[:body.index("\n\n\n")] if "\n\n\n" in body else body[:600]
+        assert "quote(','.join(WORKER_ARMS))" in body, worker
 

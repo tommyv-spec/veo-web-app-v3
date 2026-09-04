@@ -1540,6 +1540,18 @@ WEB_APP_URL = os.environ.get("WEB_APP_URL", "https://kavenobuilder.com")
 API_PATH_PREFIX = "/api/user-worker"
 WORKER_ID = os.environ.get("WORKER_ID", f"gemini-emergency-{uuid.uuid4().hex[:8]}")
 
+# v959 — EMPTY ON PURPOSE. This worker renders through the Gemini API and has no
+# movie-section arm at all, so the server must keep holding section jobs back
+# from it; declaring the empty tuple says that out loud instead of leaving the
+# param off and letting it look like an oversight.
+WORKER_ARMS = ()
+
+
+def _worker_arms_q():
+    """The `arms=` fragment for a poll URL, percent-encoded (see flow_worker)."""
+    from urllib.parse import quote
+    return f"arms={quote(','.join(WORKER_ARMS))}"
+
 
 class Api:
     """Thin client for the user-worker API. Same endpoints, same auth header,
@@ -1569,13 +1581,13 @@ class Api:
         still has to come through /jobs/pending — which serves the OLDEST job
         first. Walk past the others with `exclude` until the wanted id shows up.
         """
-        res, _ = self.get(f"/jobs/pending?worker_id={WORKER_ID}")
+        res, _ = self.get(f"/jobs/pending?worker_id={WORKER_ID}&{_worker_arms_q()}")
         job = (res or {}).get("job")
         if not want_id or not job or job.get("id") == want_id:
             return job
         seen = [job["id"]]
         for _ in range(max_walk):
-            res, _ = self.get(f"/jobs/pending?worker_id={WORKER_ID}"
+            res, _ = self.get(f"/jobs/pending?worker_id={WORKER_ID}&{_worker_arms_q()}"
                               f"&exclude={','.join(seen)}")
             job = (res or {}).get("job")
             if not job:
@@ -1591,7 +1603,7 @@ class Api:
         """Clips queued for regeneration — the retry/redo lane flow_worker.py
         claims. Same endpoint, same claim semantics (claiming is done server
         side when worker_id is supplied)."""
-        res, _ = self.get(f"/clips/redo-pending?worker_id={WORKER_ID}")
+        res, _ = self.get(f"/clips/redo-pending?worker_id={WORKER_ID}&{_worker_arms_q()}")
         return (res or {}).get("clips") or []
 
     def job_status(self, job_id, status, error=None):

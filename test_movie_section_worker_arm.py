@@ -764,9 +764,20 @@ def test_both_polls_advertise_the_arms_this_build_carries():
     place the server can tell."""
     src = _worker_src()
     assert 'WORKER_ARMS = ("movie-section",)' in src
-    assert 'f"/jobs/pending?worker_id={WORKER_ID}&arms={\',\'.join(WORKER_ARMS)}"' in src
-    assert ('f"/clips/redo-pending?worker_id={WORKER_ID}'
-            '&arms={\',\'.join(WORKER_ARMS)}"') in src
+    assert 'f"/jobs/pending?worker_id={WORKER_ID}&{_worker_arms_q()}"' in src
+    assert 'f"/clips/redo-pending?worker_id={WORKER_ID}&{_worker_arms_q()}"' in src
+
+
+def test_the_arms_fragment_is_built_and_escaped_in_one_place():
+    """Both polls read the same helper, so a new arm cannot reach one poll and
+    not the other, and neither can go out unescaped."""
+    from urllib.parse import quote
+    fn = _worker_function("_worker_arms_q", extra_ns={
+        "WORKER_ARMS": ("movie-section",), "_url_quote": quote})
+    assert fn() == "arms=movie-section"
+    fn2 = _worker_function("_worker_arms_q", extra_ns={
+        "WORKER_ARMS": ("movie-section", "a b&c"), "_url_quote": quote})
+    assert fn2() == "arms=movie-section%2Ca%20b%26c"
 
 
 def test_the_charswap_arm_is_deliberately_not_advertised():

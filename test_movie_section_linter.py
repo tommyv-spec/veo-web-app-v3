@@ -358,6 +358,18 @@ def test_the_v807_cut_out_ends_at_a_two_space_clip_header(tmp_path):
     assert code != 0 and "v807: 1 editing/transition phrase(s)" in _findings(out)
 
 
+def test_a_two_space_clip_header_is_still_checked_field_by_field(tmp_path):
+    """`clips` is built with `\\s+`, so `###  Clip 1.2` IS in the list — but the
+    per-clip head was a literal single space, so its block never matched and
+    `continue` skipped every v750 and v865 check for it in silence. A header the
+    file lists must be a header this loop can read."""
+    md = MIN_BUILD.format(scenes=LEGACY_SCENE)
+    md += ("\n###  Clip 1.2\n\n**Text prompt:**\n```\nshe sets the jar down\n```\n"
+           "**Prompt B (policy fallback):**\n```\nshe puts the jar down\n```\n")
+    code, out = _lint(md, tmp_path)
+    assert code != 0 and "v750: Clip 1.2 missing **Start frame:**" in _findings(out)
+
+
 def test_a_later_section_cannot_supply_the_last_clips_missing_fields(tmp_path):
     """The per-clip block had no `## ` bound, so the LAST clip's block ran to the
     end of the file. A `**Text prompt:**` sitting in a later section counted as

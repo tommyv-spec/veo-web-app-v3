@@ -8915,6 +8915,18 @@ def check_abort(job_id):
 # the field already has it, so gating on it would strand live jobs.
 WORKER_ARMS = ("movie-section",)
 
+from urllib.parse import quote as _url_quote  # noqa: E402 — used by the polls below
+
+
+def _worker_arms_q():
+    """The `arms=` fragment for a poll URL, percent-encoded.
+
+    Today's names are plain ASCII, so this changes nothing. It is here because a
+    query string built by hand and never escaped is how a later arm name with a
+    space or an `&` in it silently truncates the URL and turns the gate off.
+    """
+    return f"arms={_url_quote(','.join(WORKER_ARMS))}"
+
 
 def get_pending_job(exclude_ids=None):
     """Get next pending job from API and claim it for this worker.
@@ -8922,7 +8934,7 @@ def get_pending_job(exclude_ids=None):
     Args:
         exclude_ids: Set of job IDs to exclude (already being processed)
     """
-    url = f"/jobs/pending?worker_id={WORKER_ID}&arms={','.join(WORKER_ARMS)}"
+    url = f"/jobs/pending?worker_id={WORKER_ID}&{_worker_arms_q()}"
     if exclude_ids:
         url += f"&exclude={','.join(exclude_ids)}"
     result = api_request("GET", url)
@@ -9020,7 +9032,7 @@ def get_redo_clips():
     that cannot render a method must not be handed a clip that needs it.
     """
     result = api_request(
-        "GET", f"/clips/redo-pending?worker_id={WORKER_ID}&arms={','.join(WORKER_ARMS)}")
+        "GET", f"/clips/redo-pending?worker_id={WORKER_ID}&{_worker_arms_q()}")
     if result and result.get("clips"):
         clips = result["clips"]
         return clips

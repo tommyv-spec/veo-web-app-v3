@@ -17796,10 +17796,9 @@ async def local_worker_get_pending_job(
         if _age_cutoff is not None:
             query = query.filter(Job.created_at >= _age_cutoff)
 
-        # v959 — a worker that never advertised the movie-section arm walks past
-        # section jobs; see _v959_next_job_for_poller.
-        job = _v959_next_job_for_poller(
-            query.order_by(Job.created_at.asc()), arms, worker_id, "local-worker")
+        # v959 — a worker that never advertised the movie-section arm has
+        # section jobs filtered out; see _v959_next_job_for_poller.
+        job = _v959_next_job_for_poller(query, arms, worker_id, "local-worker")
 
         if job and job.claimed_by_worker != worker_id:
             # Claim it
@@ -17826,8 +17825,7 @@ async def local_worker_get_pending_job(
             query = query.filter(Job.created_at >= _age_cutoff)
 
         # v959 — same gate on the look-without-claiming branch.
-        job = _v959_next_job_for_poller(
-            query.order_by(Job.created_at.asc()), arms, worker_id, "local-worker")
+        job = _v959_next_job_for_poller(query, arms, worker_id, "local-worker")
 
     # v455: piggyback abort signals on this poll. The worker polls /pending
     # constantly (every 5-8s), so including the abort list here avoids a
@@ -18836,63 +18834,114 @@ def _v959_clip_needs_arm(clip) -> bool:
     return (getattr(clip, "render_method", None) or "").strip().lower() == _V959_ARM
 
 
+_V959_MISSING = object()
+
+
 def _v959_job_needs_arm(job) -> bool:
     """Does any clip on this job need the movie-section arm?
 
-    A job that cannot be read at all counts as needing the arm: guessing "no"
-    here is exactly the wrong render this gate exists to stop.
+    This is the row-level statement of the same rule _v959_no_section_clip()
+    expresses in SQL; the tests hold the two to the same answer on the same
+    data, so the fast path and the readable one cannot drift apart.
+
+    A job whose clips cannot be read — the attribute raises, or is not there at
+    all — counts as needing the arm. Guessing "no" is exactly the wrong render
+    this gate exists to stop, and a missing attribute is no better evidence
+    than a raised one.
     """
     try:
-        clips = list(getattr(job, "clips", None) or [])
+        clips = getattr(job, "clips", _V959_MISSING)
+    except Exception:
+        return True
+    if clips is _V959_MISSING:
+        return True
+    try:
+        clips = list(clips or [])
     except Exception:
         return True
     return any(_v959_clip_needs_arm(c) for c in clips)
 
 
-def _v959_next_job_for_poller(ordered_query, arms_param: Optional[str],
-                              worker_id: Optional[str], lane: str, look_ahead: int = 25):
-    """The first queued job in order that this poller is allowed to render.
+def _v959_no_section_clip():
+    """SQL for "this job carries no movie-section clip".
 
-    A worker that advertises the arm takes the head of the queue, exactly as
-    before — same query, same `.first()`. A worker WITHOUT the arm walks past
-    any job carrying a section clip and takes the next one it can actually
-    render; the section job is left untouched and stays queued for a worker that
-    has the arm. Skipping instead of returning nothing matters: a section job
-    sitting at the head would otherwise starve every ordinary job behind it.
+    A NOT EXISTS correlated on Job.id, so the database answers in the same
+    query that picks the job: one round trip, LIMIT 1, no clip rows loaded and
+    no look-ahead window. The earlier version walked 25 jobs in Python and
+    lazy-loaded each one's clips, which cost a query per candidate AND left a
+    real hole — a queue holding more than 25 section jobs starved every
+    ordinary job behind them.
 
-    look_ahead bounds the walk so a queue full of section jobs cannot turn one
-    poll into a full table scan.
+    coalesce + lower so a NULL render_method (every legacy clip) reads as the
+    ordinary renderer, which is what it is.
     """
-    if _v959_poller_has_arm(arms_param):
-        return ordered_query.first()
-    for job in ordered_query.limit(look_ahead).all():
-        if not _v959_job_needs_arm(job):
-            return job
-        print(f"[v959] job {job.id[:8]} held: worker {worker_id or '(none)'} "
-              f"({lane}) lacks the movie-section arm", flush=True)
-    return None
+    from sqlalchemy import and_, exists, func
+    return ~exists().where(and_(
+        Clip.job_id == Job.id,
+        func.lower(func.coalesce(Clip.render_method, "")) == _V959_ARM,
+    ))
+
+
+# One line per (worker, job) instead of one every 5-8 seconds forever. An
+# armless worker polls on a timer and would otherwise fill the log with the
+# same sentence about the same job until someone restarts it.
+_V959_HELD_LOGGED: set = set()
+_V959_HELD_LOG_CAP = 5000
+
+
+def _v959_log_held_once(key, message):
+    """Print `message` the first time this key is seen, then never again."""
+    if key in _V959_HELD_LOGGED:
+        return
+    if len(_V959_HELD_LOGGED) >= _V959_HELD_LOG_CAP:
+        _V959_HELD_LOGGED.clear()      # a long-lived process must not grow forever
+    _V959_HELD_LOGGED.add(key)
+    print(message, flush=True)
+
+
+def _v959_next_job_for_poller(query, arms_param: Optional[str],
+                              worker_id: Optional[str], lane: str):
+    """The first queued job this poller is allowed to render.
+
+    A worker that advertises the arm gets the head of the queue, exactly as
+    before: same query, same `.first()`. A worker WITHOUT the arm has section
+    jobs filtered out in SQL, so it still gets the oldest job it CAN render and
+    the section jobs stay queued, untouched, for a worker that has the arm.
+    """
+    if not _v959_poller_has_arm(arms_param):
+        query = query.filter(_v959_no_section_clip())
+        _v959_log_held_once(
+            ("pending", lane, worker_id),
+            f"[v959] worker {worker_id or '(none)'} ({lane}) polls without the "
+            f"movie-section arm — section jobs are held from it until it restarts")
+    return query.order_by(Job.created_at.asc()).first()
 
 
 def _v959_hold_section_redos(redo_clips, arms_param: Optional[str],
                              worker_id: Optional[str], lane: str):
-    """Drop any movie-section clip from a redo hand-out to an armless worker.
+    """Drop every movie-section clip from a redo hand-out. No exceptions.
 
-    In practice _v945_14_reject_charswap_redos has already flipped every section
-    clip to 'failed' before this runs — the redo renderer is plain
-    image-to-video and has no arm for the method at all. This is the same
-    fail-closed guard the pending lane uses, kept on this door too so a later
-    change to that one cannot quietly start handing sections to a worker that
-    would render them wrong.
+    Unconditional, exactly like the v945.14 door beside it: the redo renderer is
+    plain image-to-video and has no section arm for ANY worker, armed or not.
+    Gating this on the arms param would have meant a worker that can render a
+    section through the normal path being handed one through a path that
+    cannot. arms_param is recorded in the log line — it names who was refused —
+    and does not change the decision.
+
+    In practice _v945_14_reject_charswap_redos has already flipped these clips
+    to 'failed' before this runs. This is the same fail-closed guard the pending
+    lane uses, kept on this door too so a later change to that one cannot
+    quietly start handing sections to a renderer with no arm for them.
     """
-    if _v959_poller_has_arm(arms_param):
-        return redo_clips
     kept = []
     for clip in redo_clips:
         if _v959_clip_needs_arm(clip):
-            print(f"[v959] job {getattr(clip, 'job_id', '?')} redo clip "
-                  f"{getattr(clip, 'id', '?')} held: "
-                  f"worker {worker_id or '(none)'} ({lane}) lacks the movie-section arm",
-                  flush=True)
+            _v959_log_held_once(
+                ("redo", lane, worker_id, getattr(clip, "id", "?")),
+                f"[v959] job {getattr(clip, 'job_id', '?')} redo clip "
+                f"{getattr(clip, 'id', '?')} held from worker "
+                f"{worker_id or '(none)'} ({lane}, arms={arms_param or 'none'}) — "
+                f"the redo lane has no movie-section arm")
             continue
         kept.append(clip)
     return kept
@@ -20032,10 +20081,9 @@ async def user_worker_get_pending_job(
         if _age_cutoff is not None:
             query = query.filter(Job.created_at >= _age_cutoff)
 
-        # v959 — a worker that never advertised the movie-section arm walks past
-        # section jobs; see _v959_next_job_for_poller.
-        job = _v959_next_job_for_poller(
-            query.order_by(Job.created_at.asc()), arms, worker_id, "user-worker")
+        # v959 — a worker that never advertised the movie-section arm has
+        # section jobs filtered out; see _v959_next_job_for_poller.
+        job = _v959_next_job_for_poller(query, arms, worker_id, "user-worker")
 
         if job:
             job.claimed_by_worker = worker_id
@@ -20068,8 +20116,7 @@ async def user_worker_get_pending_job(
             query = query.filter(Job.created_at >= _age_cutoff)
 
         # v959 — same gate on the look-without-claiming branch.
-        job = _v959_next_job_for_poller(
-            query.order_by(Job.created_at.asc()), arms, worker_id, "user-worker")
+        job = _v959_next_job_for_poller(query, arms, worker_id, "user-worker")
 
     # v455: piggyback abort signals (same as local-worker endpoint)
     aborted_jobs = []
