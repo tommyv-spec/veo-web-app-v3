@@ -13916,6 +13916,84 @@ async def _do_export_final_impl(
             except Exception as e:
                 print(f"[Export] Speed change error (non-fatal): {e}", flush=True)
 
+        # === v948 — POST-CONCAT SILENCE-HOLE SWEEP ===
+        #
+        # The per-clip whisper VAD trims each clip's own edges. It cannot see
+        # a pause in the middle of a clip, and it cannot see the stack-up at a
+        # clip boundary (clip N's kept tail + clip N+1's kept head), so both
+        # survive into the assembled final as dead air. Operator rule
+        # (wiki/meta/generate-video-checklist.md "No dead air"): a selling
+        # final ships with ZERO silences >= 0.9s and every hole is cut to a
+        # ~0.3s breath — jump cuts are native to the format. Done by hand on
+        # job 29d45418 (50.3s -> 44.0s, zero detections after); this is that
+        # procedure as a stage.
+        #
+        # WHERE IT SITS. After concat, after audio enhancement, after the speed
+        # pass — and, since v698A.2, BEFORE the v925 b-roll pass. It used to
+        # run last, after the b-roll, which meant the cutaway file was measured
+        # against a speaker file this sweep then shortened (the old code
+        # stamped `v948_broll_stale` and asked for a re-run). Now the b-roll,
+        # its word alignment and the v825 stills all measure the file that
+        # ships. Nothing between here and the old position reads the speaker
+        # file's length except the b-roll pass itself, which now wants the
+        # swept one.
+        #
+        # OFF unless settings.max_silence_s is set — absent means the export
+        # is byte-identical to pre-v948.
+        #
+        # NEVER fatal: on any error the pre-sweep file ships untouched. An
+        # export that survived the whole pipeline is not worth losing to a
+        # cosmetic pass.
+        _v948_sweep = None   # kept for the b-roll pass: its keep_segments map the cuts exactly
+        _v948_max = getattr(settings, "max_silence_s", None)
+        if _v948_max and _v948_max > 0:
+            try:
+                import os as _os948
+                from video_processor import sweep_silence_holes as _sweep948
+                _swept_path = output_dir / f"swept_{output_filename}"
+                _sweep = await asyncio.to_thread(
+                    _sweep948, output_path, _swept_path, float(_v948_max),
+                )
+                if _sweep.get("applied"):
+                    _os948.replace(_swept_path, output_path)
+                    stats["v948_holes_cut"] = _sweep["holes_cut"]
+                    stats["v948_removed_s"] = round(_sweep["removed_s"], 3)
+                    stats["v948_residual"] = _sweep["residual"]
+                    stats["pre_sweep_duration"] = _sweep["original_duration"]
+                    stats["final_duration"] = _sweep["final_duration"]
+                    _v948_sweep = _sweep
+                print(
+                    f"[Export/v948] hole sweep: {_sweep['holes_cut']} holes cut, "
+                    f"{_sweep['removed_s']:.1f}s removed, "
+                    f"residual detections={_sweep['residual']}",
+                    flush=True,
+                )
+                if _sweep.get("residual"):
+                    # Say it out loud rather than reporting a clean sweep that
+                    # the file does not support. Usually means a hole sits
+                    # inside a segment the plan kept whole (detector floor /
+                    # threshold mismatch), not that the cut failed.
+                    print(
+                        f"[Export/v948] ⚠ {_sweep['residual']} silence(s) >= "
+                        f"{_v948_max}s STILL in the shipped file: "
+                        f"{_sweep.get('residual_holes')}",
+                        flush=True,
+                    )
+            except Exception as _sweep_err:
+                print(
+                    f"[Export/v948] hole sweep FAILED ({_sweep_err}) — "
+                    f"shipping the unswept final",
+                    flush=True,
+                )
+                stats["v948_error"] = str(_sweep_err)[:500]
+
+        # v698A.2 — the words heard on the shipped speaker file, measured once
+        # by the b-roll pass (when a job has shared sentences) and offered to
+        # the v825 stills step, which checks the file fingerprint before
+        # trusting them. None when the word pass did not run.
+        _v698a_master_words = None
+        _v698a_words_fp = None
+
         # === v925 — B-ROLL PIPELINE (v698A Phase 4b-ii, relocated) ===
         #
         # WHY IT LIVES HERE NOW. Until v925 this ran immediately after the
@@ -14248,12 +14326,26 @@ async def _do_export_final_impl(
                         # identity and step 2 falls back to the delivered
                         # duration over the summed clip durations, which also
                         # absorbs concat normalize drift.
+                        #
+                        # v698A.2 — a THIRD exact step. The v948 silence sweep
+                        # now runs BEFORE this pass, so the file we measured
+                        # (`_speaker_final_dur`) is the SWEPT one. Its cuts are
+                        # non-uniform, so they must not be absorbed by the
+                        # speed ratio: the ratio is taken against the PRE-sweep
+                        # delivered length, and the sweep's own keep_segments
+                        # (pre-sweep clock — the clock the speed step lands on)
+                        # map every window across exactly, below.
                         _sum_durs = sum(float(_d or 0.0) for _d in _speaker_durs)
                         _keep = stats.get("keep_segments") or []
                         _post_vad_dur = float(
                             stats.get("pre_speed_duration")
                             or stats.get("vad_final_duration")
                             or 0.0
+                        ) or _speaker_final_dur
+                        _sweep_applied = bool(_v948_sweep and _v948_sweep.get("applied"))
+                        _pre_sweep_dur = (
+                            float(stats.get("pre_sweep_duration") or 0.0)
+                            if _sweep_applied else 0.0
                         ) or _speaker_final_dur
 
                         from video_processor import (
@@ -14265,7 +14357,7 @@ async def _do_export_final_impl(
 
                         if _keep:
                             _k = (
-                                _speaker_final_dur / _post_vad_dur
+                                _pre_sweep_dur / _post_vad_dur
                                 if _post_vad_dur > 0.1 else 1.0
                             )
                             _mode = f"vad_keep_map({len(_keep)} segs) × {_k:.4f}"
@@ -14275,13 +14367,13 @@ async def _do_export_final_impl(
                                 _t["target_duration"] = _t["end"] - _t["start"]
                         else:
                             _k = 1.0
-                            if _sum_durs > 0.1 and _speaker_final_dur > 0.1:
-                                _k = _speaker_final_dur / _sum_durs
+                            if _sum_durs > 0.1 and _pre_sweep_dur > 0.1:
+                                _k = _pre_sweep_dur / _sum_durs
                             if _k <= 0.4 or _k >= 1.6:
                                 print(
                                     f"[Export/v698A/broll] ⚠ measured ratio {_k:.4f} "
                                     f"outside sane range (sum_clips={_sum_durs:.3f}s, "
-                                    f"speaker={_speaker_final_dur:.3f}s) — using 1.0. "
+                                    f"speaker={_pre_sweep_dur:.3f}s) — using 1.0. "
                                     f"Something upstream changed the timeline length.",
                                     flush=True,
                                 )
@@ -14292,6 +14384,18 @@ async def _do_export_final_impl(
                                     _t["start"] = _t["start"] * _k
                                     _t["end"] = _t["end"] * _k
                                     _t["target_duration"] = _t["end"] - _t["start"]
+                        if _sweep_applied:
+                            # v698A.2 — step 3: the sweep's cuts, exactly.
+                            _sweep_keeps = _v948_sweep.get("keep_segments") or []
+                            for _t in _pre_targets:
+                                _t["start"] = _map_through_vad_impl(_t["start"], _sweep_keeps)
+                                _t["end"] = _map_through_vad_impl(_t["end"], _sweep_keeps)
+                                _t["target_duration"] = _t["end"] - _t["start"]
+                            _mode += (
+                                f" → swept {_speaker_final_dur:.3f}s via "
+                                f"{len(_sweep_keeps)} keep segments "
+                                f"(removed {float(_v948_sweep.get('removed_s') or 0.0):.3f}s)"
+                            )
                         stats["v698a_broll_time_scale"] = round(_k, 6)
                         stats["v698a_broll_target_map"] = _mode
                         print(
@@ -14299,7 +14403,8 @@ async def _do_export_final_impl(
                             f"per-clip durations ({len(_pre_targets)} clips) and "
                             f"mapped by {_mode} "
                             f"(pre-VAD sum={_sum_durs:.3f}s → post-VAD "
-                            f"{_post_vad_dur:.3f}s → delivered "
+                            f"{_post_vad_dur:.3f}s → pre-sweep "
+                            f"{_pre_sweep_dur:.3f}s → delivered "
                             f"{_speaker_final_dur:.3f}s)",
                             flush=True,
                         )
@@ -14309,6 +14414,208 @@ async def _do_export_final_impl(
                                 f"{_t['start']:.2f}s → {_t['end']:.2f}s",
                                 flush=True,
                             )
+
+                        # === v698A.2 — place each SHARED sentence's cutaways on
+                        # the words heard in the shipped file (2026-09-04). ===
+                        #
+                        # The letter split above (split_span) only approximates
+                        # where a fragment falls inside its sentence. The export
+                        # already has the real thing for the stills lane (v825:
+                        # transcribe_master_audio + resolve_support_spans on the
+                        # finished speaker audio), so it is reused here: one
+                        # Whisper "small" run on `speaker_master_audio` — the
+                        # SWEPT, delivered file — under v864's memory guards and
+                        # lock; then every fragment boundary is the moment its
+                        # first word is heard, and the sentence's own edges come
+                        # from the words too. The mapped windows stay as the
+                        # sanity envelope and as the fallback: any doubt about a
+                        # sentence leaves ITS letter windows in place and says
+                        # why. This pass never raises; the export cannot lose a
+                        # file to it.
+                        _v698a_wa = {"method": "skipped", "groups": 0,
+                                     "fallback_groups": 0, "reasons": [],
+                                     "whisper_words": 0}
+                        if _afs_sharers and _pre_targets:
+                            _v698a_wa["method"] = "chars"
+                            _v698a_wa["groups"] = len(_afs_sharers)
+                            try:
+                                from video_processor import (
+                                    transcribe_master_audio as _tma_w,
+                                    resolve_support_spans as _rss_w,
+                                    _align_scene_lines as _asl_w,
+                                    _normalize as _norm_w,
+                                )
+                                from pairing_resolver import (
+                                    build_alignment_inputs as _bai_w,
+                                    sentence_container as _sc_w,
+                                    tile_fragment_windows as _tfw_w,
+                                )
+                                import os as _os_w
+                                _v864_release()
+                                _avail_w, _rss_mb_w = _v864_mem()
+                                _min_w = int(_os_w.environ.get("SUPPORT_TRACK_MIN_AVAIL_MB", "600"))
+                                # [TEMP v698A.2] remove once operator-side evidence lands.
+                                print(
+                                    f"[Export/v698A.2] pre-whisper mem: avail={_avail_w}MB "
+                                    f"rss={_rss_mb_w}MB (need >={_min_w}MB, None=unknown/dev)",
+                                    flush=True,
+                                )
+                                if _avail_w is not None and _avail_w < _min_w:
+                                    raise RuntimeError(f"memory avail={_avail_w}MB < {_min_w}MB")
+                                async with _V864_SUPPORT_LOCK:
+                                    _mw_w = await asyncio.to_thread(_tma_w, speaker_master_audio)
+                                _v864_release()
+                                _st_w = output_path.stat()
+                                _v698a_master_words = _mw_w
+                                _v698a_words_fp = (_st_w.st_size, _st_w.st_mtime_ns)
+                                _v698a_wa["whisper_words"] = len(_mw_w or [])
+                                if not _mw_w:
+                                    raise RuntimeError("whisper heard no words")
+
+                                # The speaker concat, slot by slot, in order —
+                                # every spoken clip, shared or not, so the
+                                # resolver walks the sentences monotonically.
+                                _clip_by_db_w = {c.get("_clip_db_id"): c for c in clip_info}
+                                _slot_texts_w = []
+                                for _db_w in _speaker_db_ids:
+                                    _sc_clip = _clip_by_db_w.get(_db_w) or {}
+                                    _auth_w = (_sc_clip.get("dialogue_text") or "").strip()
+                                    _cands_w = [_auth_w] if _auth_w else []
+                                    _b_w = (_sc_clip.get("dialogue_text_b") or "").strip()
+                                    if _b_w and (_sc_clip.get("rendered_prompt_variant") or "A") == "B":
+                                        _cands_w.append(_b_w)   # v821: the line that was SPOKEN
+                                    _slot_texts_w.append((_auth_w, _cands_w))
+                                _slot_of_db_w = {db: i for i, db in enumerate(_speaker_db_ids)}
+                                _groups_w = []   # (slot, fragments, source db id, sharer clips)
+                                for _pid_w, _grp_w in _afs_sharers.items():
+                                    if _pid_w not in _slot_of_db_w:
+                                        continue
+                                    _groups_w.append((
+                                        _slot_of_db_w[_pid_w],
+                                        [(g.get("voiceover_line") or "") for g in _grp_w],
+                                        _pid_w, _grp_w,
+                                    ))
+                                _groups_w.sort(key=lambda t: t[0])
+                                _scene_lines_w, _inserts_w, _index_w, _skipped_w = _bai_w(
+                                    [(s, f) for s, f, _p, _g in _groups_w],
+                                    _slot_texts_w, _norm_w,
+                                )
+                                _master_text_w = " ".join(_norm_w(w["word"]) for w in _mw_w)
+                                _aligned_w = _asl_w(_mw_w, _master_text_w, _scene_lines_w)
+                                _spans_w = (
+                                    _rss_w(_mw_w, _inserts_w, _scene_lines_w) if _inserts_w else []
+                                )
+                                _span_by_gk, _ins_by_gk = {}, {}
+                                for _ins, _sp in zip(_inserts_w, _spans_w):
+                                    _gk = _index_w[_ins["support_index"]]
+                                    _span_by_gk[_gk] = _sp
+                                    _ins_by_gk[_gk] = _ins
+                                _tidx_by_db = {}
+                                for _ti, _bc in enumerate(broll_clip_info):
+                                    _tidx_by_db.setdefault(_bc.get("_clip_db_id"), _ti)
+
+                                _ok_groups = 0
+                                for _gno, (_slot, _frags, _pid_w, _grp_w) in enumerate(_groups_w):
+                                    _tidxs = [_tidx_by_db.get(g.get("_clip_db_id")) for g in _grp_w]
+                                    _label = (
+                                        f"sentence slot {_slot} "
+                                        f"\"{' '.join(_slot_texts_w[_slot][0].split()[:4])}…\""
+                                    )
+                                    if _gno in _skipped_w or any(t is None for t in _tidxs):
+                                        _reason = _skipped_w.get(_gno, "sharer missing from the b-roll list")
+                                        _v698a_wa["fallback_groups"] += 1
+                                        _v698a_wa["reasons"].append(f"slot {_slot}: {_reason}")
+                                        print(f"[Export/v698A.2] {_label} method=chars reason={_reason}", flush=True)
+                                        continue
+                                    _env = (
+                                        min(_pre_targets[t]["start"] for t in _tidxs),
+                                        max(_pre_targets[t]["end"] for t in _tidxs),
+                                    )
+                                    _n = len(_frags)
+                                    _sps = [_span_by_gk.get((_gno, k)) for k in range(1, _n + 1)]
+                                    _al = _aligned_w[_slot] if _slot < len(_aligned_w) else None
+                                    _al_prev = (
+                                        _aligned_w[_slot - 1]
+                                        if 0 < _slot <= len(_aligned_w) else None
+                                    )
+                                    _al_next = (
+                                        _aligned_w[_slot + 1]
+                                        if _slot + 1 < len(_aligned_w) else None
+                                    )
+                                    _next_start = _mw_w[_al_next["lo"]]["start"] if _al_next else None
+                                    _cont, _reason = _sc_w(
+                                        _env,
+                                        _sps[0]["start"] if _sps[0] else None,
+                                        _next_start,
+                                        _sps[-1]["end"] if _sps[-1] else None,
+                                        _al_prev["lo"] if _al_prev else None,
+                                        _al["lo"] if _al else None,
+                                    )
+                                    _wins_w = None
+                                    if _cont is not None:
+                                        _wins_w, _reason = _tfw_w(
+                                            _cont, [(_s["start"] if _s else None) for _s in _sps]
+                                        )
+                                    _letters = [
+                                        (_pre_targets[t]["start"], _pre_targets[t]["end"])
+                                        for t in _tidxs
+                                    ]
+                                    if _wins_w is None:
+                                        _v698a_wa["fallback_groups"] += 1
+                                        _v698a_wa["reasons"].append(f"slot {_slot}: {_reason}")
+                                        print(
+                                            f"[Export/v698A.2] {_label} envelope "
+                                            f"{_env[0]:.2f}-{_env[1]:.2f}s method=chars "
+                                            f"reason={_reason}",
+                                            flush=True,
+                                        )
+                                        continue
+                                    _conf = min(float(_s.get("confidence") or 1.0) for _s in _sps)
+                                    for _t, _w in zip(_tidxs, _wins_w):
+                                        _pre_targets[_t]["start"] = _w[0]
+                                        _pre_targets[_t]["end"] = _w[1]
+                                        _pre_targets[_t]["target_duration"] = _w[1] - _w[0]
+                                        _pre_targets[_t]["confidence"] = _conf
+                                    _ok_groups += 1
+                                    # [TEMP v698A.2] per-fragment proof: letters vs words.
+                                    _parts = []
+                                    for k in range(_n):
+                                        _ins_k = _ins_by_gk.get((_gno, k + 1)) or {}
+                                        _parts.append(
+                                            f"k={k + 1} \"{' '.join(_frags[k].split()[:3])}\" "
+                                            f"letters={_letters[k][0]:.2f}s "
+                                            f"words={_wins_w[k][0]:.2f}s "
+                                            f"(word \"{_ins_k.get('start_word', '')}\" "
+                                            f"conf={float(_sps[k].get('confidence') or 1.0):.1f})"
+                                        )
+                                    print(
+                                        f"[Export/v698A.2] {_label} container "
+                                        f"{_cont[0]:.2f}-{_cont[1]:.2f}s (envelope "
+                                        f"{_env[0]:.2f}-{_env[1]:.2f}s) | "
+                                        + " | ".join(_parts) + " | method=words",
+                                        flush=True,
+                                    )
+                                _v698a_wa["method"] = "words" if _ok_groups else "chars"
+                                print(
+                                    f"[Export/v698A.2] method={_v698a_wa['method']} "
+                                    f"groups={len(_groups_w)} ok={_ok_groups} "
+                                    f"fallback={_v698a_wa['fallback_groups']} "
+                                    f"whisper_words={_v698a_wa['whisper_words']} "
+                                    f"avail_mb={_avail_w}",
+                                    flush=True,
+                                )
+                            except Exception as _wa_err:
+                                _v698a_wa["method"] = "chars"
+                                _v698a_wa["reasons"].append(
+                                    f"{type(_wa_err).__name__}: {str(_wa_err)[:160]}"
+                                )
+                                print(
+                                    f"[Export/v698A.2] method=chars reason="
+                                    f"{type(_wa_err).__name__}: {str(_wa_err)[:160]} "
+                                    f"— letter windows kept",
+                                    flush=True,
+                                )
+                        stats["v698a_word_alignment"] = _v698a_wa
 
                 print(
                     f"[Export/v698A/broll] master-audio alignment: "
@@ -14451,82 +14758,8 @@ async def _do_export_final_impl(
                 _tb_broll.print_exc()
                 stats["v698a_broll_error"] = str(_broll_err)[:500]
 
-        # === v948 — POST-CONCAT SILENCE-HOLE SWEEP ===
-        #
-        # The per-clip whisper VAD trims each clip's own edges. It cannot see
-        # a pause in the middle of a clip, and it cannot see the stack-up at a
-        # clip boundary (clip N's kept tail + clip N+1's kept head), so both
-        # survive into the assembled final as dead air. Operator rule
-        # (wiki/meta/generate-video-checklist.md "No dead air"): a selling
-        # final ships with ZERO silences >= 0.9s and every hole is cut to a
-        # ~0.3s breath — jump cuts are native to the format. Done by hand on
-        # job 29d45418 (50.3s -> 44.0s, zero detections after); this is that
-        # procedure as a stage.
-        #
-        # WHERE IT SITS. Last thing before the file is stored/uploaded, so it
-        # runs on the timeline that actually ships: after concat, after audio
-        # enhancement, after the speed pass, after the v925 b-roll pass.
-        # Anything earlier would sweep a file that later stages then change.
-        #
-        # OFF unless settings.max_silence_s is set — absent means the export
-        # is byte-identical to pre-v948.
-        #
-        # NEVER fatal: on any error the pre-sweep file ships untouched. An
-        # export that survived the whole pipeline is not worth losing to a
-        # cosmetic pass.
-        _v948_max = getattr(settings, "max_silence_s", None)
-        if _v948_max and _v948_max > 0:
-            try:
-                import os as _os948
-                from video_processor import sweep_silence_holes as _sweep948
-                _swept_path = output_dir / f"swept_{output_filename}"
-                _sweep = await asyncio.to_thread(
-                    _sweep948, output_path, _swept_path, float(_v948_max),
-                )
-                if _sweep.get("applied"):
-                    _os948.replace(_swept_path, output_path)
-                    stats["v948_holes_cut"] = _sweep["holes_cut"]
-                    stats["v948_removed_s"] = round(_sweep["removed_s"], 3)
-                    stats["v948_residual"] = _sweep["residual"]
-                    stats["pre_sweep_duration"] = _sweep["original_duration"]
-                    stats["final_duration"] = _sweep["final_duration"]
-                print(
-                    f"[Export/v948] hole sweep: {_sweep['holes_cut']} holes cut, "
-                    f"{_sweep['removed_s']:.1f}s removed, "
-                    f"residual detections={_sweep['residual']}",
-                    flush=True,
-                )
-                if _sweep.get("residual"):
-                    # Say it out loud rather than reporting a clean sweep that
-                    # the file does not support. Usually means a hole sits
-                    # inside a segment the plan kept whole (detector floor /
-                    # threshold mismatch), not that the cut failed.
-                    print(
-                        f"[Export/v948] ⚠ {_sweep['residual']} silence(s) >= "
-                        f"{_v948_max}s STILL in the shipped file: "
-                        f"{_sweep.get('residual_holes')}",
-                        flush=True,
-                    )
-                if _sweep.get("applied") and stats.get("v698a_broll_duration"):
-                    # The v925 b-roll track was measured against the speaker
-                    # file as it stood BEFORE this cut, so it is now longer
-                    # than what ships. Surface it — do not pretend the pair
-                    # still lines up.
-                    print(
-                        f"[Export/v948] ⚠ b-roll was built against the "
-                        f"pre-sweep speaker file; it is now "
-                        f"{_sweep['removed_s']:.1f}s longer than the shipped "
-                        f"master. Re-run the b-roll pass if you need the pair.",
-                        flush=True,
-                    )
-                    stats["v948_broll_stale"] = True
-            except Exception as _sweep_err:
-                print(
-                    f"[Export/v948] hole sweep FAILED ({_sweep_err}) — "
-                    f"shipping the unswept final",
-                    flush=True,
-                )
-                stats["v948_error"] = str(_sweep_err)[:500]
+        # (v948 silence-hole sweep: moved in front of the v925 b-roll pass by
+        # v698A.2 so the cutaway file is built from the file that ships.)
 
         # Upload to R2 for persistence (voice swap needs this as input after Render restarts)
         try:
@@ -14603,47 +14836,65 @@ async def _do_export_final_impl(
                     export_support_track as _est,
                     ffprobe_json as _fpj, get_duration as _gd,
                 )
-                # 1) master audio from the final talking-head mp4
-                _sup_audio = output_dir / "support_master.mp3"
-                _ac = ["ffmpeg", "-y", "-i", str(output_path), "-vn",
-                       "-acodec", "libmp3lame", "-q:a", "2", str(_sup_audio)]
-                _acr = await asyncio.to_thread(_sp2.run, _ac, capture_output=True, text=True)
-                if _acr.returncode != 0 or not _sup_audio.exists():
-                    raise RuntimeError(f"support master-audio extract failed: {(_acr.stderr or '')[-300:]}")
-                # 2) word timestamps + phrase spans
-                # v864 — release first, then measure, then refuse if too tight.
-                _v864_release()
-                _avail_mb, _rss_mb = _v864_mem()
-                # v864.1 — `import os as _os864`, NOT bare `os`. _do_export_final
-                # has a function-local `import os` further down, which makes `os`
-                # local for the WHOLE function scope, so reading it here raised
-                # UnboundLocalError and skipped the track ("cannot access local
-                # variable 'os'"). Same workaround the function already uses at
-                # its other local-import site.
-                import os as _os864
-                _min_mb = int(_os864.environ.get("SUPPORT_TRACK_MIN_AVAIL_MB", "600"))
+                # v698A.2 — reuse the words the b-roll pass measured on this
+                # very file, but only while the file is provably unchanged
+                # since (size + mtime fingerprint). Both passes read
+                # `output_path`; a future stage that rewrites it between the
+                # two would silently put stills on stale times without this.
+                _mw = None
                 try:
-                    import mem_guard as _mg865
-                    _mg865.log("pre-whisper (support-track)")
-                except Exception:
-                    pass
-                print(f"[Export][v864] pre-whisper mem: avail={_avail_mb}MB "
-                      f"rss={_rss_mb}MB (need >={_min_mb}MB, None=unknown/dev)", flush=True)
-                if _avail_mb is not None and _avail_mb < _min_mb:
-                    # Skipping keeps the finished export. Loading anyway risks an
-                    # OOM kill that destroys it. Bump the instance or lower
-                    # SUPPORT_TRACK_MIN_AVAIL_MB to re-enable.
-                    raise RuntimeError(
-                        f"insufficient memory for support-track whisper load: "
-                        f"avail={_avail_mb}MB < {_min_mb}MB — export kept, track skipped"
-                    )
-                # v864 — serialize: never let two exports hold a whisper model
-                # at the same time on this instance.
-                async with _V864_SUPPORT_LOCK:
-                    _mw = await asyncio.to_thread(_tma, _sup_audio)
-                _v864_release()
-                _a2, _r2 = _v864_mem()
-                print(f"[Export][v864] post-whisper mem: avail={_a2}MB rss={_r2}MB", flush=True)
+                    if _v698a_master_words is not None and _v698a_words_fp is not None:
+                        _st_r = output_path.stat()
+                        if (_st_r.st_size, _st_r.st_mtime_ns) == _v698a_words_fp:
+                            _mw = _v698a_master_words
+                            print(f"[Export][v825] master words reused from v698A.2 ({len(_mw)} words)", flush=True)
+                        else:
+                            print("[Export][v825] master words NOT reused: output_path changed since v698A.2 pass", flush=True)
+                except Exception as _reuse_err:
+                    _mw = None
+                    print(f"[Export][v825] master-word reuse check failed ({_reuse_err}); transcribing", flush=True)
+                if _mw is None:
+                    # 1) master audio from the final talking-head mp4
+                    _sup_audio = output_dir / "support_master.mp3"
+                    _ac = ["ffmpeg", "-y", "-i", str(output_path), "-vn",
+                           "-acodec", "libmp3lame", "-q:a", "2", str(_sup_audio)]
+                    _acr = await asyncio.to_thread(_sp2.run, _ac, capture_output=True, text=True)
+                    if _acr.returncode != 0 or not _sup_audio.exists():
+                        raise RuntimeError(f"support master-audio extract failed: {(_acr.stderr or '')[-300:]}")
+                    # 2) word timestamps + phrase spans
+                    # v864 — release first, then measure, then refuse if too tight.
+                    _v864_release()
+                    _avail_mb, _rss_mb = _v864_mem()
+                    # v864.1 — `import os as _os864`, NOT bare `os`. _do_export_final
+                    # has a function-local `import os` further down, which makes `os`
+                    # local for the WHOLE function scope, so reading it here raised
+                    # UnboundLocalError and skipped the track ("cannot access local
+                    # variable 'os'"). Same workaround the function already uses at
+                    # its other local-import site.
+                    import os as _os864
+                    _min_mb = int(_os864.environ.get("SUPPORT_TRACK_MIN_AVAIL_MB", "600"))
+                    try:
+                        import mem_guard as _mg865
+                        _mg865.log("pre-whisper (support-track)")
+                    except Exception:
+                        pass
+                    print(f"[Export][v864] pre-whisper mem: avail={_avail_mb}MB "
+                          f"rss={_rss_mb}MB (need >={_min_mb}MB, None=unknown/dev)", flush=True)
+                    if _avail_mb is not None and _avail_mb < _min_mb:
+                        # Skipping keeps the finished export. Loading anyway risks an
+                        # OOM kill that destroys it. Bump the instance or lower
+                        # SUPPORT_TRACK_MIN_AVAIL_MB to re-enable.
+                        raise RuntimeError(
+                            f"insufficient memory for support-track whisper load: "
+                            f"avail={_avail_mb}MB < {_min_mb}MB — export kept, track skipped"
+                        )
+                    # v864 — serialize: never let two exports hold a whisper model
+                    # at the same time on this instance.
+                    async with _V864_SUPPORT_LOCK:
+                        _mw = await asyncio.to_thread(_tma, _sup_audio)
+                    _v864_release()
+                    _a2, _r2 = _v864_mem()
+                    print(f"[Export][v864] post-whisper mem: avail={_a2}MB rss={_r2}MB", flush=True)
                 # v825.9 — hand the resolver each scene's spoken-line candidates
                 # (Prompt A line + the Prompt-B reworded line) so a support is
                 # placed INSIDE its owning line's master span, correct whether A
