@@ -88,9 +88,19 @@ assert "base, audio, picture_source = prepare_composition(" in run
 assert "picture_source=picture_source)" in run
 assert "def run_quality_checks(" in src and 'picture_source: str = "export"' in src
 assert "return build_qc_report(checks, picture_source=picture_source)" in src
-# the local tool unpacks the new tuple
-tool = open(os.path.join(os.path.dirname(ROOT), "tools", "capcut_autoedit.py"), encoding="utf-8").read()
-assert "_audio, _picture_source = prepare_composition(" in tool
+# the local tool unpacks the new tuple (it lives in the wiki repo above code/;
+# a standalone clone of code/ has no such file — skip, do not crash)
+_tool_path = os.path.join(os.path.dirname(ROOT), "tools", "capcut_autoedit.py")
+if os.path.exists(_tool_path):
+    tool = open(_tool_path, encoding="utf-8").read()
+    assert "_audio, _picture_source = prepare_composition(" in tool
+else:
+    print("  (tools/capcut_autoedit.py not present in this checkout — unpack check skipped)")
+# the trimmed reference carries the picture source in its name; the seeded
+# transcript is part of the caption-pass name
+assert 'base_trim_{trim_key}_{picture_source}.mp4' in prep
+assert 'src_key = f"{src_key}_t{file_fingerprint(first_data)}"' in src
+assert "abs(_pdur - dur) > 0.5" in prep
 print("OK plumbing: picture flows to layout, compose, trim, occupancy and the QC record; audio stays the export's")
 
 print("ALL OK check_autoedit_picture_base")

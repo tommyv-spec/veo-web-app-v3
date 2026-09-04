@@ -1290,6 +1290,10 @@ def render_captions_dynamic(nocap: Path, out: Path, template: str, windows, work
     first_data = None          # v938.23 — the transcript every later pass replays
     if subtitle_data and Path(subtitle_data).exists():
         first_data = Path(subtitle_data)
+        # v698A.2.5 (review) — a seeded transcript is baked into every pass, so
+        # the pass name must carry it (§v938.1): a corrected transcript never
+        # reuses the passes burned from the raw one, and vice versa.
+        src_key = f"{src_key}_t{file_fingerprint(first_data)}"
     for o in offsets:
         tag = str(o).replace('-', 'm').replace('.', '_')
         p = work / cap_pass_name(o, template, src_key)
@@ -1575,6 +1579,18 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
     picture, picture_source = choose_picture(
         base, cutaway_edit, hook_end, band_in_use_for(repairs, segs, sup))
     if picture_source == "final_broll":
+        # v698A.2.5 (review) — compose cuts the picture at the EXPORT's length
+        # (`-t dur`) and muxes the export's audio under it. A cutaway edit that
+        # is not the same length as its export (a b-roll pass that stopped
+        # short) would freeze under full-length audio; refuse it and keep the
+        # speaker export, loudly.
+        _pdur = probe_duration(picture)
+        if abs(_pdur - dur) > 0.5:
+            print(f"[autoedit/v698A.2.5] cutaway edit {picture.name} is {_pdur:.2f}s but the "
+                  f"export is {dur:.2f}s — not the same edit; captioning the export instead",
+                  flush=True)
+            picture, picture_source = base, "export"
+    if picture_source == "final_broll":
         print(f"[autoedit/v698A.2.5] picture = {picture.name} (cutaway edit); "
               f"audio = {base.name}", flush=True)
     # The 4th element records WHICH face detector produced these numbers — a
@@ -1632,7 +1648,9 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
     trim_key = f"s{start_s:.2f}_e{end_s:.2f}"
     nocap, trimmed_dur = trim_media(nocap, work / f"nocap_trim_{trim_key}.mp4",
                                     start_s, end_s, dur)
-    picture, _ = trim_media(picture, work / f"base_trim_{trim_key}.mp4",
+    # v698A.2.5 (review) — the trimmed reference is named after its SOURCE too:
+    # a re-run that flips picture_source must not reuse the other file's trim.
+    picture, _ = trim_media(picture, work / f"base_trim_{trim_key}_{picture_source}.mp4",
                             start_s, end_s, dur)
     segs = shifted_segments(segs, start_s, trimmed_dur)
     return nocap, trimmed_dur, segs, auto_offset, pip_y, chin, picture, audio, picture_source
