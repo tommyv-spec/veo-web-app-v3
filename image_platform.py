@@ -352,6 +352,12 @@ def run_image_platform_migrations():
          "ALTER TABLE image_scene_assignments ADD COLUMN swap_audio VARCHAR(20)"),
         ("clips", "swap_audio",
          "ALTER TABLE clips ADD COLUMN swap_audio VARCHAR(20)"),
+        # v959: movie-section face references. Nullable, NO default — NULL is
+        # what every existing row is and means "renders the normal way".
+        ("image_scene_assignments", "face_ref_node_ids_json",
+         "ALTER TABLE image_scene_assignments ADD COLUMN face_ref_node_ids_json TEXT"),
+        ("clips", "face_ref_frames_json",
+         "ALTER TABLE clips ADD COLUMN face_ref_frames_json TEXT"),
         # v944: the build's declared finishing (captions + overlay), JSON
         # string. Nullable, NO default — an old batch stays NULL and the job
         # it promotes keeps today's auto-edit defaults.
@@ -560,6 +566,13 @@ def run_image_platform_migrations():
          "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS swap_audio VARCHAR(20)"),
         ("clips", "swap_audio",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS swap_audio VARCHAR(20)"),
+        # v959: movie-section face references — see the SQLite block above.
+        # Production is Postgres: a SQLite-only entry means the column never
+        # exists live and every write to it 500s.
+        ("image_scene_assignments", "face_ref_node_ids_json",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS face_ref_node_ids_json TEXT"),
+        ("clips", "face_ref_frames_json",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS face_ref_frames_json TEXT"),
         # v944: declared finishing — see the SQLite block above. Production is
         # Postgres: a SQLite-only entry means the column never exists live and
         # every write to it 500s.
@@ -731,25 +744,34 @@ MOVIE_SECTION_RENDER_METHOD = "movie-section"
 MOVIE_SECTION_WINDOWS_S = (8, 10)
 MOVIE_SECTION_MAX_FACE_REFS = 2
 
-# Flipped in the same push that ships the flow_worker movie_section_* arm and
-# its E2E proof (v959 Task 11). The parser lands ahead of the arm, so until then
-# a build that declares the method would import clean and render on the ordinary
-# path with its face refs dropped — which looks like a bad take, not a missing
-# feature. The import route refuses it while this is False; the PARSER keeps
-# parsing, because the later tasks and the E2E driver need it to.
+# Flipped in v959 Task 11 Step 0, in the same push that ships the flow_worker
+# movie_section_* arm (Task 5) and the E2E run that proves it (Task 10). The
+# parser lands ahead of the arm, so until then a build that declares the method
+# would import clean and render on the ordinary path with its face refs dropped
+# — which looks like a bad take, not a missing feature. The import route refuses
+# it while this is False; the PARSER keeps parsing, because the later tasks and
+# the E2E driver need it to.
 MOVIE_SECTION_ARM_SHIPPED = False
 
 # v943 — the columns a charswap job cannot work without. Named once so the
 # readback check and the migration list can never drift apart by hand.
+# v959 added the movie-section columns to the same list: the name still says
+# charswap (it is read by GET /api/admin/verify-charswap-columns in main.py and
+# by test_charswap_render_method.py), but what it holds is every render-method
+# column the startup proof must cover. A new render method adds its columns HERE.
 CHARSWAP_COLUMNS = {
     "image_scene_assignments": [
         "render_method", "swap_source_r2_key", "swap_mode", "swap_avatar_upload_id",
         # v943.1 — export-time source audio.
         "swap_audio",
+        # v959 — movie-section face reference image nodes.
+        "face_ref_node_ids_json",
     ],
     "clips": [
         "render_method", "swap_source_r2_key", "swap_mode", "swap_avatar_upload_id",
         "swap_audio",
+        # v959 — movie-section face reference frames.
+        "face_ref_frames_json",
     ],
 }
 
@@ -1780,6 +1802,10 @@ class ImageSceneAssignment(Base):
     # over this clip's segment. It never touches the render — Flow uploads are
     # muted by contract.
     swap_audio = Column(String(20), nullable=True)
+    # v959 — movie-section face reference IMAGE NODES (JSON list of ImageNode
+    # ids), bound at import from `- **face_refs:** image_K, image_L`. NULL on
+    # every scene that renders the normal way.
+    face_ref_node_ids_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1873,6 +1899,9 @@ class ImageSceneAssignment(Base):
             "swap_avatar_upload_id": self.swap_avatar_upload_id,
             # v943.1 — export-time audio for a swap clip.
             "swap_audio": self.swap_audio,
+            # v959 — movie-section face reference image nodes. None on every
+            # scene that renders the normal way.
+            "face_ref_node_ids_json": self.face_ref_node_ids_json,
         }
 
 
@@ -9193,10 +9222,12 @@ def _import_scene_table_impl(
     # `_v943_avatar_node_id` None and writes a NULL scene image, which is the
     # zero-clips-no-error bug f798f94 exists to prevent. One spelling.
 
-    # v959 — the movie-section latch. Refused whole, before any row is written,
-    # for the same reason the charswap bindings are resolved here: a build that
-    # cannot be rendered must not be half-imported. Same one spelling of the
-    # question as v945.8 above.
+    # v959 — the movie-section latch. Rows have already been flushed by the time
+    # this runs (the batch and its image nodes); what makes the refusal whole is
+    # the wrapper's db.rollback() on HTTPException (~7190), which throws the
+    # whole transaction away. That is the same reason the charswap bindings are
+    # resolved here: a build that cannot be rendered must not be half-imported.
+    # Same one spelling of the question as v945.8 above.
     if not MOVIE_SECTION_ARM_SHIPPED and any(
         (s.get("render_method") or "").strip().lower() == MOVIE_SECTION_RENDER_METHOD
         for s in storyboard_scenes

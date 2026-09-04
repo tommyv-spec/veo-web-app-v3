@@ -189,7 +189,7 @@ def test_text_card_declaring_the_method_hard_fails():
 
 
 def test_silent_scene_in_a_section_build_names_the_dead_end():
-    """"Declare it on every shot scene too" is advice a silent scene cannot
+    """'Declare it on every shot scene too' is advice a silent scene cannot
     take — it has no words to carry. The message has to say that."""
     with pytest.raises(ValueError, match="no silent scenes"):
         _parse(SECTION_SCENE + "\n" + SILENT_SCENE)
@@ -242,8 +242,31 @@ def test_the_arm_is_not_shipped_yet():
 def test_the_import_route_carries_the_latch():
     """The latch sits in the batch-import route, which needs a database session
     and a request body, so no unit test can call it. Pin its text instead —
-    the same way test_charswap_render_method pins the worker's arm condition."""
-    src = (_HERE / "image_platform.py").read_text(encoding="utf-8")
+    the same way test_charswap_render_method pins the worker's arm condition.
+
+    Read only the route, not the whole module: the condition has to be in THAT
+    function, and the wording of the 400 is prose that may be reworded without
+    breaking anything."""
+    import inspect
+
+    import image_platform
+    src = inspect.getsource(image_platform._import_scene_table_impl)
     assert "if not MOVIE_SECTION_ARM_SHIPPED and any(" in src
+    # The constant has to be inside that same condition — a latch that reads
+    # some OTHER method's name is not this latch. `):` closes the `any(...)`.
+    latch = src[src.index("if not MOVIE_SECTION_ARM_SHIPPED and any("):]
+    condition = latch[:latch.index("):") + 2]
+    assert "MOVIE_SECTION_RENDER_METHOD" in condition
     assert "render arm is not shipped yet" in src
-    assert "Wait for v959 Task 11 (v959)" in src
+
+
+# --- 3. the columns exist on both rows and serialise ------------------------
+
+def test_clip_row_has_face_ref_frames_column():
+    from models import Clip
+    assert "face_ref_frames_json" in Clip.__table__.columns
+
+
+def test_assignment_row_has_face_ref_node_ids_column():
+    from image_platform import ImageSceneAssignment
+    assert "face_ref_node_ids_json" in ImageSceneAssignment.__table__.columns
