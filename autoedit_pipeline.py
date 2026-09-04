@@ -1881,8 +1881,16 @@ def prepare_fixed_transcript(nocap: Path, template: str, windows, work: Path, pl
         print(f"[v960] transcript probe: one throwaway pycaps pass over "
               f"{nocap.name} to harvest the words before they are drawn",
               flush=True)
-        render_captions(nocap, probe, template,
-                        windows[0][2] if windows else -0.05)
+        try:
+            render_captions(nocap, probe, template,
+                            windows[0][2] if windows else -0.05)
+        finally:
+            # v960.3 — in a `finally`, not after the call. The probe is a
+            # FULL-SIZE mp4 we never wanted; leaving one behind per failed run
+            # fills the work directory with files nothing will ever clean up,
+            # and a caption render is exactly the stage that fails (a missing
+            # template, a pycaps upgrade, a video it cannot read).
+            probe.unlink(missing_ok=True)
     probe.unlink(missing_ok=True)            # the video was never the point
     if not raw_json.exists():
         raise AutoEditError(
@@ -2918,7 +2926,20 @@ TEXT_OVERLAY_STYLE = ("fontcolor=white:shadowcolor=black@0.55:shadowx=3:shadowy=
 def _drawtext_path(path) -> str:
     """A filesystem path inside a drawtext option. The drive-letter colon has to
     be escaped even inside the quotes, or ffmpeg drops the option and draws
-    nothing while still exiting 0."""
+    nothing while still exiting 0.
+
+    v960.3 — an apostrophe CANNOT be escaped here, so callers must not hand one
+    over. Every design was measured against a real render from a directory
+    called `it's a dir`: `\'` and the unquoted forms die in the filter parser
+    ("No option name near ..."), and the POSIX `'\''` dance parses but makes
+    ffmpeg open the wrong file — it drops the apostrophe and swallows the rest
+    of the option string. All of them drew 0 pixels.
+
+    So `render_text_overlays` passes BASENAMES and sets ffmpeg's working
+    directory instead (5534 pixels drawn from that same directory). This helper
+    still quotes and escapes the drive-letter colon, which is what a basename
+    or an apostrophe-free absolute path needs.
+    """
     return "'" + str(path).replace("\\", "/").replace(":", r"\:") + "'"
 
 
@@ -2936,13 +2957,20 @@ def text_overlay_plan(items):
         raise AutoEditError(f"{exc} (v960)")
 
 
-def text_overlay_filter(plan, textfiles):
+def text_overlay_filter(plan, textfiles, font_name=None):
     """The drawtext chain for a plan, given one written text file per item.
 
     Separated from the render so a test can assert the exact filter string
     without touching ffmpeg.
+
+    v960.3 — `textfiles` are BARE BASENAMES and `font_name` is the font's
+    basename, both resolved by ffmpeg against its working directory, which the
+    renderer sets. No directory path may enter this string: a parent directory
+    with an apostrophe in it breaks drawtext and no escaping fixes it (measured
+    — see `render_text_overlays`). `font_name=None` keeps the old absolute-path
+    behaviour for any caller that has not moved.
     """
-    font = _drawtext_path(TEXT_OVERLAY_FONT)
+    font = _drawtext_path(font_name or TEXT_OVERLAY_FONT)
     parts = []
     for item, tf in zip(plan, textfiles):
         enable = ""
@@ -2971,24 +2999,49 @@ def render_text_overlays(video_in, video_out, plan):
             f"The text-overlay font is missing: {font}. The overlays are drawn "
             f"in that typeface and there is no substitute (v960)")
     work = Path(video_out).parent
+    # v960.3 — the filter names its files by BARE BASENAME, with ffmpeg's cwd
+    # set to the directory holding them, so no directory path ever enters the
+    # filter string.
+    #
+    # Measured, because escaping was tried first and every design failed: a path
+    # containing an apostrophe (`C:\Users\O'Brien\...`) breaks drawtext, and
+    # there is no escape that fixes it. `\'` and unquoted forms die in the
+    # parser with "No option name near ...". The POSIX `'\''` dance parses but
+    # ffmpeg then opens the wrong file — it DROPS the apostrophe and swallows
+    # the rest of the option, so it tried to read a filename ending
+    # `...its a dir/line.txt:fontfile=C\:/Users/...`. Rendering a frame from
+    # such a directory: every escaper 0 bright pixels, cwd + basenames 5534.
+    #
+    # Input and output paths are argv, not filter text, so they stay absolute
+    # and need no care. Only the two filter-borne names move.
     textfiles = []
+    font_local = work / font.name
+    font_copied = False
     try:
         for i, item in enumerate(plan):
             tf = work / f"text_overlay_{i}.txt"
             tf.write_text(item["text"], encoding="utf-8")
             textfiles.append(tf)
-        vf = text_overlay_filter(plan, textfiles)
+        if not font_local.exists():
+            shutil.copy2(font, font_local)   # ~200 KB, beside the text files
+            font_copied = True
+        vf = text_overlay_filter(plan, [Path(t.name) for t in textfiles],
+                                 font_name=font_local.name)
         lines = "; ".join(f"{it['text']!r}@y{it['y']}" +
                           (f" from {it['from']}s" if it["from"] else "")
                           for it in plan)
         print(f"overlay: text — {len(plan)} line(s): {lines}", flush=True)
         Path(video_out).unlink(missing_ok=True)
-        run(["ffmpeg", "-v", "error", "-i", str(video_in), "-vf", vf,
+        run(["ffmpeg", "-v", "error", "-i", str(Path(video_in).resolve()),
+             "-vf", vf,
              "-c:v", "libx264", "-crf", "19", "-preset", "medium",
-             "-c:a", "copy", "-movflags", "+faststart", "-y", str(video_out)])
+             "-c:a", "copy", "-movflags", "+faststart", "-y",
+             str(Path(video_out).resolve())], cwd=str(work))
     finally:
         for tf in textfiles:
             tf.unlink(missing_ok=True)
+        if font_copied:
+            font_local.unlink(missing_ok=True)
     return Path(video_out)
 
 

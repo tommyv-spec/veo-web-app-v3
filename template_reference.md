@@ -20094,3 +20094,48 @@ derive both from the thing they describe.
 
 **Touched:** `code/main.py`, `code/tests/check_v960_2_worker_template_files.py`, this status line.
 Operator 2026-09-04.
+
+### v960.3 — three defects a post-deploy review found, and one it got wrong (2026-09-04)
+
+A `caveman:cavecrew-reviewer` pass over the shipped v773.1/v960/v960.1/v960.2 set returned three
+findings. Two were real, one had the wrong mechanism but a worthwhile fix underneath. All are in.
+
+**1. The drawtext filter carried a full directory path.** `_drawtext_path` quoted the path and escaped
+the drive-letter colon, but not an apostrophe — so a work directory like `C:\Users\O'Brien\...` would
+break the filter. Not an attack (our paths are a UUID work directory and a repo font) but a real
+portability bug on somebody else's machine, and drawtext reports it by drawing nothing while exiting 0.
+
+**No escaping fixes it, and this was measured, not reasoned about.** Rendering a frame from a directory
+literally named `it's a dir`, with five escaper designs: `\'` inside the quotes, the unquoted
+forms, and escape-everything all die in the filter parser with "No option name near ...". The POSIX
+`'\''` dance parses, and is worse — ffmpeg **drops the apostrophe and swallows the rest of the option
+string**, so it tried to open a file ending `...its a dir/line.txt:fontfile=C\:/Users/...`. All five
+drew **0** bright pixels.
+
+The fix removes the path from the filter instead of escaping it: `render_text_overlays` writes its text
+files into the work directory, copies the font in beside them, names both by BARE BASENAME, and runs
+ffmpeg with `cwd` set there. Same directory, same render: **5534** bright pixels. Input and output are
+argv rather than filter text, so they stay absolute and need no care. The copied font is removed
+afterwards, and only when that call is the one that copied it.
+
+**The shipped look is unchanged, re-measured on the real file** rather than assumed: re-burning the
+d74ab616 overlays through the new renderer reproduces the accepted file's numbers exactly — duration
+delta 0.000000 s, banner MAD 1.245, CTA-on 18.561, CTA-off 1.001.
+
+**2. The transcript probe leaked on failure.** `prepare_fixed_transcript` deleted its throwaway probe
+video after `render_captions` returned, so any exception left a full-size mp4 in the work directory
+that nothing would ever clean up — and a caption render is exactly the stage that fails (a missing
+template, a pycaps upgrade, a video it cannot read). Now in a `finally`.
+
+**3. `..` was NOT the traversal hole the review reported.** The claim was that a directory named `..`
+inside `caption_templates` would escape through the download route. It cannot: `Path.iterdir()` never
+yields `.` or `..`, and the filesystem refuses to create either name (`FileExistsError`) — both checked
+rather than argued. The finding still pointed at something real, because a **symlink** would escape,
+so `_autoedit_caption_template_files` now resolves each directory and skips anything landing outside
+`code/`, logging when it does. There are no symlinks there today; this keeps that true.
+
+**The general lesson, again:** a reviewer's mechanism and a reviewer's instinct are separate claims.
+Check the mechanism, and if it is wrong, still ask what the instinct was pointing at.
+
+**Touched:** `code/autoedit_pipeline.py`, `code/main.py`,
+`code/tests/check_v960_3_review_fixes.py`, this status line. Operator 2026-09-04.

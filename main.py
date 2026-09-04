@@ -21366,10 +21366,23 @@ def _autoedit_caption_template_files():
     a `README.md` beside them is documentation, not something the worker needs.
     """
     out = []
-    root = Path(__file__).parent / "caption_templates"
+    code_dir = Path(__file__).parent.resolve()
+    root = code_dir / "caption_templates"
     if not root.exists():
         return out
     for d in sorted(root.iterdir(), key=lambda p: p.name):
+        # v960.3 — containment, stated rather than assumed. `..` is NOT the
+        # hole a reviewer suspected: iterdir() never yields `.` or `..`, and the
+        # filesystem refuses to create a directory with either name. A SYMLINK
+        # is the real way out of this directory, so resolve and check. There are
+        # none today; this keeps it true if one ever appears.
+        try:
+            if code_dir not in d.resolve().parents:
+                print(f"[v960.3] caption template {d.name!r} resolves outside "
+                      f"code/ — not served to workers", flush=True)
+                continue
+        except OSError:                      # a broken link, or a name the OS refuses
+            continue
         if not (d / "pycaps.template.json").exists():
             continue
         for rel in ("pycaps.template.json", "styles.css",
