@@ -19840,3 +19840,181 @@ runs; the clip-editor "describe your edits" surface; a pixel check that the anch
 example), `wiki/patterns/conventions.md`, `wiki/meta/generate-video-checklist.md` §F, the four
 bundle scripts, `wiki/log.md`, `rules/v959.md` (generated). Plan:
 `docs/superpowers/plans/2026-09-04-movie-section-render-method.md`. Operator 2026-09-04.
+
+## v960 — THE BUILD DECLARES THE CAPTION WORDS AND THE BURNED OVERLAYS, AND THE CARD OBEYS IT (2026-09-04)
+
+**The ask, in the operator's words:** make the platform auto-edit produce the full source look on its
+own — the build declares the caption style, the casing rule, the brand word list, and the overlays
+with their timing, and the auto-edit card reads it. One click, same output.
+
+**What it replaced.** The accepted file
+(`output/autoedit-downloads/autoedit_d74ab616_source-style_captions_banner_cta.mp4`) took THREE
+steps: a platform auto-edit run, then `tools/fbads_caption_case.py` over its transcript, then
+`tools/fbads_burn_overlays.py` over the result. A platform run alone (`0605fe`) produced chunked
+korella captions reading "garnices" and no overlays at all.
+
+**Three gaps, and one of them was a v947 defect.**
+
+1. **The caption words.** pycaps transcribes the audio itself: it mishears the brand ("garnices"
+   for "garnissa's") and capitalises like a sentence, while the source ad's captions are lowercase
+   with a few exceptions (`decoded_sophie-founder-origin-047.md:43`). The build had no way to say
+   either thing.
+2. **The overlays.** `overlay_stage_plan` knows exactly one engine, `readcaption`, and all four of
+   its bullets are read-caption concepts. There was no way to declare plain burned text.
+3. **The card ignored the declaration.** `_queue_autoedit_impl` folded THREE keys — `template`,
+   `captions_enabled`, `overlay_spec` — into a side dict at the BOTTOM of the function, and every
+   other read (`req.trim_start_s`, `req.audio_enhance`, `req.hook_corner`, `placement`, `offset`)
+   came off the UNFOLDED request. So a declared `autoedit_*` field was applied only by the v947
+   auto-finish chain and was silently ignored when a person clicked the card. The export endpoint
+   never had this hole (it applies `_spec["export"]` on a manual export); the auto-edit one did.
+
+### The three new bullets
+
+```markdown
+- **captions:** garnissa
+- **autoedit_caption_case:** lower
+- **autoedit_caption_words:** {"garnices": "Garnissa's", "nora": "Nora"}
+- **autoedit_text_overlays:** [{"text": "Free", "y": 0.175, "size": 62}, {"text": "Get Yours Now", "y": 0.455, "size": 64, "from": 47.5}]
+```
+
+They ride the v947 `autoedit_*` namespace and cost **zero parser changes**:
+`_finishing_validate_prefixed` derives its known-field list from
+`set(AutoEditRequest.model_fields)`, so adding a field to `code/finishing_models.py` makes it
+declarable and pydantic-validated, and a typo in the bullet name hard-fails at import naming every
+field the model does know.
+
+**Considered and rejected: a new `overlay:` engine.** `overlay:` is validated against the hard-coded
+tuple `("none", "readcaption")` and every `overlay_*` bullet beside it belongs to an engine that
+MEASURES the subject and chooses placement. Burned banner text is the opposite — fixed pixels, fixed
+for the whole video, read off the source frames. Putting it in that family means editing the parser,
+reserving four more bullet names and teaching one bullet two engines. Recorded here so a later
+reader does not re-open it.
+
+**Field shapes** (pydantic enforces them; the rules themselves live in `autoedit_qc.py`, which is the
+module the local worker installs — `finishing_models.py` is not in `AUTOEDIT_WORKER_FILES`, so the
+rule has to sit on the worker's side of that line):
+
+| Field | Type | Absent means |
+|---|---|---|
+| `caption_case` | `Optional[Literal["lower"]]` | leave the transcript's own casing alone |
+| `caption_words` | `Optional[Dict[str, str]]` | no word fixes |
+| `text_overlays` | `Optional[List[Dict[str, Any]]]` | no burned overlays (the pre-v960 behaviour) |
+
+`caption_words` maps what pycaps **writes** to what it should **say**, matched case-insensitively on
+the word core with edge punctuation kept. One map covers both a mishearing and a proper noun's
+capital. `lower` is applied first and the map overrides it — the same order as the tool — and the
+I-forms (`i`, `i'm`, `i've`, `i'd`, `i'll`) stay built into `lower` because they are English, not
+per-build. **Its limit:** a mishearing that SPLITS one spoken word into two transcript words cannot
+be repaired by a word map.
+
+A text-overlay item takes `text` / `y` / `size` / `from` / `until` and nothing else. `y` is a
+**fraction of frame height**, never a raw ffmpeg expression — the renderer emits `y=h*<fraction>`,
+which removes a filter-injection surface and is easier to author than `h*0.175`. `size` is whole
+pixels **at the output height**: the reference numbers are for 1080x1920 and do not scale. Colour,
+font and shadow are constants measured off the source frames and pinned by test, the same discipline
+v944.1 applies to the read-caption constants.
+
+### Where each half runs
+
+**The caption fix runs BEFORE the captions are drawn.** `render_captions_dynamic` already had both
+halves: the first pycaps pass writes `<stem>.json`, and `--subtitle-data` replays a given JSON. So a
+declared plan triggers one throwaway **transcript probe** pass into
+`work/transcript_probe_<template>_<fp>.mp4`, purely to harvest its JSON; the fixes are applied to it;
+the video is deleted; every real pass is seeded with `work/transcript_fixed_<fp>_<digest>.json`. The
+pass name already folds the seed's fingerprint into `src_key` (v698A.2.5 review), so a pass burned
+from the raw transcript can never be reused for a corrected one. The raw probe JSON is cached under
+the video's fingerprint, so changing the word map does not re-transcribe.
+
+*Why a probe and not a transcribe-only call:* pycaps has no transcribe-only flag (`--preview` swaps
+in a dummy transcriber AND turns the JSON dump off), and its only importable transcribe-then-stop
+path — `CapsPipeline.prepare()` / `.transcribe()` / `.process_document()` — would mean rebuilding
+the CLI's own template resolution, including the working directory it needs for a local style,
+inside the worker process. One throwaway pass is the cheaper mistake.
+
+**The text overlays run AFTER the captions**, as a second overlay stage beside v944's. If a build
+ever declares both, **the order is fixed: read-caption first, then text.** Each stage copies the
+current output to one temp file and deletes it in a `finally`.
+
+**How the text reaches ffmpeg — `textfile=`, not an inlined `text='...'`.** This is the one
+deliberate difference from `tools/fbads_burn_overlays.py`, and it is measured, not preferred:
+rendering the same string through `textfile=` and through four different escapers and comparing the
+frames pixel by pixel, `textfile=` is right every time and **every escaper is wrong on an
+apostrophe** ("Don't Miss Out"). The text therefore never enters the filter string at all, so no
+separator is left in it that could break the chain. `expansion=none` is set for the same class of
+reason: with the default expansion a `%` in the text kills the whole drawtext filter **and ffmpeg
+still exits 0, drawing nothing**.
+
+### The card fold
+
+`derive_autoedit_defaults` gains the whole declared `autoedit` block, folded field by field in the
+rev-459 shape (declaration = default, an explicitly-sent field always wins, `model_fields_set` is
+what makes "explicit" real). `_queue_autoedit_impl` now folds **first** and **rebuilds the request**:
+`req = AutoEditRequest(**folded)`, with the caller's `model_fields_set` captured in a local before
+the rebuild resets it. Rebuilding is the whole point — patch a few variables instead and the fold is
+inert for every field except the ones you remembered to patch. Order matters twice more: `placement`
+and the `-0.45 <= offset <= 0.45` check run AFTER the fold (otherwise a declared offset reaches the
+renderer unchecked), and the hook-layout inheritance runs after it too, so a declared
+`hook_corner`/`hook_bg` suppresses the stored-run inheritance exactly as it does on the auto-finish
+chain.
+
+**Blast radius, measured before shipping.** Two builds in the tree declare any `autoedit_*` bullet
+and both declare only `autoedit_audio_enhance`. The auto-edit card sends eleven fields explicitly on
+every click (`template`, `placement`, `offset`, `trim_start_s`, `trim_end_s`, `pip_enabled`,
+`captions_enabled`, `chroma_similarity`, `chroma_blend`, `music_filename`, `music_db`), so the fold
+can never change those. It therefore newly reaches `audio_enhance`, `hook_corner`, `hook_bg` and the
+three new fields. `code/tests/check_v960_declaration_fold.py` asserts the eleven are still exactly
+eleven — if someone adds a field to the card, that measurement is stale and the test says so.
+
+**A gap this rule does NOT close.** `template` is one of those eleven, and the card's Caption style
+dropdown defaults to the LAST RUN's template, never to the job's declared `captions:`. So a declared
+`captions: garnissa` is overridden unless the dropdown already shows `garnissa`; the operator picks
+it once and it then sticks. Making the dropdown default to the declaration is a UI change and was
+out of scope here.
+
+### The regression contract
+
+A job that declares none of the new fields renders exactly as before: `normalize_repairs` keeps every
+pre-v960 key at its pre-v960 value and adds only the three new keys, all `None`; no plan means
+`subtitle_data=None`, which is the argument the caption stage passed before; no `text_overlays` means
+no second overlay stage and no extra ffmpeg pass. Proven by a local re-run of job `d74ab616` with
+`repairs={}`: `occupancy: cached`, **zero** new files in the work dir, QC READY.
+
+### The proof, on the delivered file
+
+Measured on the delivered MP4, never a stage log — the worker uploads only the video and the
+`qc_report` (`code/static/autoedit_worker.py`), so a correct transcript sidecar would prove the fix
+was COMPUTED, not that those words were BURNED. Run locally through the repo code, driven through
+`_queue_autoedit_impl` itself so the declaration travelled the real path:
+
+| # | Measurement | Result |
+|---|---|---|
+| 1 | Duration vs the reference | 54.291667s vs 54.291667s — difference **0.000000s** (limit 0.05) |
+| 2 | Caption words burned | brand reads `Garnissa's` at t=46.15; no `garnice` in any of three frames; every declared word read back in the declared case, **0 wrong-case** |
+| 3 | Same words as the reference file | identical declared-word lists at t=3.0 / 33.0 / 46.15 |
+| 4 | Banner from t=0 | MAD of the 0.14H-0.26H crop at t=1.0s: **1.245** (limit 6.0) |
+| 5 | Banner is really text | OCR reads `Free` and `Acrylic Painting Guide` |
+| 6 | CTA on at 48.5s | MAD **18.561** against the same frame of the pre-overlay control (needs >= 15); OCR reads both CTA lines |
+| 7 | CTA off at 46.5s | MAD **1.001** against the same control (limit 2.0); neither CTA line found |
+
+Checks 6 and 7 compare each frame against the **same timestamp of the pre-overlay cut**, not against
+each other: two different moments of a moving video differ even with no CTA burned at all, so only a
+same-timestamp control isolates the overlay. Checks 2 and 3 judge the caption against the words the
+corrected transcript says are on screen at that second, matched case-sensitively — stricter than
+string equality, because it fails on a wrong case, while OCR junk from the picture beside the caption
+plate can neither pass nor fail anything. (Plain string equality was tried first and is not usable
+here: the reference burns at a constant offset, centre 0.78H, and the new run plans dynamically,
+centre 0.70H, so the two crops carry different background.)
+
+**Positions are fractions of height and `size` is absolute pixels**, so a non-1080x1920 output moves
+the text and does not rescale it. Noted, not fixed.
+
+**Touched:** `code/finishing_models.py`, `code/autoedit_qc.py`, `code/main.py`,
+`code/autoedit_pipeline.py`, `code/tests/check_v960_caption_fixes.py`,
+`code/tests/check_v960_text_overlays.py`, `code/tests/check_v960_declaration_fold.py`,
+`tools/fbads_caption_case.py` + `tools/fbads_burn_overlays.py` (docstring pointers only — both stay
+on disk as the reference the constants were lifted from and the one-off fallback),
+`projects/fbads/learn-acrylic/videos/garnissa-acrylic-047-recreation-v4.md`, this section,
+`wiki/patterns/conventions.md`, `wiki/meta/build-rule-index.md`, `wiki/log.md`, `rules/v960.md`
+(generated). Plan:
+`docs/superpowers/plans/2026-09-04-autoedit-finishing-spec-from-the-build.md` (two Codex passes, six
+findings, all applied). Operator 2026-09-04.

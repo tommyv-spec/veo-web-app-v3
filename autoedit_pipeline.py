@@ -15,7 +15,7 @@ docs/experiments/autoedit-hook-composite-placement-2026-08-22.md.
 
 MUST stay importable on the Render server, where cv2 / faster_whisper / pycaps
 are NOT installed. Every one of those imports lives inside a function body —
-keep it that way. Only stdlib + argparse/json/os/shutil/subprocess/sys/pathlib
+keep it that way. Only stdlib + argparse/json/os/re/shutil/subprocess/sys/pathlib
 may be imported at module level.
 
 The local CLI wrapper is tools/capcut_autoedit.py (wiki repo) — it just calls
@@ -24,6 +24,7 @@ run_autoedit() below. This module is the moved-verbatim pipeline body.
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1745,6 +1746,165 @@ def _render_caption_pass(nocap: Path, out: Path, template: str, windows, work: P
 
 
 # ===========================================================================
+# v960 — THE SOURCE-LOOK CAPTION FIXES.
+#
+# pycaps transcribes the audio itself. It mishears a brand name ("garnices" for
+# "garnissa's") and capitalises like a sentence, while the source ad's captions
+# are lowercase with a few exceptions. Both were fixed by hand after every
+# render (tools/fbads_caption_case.py); the build now SAYS them and the run
+# applies them itself.
+#
+# The fix has to land between "pycaps transcribed the audio" and "pycaps drew
+# the captions", and render_captions_dynamic already has both halves: the first
+# pass writes <stem>.json, and `subtitle_data=` replays a given JSON. So: one
+# throwaway probe pass harvests the raw transcript, the fixes are applied to it,
+# and every real pass replays the corrected file. The pass name already folds
+# the seed's fingerprint into `src_key` (v698A.2.5 review), so a pass burned
+# from the raw transcript can never be reused for a corrected one.
+#
+# The word walk is tools/fbads_caption_case.py's, moved here verbatim in
+# behaviour: strip the punctuation at the edges, decide on the lowercase core,
+# put the punctuation back. The tool stays on disk as the reference and the
+# one-off fallback.
+# ===========================================================================
+
+# English, not per-build: a build should not have to list these to get "I" back.
+CAPTION_I_FORMS = {"i": "I", "i'm": "I'm", "i've": "I've", "i'd": "I'd",
+                   "i'll": "I'll"}
+_CAPTION_EDGE_RE = re.compile(r"^[^\w']+|[^\w']+$")
+
+
+def caption_fix_plan(case, words):
+    """v960 — the transcript fix, or None when the build declared neither.
+
+    Pure: no files, no ffmpeg. `None` out means the caption stage runs exactly
+    the calls it ran before this rule existed, which is the regression contract.
+    """
+    from autoedit_qc import validate_caption_case, validate_caption_words
+    try:
+        case = validate_caption_case(case)
+        words = validate_caption_words(words)
+    except ValueError as exc:
+        raise AutoEditError(f"{exc} (v960)")
+    if not case and not words:
+        return None
+    return {"case": case, "words": dict(words or {})}
+
+
+def caption_fix_digest(plan):
+    """A short stable name for one plan, so the fixed transcript is cached
+    under everything baked into it (§v938.1)."""
+    payload = json.dumps({"case": plan["case"], "words": plan["words"]},
+                         sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
+
+
+def fix_caption_word(text, plan):
+    """One transcript word, corrected. Returns the ORIGINAL when nothing applies.
+
+    Order is the tool's: the map wins, then the `lower` rule, and the I-forms
+    are part of `lower`. Edge punctuation is preserved.
+    """
+    core = _CAPTION_EDGE_RE.sub("", text or "")
+    key = core.lower()
+    if key in plan["words"]:
+        new = plan["words"][key]
+    elif plan["case"] == "lower":
+        new = CAPTION_I_FORMS.get(key, core.lower())
+    else:
+        return text
+    if new == core:
+        return text
+    lead = text[: len(text) - len(text.lstrip("\"'(["))]
+    trail = text[len(text.rstrip(".,!?;:\"')]")):]
+    if lead + core + trail == text:
+        return lead + new + trail
+    # The lead/trail split only knows the punctuation the corpus carries (the
+    # tool's own two sets). On anything else — an em dash, an ellipsis — the
+    # naive rebuild would DROP characters, so replace the core in place instead.
+    return text.replace(core, new, 1) if core else text
+
+
+def apply_caption_fixes(data, plan):
+    """Walk segments[].lines[].words[].text. Returns (new document, changed).
+
+    The input is not touched; the copy is what gets written and seeded.
+    """
+    if plan is None:
+        return data, 0
+    out = json.loads(json.dumps(data))       # JSON in, JSON out: a real deep copy
+    changed = 0
+    for segment in out.get("segments") or []:
+        for line in segment.get("lines") or []:
+            for word in line.get("words") or []:
+                old = word.get("text", "")
+                new = fix_caption_word(old, plan)
+                if new != old:
+                    word["text"] = new
+                    changed += 1
+    return out, changed
+
+
+def caption_words_of(data):
+    """Every word text in a pycaps subtitle document, in order."""
+    return [w.get("text", "")
+            for s in data.get("segments") or []
+            for line in s.get("lines") or []
+            for w in line.get("words") or []]
+
+
+def prepare_fixed_transcript(nocap: Path, template: str, windows, work: Path, plan):
+    """v960 — harvest the transcript, correct it, hand back the file to seed.
+
+    `plan is None` returns None and the caller passes `subtitle_data=None`,
+    which is what it passed before this rule existed.
+
+    The probe is a full pycaps pass whose VIDEO is thrown away — pycaps has no
+    transcribe-only flag, and its only importable transcribe-then-stop path
+    (CapsPipeline.prepare/transcribe/process_document) would mean rebuilding the
+    CLI's own template resolution, including the cwd it needs for a local style,
+    inside the worker process. One throwaway pass is the cheaper mistake. The
+    raw transcript is cached under the video's fingerprint, so a re-run with a
+    different word map does not re-transcribe.
+    """
+    if plan is None:
+        return None
+    if caption_engine() != "pycaps":
+        raise AutoEditError(
+            "This build declares caption_case/caption_words, and only the pycaps "
+            "renderer can replay a corrected transcript. The libass fallback "
+            "would silently ship the misheard words instead (v960)")
+    fp = file_fingerprint(nocap)
+    probe = work / f"transcript_probe_{template}_{fp}.mp4"
+    raw_json = probe.with_suffix(".json")
+    if not raw_json.exists():
+        print(f"[v960] transcript probe: one throwaway pycaps pass over "
+              f"{nocap.name} to harvest the words before they are drawn",
+              flush=True)
+        render_captions(nocap, probe, template,
+                        windows[0][2] if windows else -0.05)
+    probe.unlink(missing_ok=True)            # the video was never the point
+    if not raw_json.exists():
+        raise AutoEditError(
+            f"pycaps did not write a transcript beside {probe.name} — the "
+            f"declared caption fixes cannot be applied (v960)")
+
+    raw = json.loads(raw_json.read_text(encoding="utf-8"))
+    fixed, changed = apply_caption_fixes(raw, plan)
+    total = len(caption_words_of(raw))
+    dest = work / f"transcript_fixed_{fp}_{caption_fix_digest(plan)}.json"
+    dest.write_text(json.dumps(fixed, ensure_ascii=False, indent=1),
+                    encoding="utf-8")
+    before, after = caption_words_of(raw), caption_words_of(fixed)
+    examples = [f"{b!r}->{a!r}" for b, a in zip(before, after) if b != a][:6]
+    print(f"[v960] caption fixes: {changed} of {total} words changed "
+          f"(case={plan['case'] or 'as-is'}, {len(plan['words'])} word rule(s)) "
+          f"-> {dest.name}" + (f"; e.g. {', '.join(examples)}" if examples else ""),
+          flush=True)
+    return dest
+
+
+# ===========================================================================
 # v944 — THE READ-CAPTION TEXT OVERLAY.
 #
 # Ported from tools/readcaption_overlay.py, which was the proven local tool and
@@ -2724,6 +2884,114 @@ def render_readcaption_overlay(video_in, video_out, plan):
     return Path(video_out)
 
 
+# ===========================================================================
+# v960 — THE BURNED TEXT OVERLAYS (the banner and the CTA card).
+#
+# A SECOND overlay engine beside v944's read-caption one, not a mode of it.
+# The read-caption engine MEASURES the subject and chooses placement; this one
+# is the opposite — fixed pixels, fixed for the whole video, read off the source
+# frames. Both can run on one video; the order is read-caption first, then this,
+# and that order is fixed so the second never looks like a bug.
+#
+# The constants are lifted verbatim from tools/fbads_burn_overlays.py, the tool
+# that produced the accepted file. The one deliberate difference is HOW the text
+# reaches ffmpeg: the tool inlines it as `text='...'`, which is measurably wrong
+# for any text carrying an apostrophe or a colon. Rendering the same string
+# through `textfile=` and through four different escapers and comparing the
+# frames pixel by pixel: `textfile=` is right every time, and every escaper is
+# wrong on an apostrophe ("Don't Miss Out"). So the text goes to ffmpeg in a
+# file and never enters the filter string at all — there is no separator left
+# to break the chain. `expansion=none` makes `%` and `{}` literal for the same
+# reason: with the default expansion a `%` in the text kills the whole drawtext
+# filter and ffmpeg still exits 0, drawing nothing.
+# ===========================================================================
+
+TEXT_OVERLAY_FONT = str(TEMPLATES_DIR / "korella" / "resources" /
+                        "Montserrat-ExtraBold.ttf")
+# White bold with a soft shadow and a hairline border — the source ad's banner,
+# measured off its frames. NOT declarable in v1: same discipline as v944.1's
+# read-caption constants.
+TEXT_OVERLAY_STYLE = ("fontcolor=white:shadowcolor=black@0.55:shadowx=3:shadowy=3"
+                      ":borderw=1:bordercolor=black@0.35")
+
+
+def _drawtext_path(path) -> str:
+    """A filesystem path inside a drawtext option. The drive-letter colon has to
+    be escaped even inside the quotes, or ffmpeg drops the option and draws
+    nothing while still exiting 0."""
+    return "'" + str(path).replace("\\", "/").replace(":", r"\:") + "'"
+
+
+def text_overlay_plan(items):
+    """v960 — the burned text overlays, validated hard. None in, None out.
+
+    Pure: no files, no ffmpeg. Shares one validator with normalize_repairs and
+    the request model, so the build, the endpoint and the worker cannot disagree
+    about what is legal.
+    """
+    from autoedit_qc import validate_text_overlays
+    try:
+        return validate_text_overlays(items)
+    except ValueError as exc:
+        raise AutoEditError(f"{exc} (v960)")
+
+
+def text_overlay_filter(plan, textfiles):
+    """The drawtext chain for a plan, given one written text file per item.
+
+    Separated from the render so a test can assert the exact filter string
+    without touching ffmpeg.
+    """
+    font = _drawtext_path(TEXT_OVERLAY_FONT)
+    parts = []
+    for item, tf in zip(plan, textfiles):
+        enable = ""
+        if item["from"] > 0 and item["until"] is not None:
+            enable = (f":enable='between(t,{item['from']},{item['until']})'")
+        elif item["from"] > 0:
+            enable = f":enable='gte(t,{item['from']})'"
+        elif item["until"] is not None:
+            enable = f":enable='lt(t,{item['until']})'"
+        parts.append(
+            f"drawtext=textfile={_drawtext_path(tf)}:fontfile={font}:"
+            f"{TEXT_OVERLAY_STYLE}:fontsize={item['size']}:"
+            f"x=(w-text_w)/2:y=h*{item['y']}:expansion=none{enable}")
+    return ",".join(parts)
+
+
+def render_text_overlays(video_in, video_out, plan):
+    """Burn the declared banner/CTA text onto a finished cut.
+
+    One ffmpeg pass for every item, audio copied through untouched.
+    """
+    font = Path(TEXT_OVERLAY_FONT)
+    if not font.exists():
+        # A clear message naming the file beats an ffmpeg error about a filter.
+        raise AutoEditError(
+            f"The text-overlay font is missing: {font}. The overlays are drawn "
+            f"in that typeface and there is no substitute (v960)")
+    work = Path(video_out).parent
+    textfiles = []
+    try:
+        for i, item in enumerate(plan):
+            tf = work / f"text_overlay_{i}.txt"
+            tf.write_text(item["text"], encoding="utf-8")
+            textfiles.append(tf)
+        vf = text_overlay_filter(plan, textfiles)
+        lines = "; ".join(f"{it['text']!r}@y{it['y']}" +
+                          (f" from {it['from']}s" if it["from"] else "")
+                          for it in plan)
+        print(f"overlay: text — {len(plan)} line(s): {lines}", flush=True)
+        Path(video_out).unlink(missing_ok=True)
+        run(["ffmpeg", "-v", "error", "-i", str(video_in), "-vf", vf,
+             "-c:v", "libx264", "-crf", "19", "-preset", "medium",
+             "-c:a", "copy", "-movflags", "+faststart", "-y", str(video_out)])
+    finally:
+        for tf in textfiles:
+            tf.unlink(missing_ok=True)
+    return Path(video_out)
+
+
 def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
                  placement: str = "dynamic", offset: float | None = None,
                  progress=lambda stage: None, repairs=None) -> Path:
@@ -2749,6 +3017,10 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
     # operator said must never happen. So when the hook is recomposited, scan
     # what the viewer will actually see.
     occ_src = nocap if repairs.get("hook_corner") else base
+    # v960 — the declared transcript fixes. None when the build declared
+    # neither, and then every call below is the call it was before this rule.
+    _cap_plan = caption_fix_plan(repairs.get("caption_case"),
+                                 repairs.get("caption_words"))
     if repairs["captions_enabled"] and placement == "dynamic" and offset is None:
         # The cache name records WHICH video was scanned. It used to key on the
         # trim values alone, so switching sources would have silently reused the
@@ -2765,12 +3037,16 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
             buckets = build_occupancy(occ_src, dur)
         occ_file.write_text(json.dumps(buckets))
         windows = plan_caption_windows(buckets, chin, segs, pip_y, dur)
-        _render_caption_pass(nocap, out, template, windows, work, dur, audio)
+        _seed = prepare_fixed_transcript(nocap, template, windows, work, _cap_plan)
+        _render_caption_pass(nocap, out, template, windows, work, dur, audio,
+                             subtitle_data=_seed)
     elif repairs["captions_enabled"]:
         buckets = build_occupancy(occ_src, dur)
         chosen_offset = offset if offset is not None else auto_offset
         windows = [(0.0, dur, chosen_offset)]
-        _render_caption_pass(nocap, out, template, windows, work, dur, audio)
+        _seed = prepare_fixed_transcript(nocap, template, windows, work, _cap_plan)
+        _render_caption_pass(nocap, out, template, windows, work, dur, audio,
+                             subtitle_data=_seed)
     else:
         out.unlink(missing_ok=True)
         shutil.copy2(nocap, out)
@@ -2792,6 +3068,24 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
             render_readcaption_overlay(pre, out, _rc_plan)
         finally:
             pre.unlink(missing_ok=True)      # disk-bounded: one temp, deleted
+
+    # v960 — the declared burned TEXT overlays, after the read-caption stage.
+    # Same shape: guarded on the declaration, one temp file, deleted in a
+    # finally, and it burns onto the delivered artifact so the quality check
+    # below measures what actually shipped (§v938.1).
+    #
+    # THE ORDER IS FIXED: read-caption first, then text. A build that declares
+    # both gets the banner drawn over the read-caption block, never under it.
+    _tx_plan = text_overlay_plan((repairs or {}).get("text_overlays"))
+    if _tx_plan is not None:
+        progress("overlay")
+        pre = work / "text_overlay_input.mp4"
+        pre.unlink(missing_ok=True)
+        shutil.copy2(out, pre)
+        try:
+            render_text_overlays(pre, out, _tx_plan)
+        finally:
+            pre.unlink(missing_ok=True)
 
     if repairs["captions_enabled"] and not buckets:
         buckets = build_occupancy(occ_src, dur)

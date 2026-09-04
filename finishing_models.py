@@ -5,8 +5,21 @@ build markdown's declared ## Finishing export_*/autoedit_* fields against the
 REAL models instead of a hand-maintained copy that would drift (the v892.2
 lesson). main.py imports them from here; behavior is unchanged.
 """
-from typing import Any, Dict, Literal, Optional
-from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, Field, field_validator
+
+# v960 — the text-overlay item rule lives in autoedit_qc, not here, and this
+# module imports it rather than owning a copy. Direction matters: autoedit_qc
+# is the pure module the LOCAL WORKER installs (main.AUTOEDIT_WORKER_FILES
+# ships autoedit_qc.py and NOT finishing_models.py), so the rule has to sit on
+# the worker's side of that line or the worker could not validate a run it was
+# handed. autoedit_qc imports nothing but pathlib, so this edge is one-way and
+# free.
+from autoedit_qc import (
+    validate_caption_case,
+    validate_caption_words,
+    validate_text_overlays,
+)
 
 
 class ExportSettings(BaseModel):
@@ -127,6 +140,45 @@ class AutoEditRequest(BaseModel):
     # imported before v944 (nothing declared, nothing to derive) can still be
     # re-finished with an overlay without re-importing the build.
     overlay_spec: Optional[Dict[str, Any]] = None
+    # v960 — the source look, said by the BUILD rather than fixed by hand after
+    # the render. Three separate gaps, three fields:
+    #
+    #   caption_case  — pycaps capitalises like a sentence; the source ad's
+    #                   captions are lowercase except the I-forms and a few
+    #                   proper nouns. "lower" applies that rule to the
+    #                   transcript BEFORE the captions are drawn.
+    #   caption_words — pycaps transcribes the audio itself and mishears the
+    #                   brand ("garnices" for "garnissa's"). This maps what it
+    #                   WRITES to what it should SAY, matched case-insensitively
+    #                   on the word core with edge punctuation kept. One map
+    #                   covers both a mishearing and a proper noun's capital.
+    #                   LIMIT: a mishearing that splits one spoken word into TWO
+    #                   transcript words cannot be repaired by a word map.
+    #   text_overlays — burned banner/CTA text: {"text", "y", "size", "from",
+    #                   "until"}. `y` is a fraction of frame height; `size` is
+    #                   pixels at the OUTPUT height (the reference numbers are
+    #                   for 1080x1920 and do not scale). Colour, font and shadow
+    #                   are constants, not declarable.
+    #
+    # Absent = today's behaviour, which is the regression contract.
+    caption_case: Optional[Literal["lower"]] = None
+    caption_words: Optional[Dict[str, str]] = None
+    text_overlays: Optional[List[Dict[str, Any]]] = None
+
+    @field_validator("caption_case")
+    @classmethod
+    def _v960_caption_case(cls, v):
+        return validate_caption_case(v)
+
+    @field_validator("caption_words")
+    @classmethod
+    def _v960_caption_words(cls, v):
+        return validate_caption_words(v)
+
+    @field_validator("text_overlays")
+    @classmethod
+    def _v960_text_overlays(cls, v):
+        return validate_text_overlays(v)
 
 
 def skip_start_trim(*, smart_trim, trim_cut_scene_starts, has_lineup, pos,

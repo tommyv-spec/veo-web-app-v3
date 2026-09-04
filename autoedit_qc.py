@@ -51,11 +51,125 @@ DEFAULT_REPAIRS = {
     # and the local one each hand it straight back to run_autoedit), so there
     # is nothing to migrate and nothing new to keep in sync.
     "overlay_spec": None,
+    # v960 — the source look, declared by the build.
+    #   caption_case  : "lower" applies the source ad's casing rule to every
+    #                   transcribed word before the captions are drawn.
+    #   caption_words : what pycaps WRITES -> what it should SAY, so a misheard
+    #                   brand ("garnices") and a proper noun's capital are one
+    #                   map instead of a hand edit after the render.
+    #   text_overlays : burned banner/CTA text with fractional positions and a
+    #                   start time. A second overlay engine beside v944's
+    #                   read-caption one, running after it.
+    # All three None = every run that existed before this key, unchanged.
+    "caption_case": None,
+    "caption_words": None,
+    "text_overlays": None,
 }
 
 HOOK_BG_EXTENSIONS = {".mp4", ".mov", ".png", ".jpg", ".jpeg", ".webp"}
 
 MUSIC_EXTENSIONS = {".aac", ".m4a", ".mp3", ".mp4", ".wav"}
+
+# v960 — the only keys a text-overlay item may carry. Deliberately closed:
+# colour, font and shadow are the constants measured off the source frames and
+# pinned by test, the same discipline v944.1 applies to the read-caption ones.
+TEXT_OVERLAY_KEYS = ("text", "y", "size", "from", "until")
+
+
+def validate_caption_case(value):
+    """v960 — the casing rule for the burned captions. None = leave it alone."""
+    if value in (None, ""):
+        return None
+    v = str(value).strip().lower()
+    if v != "lower":
+        raise ValueError(
+            "caption_case must be 'lower' (the source ad's rule: all-lowercase "
+            "except the I-forms and the words caption_words names), or omitted")
+    return v
+
+
+def validate_caption_words(value):
+    """v960 — the word map. Keys are lowercased: the match is case-insensitive
+    on the word core, so a build declares the fix once and it lands wherever
+    pycaps happened to capitalise it."""
+    if value in (None, "", {}):
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(
+            "caption_words must be an object mapping what the transcript says "
+            "to what it should say, e.g. {\"garnices\": \"Garnissa's\"}")
+    out = {}
+    for key, replacement in value.items():
+        k = str(key).strip().lower()
+        if not k:
+            raise ValueError("caption_words has an empty key")
+        v = str(replacement).strip()
+        if not v:
+            raise ValueError(f"caption_words[{key!r}] has no replacement text")
+        out[k] = v
+    return out
+
+
+def validate_text_overlays(value):
+    """v960 — the burned text overlays, validated HERE so a bad item dies at
+    queue time rather than halfway through an ffmpeg pass.
+
+    `y` is a FRACTION of frame height, never a raw ffmpeg expression: the
+    renderer emits `y=h*<fraction>`, which removes a filter-injection surface
+    and is easier to author than `h*0.175`. `size` is whole pixels at the
+    OUTPUT height — the reference numbers are for 1080x1920 and do not scale.
+    """
+    if value in (None, "", [], ()):
+        return None
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(
+            "text_overlays must be a list of overlay items, or omitted for none")
+    out = []
+    for i, item in enumerate(value):
+        where = f"text_overlays[{i}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{where} must be an object with "
+                             f"{', '.join(TEXT_OVERLAY_KEYS)}")
+        unknown = sorted(set(item) - set(TEXT_OVERLAY_KEYS))
+        if unknown:
+            raise ValueError(
+                f"{where} has unknown key(s): {', '.join(unknown)}. "
+                f"Known: {', '.join(TEXT_OVERLAY_KEYS)}")
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"{where}.text must be a non-empty string")
+        try:
+            y = float(item["y"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(
+                f"{where}.y must be a number: the fraction of frame height the "
+                f"text sits at (0.0 top, 1.0 bottom)")
+        if not 0.0 <= y <= 1.0:
+            raise ValueError(f"{where}.y must be between 0.0 and 1.0 (got {y})")
+        try:
+            size = int(item["size"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError(f"{where}.size must be a whole number of pixels")
+        if not 8 <= size <= 300:
+            raise ValueError(
+                f"{where}.size must be between 8 and 300 pixels (got {size})")
+        clean = {"text": text, "y": y, "size": size, "from": 0.0, "until": None}
+        for key in ("from", "until"):
+            if item.get(key) in (None, ""):
+                continue
+            try:
+                t = float(item[key])
+            except (TypeError, ValueError):
+                raise ValueError(f"{where}.{key} must be a number of seconds")
+            if t < 0:
+                raise ValueError(f"{where}.{key} cannot be negative (got {t})")
+            clean[key] = t
+        if clean["until"] is not None and clean["until"] <= clean["from"]:
+            raise ValueError(
+                f"{where}.until ({clean['until']}) must be later than "
+                f"from ({clean['from']})")
+        out.append(clean)
+    return out or None
 
 
 def normalize_repairs(value=None):
@@ -168,6 +282,13 @@ def normalize_repairs(value=None):
                 raise ValueError("Overlay pitch must sit between 30 and 120 spec units")
             clean["overlay_pitch"] = pitch_i
         out["overlay_spec"] = clean
+
+    # v960 — the three source-look keys, through the SAME validators the
+    # request model uses, so the declaration, the endpoint and the worker can
+    # never disagree about what is legal.
+    out["caption_case"] = validate_caption_case(out.get("caption_case"))
+    out["caption_words"] = validate_caption_words(out.get("caption_words"))
+    out["text_overlays"] = validate_text_overlays(out.get("text_overlays"))
 
     out["pip_enabled"] = bool(out["pip_enabled"])
     out["captions_enabled"] = bool(out["captions_enabled"])

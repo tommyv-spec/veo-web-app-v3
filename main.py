@@ -15321,6 +15321,18 @@ def derive_autoedit_defaults(req_dict, spec, request_was_explicit):
             out.setdefault("overlay_spec", None)
         return out
 
+    # v960 — the declared `autoedit_*` block, folded field by field, in the SAME
+    # inheritance shape: the declaration is a default, an explicitly-sent field
+    # always wins. It sits ABOVE the captions/overlay derive because that block
+    # can return early, and because the two can never collide: the parser
+    # RESERVES template/captions_enabled/overlay_spec out of the `autoedit_`
+    # namespace (image_platform.parse_finishing_section), so a declaration can
+    # never name one of them.
+    for field, value in (spec.get("autoedit") or {}).items():
+        if field in request_was_explicit:
+            continue
+        out[field] = value
+
     captions = str(spec.get("captions") or "none").lower()
     if "captions_enabled" not in request_was_explicit:
         out["captions_enabled"] = captions != "none"
@@ -15344,6 +15356,55 @@ def _queue_autoedit_impl(db, job, req: AutoEditRequest, user_id):
     import uuid as _uuid
 
     job_id = job.id
+
+    # v944/v947/v960 — the BUILD's declared finishing supplies the defaults.
+    # This is the whole root cause of the de7f9331 finish: the auto-edit ran
+    # with template=korella / captions_enabled=True because nothing in the job
+    # said otherwise, and the build had agreed on an overlay and no captions.
+    # Same inheritance shape as the hook layout below: declaration = default,
+    # an explicitly-sent field always wins. `model_fields_set` is what makes
+    # "explicit" real — a value that merely equals the default is not a choice.
+    #
+    # v960 — the fold is the FIRST thing this function does, and it REBUILDS
+    # `req`. Before that it folded three keys into a side dict at the bottom,
+    # so every other read below (`req.trim_start_s`, `req.audio_enhance`,
+    # `req.hook_corner`, and the placement/offset lines that used to sit right
+    # here) came off the UNFOLDED request — a declared `autoedit_*` field was
+    # applied only by the auto-finish chain and silently ignored when a person
+    # clicked the ✂️ Auto-Edit card. Rebuilding is what makes every later read
+    # see the declaration for free; the export endpoint never had this hole.
+    # Order matters twice over: `placement` and the offset RANGE CHECK must run
+    # AFTER the fold, or a declared offset would reach the renderer unchecked;
+    # and the hook-layout inheritance must run after it too, so a declared
+    # hook_corner/hook_bg suppresses the stored-run inheritance (the v947 rule:
+    # that check is on the VALUES, not on `model_fields_set`).
+    _v944_spec = None
+    if getattr(job, "finishing_spec", None):
+        try:
+            _v944_spec = json.loads(job.finishing_spec)
+        except (ValueError, TypeError):
+            # A corrupt stored value degrades to "declared nothing" rather than
+            # blocking a re-finish. It was validated at import; if it is broken
+            # now, the import is the thing to fix.
+            print(f"[v944] job={job_id[:8]} finishing_spec is not valid JSON — ignored",
+                  flush=True)
+    # Rebuilding resets `model_fields_set`, so capture "what the caller sent"
+    # BEFORE it, not after.
+    _explicit = set(req.model_fields_set)
+    _folded = derive_autoedit_defaults(req.model_dump(), _v944_spec,
+                                       request_was_explicit=_explicit)
+    try:
+        req = AutoEditRequest(**_folded)
+    except Exception as exc:
+        # FAIL CLOSED. The declaration was validated at import through this same
+        # model, so this only fires on a stored spec that no longer matches the
+        # model — rendering with settings the build never asked for is the exact
+        # v944 failure class this feature exists to kill.
+        raise HTTPException(
+            status_code=400,
+            detail=f"The build's declared auto-edit settings are not valid for "
+                   f"this platform version ({str(exc)[:200]}) — re-import the build")
+
     placement = "constant" if req.offset is not None else req.placement
     if req.offset is not None and not -0.45 <= req.offset <= 0.45:
         raise HTTPException(
@@ -15379,37 +15440,18 @@ def _queue_autoedit_impl(db, job, req: AutoEditRequest, user_id):
             except (ValueError, TypeError):
                 pass
 
-    # v944 — the BUILD's declared finishing supplies the defaults. This is the
-    # whole root cause of the de7f9331 finish: the auto-edit ran with
-    # template=korella / captions_enabled=True because nothing in the job said
-    # otherwise, and the build had agreed on an overlay and no captions.
-    # Same inheritance shape as the hook layout above: declaration = default,
-    # an explicitly-sent field always wins. `model_fields_set` is what makes
-    # "explicit" real — a value that merely equals the default is not a choice.
-    _v944_spec = None
-    if getattr(job, "finishing_spec", None):
-        try:
-            _v944_spec = json.loads(job.finishing_spec)
-        except (ValueError, TypeError):
-            # A corrupt stored value degrades to "declared nothing" rather than
-            # blocking a re-finish. It was validated at import; if it is broken
-            # now, the import is the thing to fix.
-            print(f"[v944] job={job_id[:8]} finishing_spec is not valid JSON — ignored",
-                  flush=True)
-    _v944 = derive_autoedit_defaults(
-        {
-            "template": req.template,
-            "captions_enabled": req.captions_enabled,
-            "overlay_spec": req.overlay_spec,
-        },
-        _v944_spec,
-        request_was_explicit=req.model_fields_set,
-    )
-    template = _v944["template"]
+    # Everything below reads the FOLDED request built at the top of this
+    # function — that is what carries the build's declaration into the run.
+    template = req.template
     if _v944_spec is not None:
+        _folded_names = sorted(k for k in (_v944_spec.get("autoedit") or {})
+                               if k not in _explicit)
         print(f"[v944] job={job_id[:8]} finishing declared {_v944_spec} -> "
-              f"template={template} captions={_v944['captions_enabled']} "
-              f"overlay={'readcaption' if _v944['overlay_spec'] else 'none'}",
+              f"template={template} captions={req.captions_enabled} "
+              f"overlay={'readcaption' if req.overlay_spec else 'none'} "
+              f"placement={placement} offset={req.offset} "
+              f"[v960] autoedit fields folded: "
+              f"{', '.join(_folded_names) if _folded_names else 'none'}",
               flush=True)
     _autoedit_validate(template, placement)
 
@@ -15418,7 +15460,7 @@ def _queue_autoedit_impl(db, job, req: AutoEditRequest, user_id):
             "trim_start_s": req.trim_start_s,
             "trim_end_s": req.trim_end_s,
             "pip_enabled": req.pip_enabled,
-            "captions_enabled": _v944["captions_enabled"],
+            "captions_enabled": req.captions_enabled,
             "chroma_similarity": req.chroma_similarity,
             "chroma_blend": req.chroma_blend,
             "music_filename": req.music_filename,
@@ -15426,10 +15468,20 @@ def _queue_autoedit_impl(db, job, req: AutoEditRequest, user_id):
             "audio_enhance": req.audio_enhance,
             "hook_corner": hook_corner_req,
             "hook_bg": hook_bg_req,
-            "overlay_spec": _v944["overlay_spec"],
+            "overlay_spec": req.overlay_spec,
+            # v960 — the source look.
+            "caption_case": req.caption_case,
+            "caption_words": req.caption_words,
+            "text_overlays": req.text_overlays,
         })
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    # v960 TEMP diagnostic — remove once operator-side evidence lands that a
+    # card click carries the build's declaration into the render.
+    print(f"[v960 TEMP] job={job_id[:8]} caption_case={repairs['caption_case']} "
+          f"caption_words={len(repairs['caption_words'] or {})} "
+          f"text_overlays={len(repairs['text_overlays'] or [])} "
+          f"audio_enhance={repairs['audio_enhance']}", flush=True)
 
     # Serializes concurrent queue attempts (the v947 chain, an operator click,
     # a sweeper double-completion): the can_queue read below is check-then-act,
