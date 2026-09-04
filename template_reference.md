@@ -6184,6 +6184,8 @@ For each scene in the new authored sequence:
 
 **Status update (v698A.2.2, 2026-09-04 13:20): PROVEN on `d74ab616` export `437bb977`.** Measured on the delivered `final_broll_*_86f08b.mp4` against the assembler's own `clip_details.target_start`: 15 of 16 cuts within +0.002…+0.040 s, flat along the whole 54 s (the drift was +0.04 → +0.35 s and growing); the 16th, +0.082 s at 32.73 s, is the designed seam where sentence 5's mapped on-camera window starts inside the previous word-measured container's end (the later clip starts at the cursor). `stats.frame_plan = {asked 1308, got 1308, repaired 0, skipped []}`, `method=words` 7/7, no `v698a_broll_error`. Known, not fixed: the b-roll CONTAINER is still 0.172 s longer than the speaker's (1303 vs 1295 video frames, `v698a_broll_length_mismatch` still true) because `speaker_master_audio` is an MP3 whose encoder padding outlives the speaker's audio and the mux ends on it; the video timeline itself ends where the speaker's audio ends (1303 frames = 54.29 s vs 54.27 s). Fix when wanted: mux the b-roll with `-t <speaker duration>` or extract the master audio losslessly (v698A.2.3, not started).
 
+**v698A.3 (same day) — the review page shows B-roll in its own section; no pairing cards.** Operator 13:40: *"the UI is still confusing with the pairing of the brolls — they should just be in a different section of the page, called brolls"*. Pattern taken from the tools people already know (Descript keeps b-roll on a separate Layer lane above the main track; every NLE keeps it on V2; NN/g: a bounded region is the strongest grouping cue): the clips panel is now an **A-roll grid** (spoken takes and text cards — byte-identical markup for a job with no cutaways) followed, only when the job has `visual_pair` clips, by a **🎬 B-roll (N)** section: the cutaways in timeline order, grouped under `under #<spoken clip> "<first words of its sentence>"` subheaders, each card reading `covers: "<its words>"`, with approve per card, per sentence and for all b-roll (`approveClipsSeq`: continues past a failed id, keeps successes, reloads in `finally`, one banner names the failures with a retry of just those). No card ever draws a second clip: `_audioTwin` is gone, `renderClipPaired` is unreachable (kept one release), a 1:1 `audio_pair` twin is shown as its own spoken card at its visual's position. One helper, `renderClipsPanel(clips, id, exportsLoaded)`, builds the panel for both the cached and the network render path; `renderClip` derives b-roll mode from `clip_role` so every re-render (poll patch, variant switch) stays consistent; every card lookup is panel-wide (`markClipRegenerating`, `toggleVariantsExpanded` converted). Plan: `docs/superpowers/plans/2026-09-04-review-ui-sentence-card-for-shared-cutaways.md` (Codex: 2 passes, 6 findings applied). Tests: `code/tests/test_review_ui_broll_section.py` (static + DOM cases through the real `index.html` in headless Chromium, incl. "no cutaways → byte-identical to the parent commit"); proof tool `code/tools/check_review_page.py --job <id>` (read-only, counts A-roll / B-roll / headers / paired cards on the served page, screenshot). Commits `12b124b`, `9286abe`. Known limit, unchanged from before: the panel's sections are created by a first render; cutaways created after the panel is painted are patched only if their card already exists.
+
 **What it costs.** One Whisper "small" run (~250 MB) per export that has shared sentences; on a tight box the memory guard turns it into `method=chars reason=memory …` and the export ships with today's letter windows.
 
 **Tests.** `code/tests/check_v698a2_word_windows.py` (runs the REAL resolver on garnissa v4 sentence 7: boundaries on `over` and `that`; a misheard `over`→`ova` and a missing `that` still land; the v948 keep-list mapping subtracts a hole before and inside a sentence exactly), `code/tests/check_v698a2_export_wiring.py` (stage order, ratio source, exact sweep mapping, word pass placement, fallback, fingerprint reuse, resolver untouched). Lesson recorded as `feedback_find-the-existing-mechanism-before-planning-a-new-one`: the first plan (`2026-09-04-broll-placement-by-spoken-words.md`, superseded; commits parked on `code` branch `keep/v698a2-perclip-words`) built a third aligner beside v825's because the reviewer was never shown it.
@@ -19565,3 +19567,198 @@ living in `raw/decode_work/<folder>/` via the batch-name prefix (v958.1 — the 
 refused every daily-lane job with "no build .md maps"), and `tools/daily_finish_prompt.md`
 forbids ScheduleWakeup-waiting in the headless wrapper (the 08:10 process exits with the turn
 and the wakeup dies with it — the 2026-09-01 three-videos-stranded incident).
+
+## v959 — MOVIE-SECTION RENDER METHOD: THE MENTOR'S CLIP, DECLARED IN THE BUILD (2026-09-04)
+
+**What it is.** One scene = one 8–10 s Flow clip made his way: the composer on the INGREDIENTS
+tab, one WIDE scene image as the first chip, 1–2 face images beside it, the Omni model, and the
+build's own prompt — the `Setting:` paragraph verbatim, then a contiguous run of timestamped
+beats carrying BOTH speakers, then one tail line. Nothing else. It is the SECOND accepted value
+of the v945 `render_method` hook, so it reuses that rule's whole path: a scene bullet →
+`_parse_scene_blocks_new` → `ImageSceneAssignment` → `Clip` → the worker's claim JSON → one arm
+in `flow_worker.py`. Face references travel the way `end_frame_image` travels (v718i): image
+refs → node ids → the upload set → frame files → URLs the worker downloads.
+
+Prompt doctrine is canonical elsewhere and is not restated here:
+`wiki/concepts/prompting/movie-style-prompting.md` §5 (the four laws of the clip prompt), §5b
+(the numbers, measured), §5c (the chip rebuilds the world). Method read off his screen:
+`docs/movie-style-flow-method-definitive-2026-09-02.md`. Worked example, gates green:
+`docs/experiments/movie-style-e2e-2026-09-01/v8/hardware-lot-movie-section-v8.md`.
+
+**STATUS — the import latch. Until the flip lands, a section build cannot be imported.**
+`MOVIE_SECTION_ARM_SHIPPED = False` in `code/image_platform.py` makes the import route refuse
+any build that declares the method with an HTTP 400 saying exactly that; the caller
+(`import_scene_table`) rolls the transaction back, so nothing is half-imported. The reason is
+timing: the parser landed before the worker arm, and a build imported in between would render
+on the ORDINARY path with its face refs silently dropped — which looks like a bad take, not a
+missing feature. The parser keeps parsing while the latch is down, because the linter, the
+auditor and the off-platform E2E driver all need it to. The flag flips in the same push that
+ships the worker arm and the run that proves it end to end.
+
+**The grammar (exact).**
+
+```markdown
+### Scene 1
+- **image:** image_1                     # the WIDE anchor → the scene chip (§5c)
+- **scene_type:** shot
+- **render_method:** movie-section
+- **face_refs:** image_2, image_3        # 1–2 close-up `### Image` blocks, each `reference_image: image_1`
+- **speaker:** on-camera
+- **line:** <every spoken word of the section, in order, lowercase>
+- **clip_duration_s:** 10                # the WINDOW: 8 | 10 — mandatory
+- **clip_mode:** fresh
+- **transition:** cut
+- **action_note:** ...
+```
+
+and the clip prompt (`### Clip 1.1` → `**Text prompt:**` fence) in his shape:
+
+```
+Setting: <paragraph reused VERBATIM on every section clip of the build>
+
+00:00 - 00:04
+[direction]
+
+Woman:
+"<line>"
+
+00:04 - 00:06
+[direction]
+
+Man:
+"<line>"
+
+<one tail line: fault remedies + "camera switches between faces more often">
+```
+
+§0 carries `MOVIE SECTION ANCHOR: image_K — wide because <line>`.
+
+**What is refused, and where.**
+
+| what you wrote | what happens |
+|---|---|
+| `render_method: movie_section` (or any value but `charswap` / `movie-section`) | `ValueError` naming `render_method` |
+| `render_method` on a `text_card` scene | `ValueError` — a text card is drawn by ffmpeg, never rendered as a clip |
+| `face_refs` on a scene without the method · 0 or 3+ refs · a ref repeated · a ref = the scene's own image · an undefined image | `ValueError` naming `face_refs` |
+| the swap trio (`swap_source_video` / `swap_mode` / `audio`) on a section scene | `ValueError` — those bullets belong to charswap alone |
+| two `- **line:**` bullets on a section scene | `ValueError` — a section renders exactly one clip |
+| `clip_duration_s` missing or not 8 / 10 | `ValueError` naming `clip_duration_s` |
+| some shot scenes movie-section, others not | `ValueError` listing both sets of scene numbers |
+| a SILENT shot scene inside a section build | `ValueError` — every section carries words, so make it a `text_card` or fold the b-roll into a section |
+| a section clip with no `### Clip N.1` Text prompt | HTTP 400 / `ValueError` at BOTH clip creators |
+| a job config naming a non-Omni model | HTTP 400 at promote (the model is forced to the Omni label otherwise) |
+| ANY of the above, while the latch is down | HTTP 400 at import before any of it is reached |
+
+**Where the face images actually come from.** They are MATERIALISED, not borrowed. A face-ref
+image is never any scene's own image, so the scene copy loop never writes its frame file and a
+reused start-frame key would 404 at render time. `_v959_materialise_face_frames(...)` mirrors the
+v892.10 plate-frame precedent: per face ref it copies the node's chosen variant, uploads it to
+R2, and returns that key — refusing with a 500 when the frame is missing, and running before the
+`Job` row exists. Both prepare flat-row branches carry `face_ref_node_ids` and
+`face_ref_local_indexes`, not only the scene payload (v718i.2's lesson: a binding that lives only
+on the scene payload arrives as `None` on every clip). Every machine-written JSON column raises
+on corruption instead of degrading to `[]` — a stripped face list is a wrong render, not a
+smaller one.
+
+**The columns.** `ImageSceneAssignment.face_ref_node_ids_json` and `Clip.face_ref_frames_json`,
+both nullable with NO default, so every legacy row reads NULL. Both are listed in
+`CHARSWAP_COLUMNS` — the name still says charswap, but what it holds is every render-method
+column the startup readback must cover, so `GET /api/admin/verify-charswap-columns` proves them
+on each deploy. A new render method adds its columns THERE.
+
+**The API lane.** `DialogueLineInput.render_method` is validated by a pydantic validator that
+normalises (strip, lowercase, `""` → `None`) and then accepts only the two known values from one
+`_RENDER_METHODS` tuple — three downstream readers compare the stored value raw, so an unnormalised
+string would slip past them. `face_ref_local_indexes` is the field that makes the browser hop work:
+`dialogue_list` → `Job.dialogue_json` → `dialogue_raw` is exactly how `end_frame_image_local_index`
+already travels. There are THREE doors, and all three are shut: the CLI promote, `POST /api/jobs`,
+and the browser promote payload in `code/static/index.html`, which now sends `face_ref_node_ids`
+and `face_ref_local_indexes` beside `end_frame_image_local_index`. The `POST /api/jobs` creator
+refuses an empty, out-of-range, duplicated or over-cap (`MOVIE_SECTION_MAX_FACE_REFS = 2`) face
+list and a section line with no prompt override; a refused line fails the whole JOB, which is what
+"all shot scenes or none" means at run time. The claim JSON carries `render_method`,
+`input_mode: Ingredients`, `section_window_s` and `face_ref_urls` at BOTH worker lanes. The redo
+door `_v945_14_reject_charswap_redos` now refuses BOTH methods — its `error_code` stays
+`CHARSWAP_NO_REDO` (the grep token that other code and tests search for) while its message and log
+line name the real method — so no janitor can requeue a failed section into the ordinary renderer.
+
+**What the worker proves before a render** (every verdict fails closed; one JSON line per stage in
+`movie_section_diag.jsonl` beside the worker): the settings dialog verified on an Omni model · the
+DOM says Ingredients, forced there by `set_clip_input_mode(..., force_ingredients=True)` (the third
+way in, beside "Omni + this clip has an end frame") · every input present, all or nothing · 1 + N
+chips, all distinct (the attach helper's success signal is a chip COUNT, so two chips carrying the
+same media id means one image went up twice and a face never made it) · the generate body carried
+every media id · the API capture says `shape=referenceImages` with an `r2v` model key. A missing
+capture reads as "unverified", not as a failure, because the listener that fills it is off unless
+`FLOW_API_CAPTURE=1` and the body probe has already proved the chips. The prompt ships VERBATIM
+through `veo_prompt_override`, never through `build_prompt`.
+
+**Policy ladder: one rung.** A policy trip on a section clip retries Prompt B in the SAME
+Ingredients mode once, then fails. There is never an Omni→Veo model swap — the swap lands on a
+model with no Ingredients tab, which is a guaranteed wrong render. `render_method` is forwarded to
+`route_generation_policy` / `policy_gen_next_action` from EVERY call site, so no lane can take the
+old ladder by omission.
+
+**What the auditor checks** (`c_v959_movie_section` in `.claude/skills/build-video/audit_build.py`).
+Seven laws, and the numbers are READ from `tools/check_section_pacing.py` rather than retyped, so
+the hand tool and the gate can never disagree:
+
+1. `Setting:` first, and byte-identical across every section clip of the build (§5 law 1) — when
+   they drift the message names the clip that drifted, not every clip.
+2. at least one `MM:SS - MM:SS` beat per clip, and no house tokens: the literal set
+   (`Animate the attached`, `Quality / Fidelity Lock`, `Negative Constraints`, `saying exactly`,
+   `No music`, `no background noise`) plus the preamble as a regex (`Create an? \d+-second`), so a
+   different duration cannot slip through.
+3. one section renders exactly ONE clip; a second `### Clip N.x` FAILs.
+4. the pacing: per beat over `BEAT_MAX_WPS` (4.0 w/s) is unspeakable; a beat carrying words in a
+   zero-second span FAILs ("a beat needs a duration"); the window under `WINDOW_FAIL_WPS` (2.0 w/s)
+   is underfilled and FAILs, under `WINDOW_TARGET_WPS` (2.3) WARNs; beats spanning more than
+   `WINDOW_MAX_FILL` (110 %) of the window overrun it. The span is `max(end) − min(start)`, so beats
+   written out of order still measure against the window they cover.
+5. the one `line:` equals the quoted spans of the clip in order — it is what whisper aligns to at
+   export. Typographic quotes are normalised first, so a section pasted out of a word processor
+   still matches.
+6. every `face_refs` image is a close-up of THIS scene: it carries `reference_image:` chaining to
+   the anchor.
+7. the anchor is declared in §0, the `### Image K` block exists, its prompt names wide framing, and
+   every scene image is the anchor or chains to it (§5c rule 3). A missing or malformed
+   `clip_duration_s` FAILs; it is the pacing law's denominator, never a silent skip.
+
+**Our grammar stands down on a section build — by set, not by guards.** Twelve checks encode OUR
+clip grammar (one speaker per clip, the 28-word line cap, the house prompt body, close framing),
+which his section grammar contradicts by design, so they stand down for the WHOLE build through
+the runner's existing stand-down mechanism (`V959_OUR_GRAMMAR`, beside `KORELLA_DOCTRINE`),
+computed once: `dialogue_turn_grammar`, `scene_one_mouth`, `line_word_cap`, `v861_clip_duration`,
+`american_accent`, `v810_form`, `v807_transition`, `v794_concurrency`, `v934_addressee`,
+`v577_scene_merge`, `frames_close`, `hook_prop_close`. Everything else still runs: §8 compliance,
+v808 minors, forbidden words, disclosure, Prompt B, the USA pack. Declaring the method on SOME shot
+scenes and not all is itself a FAIL — two coherent systems, never mixed.
+
+**The import linter mirrors the same stand-down** (`code/verify_video_format.py`, scoped by
+`_is_section_build`): the v807 transition-phrase scan does not run on a section clip (it tripped on
+the mentor's own wardrobe words "with the sleeves cut away" inside the verbatim Setting paragraph),
+the v865 twelve labelled house blocks and the v750 fence-shape expectations do not apply to his
+prompt shape, v577's budget stands down, and v594 counts a `face_refs` image as USED so a face chip
+is not reported as an unused image. Everything that is compliance or contract stays: v808 minors,
+v806 tokens, v693 lowercase, v615 em-dash, the Prompt B gate, the `## Pre-Flight Checklist` and
+section-header requirements. The linter also repeats the parser's `face_refs` refusals, so a bad
+build is caught before import rather than at it.
+
+**One doctrine carve-out.** `c_usa_script_count` accepts `CARVE-OUT: usa_script_count — <reason>`
+ONLY for builds under `docs/experiments/`, never under `videos/`. An experiment build exists to
+prove a render method, is never posted, and its lines are the source's verbatim words; posted
+builds keep the spoken-line USA ladder unchanged.
+
+**Deferred (v2).** Overlapping sections plus trim-at-join — v1 sections do not overlap, speaker
+context comes from the opening-shot direction slot, and `tools/trim_to_speech.py` covers manual
+runs; the clip-editor "describe your edits" surface; a pixel check that the anchor really is wide
+(today the wide-anchor rule is a declaration plus a word check on the image prompt).
+
+**Touched:** `code/image_platform.py`, `code/models.py`, `code/main.py`, `code/static/index.html`,
+`code/static/flow_worker.py`, `code/verify_video_format.py`, `code/test_movie_section_render_method.py`,
+`code/test_movie_section_worker_arm.py`, `code/test_movie_section_linter.py`,
+`.claude/skills/build-video/audit_build.py`, `tools/tests/test_audit_v959.py`,
+`tools/check_section_pacing.py`, this section, `code/template_new_format.md` (Scene 6 + the Clip
+example), `wiki/patterns/conventions.md`, `wiki/meta/generate-video-checklist.md` §F, the four
+bundle scripts, `wiki/log.md`, `rules/v959.md` (generated). Plan:
+`docs/superpowers/plans/2026-09-04-movie-section-render-method.md`. Operator 2026-09-04.
