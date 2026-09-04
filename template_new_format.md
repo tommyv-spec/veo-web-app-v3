@@ -996,12 +996,19 @@ The main character, same [setting anchor] as image 2, same framing — shot on i
 - **face_refs:** image_2, image_3                # v959 — 1 or 2 `### Image N` blocks, close-ups of THIS scene, each carrying `reference_image: image_1`. Never the scene's own image, never repeated, never on a scene without the method. They ride to the worker as extra chips beside the scene chip.
 - **cast:** the man in the grey cut-off shirt, the woman in the olive t-shirt
 - **speaker:** on-camera
-- **clip_duration_s:** 10                        # v959 — 8 or 10, MANDATORY. It is the pacing window the §5b numbers divide by; missing or any other value HARD-FAILS.
 - **target_duration_s:** 10
 - **clip_mode:** fresh
 - **transition:** cut
 - **line:** wow if my husband looked like you i would never leave the house then he should do what i do   # v959 — EXACTLY ONE line bullet, holding every spoken word of the section in order, lowercase. It must equal the quoted spans of Clip 6.1 in order — whisper aligns to it at export.
+- **clip_duration_s:** 10                        # v959 — 8 or 10, MANDATORY. It is the pacing window the §5b numbers divide by; missing or any other value HARD-FAILS.
 - **action_note:** [Start beat 0-4s] ... [Mid-clip beat 4-8s] ... [End beat 8-10s] ...
+
+<!-- v959 ORDER (2026-09-04, corrected): `clip_duration_s` sits BELOW `line:` and must stay there.
+     v861 attaches the window to the CLOSEST PRECEDING `- **line:**`, so writing it above the line
+     parses to None and the scene raises "needs clip_duration_s 8 or 10 ... got None". The bullet
+     was above the line when this example first shipped; it was moved, not reworded. -->
+
+
 
 <!-- v959 — §0 of the build carries one extra declaration: `MOVIE SECTION ANCHOR: image_K — wide
      because <why>`, and the `### Image K` prompt must itself name wide framing (wide / full shot /
