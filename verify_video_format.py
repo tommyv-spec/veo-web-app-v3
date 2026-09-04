@@ -136,6 +136,9 @@ def lint(path: str) -> int:
     sblocks = re.split(r"(?=^###\s+Scene\s+\d+\s*$)", t, flags=re.M)
     used_imgs: set[int] = set()
     end_frames: list[tuple[int, int]] = []
+    # v959 — one row per SHOT scene: (scene number, its render_method or None).
+    # text_card scenes never appear here; they carry no render method.
+    shot_methods: list[tuple[str, str | None]] = []
     voiceover_anchor_targets: list[tuple[str, int]] = []  # (scene_no, target_img)
     pair_scenes: list[dict] = []   # v698A many-to-one, resolved after the loop
     line_count = 0
@@ -147,6 +150,11 @@ def lint(path: str) -> int:
         cut = re.search(r"^(?:###\s|##\s)", b[h.end():], re.M)
         blk = b[: h.end() + cut.start()] if cut else b
         is_text_card = "scene_type:** text_card" in blk
+        # v959 — read the render method FIRST: it decides which of our own
+        # clip-grammar checks below apply to this scene at all.
+        rm = re.search(r"^-\s+\*\*render_method:\*\*\s*(\S+)", blk, re.M)
+        rm_val = rm.group(1).strip().lower() if rm else None
+        is_section = rm_val == "movie-section"
         img_m = re.search(r"^-\s+\*\*image:\*\*\s+image_(\d+)", blk, re.M)
         if not is_text_card and not img_m:
             fails.append(f"v696: Scene {sn} missing `- **image:** image_N`")
@@ -163,8 +171,11 @@ def lint(path: str) -> int:
         if not is_text_card and "**action_note:**" not in blk:
             warns.append(f"v540: Scene {sn} missing action_note")
         # word budget v577 (approx 2.6 x target_duration_s)
+        # v959 — skipped on a movie-section scene: its one line holds the WHOLE
+        # section (every speaker, in order), so a per-clip budget cannot judge
+        # it. The words-per-second gate of §5b judges it instead (auditor).
         td = re.search(r"^-\s+\*\*target_duration_s:\*\*\s+([\d.]+)", blk, re.M)
-        if td:
+        if td and not is_section:
             budget = 2.6 * float(td.group(1))
             for ln in scene_lines:
                 wc = len(ln.split())
@@ -173,6 +184,36 @@ def lint(path: str) -> int:
         ef = re.search(r"^-\s+\*\*end_frame_image:\*\*\s+image_(\d+)", blk, re.M)
         if ef and img_m:
             end_frames.append((int(img_m.group(1)), int(ef.group(1))))
+        # v959 — movie-section declarations, mirrored from image_platform.py so
+        # a build that lints here is a build the platform parser accepts.
+        fr = re.search(r"^-\s+\*\*face_refs:\*\*\s*(.+)$", blk, re.M)
+        cds = re.findall(r"^-\s+\*\*clip_duration_s:\*\*\s*(\d+)", blk, re.M)
+        if rm_val and rm_val not in ("charswap", "movie-section"):
+            fails.append(f"v943/v959: Scene {sn} render_method {rm_val!r} is not charswap or movie-section")
+        if fr and not is_section:
+            fails.append(f"v959: Scene {sn} has face_refs but render_method is not movie-section")
+        if is_section:
+            refs = [x.strip() for x in fr.group(1).split(",")] if fr else []
+            ref_nums = [int(m.group(1)) for m in
+                        (re.fullmatch(r"image_(\d+)", r) for r in refs) if m]
+            if not (1 <= len(ref_nums) <= 2) or len(ref_nums) != len(refs):
+                fails.append(f"v959: Scene {sn} face_refs must name 1-2 `image_N` (got {refs})")
+            if len(set(ref_nums)) != len(ref_nums):
+                fails.append(f"v959: Scene {sn} face_refs repeats an image ({refs}) — the parser refuses it too")
+            for n in ref_nums:
+                if n not in img_nums:
+                    fails.append(f"v959: Scene {sn} face_refs image_{n} not defined")
+                if img_m and n == int(img_m.group(1)):
+                    fails.append(f"v959: Scene {sn} face_refs image_{n} is the scene's own image")
+                # A face ref IS a use of that image — it is uploaded and
+                # attached as a chip, so v594 must not call it unused.
+                used_imgs.add(n)
+            if len(scene_lines) != 1:
+                fails.append(f"v959: Scene {sn} movie-section needs exactly one `- **line:**` (found {len(scene_lines)})")
+            if not cds or cds[0] not in ("8", "10"):
+                fails.append(f"v959: Scene {sn} movie-section needs `- **clip_duration_s:** 8` or `10` (got {cds or 'none'})")
+        if not is_text_card:
+            shot_methods.append((sn, rm_val))
         # v698A Gate 9 mirror — the platform import HARD-FAILS a scene whose
         # speaker normalizes to 'voiceover' but has no voiceover_anchor_image.
         # Decode docs write `speaker: voiceover` + `voiceover_anchor_image: none`
@@ -205,6 +246,20 @@ def lint(path: str) -> int:
                     f"an in-scene speaker value instead of 'voiceover'")
             elif anchor:
                 voiceover_anchor_targets.append((sn, int(anchor.group(1))))
+
+    # v959 — all shot scenes or none (two coherent systems, never mixed).
+    _ms = [sn for sn, m in shot_methods if m == "movie-section"]
+    if _ms and len(_ms) != len(shot_methods):
+        _other = [sn for sn, m in shot_methods if m != "movie-section"]
+        fails.append(f"v959: render_method=movie-section must cover all shot scenes or none "
+                     f"(declared on {_ms}, missing on {_other})")
+    # A SECTION BUILD is one where every shot scene renders the mentor's way.
+    # On it, the checks that encode OUR clip grammar stand down further down —
+    # his prompt shape (`Setting:` + timestamped beats + one tail line) breaks
+    # them by design. Compliance and contract checks never stand down.
+    _is_section_build = bool(shot_methods) and all(
+        m == "movie-section" for _, m in shot_methods)
+    section_scene_nums = {int(sn) for sn in _ms}
 
     # v698A many-to-one — validate every `audio_from_scene: N` with the SAME
     # resolver Phase 3a uses (code/pairing_resolver.py), so lint and job setup
@@ -351,10 +406,34 @@ def lint(path: str) -> int:
         # never sees the previous clip. Editing/transition language in a clip
         # prompt is noise at best and can make Veo render a cut INSIDE the
         # clip. Describe only what happens within the clip.
-        cuts = re.findall(r"\bhard cut\b|\bcuts?\s+(?:to|back|away|from)\b|\btransitions?\s+(?:to|from)\b", veo, re.I)
+        # v959 — a movie-section clip is EXEMPT: it ships his `Setting:`
+        # paragraph verbatim, and on 2026-09-04 the words "with the sleeves cut
+        # away" (a shirt, not an edit) hard-failed a whole build here. So the
+        # scan reads the section text with every movie-section clip block cut
+        # out; a text_card or legacy clip in the same file is still read.
+        _v807_zone = veo
+        if section_scene_nums:
+            _skip: list[tuple[int, int]] = []
+            for n, m in clips:
+                if int(n) not in section_scene_nums:
+                    continue
+                head = rf"^### Clip {n}\.{m}\b" if m else rf"^### Clip {n}\b(?!\.)"
+                cb = re.search(head + r".*?(?=^### Clip|\Z)", veo, re.M | re.S)
+                if cb:
+                    _skip.append(cb.span())
+            if _skip:
+                _kept, _prev = [], 0
+                for _a, _b in sorted(_skip):
+                    _kept.append(veo[_prev:_a])
+                    _prev = _b
+                _kept.append(veo[_prev:])
+                _v807_zone = "".join(_kept)
+        cuts = re.findall(r"\bhard cut\b|\bcuts?\s+(?:to|back|away|from)\b|\btransitions?\s+(?:to|from)\b", _v807_zone, re.I)
         if cuts:
             fails.append(f"v807: {len(cuts)} editing/transition phrase(s) in Veo prompts ('hard cut'/'cut to'/...) — describe only what happens INSIDE the clip; the cut between clips is the editor's job, not Veo's")
-        if "```" in veo:
+        # v959 — his clip prompt IS a fenced block in every shipped example, so
+        # the unfenced house preference does not apply to a section build.
+        if "```" in veo and not _is_section_build:
             # v750.1 (veo_prompt_overrides.py _extract_prompt_content) tries fenced
             # extraction first, falls back to unfenced — so fences still render.
             # Doc-style preference is unfenced; flag as WARN, not a render-blocker.
@@ -374,7 +453,11 @@ def lint(path: str) -> int:
             # ACTION / TERMINAL STATE anchors (operator 2026-07-24). Only new
             # Omni-titled sections are held to the twelve-block Omni shape;
             # legacy Veo-titled builds keep rendering untouched (forward-only).
-            if _is_omni_section:
+            # v959 — a movie-section clip carries NONE of the house blocks on
+            # purpose (§5 law 4: his clip prompts carry no quality lock, no
+            # camera block, no negative list). The auditor's
+            # c_v959_movie_section checks his shape instead.
+            if _is_omni_section and int(n) not in section_scene_nums:
                 for _lbl in ("Quality / Fidelity Lock:", "Camera:",
                              "Performance / Action:", "Negative Constraints:"):
                     if _lbl not in blk:
