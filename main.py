@@ -22549,6 +22549,13 @@ log "Starting worker"
 # Run worker in foreground (matches Windows .bat behavior — user sees output)
 cd "$DIR"
 set -a; source .env; set +a
+# The generated start_worker.sh above sets this for ITS runs; this is the
+# installer running the worker itself, a separate shell, so it needs its own.
+# Usually harmless because a foreground run has a terminal and python
+# line-buffers to one -- but `bash install.sh | tee install.log`, which is
+# exactly what someone does when an install misbehaves, turns stdout into a
+# pipe and hides the next ~24 minutes of output at the worst moment.
+export PYTHONUNBUFFERED=1
 echo "  Chrome will open — click 'Continue without signing in' if prompted,"
 echo "  then log into your Google account on the Flow page."
 echo "  Keep this window open while the worker runs."
