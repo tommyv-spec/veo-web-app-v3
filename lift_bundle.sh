@@ -806,6 +806,14 @@ Output the videos/*.md per code/template_new_format.md skeleton + strict
 v593 parser format. End with ## Sources (referencing the decoded source
 above) and ## Used in (placeholder).
 
+RENDER METHOD (v945 / v959): a normal lift declares nothing and renders the
+ordinary way. Declare `- **render_method:** charswap` only for an avatar swap
+into a real source video (template_reference.md §v945); declare
+`- **render_method:** movie-section` + `- **face_refs:**` + `- **clip_duration_s:** 8|10`
+only for the mentor's Ingredients-tab clip, and then on EVERY shot scene of the
+build or none (template_reference.md §v959 — import is latched off until the
+worker arm ships).
+
 ================================================================================
 # CANONICAL ACTION_NOTE EXAMPLE — match this shape EXACTLY
 ================================================================================

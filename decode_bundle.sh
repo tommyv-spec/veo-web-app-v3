@@ -4176,6 +4176,13 @@ PRE-OUTPUT VALIDATION (v722):
 Output the decoded markdown per code/template_new_format.md skeleton +
 strict v593 parser format. Include ## Sources (manifest / transcript /
 shots / motion / source MP4 paths) and ## Used in (placeholder).
+
+RENDER METHOD (v945 / v959): a DECODE never declares one — it observes a
+source, it does not choose how we would render it. Note the observation in
+prose when the source clearly runs one section of continuous multi-speaker
+dialogue in one take (the shape a later build may lift as
+`- **render_method:** movie-section`, template_reference.md §v959) or when a
+real person's body carries a swapped face (§v945).
 EOF
 }
 

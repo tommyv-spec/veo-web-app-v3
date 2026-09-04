@@ -658,6 +658,14 @@ Step 5 — OUTPUT shape (per code/template_new_format.md skeleton)
     causal structure + persona/setting authority read
   ## Veo 3.1 Final Prompts — per clip
 
+  RENDER METHOD (v945 / v959): a normal port declares nothing and renders the
+  ordinary way. Declare `- **render_method:** charswap` only for an avatar swap
+  into a real source video (template_reference.md §v945); declare
+  `- **render_method:** movie-section` + `- **face_refs:**` +
+  `- **clip_duration_s:** 8|10` only for the mentor's Ingredients-tab clip, and
+  then on EVERY shot scene of the build or none (template_reference.md §v959 —
+  import is latched off until the worker arm ships).
+
 Step 6 — PRE-OUTPUT VALIDATION GATES (mandatory — fix and re-emit if any fail)
   Gate 1 — text_card scenes have NO ### Image N header (v696)
   Gate 2 — every shot scene chains forward through state-evolution (v596 + v604)

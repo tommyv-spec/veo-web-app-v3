@@ -485,6 +485,14 @@ v593 parser format. End with ## Sources (no decoded source — note
 "created from 0 based on corpus-validated cell + bundle [date]") and
 ## Used in (placeholder).
 
+RENDER METHOD (v945 / v959): a normal build declares nothing and renders the
+ordinary way. Declare `- **render_method:** charswap` only for an avatar swap
+into a real source video (template_reference.md §v945); declare
+`- **render_method:** movie-section` + `- **face_refs:**` + `- **clip_duration_s:** 8|10`
+only for the mentor's Ingredients-tab clip, and then on EVERY shot scene of the
+build or none (template_reference.md §v959 — import is latched off until the
+worker arm ships).
+
 If unsure which cell to pick, the safest default is the most-validated:
 F-to-F-about-M x ED x Black-female-practitioner x saffron-Template-A
 (4 corpus instances).

@@ -989,6 +989,30 @@ The main character, same [setting anchor] as image 2, same framing — shot on i
      number was claimed a day earlier by a different rule, so canon is v945. Do not rename the code.
      Deep-dive: template_reference.md §v945. -->
 
+### Scene 6 — example movie-section scene (v959)
+- **image:** image_1                             # v959 — the WIDE anchor; it becomes the scene chip on the Ingredients tab (§5c). Every section scene of the build points at the anchor or at an image whose `reference_image:` chain reaches it.
+- **scene_type:** shot                           # v959 — a text_card may NEVER carry render_method (it is drawn by ffmpeg, not rendered as a clip). A SILENT shot scene is refused in a section build: make it a text_card or fold the b-roll into a section.
+- **render_method:** movie-section               # v959 — the second accepted value of the v945 hook. ALL shot scenes of the build carry it, or none: mixing his section grammar with our one-speaker clips HARD-FAILS at import.
+- **face_refs:** image_2, image_3                # v959 — 1 or 2 `### Image N` blocks, close-ups of THIS scene, each carrying `reference_image: image_1`. Never the scene's own image, never repeated, never on a scene without the method. They ride to the worker as extra chips beside the scene chip.
+- **cast:** the man in the grey cut-off shirt, the woman in the olive t-shirt
+- **speaker:** on-camera
+- **clip_duration_s:** 10                        # v959 — 8 or 10, MANDATORY. It is the pacing window the §5b numbers divide by; missing or any other value HARD-FAILS.
+- **target_duration_s:** 10
+- **clip_mode:** fresh
+- **transition:** cut
+- **line:** wow if my husband looked like you i would never leave the house then he should do what i do   # v959 — EXACTLY ONE line bullet, holding every spoken word of the section in order, lowercase. It must equal the quoted spans of Clip 6.1 in order — whisper aligns to it at export.
+- **action_note:** [Start beat 0-4s] ... [Mid-clip beat 4-8s] ... [End beat 8-10s] ...
+
+<!-- v959 — §0 of the build carries one extra declaration: `MOVIE SECTION ANCHOR: image_K — wide
+     because <why>`, and the `### Image K` prompt must itself name wide framing (wide / full shot /
+     two-shot / head to toe). One section = one clip = one line. The swap trio (swap_source_video /
+     swap_mode / audio) belongs to charswap alone and HARD-FAILS on a section scene.
+     STATUS: import is latched OFF (`MOVIE_SECTION_ARM_SHIPPED = False`, image_platform.py) until
+     the worker arm ships — a build declaring the method is refused with a 400. Authoring, the
+     linter and the auditor all work today.
+     Deep-dive: template_reference.md §v959. Prompt doctrine:
+     wiki/concepts/prompting/movie-style-prompting.md §5 / §5b / §5c. -->
+
 ---
 
 ## Finishing
@@ -1313,6 +1337,37 @@ The <visual descriptor> says, "<line>"
 ```
 
 CUT because the start frame already carries them: the `Reference:` identity paragraph, the `Scene:` environment paragraph, the t=0 camera layout, `Ending Camera Beat`, `Style:`, the long negative list. Accent, when it must be locked, goes in its OWN sentence before the speech line — never between `says,` and the quote. Legacy twelve-block bodies still parse and still need their `saying exactly:` + silence clause; forward-only. Deep-dive: template_reference.md §v872.
+
+### Clip 6.1 — movie-section (v959): his shape, not the twelve-block body
+
+**Only on a scene that declares `- **render_method:** movie-section`.** A section clip is NOT a variant of our body — it is a different grammar, and the two must never be mixed inside one build (all shot scenes or none). The whole prompt is the `Setting:` paragraph, then a contiguous run of timestamped beats carrying BOTH speakers, then one tail line. Both speakers in one clip is exactly what v872 forbids on our path — that is why the auditor switches grammars at build level instead of per clip.
+
+**Start frame:** Image 1
+**Face refs:** Image 2, Image 3
+**Text prompt:**
+```
+Setting: The loading lot of an American hardware store on a bright day, by the open tailgate of a dusty white pickup. A grey-bearded muscular older man, 60, extremely fit for his age, wears a grey cut-off shirt with the sleeves cut away, holding a heavy paper sack of concrete mix easily in one hand. Behind him a woman in her late 30s, an ordinary shopper in an olive t-shirt with a small store basket, has stopped and is staring at his arm.
+
+00:00 - 00:04
+[She stops behind him, staring at the heavy sack hanging from his one hand.]
+
+Woman:
+"wow, if my husband looked like you i would never leave the house"
+
+00:04 - 00:06
+[The man turns his head from the truck bed and looks at her with an easy smile.]
+
+Man:
+"then he should do what i do"
+
+camera switches between faces more often
+```
+**Prompt B (policy fallback — Prompt A with the last spoken line reworded, v821):**
+```
+[Prompt A written out in FULL, byte-identical, EXCEPT the LAST quoted span, reworded: "he should just do what i do" — same meaning, different words. The Setting paragraph and every beat stay byte-identical.]
+```
+
+What the gates check on this block: the fence starts with `Setting:`, and that paragraph is byte-identical on every section clip of the build · at least one `MM:SS - MM:SS` beat · NO house tokens at all (`Animate the attached`, `Quality / Fidelity Lock`, `Negative Constraints`, `saying exactly`, `No music`, `no background noise`, `Create an N-second`) · the scene's `- **line:**` equals the quoted spans in order · the pacing: no beat over 4.0 words per second, no beat carrying words in a zero-length span, the section at 2.0 w/s of the window or more (his density is 2.3–3.3), the beats spanning no more than 110 % of the window · exactly one `### Clip N.x` for the scene. The tail line is where fault remedies accumulate across reruns; "camera switches between faces more often" is what produces the intra-clip close-up rotation. Deep-dive: template_reference.md §v959; prompt doctrine: `wiki/concepts/prompting/movie-style-prompting.md` §5 / §5b / §5c.
 
 *(One Clip block per `- **line:**` in the Storyboard. Multi-line scenes get one Clip block per line, sharing the same Start frame. EVERY shot scene with a spoken line carries a `**Prompt B ...:**` label + its own fence directly under the Text-prompt fence — Prompt B is the FULL Prompt A copied byte-identical EXCEPT the quoted line, which is REWORDED (different words, same meaning + same selling power). `verify_video_format.py` hard-FAILs if B is missing, if B's body differs from A's body, or if B's line equals A's line. When a source has a known failure mode, bake the guard into the positive Text prompt as an affirmative sentence — e.g. "he is alone in frame for the full clip" for solo videos. Deep-dive: template_reference.md §v865 + §v821, prior Prompt-B shape §v805.)*
 ## Anchor-Format Prompts (IMMEDIATE ACTION / TERMINAL STATE — reference, selectable)
