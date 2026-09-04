@@ -88,6 +88,12 @@ assert wp.rfind('stats["v698a_word_alignment"] = _v698a_wa') > i_exc
 # across f-string fragments, so count the two halves separately)
 assert wp.count("method=chars") >= 3, wp.count("method=chars")
 assert wp.count("reason=") >= 3, wp.count("reason=")
+# v698A.2.2 — a word-derived container cannot outlive the speaker file (Whisper
+# pads the last word's end; d74ab616's last window ended 54.48s in a 54.27s file)
+i_clamp = wp.find("clamped to speaker length")
+i_tile = wp.find("_wins_w, _reason = _tfw_w(")
+assert 0 < i_clamp < i_tile, "the container end must be clamped to _speaker_final_dur BEFORE tiling"
+assert "_cont = (_cont[0], float(_speaker_final_dur))" in wp
 # v698A.2.2 — the per-fragment "letters vs words" proof line was a [TEMP v698A.2]
 # print and is gone (its evidence landed: method=words on d74ab616 export
 # f17fd655). What must remain is the OUTCOME: a group that placed by words sets

@@ -14554,6 +14554,20 @@ async def _do_export_final_impl(
                                         _al_prev["lo"] if _al_prev else None,
                                         _al["lo"] if _al else None,
                                     )
+                                    if (_cont is not None and _speaker_final_dur > 0.1
+                                            and _cont[1] > _speaker_final_dur):
+                                        # v698A.2.2 — Whisper pads a word's END past the
+                                        # file (d74ab616: last word "ends" 54.48s in a
+                                        # 54.27s file), and the assembler renders whatever
+                                        # master length the targets imply. A window cannot
+                                        # outlive the speaker: clamp to the delivered length.
+                                        print(
+                                            f"[Export/v698A.2] {_label} container end "
+                                            f"{_cont[1]:.3f}s clamped to speaker length "
+                                            f"{_speaker_final_dur:.3f}s",
+                                            flush=True,
+                                        )
+                                        _cont = (_cont[0], float(_speaker_final_dur))
                                     _wins_w = None
                                     if _cont is not None:
                                         _wins_w, _reason = _tfw_w(
