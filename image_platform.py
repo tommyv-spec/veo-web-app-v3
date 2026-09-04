@@ -54,6 +54,15 @@ from clip_duration import (
     pick_clip_duration_s,
     resolve_clip_duration_s,
 )
+# v961 — per-clip render model. Same reason clip_duration lives in its own
+# module: main.py imports THIS file, so the allowlist cannot live in main.
+from veo_models import (
+    ALLOWED_VEO_MODELS,
+    describe_allowed,
+    is_legal_veo_model,
+    normalize_veo_model,
+    offers_ingredients_tab,
+)
 from chatgpt_extension_pairing import (
     ExpiredPairingTicket,
     InvalidPairingTicket,
@@ -213,6 +222,9 @@ def run_image_platform_migrations():
          "ALTER TABLE clips ADD COLUMN target_duration_s REAL"),
         ("clips", "veo_render_duration_s",
          "ALTER TABLE clips ADD COLUMN veo_render_duration_s INTEGER"),
+        # v961: per-clip render model. NULL = the job-level model applies.
+        ("clips", "veo_model",
+         "ALTER TABLE clips ADD COLUMN veo_model VARCHAR(64)"),
         # v681: multi-character cast model + text-card scene type.
         ("image_nodes", "cast_json",
          "ALTER TABLE image_nodes ADD COLUMN cast_json TEXT"),
@@ -429,6 +441,9 @@ def run_image_platform_migrations():
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS target_duration_s DOUBLE PRECISION"),
         ("clips", "veo_render_duration_s",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS veo_render_duration_s INTEGER"),
+        # v961: per-clip render model. NULL = the job-level model applies.
+        ("clips", "veo_model",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS veo_model VARCHAR(64)"),
         # v681: multi-character cast model + text-card scene type.
         ("image_nodes", "cast_json",
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS cast_json TEXT"),
@@ -6124,14 +6139,20 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # v861 — `clip_duration_s` joins the per-line bullet set. Like v644's
         # `pad` it attaches to the closest preceding `line`, so a two-line
         # scene can render its clips at two different durations.
+        # v961 — `veo_model` joins the same per-line bullet set, for the same
+        # reason: it is a PER-CLIP override of a job-level setting, so it
+        # attaches to the closest preceding `line` exactly as v861's duration
+        # does, and a no-line (silent / text_card) scene holds a dangling one.
         bullet_pattern = _re.compile(
-            r"^\s*[-*]\s*\*\*(line|action_note|pad|clip_duration_s)\s*:\*\*\s*(.+?)\s*$",
+            r"^\s*[-*]\s*\*\*(line|action_note|pad|clip_duration_s|veo_model)\s*:\*\*\s*(.+?)\s*$",
             flags=_re.MULTILINE | _re.IGNORECASE,
         )
         lines_list: List[str] = []
         action_notes: List[Optional[str]] = []
         pads: List[Optional[str]] = []  # v644 parallel array
         clip_durations: List[Optional[int]] = []  # v861 parallel array
+        clip_veo_models: List[Optional[str]] = []  # v961 parallel array
+        dangling_veo_model: Optional[str] = None  # v961, mirrors v861's
         # v786 — silent / text_card scenes have an action_note but NO line
         # bullets, so the attach-to-most-recent-line rule below would drop
         # it. Hold it here; if the scene ends with zero lines, emit it as a
@@ -6151,6 +6172,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 action_notes.append(None)
                 pads.append(None)
                 clip_durations.append(None)  # v861
+                clip_veo_models.append(None)  # v961
             elif key == "action_note":
                 if lines_list:
                     # Attach to most recent line
@@ -6203,6 +6225,26 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                     # still renders a clip, so hold it (mirrors v786's dangling
                     # action_note) rather than dropping it on the floor.
                     dangling_clip_duration = dur_val
+            elif key == "veo_model":
+                # v961 — the PER-CLIP render model. Exact, case-sensitive match
+                # against the Flow dropdown's own labels. NOT normalised beyond
+                # trimming and NOT repaired on a near-miss: a model string the
+                # dropdown cannot find is how a whole job silently renders on
+                # the wrong model, so an author who is wrong must be told, not
+                # guessed at. Same fail-closed stance as clip_duration_s above.
+                _model_val = normalize_veo_model(value)
+                if not is_legal_veo_model(_model_val):
+                    raise ValueError(
+                        f"Scene {scene_index}: veo_model {value!r} is not one of "
+                        f"{describe_allowed()} (v961). The strings are the Flow "
+                        f"dropdown's own labels and are matched exactly — note "
+                        f"that `Veo 3.1 - Lite` and `Veo 3.1 - Lite [Lower "
+                        f"Priority]` are different options."
+                    )
+                if lines_list:
+                    clip_veo_models[-1] = _model_val
+                else:
+                    dangling_veo_model = _model_val
 
         # v786 — no-lines scene with a scene-level action_note: surface it
         # as a 1-entry list. Parallel-array invariants hold downstream:
@@ -6217,6 +6259,13 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # silent scene could never declare its own render duration.
         if not lines_list and dangling_clip_duration is not None:
             clip_durations = [dangling_clip_duration]
+
+        # v961 — same for a no-lines scene's own model. A v698A cutaway is
+        # `speaker: voiceover` and DOES carry a line, but a `speaker: silent`
+        # b-roll scene does not, and it is exactly the kind of scene an author
+        # wants on the cheap model. Without this its declaration would be lost.
+        if not lines_list and dangling_veo_model is not None:
+            clip_veo_models = [dangling_veo_model]
 
         # v681 — text_card scenes AND silent scenes have no `- **line:**`
         # bullets by design. Tolerate missing lines on those. Other scenes
@@ -6310,6 +6359,7 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "action_notes": action_notes,
             "pads": pads,  # v644 — parallel to lines/action_notes; entries are str or None
             "clip_durations": clip_durations,  # v861 — parallel to lines; int (4|6|8|10) or None
+            "clip_veo_models": clip_veo_models,  # v961 — parallel to lines; model string or None
             "speaker_mode": speaker_mode,  # v537
             "cut_mode": cut_mode,  # v668 — None | 'whisper' | 'timeline' | 'auto'
             "explicit_target_s": explicit_target_s,  # v889 — authored, outranks the v667 anchor diff
@@ -10632,6 +10682,8 @@ def prepare_batch_for_video(
         # (silent / text_card) scene that declared the bullet yields a 1-entry
         # list.
         scene_clip_durations: List[Optional[int]] = scene.get("clip_durations") or []
+        # v961 — parallel to lines, same shape as clip_durations above.
+        scene_clip_veo_models: List[Optional[str]] = scene.get("clip_veo_models") or []
 
         # v681 — text-card / caption / cast denorm. Scene-scoped fields
         # — same value across all dialogue lines in the scene.
@@ -10854,6 +10906,10 @@ def prepare_batch_for_video(
                     anchor_bucket=anchor_bucket,
                     line_text=None,
                 ) if scene_is_silent else None,
+                # v961 — a silent scene's own render model, from its dangling
+                # bullet. NULL = the job-level model applies.
+                "veo_model": (scene_clip_veo_models[0]
+                              if scene_clip_veo_models else None),
                 # v681 — scene metadata. text_card carries caption+bg+duration;
                 # silent scenes carry scene_type=shot (or None) so the
                 # video processor doesn't try to drawtext-render them.
@@ -10970,6 +11026,13 @@ def prepare_batch_for_video(
                 # what the build actually declared.
                 "explicit_target_s": _explicit,
                 "veo_render_duration_s": _v861_line_duration,
+                # v961 — this line's own render model. Per-LINE, not scene-
+                # scoped: a scene with two lines can render them on two models,
+                # exactly as v861 lets it render them at two durations. NULL =
+                # the job-level model applies, which is every pre-v961 build.
+                "veo_model": (scene_clip_veo_models[i_in_scene]
+                              if i_in_scene < len(scene_clip_veo_models)
+                              else None),
                 # v681 — text-card / caption denorm onto the flat row.
                 # Scene-scoped (same as clip_mode/transition convention):
                 # only the first line of a scene carries the values; later
@@ -13073,6 +13136,52 @@ def promote_batch_to_video(
             f"[v959] promote batch={batch_id}: movie-section scenes present → "
             f"veo_model={_v959_model}"
         )
+
+    # v961 — a per-clip model may not fight a v943/v959 forced model.
+    #
+    # Both of those arms FAIL CLOSED on any model but Omni, because only Omni
+    # offers the Ingredients tab: charswap at static/flow_worker.py:22709-22729
+    # ("charswap requires the Omni model until a forced-Ingredients path
+    # exists") and movie sections at :23137 ("a non-Omni composer has no
+    # Ingredients tab"). So an authored `- **veo_model:** Veo 3.1 - Lite` on one
+    # of those clips does not buy a cheaper render — it buys a FAILED clip,
+    # discovered after the slot is gone.
+    #
+    # The forced model wins, and the conflict is refused HERE, at import, where
+    # it costs nothing and the author is told which scene to fix. Same stance as
+    # the two conflict checks above, which refuse rather than silently overwrite.
+    _v961_forced = _v943_model or _v959_model
+    if _v961_forced:
+        # ONLY the clips that actually need the Ingredients tab are constrained.
+        # A job-wide comparison would reject a perfectly legal `Lite` on an
+        # ordinary silent cutaway just because some OTHER clip is a charswap —
+        # which defeats the whole point of v961 on exactly the mixed jobs it
+        # exists for. (Caught by the Codex review of the implementation,
+        # 2026-09-05; the first version compared every spec in the job.)
+        def _v961_needs_ingredients(spec):
+            _rm = (spec.get("render_method") or "").strip().lower()
+            return _rm == "charswap" or _rm == MOVIE_SECTION_RENDER_METHOD
+
+        _v961_bad = [
+            spec for spec in clip_specs
+            if _v961_needs_ingredients(spec)
+            and (spec.get("veo_model") or "").strip()
+            and spec.get("veo_model") != _v961_forced
+        ]
+        if _v961_bad:
+            _first = _v961_bad[0]
+            raise HTTPException(
+                400,
+                f"v961: clip_index {_first.get('clip_index')} is a "
+                f"{(_first.get('render_method') or '').strip()} clip and declares "
+                f"`veo_model: {_first.get('veo_model')}`, but that arm is forced "
+                f"to `{_v961_forced}` — only that model offers the Ingredients "
+                f"tab it requires, and any other model fails closed at render "
+                f"time. {len(_v961_bad)} clip(s) conflict. Remove the per-clip "
+                f"veo_model bullet on them, or declare `{_v961_forced}`. Clips "
+                f"that are NOT charswap / movie-section may still carry any "
+                f"legal model."
+            )
 
     # v959 / D11 — the section prompt is the build's own text or nothing.
     #

@@ -156,6 +156,16 @@ from clip_duration import (
     CLIP_DURATION_BUCKETS,
     VEO_API_DURATIONS_S,
 )
+# v961 — the per-clip render model's allowlist. Same neutral-module reason as
+# clip_duration: this file is imported BY image_platform's importers, so the
+# constant cannot live here.
+from veo_models import (
+    ALLOWED_VEO_MODELS,
+    DEFAULT_VEO_MODEL,
+    describe_allowed,
+    is_legal_veo_model,
+    normalize_veo_model,
+)
 from lifecycle import apply_lifecycle_change, compute_stuck_days, apply_jobs_filters, _maybe_auto_enter_lifecycle, derive_effective_stage, _LIFECYCLE_STAGE_TO_TIMESTAMP_FIELD
 from auto_image_retry import parse_auto_image_retry_mode, VALID_RETRY_MODES, order_distinct_frames, pick_substitute
 from worker import worker, WORKER_VERSION
@@ -228,6 +238,10 @@ class DialogueLineInput(BaseModel):
     cut_mode: Optional[str] = None
     target_duration_s: Optional[float] = None
     veo_render_duration_s: Optional[int] = None
+    # v961 — the PER-CLIP render model. NULL = the job-level
+    # config.veo_model applies, which is every pre-v961 job. Legal values
+    # are veo_models.ALLOWED_VEO_MODELS.
+    veo_model: Optional[str] = None
     # v681 — text-card / caption denorm. caption is informational on
     # shot clips and rendered text on text_card clips. scene_type
     # 'text_card' bypasses Veo render and triggers the ffmpeg
@@ -457,6 +471,10 @@ class ClipResponse(BaseModel):
     # after (2026-08-18: three batches rendered 8s each before this was visible).
     target_duration_s: Optional[float] = None
     veo_render_duration_s: Optional[int] = None
+    # v961 — the PER-CLIP render model. NULL = the job-level
+    # config.veo_model applies, which is every pre-v961 job. Legal values
+    # are veo_models.ALLOWED_VEO_MODELS.
+    veo_model: Optional[str] = None
     # Prompt
     prompt_text: Optional[str] = None
     # v805/v821 — Prompt B policy fallback + its reworded line + active variant
@@ -2916,6 +2934,12 @@ async def _create_job_impl(
         cut_mode = line.get('cut_mode') if isinstance(line, dict) else None
         target_duration_s = line.get('target_duration_s') if isinstance(line, dict) else None
         veo_render_duration_s = line.get('veo_render_duration_s') if isinstance(line, dict) else None
+        # v961 — the per-clip render model, same shape: NULL = the
+        # job-level config.veo_model applies. Deliberately NOT gated by
+        # _adaptive_duration below: that flag is about DURATION only,
+        # and silently dropping a declared model would render the job on
+        # the wrong one.
+        veo_model_val = line.get('veo_model') if isinstance(line, dict) else None
         # v861 — adaptive length OFF: every clip renders at the job's single
         # `duration` setting. Storing NULL is the whole implementation: NULL
         # already means "use the job-level duration" on both render paths
@@ -2980,6 +3004,7 @@ async def _create_job_impl(
             cut_mode=cut_mode,
             target_duration_s=target_duration_s,
             veo_render_duration_s=veo_render_duration_s,
+            veo_model=veo_model_val,        # v961
             caption=caption_val,            # v681
             scene_type=scene_type_val,      # v681
             bg_color=bg_color_val,          # v681
@@ -3925,6 +3950,10 @@ async def _setup_job_background(
                             composite_plate_image_node_id=ck.composite_plate_image_node_id,
                             target_duration_s=ck.target_duration_s,
                             veo_render_duration_s=ck.veo_render_duration_s,
+                            # v961 — a plate renders under its layer, so
+                            # it must render on the SAME model or the two
+                            # halves of one composite disagree.
+                            veo_model=ck.veo_model,
                             cut_mode='auto',
                             scene_type='shot',
                         )
@@ -6816,6 +6845,7 @@ async def get_job_clips(
             # explicit kwargs, so declaring a field on the model is not enough.
             target_duration_s=c.target_duration_s,
             veo_render_duration_s=c.veo_render_duration_s,
+            veo_model=c.veo_model,
             prompt_text=c.prompt_text or None,
             prompt_text_b=c.prompt_text_b or None,  # v805/v821
             dialogue_text_b=c.dialogue_text_b or None,  # v821
@@ -6925,6 +6955,7 @@ async def get_job_clips_active(
             # explicit kwargs, so declaring a field on the model is not enough.
             target_duration_s=c.target_duration_s,
             veo_render_duration_s=c.veo_render_duration_s,
+            veo_model=c.veo_model,
             prompt_text=c.prompt_text or None,
             prompt_text_b=c.prompt_text_b or None,  # v805/v821
             dialogue_text_b=c.dialogue_text_b or None,  # v821
@@ -7497,6 +7528,10 @@ class UpdateClipRequest(BaseModel):
     cut_mode: Optional[str] = None
     target_duration_s: Optional[float] = None
     veo_render_duration_s: Optional[int] = None
+    # v961 — the PER-CLIP render model. NULL = the job-level
+    # config.veo_model applies, which is every pre-v961 job. Legal values
+    # are veo_models.ALLOWED_VEO_MODELS.
+    veo_model: Optional[str] = None
     caption: Optional[str] = None
     scene_type: Optional[str] = None
     bg_color: Optional[str] = None
@@ -7512,7 +7547,7 @@ class UpdateClipRequest(BaseModel):
 
 _V735_ALLOWED_CLEAR_FIELDS = {
     "dialogue_text", "dialogue_pad", "prompt_text", "prompt_text_b", "cut_mode",
-    "target_duration_s", "veo_render_duration_s", "caption",
+    "target_duration_s", "veo_render_duration_s", "veo_model", "caption",
     "scene_type", "bg_color", "voiceover_anchor_image_node_id",
     "voiceover_line",
 }
@@ -7599,6 +7634,24 @@ async def update_clip(
                 f"[0.1, 60.0]",
             )
         clip.target_duration_s = float(req.target_duration_s)
+
+    # ─── veo_model ───────────────────────────────────────────────────────
+    # v961 — the per-clip render model. Validated against the ONE allowlist
+    # (veo_models.ALLOWED_VEO_MODELS), fail-closed: a string the Flow dropdown
+    # cannot find would otherwise leave the job on whatever model was already
+    # selected, with nothing failing.
+    if req.veo_model is not None:
+        _vm = normalize_veo_model(req.veo_model)
+        if _vm is None:
+            clip.veo_model = None          # explicit clear → job-level model
+        elif not is_legal_veo_model(_vm):
+            raise HTTPException(
+                400,
+                f"veo_model {req.veo_model!r} is not one of "
+                f"{describe_allowed()} (v961)",
+            )
+        else:
+            clip.veo_model = _vm
 
     # ─── veo_render_duration_s ───────────────────────────────────────────
     # v861 — 10s joined the set (Flow's 2026-07 composer). The Veo API path
@@ -7744,7 +7797,7 @@ async def update_clip(
         _changed = []
         for fname in (
             "dialogue_text", "dialogue_pad", "prompt_text", "clip_mode",
-            "cut_mode", "target_duration_s", "veo_render_duration_s",
+            "cut_mode", "target_duration_s", "veo_render_duration_s", "veo_model",
             "caption", "scene_type", "bg_color", "clip_role",
             "voiceover_anchor_image_node_id", "voiceover_line",
         ):
@@ -7773,7 +7826,7 @@ async def update_clip(
                 # describes — the same disease as v892.2, in the response.
                 "dialogue_text", "dialogue_pad", "prompt_text", "prompt_text_b",
                 "clip_mode",
-                "cut_mode", "target_duration_s", "veo_render_duration_s",
+                "cut_mode", "target_duration_s", "veo_render_duration_s", "veo_model",
                 "caption", "scene_type", "bg_color", "clip_role",
                 "voiceover_anchor_image_node_id", "voiceover_line",
                 "audio_from_scene",     # v698A many-to-one
@@ -8099,6 +8152,8 @@ async def recreate_deleted_clip(
         clip_mode=clip_mode,
         scene_index=line.get('scene_index', 0) or 0,
         cut_mode=line.get('cut_mode'),
+        # v961 — per-clip render model; None = job-level model.
+        veo_model=line.get('veo_model'),
         target_duration_s=line.get('target_duration_s'),
         veo_render_duration_s=line.get('veo_render_duration_s'),
         caption=line.get('caption'),
@@ -8139,6 +8194,9 @@ async def recreate_deleted_clip(
         "start_frame": start_frame_key,
         "prompt_attached": bool(prompt_text),
         "veo_render_duration_s": clip.veo_render_duration_s,
+            # v961 — per-clip render model. NULL → the worker uses
+            # the job-level model, exactly as before v961.
+            "veo_model": clip.veo_model,
         "warnings": warnings,
     }
 
@@ -18017,6 +18075,9 @@ async def local_worker_get_pending_job(
             # v861 — per-clip render duration (4|6|8|10). NULL → the worker
             # falls back to the job-level duration (legacy / manual jobs).
             "veo_render_duration_s": clip.veo_render_duration_s,
+            # v961 — per-clip render model. NULL → the worker uses
+            # the job-level model, exactly as before v961.
+            "veo_model": clip.veo_model,
         }
 
         # v943 — charswap keys. Added only when the clip really is a swap, so a
@@ -18296,7 +18357,12 @@ async def local_worker_get_redo_clips(
             "prefix_short_word": job_config.get("prefix_short_word", "only"),
             "prefix_short_threshold": job_config.get("prefix_short_threshold", 15),
             "flow_variants_count": job_config.get("flow_variants_count", 2),
-            "veo_model": job_config.get("veo_model", "Veo 3.1 - Lite [Lower Priority]"),
+            # v961 — per-clip model wins; NULL falls back to the job model,
+            # which is exactly what this key did before v961. ONE key only: a
+            # second "veo_model" entry in the same dict literal silently
+            # overwrote this one, because Python keeps the LAST.
+            "veo_model": clip.veo_model or job_config.get(
+                "veo_model", "Veo 3.1 - Lite [Lower Priority]"),
         })
     
     return {"clips": clips_data}
@@ -20313,6 +20379,9 @@ async def user_worker_get_pending_job(
             # v861 — per-clip render duration (4|6|8|10). NULL → the worker
             # falls back to the job-level duration (legacy / manual jobs).
             "veo_render_duration_s": clip.veo_render_duration_s,
+            # v961 — per-clip render model. NULL → the worker uses
+            # the job-level model, exactly as before v961.
+            "veo_model": clip.veo_model,
         }
         # v943 — see the local-worker payload; keys appear only on a swap clip.
         _clip_data = _v943_maybe_charswap(_clip_data, clip, base_url, "user-worker")
@@ -20555,7 +20624,12 @@ async def user_worker_get_redo_clips(
             "prefix_short_word": job_config.get("prefix_short_word", "only"),
             "prefix_short_threshold": job_config.get("prefix_short_threshold", 15),
             "flow_variants_count": job_config.get("flow_variants_count", 2),
-            "veo_model": job_config.get("veo_model", "Veo 3.1 - Lite [Lower Priority]"),
+            # v961 — per-clip model wins; NULL falls back to the job model,
+            # which is exactly what this key did before v961. ONE key only: a
+            # second "veo_model" entry in the same dict literal silently
+            # overwrote this one, because Python keeps the LAST.
+            "veo_model": clip.veo_model or job_config.get(
+                "veo_model", "Veo 3.1 - Lite [Lower Priority]"),
         })
     
     return {"clips": clips_data}

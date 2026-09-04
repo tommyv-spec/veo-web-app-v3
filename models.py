@@ -361,6 +361,21 @@ class Clip(Base):
     target_duration_s = Column(Float, nullable=True)
     veo_render_duration_s = Column(Integer, nullable=True)
 
+    # v961 — the PER-CLIP render model, so one job can mix them: the spoken
+    # clips on `Omni Flash` and the silent b-roll cutaways on
+    # `Veo 3.1 - Lite [Lower Priority]`. Same shape as veo_render_duration_s
+    # above: resolved at import from the markdown's `- **veo_model:**` bullet,
+    # NULL = no override so the job-level config.veo_model applies, exactly as
+    # every job behaved before v961. Forward-only; no existing job changes.
+    # Legal values are veo_models.ALLOWED_VEO_MODELS — the Flow dropdown's own
+    # labels, matched exactly. Bare VARCHAR, no CHECK constraint: readers must
+    # not trust the value, they validate it (same stance as veo_render_duration_s).
+    # v943 charswap and v959 movie-section clips FORCE Omni and fail closed on
+    # anything else, so image_platform hard-fails at import when a declared
+    # per-clip model conflicts with one of those stamps.
+    # Canonical: code/template_reference.md §v961.
+    veo_model = Column(String(64), nullable=True)
+
     # v681 — text-card / caption denorm from ImageSceneAssignment.
     # caption: source caption (informational on shot clips) OR the
     # rendered text on text_card clips.

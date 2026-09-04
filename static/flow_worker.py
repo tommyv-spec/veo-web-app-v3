@@ -5573,6 +5573,19 @@ COOKIE_CLEAR_COOLDOWN = 30  # seconds — skip a redundant clear within this win
 _POLICY_FALLBACK_VEO_MODEL = "Veo 3.1 - Fast"  # the "lite/fast (frames)" target when leaving Omni
 _POLICY_SWAP_DONE = {}  # clip_id -> swapped-to model string
 
+# v961 — the job-level fallback, named once instead of retyped at each read.
+#
+# DELIBERATELY A LOCAL CONSTANT, NOT an import of code/veo_models.py: this file
+# runs standalone on worker machines and imports same-dir modules only (see the
+# sys.path handling at the top). It is the same discipline clip_duration.py
+# states for itself — "worker.py and static/flow_worker.py do NOT import this;
+# they read the resolved integer off the Clip row / API payload". The worker
+# likewise never VALIDATES a model here: the server already refused anything
+# outside veo_models.ALLOWED_VEO_MODELS at import and at the API, so what
+# arrives on the payload is legal by construction. This string only has to
+# match what the server's DEFAULT_VEO_MODEL falls back to.
+DEFAULT_VEO_MODEL = "Veo 3.1 - Lite [Lower Priority]"
+
 # v805 — per-clip Prompt B (policy fallback). The clip payload carries an
 # operator-authored voice-only fallback prompt ('prompt_b'). On the FIRST
 # generation-policy block we retry the SAME model with Prompt B (the prompt
@@ -10150,6 +10163,50 @@ def ensure_vertical_orientation(page, label=""):
                     print(f"{prefix}✓ Selected Vertical orientation (icon)", flush=True)
     except Exception as e:
         print(f"{prefix}⚠ Orientation check failed: {e}", flush=True)
+
+
+def apply_clip_veo_model(page, clip, job_veo_model, context=""):
+    """v961 — pin THIS clip's render model on the page, before anything reads it.
+
+    Precedence, highest first (the same order the REDO path already applies at
+    the `page._veo_model = _policy_swap_model or clip.get('veo_model') or ...`
+    line, lifted onto the main submit path):
+
+      1. an in-flight policy swap for this clip  (_POLICY_SWAP_DONE)
+      2. the clip's own authored model           (clip['veo_model'], v961)
+      3. the job's model                         (job config)
+      4. DEFAULT_VEO_MODEL
+
+    CALL THIS BEFORE set_clip_input_mode, NOT after, and never from inside
+    click_generate_button. _omni_ingredients_mode() reads page._veo_model AT
+    CALL TIME to decide the Frames/Ingredients tab, and set_clip_input_mode runs
+    well before the generate click. Set the model late and the tab is computed
+    from the PREVIOUS clip's model while the dropdown gets the right one — a
+    silent mismatch, and the exact shape of the bug v881 already documents one
+    line above its own call site ("set THIS clip's mode first ... without this
+    the flag is the PREVIOUS clip's shape and the wrong signal gets read").
+
+    Returns the model string applied, so the caller can log it.
+    """
+    try:
+        swapped = _POLICY_SWAP_DONE.get(clip.get('id')) if isinstance(clip, dict) else None
+        authored = None
+        if isinstance(clip, dict):
+            authored = (clip.get('veo_model') or '').strip() or None
+        target = swapped or authored or job_veo_model or DEFAULT_VEO_MODEL
+        previous = getattr(page, "_veo_model", None)
+        page._veo_model = target
+        if authored and target == authored and previous and previous != target:
+            # Only log the CHANGES, and only the ones v961 caused — a job whose
+            # clips all share the job model must stay as quiet as it was before.
+            src = "clip" if not swapped else "policy-swap"
+            print(f"[v961] {context}model {previous} → {target} (source={src})",
+                  flush=True)
+        return target
+    except Exception:
+        # Never let model bookkeeping take down a submit; the dropdown check
+        # downstream falls back to the job model on its own.
+        return job_veo_model or DEFAULT_VEO_MODEL
 
 
 def ensure_lower_priority_model(page, label=""):
@@ -18992,6 +19049,15 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
 
         clip_index = clip['clip_index']
 
+        # v961 — pin THIS clip's render model at the TOP of the iteration, so
+        # every later reader sees it: set_clip_input_mode (which decides the
+        # Frames/Ingredients tab from _omni_ingredients_mode → page._veo_model)
+        # and ensure_lower_priority_model (which drives the dropdown). NULL
+        # veo_model on the clip = the job's model, i.e. every pre-v961 job is
+        # byte-identical here.
+        apply_clip_veo_model(page, clip, veo_model,
+                             context=f"clip {clip_index + 1}: ")
+
         # v765 — never auto-resubmit a clip the DB already marks 'failed' (see
         # the matching guard in the resume loop): terminal failures await a
         # user Retry, not an automatic re-render of the same failing content.
@@ -22122,6 +22188,16 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             raise FlowAccountBlocked(job_id)  # v904.1 — typed so scan loops re-raise
 
         clip_index = clip['clip_index']
+
+        # v961 — pin THIS clip's render model, same as the failover submit loop.
+        # There are TWO submit loops in this file and they are BOTH live; a
+        # per-clip model applied in only one renders the other path's clips on
+        # the job model with nothing failing. This loop's own charswap and
+        # movie-section arms call set_clip_input_mode further down, and that
+        # reads page._veo_model to choose the Frames/Ingredients tab — so this
+        # assignment has to happen here, above every one of them.
+        apply_clip_veo_model(page, clip, veo_model,
+                             context=f"clip {clip_index + 1}: ")
 
         # v765 — never auto-resubmit a clip the DB already marks 'failed'. A
         # terminal failure (policy give-up, auto-redo cap, unusual-activity

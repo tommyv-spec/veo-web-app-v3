@@ -20139,3 +20139,143 @@ Check the mechanism, and if it is wrong, still ask what the instinct was pointin
 
 **Touched:** `code/autoedit_pipeline.py`, `code/main.py`,
 `code/tests/check_v960_3_review_fixes.py`, this status line. Operator 2026-09-04.
+
+---
+
+## v961 — PER-CLIP RENDER MODEL: one job, two models (2026-09-04)
+
+**Where it came from**: operator 2026-09-04, on the 80-clip Garnissa copycat-callout build — first
+*"the brolls are animated using lite model"*, then, once told the two-job workaround was blocked,
+**"just adjust the features to allow it, so we can change model midjob"**. What they wanted:
+**the dialogue on `Omni Flash` and the silent b-roll cutaways on `Veo 3.1 - Lite [Lower Priority]`,
+inside ONE job.**
+
+**What it fixes**: `veo_model` was a single JOB-level field (`VideoConfigInput`, `main.py:379`). One
+model for every clip. The obvious workaround — two jobs joined by `POST /api/jobs/assemble` — is
+capped at **20 clips** (`main.py:10200`, `"Maximum 20 clips allowed"`), and that build has 52
+cutaways. So a mixed-model video was not merely awkward, it was impossible.
+
+**The rule**: a scene may declare its own render model, and NULL means what it always meant.
+
+```
+### Scene 29
+- **image:** image_10
+- **speaker:** voiceover
+- **audio_from_scene:** 5
+- **veo_model:** Veo 3.1 - Lite [Lower Priority]
+- **clip_duration_s:** 4
+```
+
+Absent bullet = the job-level `config.veo_model`, so **every pre-v961 build is byte-identical**.
+Forward-only.
+
+**Legal values** — `veo_models.ALLOWED_VEO_MODELS`, matched **exactly and case-sensitively**,
+because they are the Flow dropdown's own menu-item labels:
+
+`Omni Flash` | `Veo 3.1 - Quality` | `Veo 3.1 - Fast` | `Veo 3.1 - Lite` |
+`Veo 3.1 - Lite [Lower Priority]`
+
+`Veo 3.1 - Lite` and `Veo 3.1 - Lite [Lower Priority]` are **different dropdown options**, not
+aliases (the bracket variant is absent on some account tiers — v781). A near-miss is **refused, never
+repaired**: a string the dropdown cannot find does not fail loudly, it leaves the composer on
+whatever model was already selected, and the clip renders on the wrong model with nothing failing.
+
+### Why the hard part was already built
+
+Three mechanisms existed before v961 and needed no change:
+
+- `ensure_lower_priority_model` (`static/flow_worker.py:10155`) reads the **live DOM** model button,
+  decides `already` per target, and opens the dropdown only on a mismatch. Stateless and idempotent.
+  **It is already called per generation** (`:10350`).
+- `set_clip_input_mode` (v881, `:15155`) already flips the Frames/Ingredients tab **per clip**, and
+  only when the mode actually differs. v959 hardened it: `_force_ingredients` resets on ENTRY to
+  every call *"so no clip can inherit the previous clip's answer"*, and `_input_mode_observed` clears
+  before each switch because *"a stale observation from the previous clip must never be read as this
+  clip's proof."*
+- The REDO path already applied a per-clip model (`:17845`), reading `clip.get('veo_model')` — a key
+  nothing ever populated.
+
+So v961 is plumbing plus **one correctly-placed assignment**.
+
+### THE ORDERING CONSTRAINT — the only real hazard
+
+`_omni_ingredients_mode` reads `page._veo_model` **at call time** (`:15150`). On the main submit path
+the tab is chosen at `:10758` and the dropdown is only ensured later, inside `click_generate_button`.
+
+**So the per-clip model must be pinned at the TOP of the per-clip loop, before `set_clip_input_mode`
+runs.** Set it later and the tab is computed from the PREVIOUS clip's model while the dropdown gets
+the right one — a silent mismatch, and precisely the failure v881 already warns about one line above
+its own call site (*"set THIS clip's mode first ... without this the flag is the PREVIOUS clip's
+shape and the wrong signal gets read"*). `apply_clip_veo_model(page, clip, job_model, context)` does it.
+
+**Precedence**, highest first:
+
+1. `_POLICY_SWAP_DONE[clip_id]` — an in-flight policy swap (unchanged).
+2. **the v943 charswap / v959 movie-section forced model** — see below.
+3. `clip['veo_model']` — the authored per-clip value.
+4. the job config's `veo_model`.
+5. `DEFAULT_VEO_MODEL` = `Veo 3.1 - Lite [Lower Priority]`.
+
+### v943 / v959 win, and a conflict HARD-FAILS at import
+
+Both arms **fail closed** on any model but Omni, because only Omni offers the Ingredients tab:
+charswap at `static/flow_worker.py:22709-22729` (*"charswap requires the Omni model until a
+forced-Ingredients path exists"*) and movie sections at `:23137` (*"a non-Omni composer has no
+Ingredients tab"*). An authored `Veo 3.1 - Lite` on one of those clips therefore does not buy a
+cheaper render — it buys a **failed clip**, discovered after the slot is gone.
+
+So the forced model wins and `image_platform` refuses the conflict **at import**, naming the clip and
+both models, where it costs nothing.
+
+### Where the allowlist lives — and where it must NOT
+
+`code/veo_models.py`, dependency-neutral. **NOT `main.py`**: `main.py:166` imports `image_platform`,
+so `image_platform` importing the constant back is a cycle, and importing `main` from the worker or a
+linter would load the whole app to read a list. This mirrors `ALLOWED_CLIP_DURATIONS_S` living in
+`clip_duration.py` (`image_platform.py:49-55`).
+
+**`static/flow_worker.py` does NOT import it** — it runs standalone on worker machines and imports
+same-dir modules only. It keeps a local `DEFAULT_VEO_MODEL` and never validates: the server already
+refused anything illegal at import and at the API, so what reaches the payload is legal by
+construction. Same discipline `clip_duration.py` states for itself. `test_v961_veo_model.py` fails if
+the worker's copy drifts from the canonical default, or if a legal model has no dropdown selector.
+
+### The plumbing, and why it has its own test
+
+`clips.veo_model VARCHAR(64) NULL` travels through **five** per-clip payload dicts — three
+local-worker (`main.py:8141`, `:18019`, `:18293`) and **two user-worker** (`~:20315`, `~:20552`) —
+plus both `ClipResponse` constructors and three field whitelists.
+
+The first draft of this rule enumerated only the local-worker three. Shipping that would have made
+the override work on local-worker jobs and be **silently inert on user-worker jobs** — the v698A.2.1
+failure, split by worker type so it would read as a flaky worker rather than a missing field. Caught
+by the Codex review of the plan, not by a render.
+`code/tests/check_veo_model_plumbing.py` anchors on `veo_render_duration_s`'s own site count, so a
+NEW payload path added later fails the test instead of quietly dropping the field.
+
+### Authoring
+
+The `/build` auditor's `v961_veo_model` check FAILs an unknown model string, and **WARNs when a build
+mixes models without a `RENDER MODELS:` line in §0** saying which clips get which and why — an
+undeclared mix reads as an accident.
+
+```
+RENDER MODELS: Omni Flash for the 28 spoken clips | Veo 3.1 - Lite [Lower Priority] for the 52
+silent cutaways | why: only the read has to lip-sync; the cutaways are hands and paint with no
+mouth in frame.
+```
+
+### Known, not yet proven
+
+`static/flow_worker.py:19006` says the shared project *"is locked to the job's original model"* on
+the policy-swap path. Reading says that is about the policy block needing a fresh project, not a
+hard project-level model lock — v881's own docstring describes mixed-shape jobs inside one project.
+**Whether Flow accepts a mid-project model change is something only a real render proves**, which is
+why v961's first proof must be a SMALL mixed build, never the 80-clip one.
+
+**Touched:** `code/veo_models.py` (new), `code/models.py`, `code/image_platform.py`, `code/main.py`,
+`code/static/flow_worker.py`, `code/verify_video_format.py`,
+`code/tests/check_veo_model_plumbing.py` (new), `code/tests/test_v961_veo_model.py` (new),
+`.claude/skills/build-video/audit_build.py`. Plan:
+`docs/superpowers/plans/2026-09-04-per-clip-veo-model.md`. Codex review (2 passes, 5 findings, all
+applied): `docs/audits/codex-loop/2026-09-04-per-clip-veo-model.md`. Operator 2026-09-04.

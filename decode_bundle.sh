@@ -4183,6 +4183,13 @@ prose when the source clearly runs one section of continuous multi-speaker
 dialogue in one take (the shape a later build may lift as
 `- **render_method:** movie-section`, template_reference.md §v959) or when a
 real person's body carries a swapped face (§v945).
+
+RENDER MODEL (v961): same rule — a DECODE never declares `- **veo_model:**`.
+That bullet chooses which model OUR renderer uses for a clip; a decode observes
+a source it did not render. If the source visibly mixes production registers
+(a phone-shot talking head cut against stock or staged b-roll), say so in prose
+— that observation is what later lets a build put the read on one model and the
+cutaways on another (template_reference.md §v961).
 EOF
 }
 

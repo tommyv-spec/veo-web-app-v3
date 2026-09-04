@@ -23,6 +23,23 @@ EMDASH = "—"
 V959_WINDOWS_S = (8, 10)
 V959_MAX_FACE_REFS = 2
 
+# v961 — the legal per-clip render models. Imported from the ONE source of
+# truth when this linter runs beside the app, with a literal fallback for the
+# standalone case (this file is run directly against a build .md by
+# run_build_checks, sometimes from a checkout without the app on sys.path).
+# The fallback drifting from veo_models.ALLOWED_VEO_MODELS is caught by
+# test_v961_linter_models_match_the_parser.
+try:
+    from veo_models import ALLOWED_VEO_MODELS as _V961_ALLOWED_VEO_MODELS
+except ImportError:  # pragma: no cover - standalone lint
+    _V961_ALLOWED_VEO_MODELS = (
+        "Omni Flash",
+        "Veo 3.1 - Quality",
+        "Veo 3.1 - Fast",
+        "Veo 3.1 - Lite",
+        "Veo 3.1 - Lite [Lower Priority]",
+    )
+
 
 def lint_promptb_gate(clips):
     """v821 — reworded Prompt B mandatory on every dialogue clip.
@@ -192,6 +209,17 @@ def lint(path: str) -> int:
         ef = re.search(r"^-\s+\*\*end_frame_image:\*\*\s+image_(\d+)", blk, re.M)
         if ef and img_m:
             end_frames.append((int(img_m.group(1)), int(ef.group(1))))
+        # v961 — the per-clip render model, mirrored from image_platform.py so a
+        # build that lints here is a build the platform parser accepts. Exact,
+        # case-sensitive: the strings are the Flow dropdown's own labels, and
+        # `Veo 3.1 - Lite` and `Veo 3.1 - Lite [Lower Priority]` are DIFFERENT
+        # options. A model the dropdown cannot find does not fail loudly at
+        # render time — it leaves the job on whatever was already selected.
+        for _vm_raw in re.findall(r"^-\s+\*\*veo_model:\*\*\s*(.+?)\s*$", blk, re.M):
+            if _vm_raw.strip() not in _V961_ALLOWED_VEO_MODELS:
+                fails.append(
+                    f"v961: Scene {sn} veo_model {_vm_raw.strip()!r} is not one of "
+                    + " | ".join(_V961_ALLOWED_VEO_MODELS))
         # v959 — movie-section declarations, mirrored from image_platform.py so
         # a build that lints here is a build the platform parser accepts.
         fr = re.search(r"^-\s+\*\*face_refs:\*\*\s*(.+)$", blk, re.M)

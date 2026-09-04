@@ -666,6 +666,18 @@ Step 5 — OUTPUT shape (per code/template_new_format.md skeleton)
   then on EVERY shot scene of the build or none (template_reference.md §v959 —
   import is latched off until the worker arm ships).
 
+RENDER MODEL (v961): a build normally declares nothing and every clip renders on
+the job's one model. To mix models inside ONE job, declare `- **veo_model:**` on a
+scene: exactly one of `Omni Flash` | `Veo 3.1 - Quality` | `Veo 3.1 - Fast` |
+`Veo 3.1 - Lite` | `Veo 3.1 - Lite [Lower Priority]` (the last two are DIFFERENT
+dropdown options, not aliases). Absent = the job-level model, so nothing changes
+for a build that says nothing. The usual use is a spoken read on `Omni Flash`
+with silent b-roll cutaways on `Veo 3.1 - Lite [Lower Priority]`. A build that
+MIXES models must carry a `RENDER MODELS:` line in §0 saying which clips get
+which and why, or the auditor WARNs. Charswap (v943) and movie-section (v959)
+clips force Omni and a conflicting per-clip declaration HARD-FAILS at import
+(template_reference.md §v961).
+
 Step 6 — PRE-OUTPUT VALIDATION GATES (mandatory — fix and re-emit if any fail)
   Gate 1 — text_card scenes have NO ### Image N header (v696)
   Gate 2 — every shot scene chains forward through state-evolution (v596 + v604)
