@@ -1584,7 +1584,12 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
         # is not the same length as its export (a b-roll pass that stopped
         # short) would freeze under full-length audio; refuse it and keep the
         # speaker export, loudly.
-        _pdur = probe_duration(picture)
+        try:
+            _pdur = probe_duration(picture)
+        except Exception as _pe:   # unreadable / missing cutaway edit: never a crash, the export is the picture
+            print(f"[autoedit/v698A.2.5] cutaway edit {picture.name} could not be probed ({_pe}) — "
+                  f"captioning the export instead", flush=True)
+            _pdur = -1.0
         if abs(_pdur - dur) > 0.5:
             print(f"[autoedit/v698A.2.5] cutaway edit {picture.name} is {_pdur:.2f}s but the "
                   f"export is {dur:.2f}s — not the same edit; captioning the export instead",
