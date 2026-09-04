@@ -117,6 +117,21 @@ def test_unknown_face_ref_hard_fails():
         _parse(SECTION_SCENE.replace("image_2, image_3", "image_2, image_9"))
 
 
+def test_repeated_face_ref_hard_fails():
+    with pytest.raises(ValueError, match="repeats"):
+        _parse(SECTION_SCENE.replace("image_2, image_3", "image_2, image_2"))
+
+
+def test_face_ref_token_must_be_image_n():
+    with pytest.raises(ValueError, match="face_refs"):
+        _parse(SECTION_SCENE.replace("image_2, image_3", "img_2, image_3"))
+
+
+def test_section_scene_refuses_swap_bullets():
+    with pytest.raises(ValueError, match="swap"):
+        _parse(SECTION_SCENE + "- **swap_mode:** video-led\n")
+
+
 def test_section_with_two_lines_hard_fails():
     md = SECTION_SCENE + "- **line:** a second line here\n- **clip_duration_s:** 10\n"
     with pytest.raises(ValueError, match="one clip"):
