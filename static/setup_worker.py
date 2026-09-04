@@ -403,6 +403,12 @@ def create_launch_scripts():
             f'for /f "usebackq tokens=1,* delims==" %%a in (".env") do set "%%a=%%b"\n'
             f'echo Checking for updates...\n'
             f'powershell -Command "try {{ Invoke-WebRequest -Uri \"{update_url}\" -OutFile flow_worker.py.tmp -UseBasicParsing -TimeoutSec 15; Move-Item -Force flow_worker.py.tmp flow_worker.py; Write-Host \"Updated worker\" }} catch {{ Write-Host \"Update skipped (offline?)\" }}"\n'
+            # Unbuffered, or the poll line sits in a ~24 minute stdout buffer
+            # the moment this window is redirected to a file, and a worker that
+            # is running perfectly looks dead. flow_worker.py prints that line
+            # in three places and only ONE flushes. Set AFTER the .env loop so
+            # it cannot be overridden by a stale .env.
+            f'set PYTHONUNBUFFERED=1\n'
             f'echo Starting KavenoBuilder Flow Worker...\n'
             f'"{sys.executable}" flow_worker.py --single\n'
             f'pause\n'
@@ -426,6 +432,9 @@ def create_launch_scripts():
             f'}} catch {{\n'
             f'    Write-Host "Update skipped (offline?)." -ForegroundColor Yellow\n'
             f'}}\n'
+            # Same reason as the .bat above, and set after the .env loop so a
+            # stale .env cannot put the buffering back.
+            f'$env:PYTHONUNBUFFERED = "1"\n'
             f'Write-Host "Starting KavenoBuilder Flow Worker..."\n'
             f'& "{sys.executable}" flow_worker.py --single\n'
         )
@@ -440,6 +449,9 @@ def create_launch_scripts():
             f'set +a\n'
             f'echo "Checking for updates..."\n'
             f'curl -sf --max-time 15 "{update_url}" -o flow_worker.py.tmp && mv flow_worker.py.tmp flow_worker.py && echo "Worker updated." || echo "Update skipped."\n'
+            # Same reason as the .bat above. `set -a` exported everything in
+            # .env; this line runs after it, so it wins.
+            f'export PYTHONUNBUFFERED=1\n'
             f'echo "Starting KavenoBuilder Flow Worker..."\n'
             f'python3 flow_worker.py --single\n'
         )
