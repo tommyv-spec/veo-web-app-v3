@@ -9563,7 +9563,8 @@ def _import_scene_table_impl(
             face_ref_node_ids_json=(
                 _json.dumps(
                     _v959_face_ref_node_ids(s, _v959_image_index_to_node_id))
-                if s.get("render_method") == MOVIE_SECTION_RENDER_METHOD else None
+                if (s.get("render_method") or "").strip().lower()
+                == MOVIE_SECTION_RENDER_METHOD else None
             ),
         )
         db.add(assignment)
@@ -10258,13 +10259,9 @@ def prepare_batch_for_video(
         # v959 — face reference images must be on disk for the worker to attach
         # them as Ingredients chips. Same reason as the end frame above: a face
         # ref is never a scene's OWN image, so nothing else puts it here, and a
-        # missing file surfaces as a 404 at render time.
-        try:
-            _v959_face_nids = _json.loads(
-                scene.get("face_ref_node_ids_json") or "[]") or []
-        except Exception:
-            _v959_face_nids = []
-        for _fr_nid in _v959_face_nids:
+        # missing file surfaces as a 404 at render time. An unreadable column
+        # raises out of here rather than reading as "no face refs".
+        for _fr_nid in _v959_stored_face_ref_node_ids(scene):
             if _fr_nid not in seen:
                 referenced_image_node_ids.append(_fr_nid)
                 seen.add(_fr_nid)
@@ -10701,11 +10698,7 @@ def prepare_batch_for_video(
         # positions in the uploaded image list. Empty on every normal scene.
         # The local index is what the frontend and main.py's Clip writer use to
         # find the file, exactly as they do for the end frame above.
-        try:
-            _v959_nids = _json.loads(
-                scene.get("face_ref_node_ids_json") or "[]") or []
-        except Exception:
-            _v959_nids = []
+        _v959_nids = _v959_stored_face_ref_node_ids(scene)
         _v959_face_local_idxs = [
             node_id_to_local_index.get(_n) for _n in _v959_nids
         ]
@@ -11076,11 +11069,7 @@ def prepare_batch_for_video(
                 "swap_avatar_upload_id": _v943_avatar,
                 # v943.1 — export-time source audio.
                 "swap_audio": _v943_1_audio,
-                # v959 — face refs denormed onto the line for the same reason
-                # v718i.2 denormed the end frame: the frontend dialogue payload
-                # builder reads scenes_metadata (this flat per-line array), not
-                # scene_assignments, so a binding that lives only on the
-                # per-scene payload arrives as None on every clip.
+                # v959 — face refs, same reason as the silent-line branch above.
                 "face_ref_node_ids": _v959_nids,
                 "face_ref_local_indexes": _v959_face_local_idxs,
             })
@@ -12276,6 +12265,94 @@ def _v959_face_ref_node_ids(scene, image_index_to_node_id):
     return out
 
 
+def _v959_stored_face_ref_node_ids(scene):
+    """The face-ref ImageNode ids stored on a row, or a refusal.
+
+    `face_ref_node_ids_json` is written by the import, never typed by anyone, so
+    a value that will not parse means the row is broken. Logging it and carrying
+    on with an empty list is failing open: the section renders with its face
+    chips dropped, which is a stranger on screen and a take that merely looks
+    bad. Every reader goes through here so all three say the same thing.
+    """
+    raw = scene.get("face_ref_node_ids_json")
+    try:
+        return list(json.loads(raw or "[]") or [])
+    except Exception as e:
+        raise ValueError(
+            f"Scene {scene.get('scene_index')}: face_ref_node_ids_json is not "
+            f"readable JSON ({raw!r}: {e}) (v959)")
+
+
+def _v959_materialise_face_frames(db, node_ids, nodes_by_id, job_id,
+                                  job_images_dir, frames_storage_keys, r2,
+                                  already_copied=None):
+    """node_id → R2 frame key, one copied file each. Refuses on any gap.
+
+    A face ref is referenced only by `face_refs:` and is never a scene's own
+    image, so the promote's copy loop never touched it — the same gap v892.2 and
+    v892.10 closed for the composite plate, in both implementations. The key
+    cannot be spelled out from the local index alone either: it ends in THAT
+    node's own file extension, so producing the file and the key belong in one
+    place.
+
+    It refuses instead of warning because a section clip with a face chip
+    missing renders a stranger, and the operator would only learn that after the
+    render. `already_copied` names the frame files the caller already wrote, so
+    a face ref that is also some scene's own image is not copied twice.
+
+    A failed R2 mirror is a warning, not a refusal: the key is the canonical
+    location either way, exactly as it is for start_frame_key.
+    """
+    written = set(already_copied or ())
+    out: Dict[int, str] = {}
+    for nid in sorted(set(node_ids)):
+        hit = nodes_by_id.get(nid)
+        if hit is None:
+            raise HTTPException(
+                500,
+                f"v959: face reference image node {nid} is not in this batch — "
+                f"the section clip would render with a face chip missing"
+            )
+        local_idx, node = hit
+        variant = db.query(ImageVariant).filter(
+            ImageVariant.id == node.chosen_variant_id).first()
+        if not variant:
+            raise HTTPException(
+                500, f"v959: face reference node {nid} has no chosen variant")
+        src = images_root() / variant.image_path
+        if not src.exists():
+            _storage_download_to_local(variant.image_path)
+        if not src.exists():
+            raise HTTPException(
+                500,
+                f"v959: face reference node {nid} file is unavailable at {src} "
+                f"and could not be restored from R2"
+            )
+        filename = f"image_{local_idx:02d}{src.suffix or '.png'}"
+        key = f"jobs/{job_id}/frames/{filename}"
+        if filename in written:
+            # Already on disk and already mirrored by the caller's own copy
+            # loop; copying it again would only cost a second R2 round trip.
+            out[nid] = key
+            log.info(f"[v959] face frame {filename} already written — reused")
+            continue
+        try:
+            shutil.copy2(src, job_images_dir / filename)
+        except Exception as e:
+            raise HTTPException(
+                500, f"v959: face reference node {nid} copy failed: {e}")
+        written.add(filename)
+        if r2 is not None:
+            try:
+                r2.upload_job_frame(job_id, filename, job_images_dir / filename)
+                frames_storage_keys[filename] = key
+            except Exception as ue:
+                log.warning(f"[v959] face frame {filename} R2 upload failed: {ue}")
+        out[nid] = key
+        log.info(f"[v959] face frame materialised: node={nid} -> {filename}")
+    return out
+
+
 def _v959_movie_section_veo_model(existing_model, has_movie_section):
     """Same contract as _v943_charswap_veo_model: (model_to_stamp, conflict).
 
@@ -12426,6 +12503,11 @@ def promote_batch_to_video(
     # because the local copies are gone and the `jobs/{job_id}/frames/`
     # R2 prefix was never populated.
     frames_storage_keys: Dict[str, str] = {}
+    # v959 — the frame files the scene loop below actually writes. Not the same
+    # thing as frames_storage_keys, which only gains an entry when the R2 mirror
+    # succeeds; a face ref that is also some scene's own image is on disk either
+    # way and must not be copied twice.
+    _v959_copied_frames: Set[str] = set()
     try:
         from backends.storage import is_storage_configured, get_storage as _get_storage
         _r2_configured = is_storage_configured()
@@ -12623,6 +12705,7 @@ def promote_batch_to_video(
             copy2(src_path, dst_path)
         except Exception as e:
             raise HTTPException(500, f"Node {n.id}: failed to copy variant file: {e}")
+        _v959_copied_frames.add(dst_filename)   # v959 — see the set's comment
 
         # v612 — mirror to R2 at the canonical jobs/{job_id}/frames/{filename}
         # prefix so /api/jobs/{job_id}/images/{filename}, the clone-job
@@ -12714,14 +12797,14 @@ def promote_batch_to_video(
         # on every scene that is not a movie section. The local index is this
         # node's position in `nodes`, which is what names its frame file
         # (`image_{idx:02d}`) — the same number `idx` is for the scene image.
-        _v959_face_nids: List[int] = []
-        if _assignment is not None:
-            try:
-                _v959_face_nids = _json.loads(
-                    getattr(_assignment, "face_ref_node_ids_json", None) or "[]"
-                ) or []
-            except Exception:
-                _v959_face_nids = []
+        try:
+            _v959_face_nids = _v959_stored_face_ref_node_ids({
+                "scene_index": scene_pos,
+                "face_ref_node_ids_json": getattr(
+                    _assignment, "face_ref_node_ids_json", None),
+            })
+        except ValueError as _v959_je:
+            raise HTTPException(500, str(_v959_je))
         _v959_face_local_idxs = [
             (_nodes_by_id.get(_fid) or (None, None))[0] for _fid in _v959_face_nids
         ]
@@ -12924,10 +13007,26 @@ def promote_batch_to_video(
     # composer has. Same failure the v945.3 block above fixes: this path wrote no
     # veo_model at all, so the worker fell back to a Veo model that has no
     # Ingredients path and the face chips would be dropped without a word.
-    _v959_has = any(
-        (spec.get("render_method") or "").strip().lower() == MOVIE_SECTION_RENDER_METHOD
-        for spec in clip_specs
-    )
+    def _v959_is_section(spec):
+        """Is this spec a movie section? Asked once, in one spelling.
+
+        Four hand-written copies of the same normalised comparison is how one of
+        them comes to disagree with the other three.
+        """
+        return (spec.get("render_method") or "").strip().lower() == MOVIE_SECTION_RENDER_METHOD
+
+    def _prompt_override_for(spec):
+        """The authored Text prompt for this spec, off its parallel dialogue row.
+
+        One lookup for both readers: the D11 refusal below and the prompt_text
+        fill further down. A guard that reads a different field from the one the
+        clip is actually built from is not a guard.
+        """
+        _i = spec["clip_index"]
+        _row = dialogue_list[_i] if _i < len(dialogue_list) else None
+        return (_row or {}).get("veo_prompt_override")
+
+    _v959_has = any(_v959_is_section(spec) for spec in clip_specs)
     _v959_model, _v959_conflict = _v959_movie_section_veo_model(
         config_dict.get("veo_model"), _v959_has)
     if _v959_conflict:
@@ -12947,78 +13046,42 @@ def promote_batch_to_video(
     # section, it is a different video — the v943.5 failure, where a swap clip
     # with a NULL prompt got the dialogue template and rendered a talking head.
     # So refuse here rather than let the worker fill the gap.
+    #
+    # The face refs are refused the same way and for the same reason: the parser
+    # makes 1-2 of them mandatory on every section, so an empty list here means
+    # the row lost them somewhere between import and promote. Both lanes agree —
+    # main.py's clip creator refuses the same two states.
     for spec in clip_specs:
-        if (spec.get("render_method") or "").strip().lower() != MOVIE_SECTION_RENDER_METHOD:
+        if not _v959_is_section(spec):
             continue
-        _v959_dlg = (
-            dialogue_list[spec["clip_index"]]
-            if spec["clip_index"] < len(dialogue_list) else None
-        )
-        if not ((_v959_dlg or {}).get("veo_prompt_override") or "").strip():
+        if not (_prompt_override_for(spec) or "").strip():
             raise HTTPException(
                 400,
                 f"Scene {spec['scene_index']}: render_method=movie-section needs "
                 f"its `### Clip N.1` Text prompt (Setting + timestamped section); "
                 f"build_prompt must never author a section (v959)"
             )
-
-    # v959 — materialise a frame file for every FACE REFERENCE node.
-    #
-    # The copy loop above copies one frame per entry in _scene_plan, i.e. per
-    # scene's OWN image. A face ref is referenced only by `face_refs:` and is
-    # never a scene's own image, so nothing copied it — exactly the gap v892.2
-    # and v892.10 fixed for the composite plate, in both implementations.
-    #
-    # The frame key has to be built the same way start_frame_key is
-    # (`jobs/<job>/frames/image_<local index>.<ext of THAT node's variant>`), so
-    # it cannot be spelled out from the local index alone. Materialising it here
-    # produces the file and the key in one place.
-    #
-    # This one REFUSES instead of warning: a movie section with a face chip
-    # missing renders a stranger, and the operator would only find out after the
-    # render. It runs before the Job row is created, so nothing is left behind.
-    _v959_face_frames: Dict[int, str] = {}
-    for _fid in sorted({
-        _n for _s in clip_specs
-        if (_s.get("render_method") or "").strip().lower() == MOVIE_SECTION_RENDER_METHOD
-        for _n in (_s.get("face_ref_node_ids") or [])
-    }):
-        _fhit = _nodes_by_id.get(_fid)
-        if _fhit is None:
+        if not spec.get("face_ref_node_ids"):
             raise HTTPException(
-                500,
-                f"v959: face reference image node {_fid} is not in this batch — "
-                f"the section clip would render with a face chip missing"
+                400,
+                f"Scene {spec['scene_index']}: render_method=movie-section needs "
+                f"1-{MOVIE_SECTION_MAX_FACE_REFS} face reference images, and this "
+                f"clip carries none — the face chips are what hold identity "
+                f"across sections (v959)"
             )
-        _fidx, _fnode = _fhit
-        _fvariant = db.query(ImageVariant).filter(
-            ImageVariant.id == _fnode.chosen_variant_id).first()
-        if not _fvariant:
-            raise HTTPException(
-                500, f"v959: face reference node {_fid} has no chosen variant")
-        _fsrc = images_root() / _fvariant.image_path
-        if not _fsrc.exists():
-            _storage_download_to_local(_fvariant.image_path)
-        if not _fsrc.exists():
-            raise HTTPException(
-                500,
-                f"v959: face reference node {_fid} file is unavailable at "
-                f"{_fsrc} and could not be restored from R2")
-        _fext = _fsrc.suffix or ".png"
-        _ffn = f"image_{_fidx:02d}{_fext}"
-        try:
-            copy2(_fsrc, job_images_dir / _ffn)
-        except Exception as _fe:
-            raise HTTPException(
-                500, f"v959: face reference node {_fid} copy failed: {_fe}")
-        if _r2_configured and _r2_storage is not None:
-            try:
-                _r2_storage.upload_job_frame(new_job_id, _ffn, job_images_dir / _ffn)
-                frames_storage_keys[_ffn] = f"jobs/{new_job_id}/frames/{_ffn}"
-            except Exception as _fue:
-                log.warning(f"[v959] face frame {_ffn} R2 upload failed: {_fue}")
-        _v959_face_frames[_fid] = f"jobs/{new_job_id}/frames/{_ffn}"
-        log.info(f"[v959] face frame materialised: node={_fid} -> {_ffn}")
+
+    # v959 — every FACE REFERENCE node needs a frame file of its own; see
+    # _v959_materialise_face_frames for why the copy loop above does not
+    # produce one. It runs before the Job row is created, so a refusal in
+    # there leaves nothing behind.
+    _v959_face_frames = _v959_materialise_face_frames(
+        db,
+        [_n for _s in clip_specs if _v959_is_section(_s)
+         for _n in (_s.get("face_ref_node_ids") or [])],
+        _nodes_by_id, new_job_id, job_images_dir, frames_storage_keys,
+        _r2_storage if _r2_configured else None,
+        already_copied=_v959_copied_frames,
+    )
 
     # v827 TEMP DIAG — proves the promote payload no longer fabricates a last
     # frame. Remove once an operator export confirms the closing clip logs
@@ -13141,7 +13204,9 @@ def promote_batch_to_video(
             dialogue_list[_clip_idx]
             if _clip_idx < len(dialogue_list) else None
         )
-        _veo_override = (_matching_dialogue or {}).get("veo_prompt_override") if _matching_dialogue else None
+        # v959 — the SAME lookup the D11 guard above ran, so the guard cannot
+        # pass on a prompt this clip is not built from.
+        _veo_override = _prompt_override_for(spec)
         _veo_neg = (_matching_dialogue or {}).get("veo_negative_prompt_override") if _matching_dialogue else None
         # When a prebuilt override exists, compose the final Veo prompt
         # (text + optional Negative prompt trailer) and stamp it onto
@@ -13230,16 +13295,17 @@ def promote_batch_to_video(
             # v943.1 — export-time source audio, carried the same way.
             swap_audio=spec.get("swap_audio"),
             # v959 — the face reference FRAMES, in the order the build declared
-            # them. NULL on every clip that is not a movie section. The keys
-            # come from the materialise loop above, so every one of them names a
-            # file that exists.
+            # them. NULL on every clip that is not a movie section. Every key
+            # names a file that was copied into the job's frame folder above.
+            # The R2 caveat is the same one start_frame_key carries (v612): a
+            # failed mirror leaves the key pointing at the canonical location
+            # with nothing behind it, and is logged as a warning, not a refusal.
             face_ref_frames_json=(
                 _json.dumps([
                     _v959_face_frames[_fid]
                     for _fid in (spec.get("face_ref_node_ids") or [])
                 ])
-                if (spec.get("render_method") or "").strip().lower()
-                == MOVIE_SECTION_RENDER_METHOD else None
+                if _v959_is_section(spec) else None
             ),
         )
         db.add(clip)

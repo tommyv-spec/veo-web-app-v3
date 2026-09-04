@@ -362,8 +362,10 @@ def test_prepare_uploads_the_face_frames_and_puts_them_on_the_payload():
     worker discovers that hours later as a 404 on download_frame."""
     src = _function_source("prepare_batch_for_video")
     assert "end_frame_image_local_index" in src, "fixture is out of date"
-    assert "face_ref_node_ids_json" in src            # the upload set
-    assert '"face_ref_local_indexes"' in src          # the payload rows
+    assert "_v959_stored_face_ref_node_ids(" in src   # the upload set + payload
+    # The per-scene payload and BOTH flat-row branches (silent scene, spoken
+    # line) — the frontend reads the flat rows, not the per-scene payload.
+    assert src.count('"face_ref_local_indexes"') == 3
 
 
 def test_promote_carries_the_face_refs_from_the_assignment_to_the_clip():
@@ -380,8 +382,260 @@ def test_promote_forces_omni_and_refuses_a_section_with_no_prompt():
     assert "_v959_movie_section_veo_model(" in src
     assert "raise HTTPException(400, _v959_conflict)" in src
     # D11 — build_prompt must never author a section, so a section clip with an
-    # empty Text prompt is refused rather than filled in. The lookup has to be
-    # the SAME field the Clip's prompt_text is built from, or the guard passes
-    # on a prompt the clip will not carry.
-    assert '(_v959_dlg or {}).get("veo_prompt_override")' in src
+    # empty Text prompt is refused rather than filled in. The guard and the
+    # prompt_text fill share ONE lookup: a guard that reads a different field
+    # from the one the clip is built from is not a guard.
+    assert src.count("_prompt_override_for(spec)") == 3  # def + guard + fill
     assert "build_prompt must never author a section" in src
+    # A section with no face refs is the same class of broken: the parser makes
+    # them mandatory, so an empty list means the row lost them on the way here.
+    assert 'not spec.get("face_ref_node_ids")' in src
+
+
+def test_promote_asks_one_question_about_what_a_section_is():
+    """Four spellings of the same test is how one of them comes to disagree."""
+    src = _function_source("promote_batch_to_video")
+    assert "def _v959_is_section(spec)" in src
+    assert src.count("_v959_is_section(") == 5   # def + the four readers
+    # and nobody rolls their own: the normalised comparison is written ONCE,
+    # inside that def.
+    assert src.count('render_method") or "").strip().lower() == MOVIE_SECTION') == 1
+
+
+def test_promote_calls_the_materialise_helper_and_refuses_broken_json():
+    src = _function_source("promote_batch_to_video")
+    assert "_v959_materialise_face_frames(" in src
+    assert "_v959_stored_face_ref_node_ids(" in src
+    # A broken column is a broken ROW, so it leaves as a 500 rather than as an
+    # empty face-ref list nobody notices.
+    assert "except ValueError as _v959_je:" in src
+    assert "raise HTTPException(500, str(_v959_je))" in src
+
+
+def test_no_face_ref_reader_swallows_a_broken_column():
+    """Logging and continuing IS failing open. The column is machine-written,
+    so unreadable JSON is a broken row — and a section that renders with its
+    face chips dropped renders a stranger."""
+    src = (_HERE / "image_platform.py").read_text(encoding="utf-8")
+    assert src.count("_v959_stored_face_ref_node_ids(") == 4  # def + 3 readers
+    assert "_v959_face_nids = []" not in src
+    assert "_v959_nids = []" not in src
+
+
+# --- 6. reading the stored column ------------------------------------------
+
+def test_stored_face_refs_read_back_in_order():
+    from image_platform import _v959_stored_face_ref_node_ids
+    scene = {"scene_index": 4, "face_ref_node_ids_json": "[303, 202]"}
+    assert _v959_stored_face_ref_node_ids(scene) == [303, 202]
+
+
+def test_stored_face_refs_are_empty_when_the_column_is_null():
+    from image_platform import _v959_stored_face_ref_node_ids
+    assert _v959_stored_face_ref_node_ids({"scene_index": 1}) == []
+    assert _v959_stored_face_ref_node_ids(
+        {"scene_index": 1, "face_ref_node_ids_json": ""}) == []
+
+
+def test_stored_face_refs_refuse_a_broken_column():
+    from image_platform import _v959_stored_face_ref_node_ids
+    with pytest.raises(ValueError) as e:
+        _v959_stored_face_ref_node_ids(
+            {"scene_index": 7, "face_ref_node_ids_json": "[303,"})
+    # the scene AND the value that broke it — a reader hours downstream cannot
+    # work out which row was bad from "invalid JSON".
+    assert "Scene 7" in str(e.value) and "[303," in str(e.value)
+
+
+# --- 7. materialising the face frames --------------------------------------
+#
+# The scene loop copies one frame per scene's OWN image. A face ref is never a
+# scene's own image, so nothing copies it, and its key cannot be spelled out
+# from the local index alone: it carries THAT node's file extension. Fakes
+# stand in for the node rows and the storage so the rule itself is testable.
+
+class _FakeNode:
+    def __init__(self, node_id, variant_id):
+        self.id = node_id
+        self.chosen_variant_id = variant_id
+
+
+class _FakeVariant:
+    def __init__(self, image_path):
+        self.image_path = image_path
+
+
+class _FakeDb:
+    """Answers each ImageVariant lookup from a queue, in call order."""
+
+    def __init__(self, results):
+        self._results = list(results)
+
+    def query(self, *_a, **_k):
+        return self
+
+    def filter(self, *_a, **_k):
+        return self
+
+    def first(self):
+        return self._results.pop(0) if self._results else None
+
+
+class _FakeR2:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.uploaded = []
+
+    def upload_job_frame(self, job_id, filename, path):
+        if self.fail:
+            raise RuntimeError("R2 is down")
+        self.uploaded.append(filename)
+
+
+def _patch_storage(monkeypatch, root):
+    """Point images_root() at a temp tree; record every restore attempt."""
+    import image_platform
+    attempts = []
+    monkeypatch.setattr(image_platform, "images_root", lambda: root)
+    monkeypatch.setattr(image_platform, "_storage_download_to_local",
+                        lambda p: attempts.append(p) or False)
+    return attempts
+
+
+def test_face_frames_take_the_local_index_and_the_nodes_own_extension(tmp_path, monkeypatch):
+    from image_platform import _v959_materialise_face_frames
+    root = tmp_path / "images"
+    root.mkdir()
+    (root / "a.png").write_bytes(b"png-bytes")
+    (root / "b.jpg").write_bytes(b"jpg-bytes")
+    _patch_storage(monkeypatch, root)
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    nodes_by_id = {7: (3, _FakeNode(7, 71)), 9: (12, _FakeNode(9, 91))}
+    db = _FakeDb([_FakeVariant("a.png"), _FakeVariant("b.jpg")])
+    keys = {}
+
+    out = _v959_materialise_face_frames(
+        db, [9, 7], nodes_by_id, "JOB1", job_dir, keys, None)
+
+    assert out == {7: "jobs/JOB1/frames/image_03.png",
+                   9: "jobs/JOB1/frames/image_12.jpg"}
+    assert (job_dir / "image_03.png").read_bytes() == b"png-bytes"
+    assert (job_dir / "image_12.jpg").read_bytes() == b"jpg-bytes"
+
+
+def test_face_frames_refuse_a_node_that_is_not_in_the_batch(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+
+    from image_platform import _v959_materialise_face_frames
+    _patch_storage(monkeypatch, tmp_path)
+    with pytest.raises(HTTPException) as e:
+        _v959_materialise_face_frames(
+            _FakeDb([]), [7], {}, "JOB1", tmp_path, {}, None)
+    assert e.value.status_code == 500 and "not in this batch" in str(e.value.detail)
+
+
+def test_face_frames_refuse_a_node_with_no_chosen_variant(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+
+    from image_platform import _v959_materialise_face_frames
+    _patch_storage(monkeypatch, tmp_path)
+    with pytest.raises(HTTPException) as e:
+        _v959_materialise_face_frames(
+            _FakeDb([None]), [7], {7: (3, _FakeNode(7, 71))},
+            "JOB1", tmp_path, {}, None)
+    assert "no chosen variant" in str(e.value.detail)
+
+
+def test_face_frames_refuse_a_file_that_r2_cannot_restore_either(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+
+    from image_platform import _v959_materialise_face_frames
+    root = tmp_path / "images"
+    root.mkdir()
+    attempts = _patch_storage(monkeypatch, root)
+    with pytest.raises(HTTPException) as e:
+        _v959_materialise_face_frames(
+            _FakeDb([_FakeVariant("gone.png")]), [7], {7: (3, _FakeNode(7, 71))},
+            "JOB1", tmp_path, {}, None)
+    assert "unavailable" in str(e.value.detail)
+    # the restore was actually tried before giving up
+    assert attempts == ["gone.png"]
+
+
+def test_face_frames_refuse_when_the_copy_fails(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+
+    from image_platform import _v959_materialise_face_frames
+    root = tmp_path / "images"
+    root.mkdir()
+    (root / "a.png").write_bytes(b"png")
+    _patch_storage(monkeypatch, root)
+    not_a_dir = tmp_path / "not-a-dir"
+    not_a_dir.write_text("this is a file")
+    with pytest.raises(HTTPException) as e:
+        _v959_materialise_face_frames(
+            _FakeDb([_FakeVariant("a.png")]), [7], {7: (3, _FakeNode(7, 71))},
+            "JOB1", not_a_dir, {}, None)
+    assert "copy failed" in str(e.value.detail)
+
+
+def test_a_failed_r2_upload_still_gives_the_clip_its_key(tmp_path, monkeypatch):
+    """Same contract as start_frame_key: the key is the canonical location, and
+    a failed mirror is a warning, not a lost clip."""
+    from image_platform import _v959_materialise_face_frames
+    root = tmp_path / "images"
+    root.mkdir()
+    (root / "a.png").write_bytes(b"png")
+    _patch_storage(monkeypatch, root)
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    keys = {}
+
+    out = _v959_materialise_face_frames(
+        _FakeDb([_FakeVariant("a.png")]), [7], {7: (3, _FakeNode(7, 71))},
+        "JOB1", job_dir, keys, _FakeR2(fail=True))
+
+    assert out == {7: "jobs/JOB1/frames/image_03.png"}
+    assert keys == {}   # nothing claimed to be mirrored
+
+
+def test_a_good_r2_upload_is_recorded(tmp_path, monkeypatch):
+    from image_platform import _v959_materialise_face_frames
+    root = tmp_path / "images"
+    root.mkdir()
+    (root / "a.png").write_bytes(b"png")
+    _patch_storage(monkeypatch, root)
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    keys = {}
+    r2 = _FakeR2()
+
+    _v959_materialise_face_frames(
+        _FakeDb([_FakeVariant("a.png")]), [7], {7: (3, _FakeNode(7, 71))},
+        "JOB1", job_dir, keys, r2)
+
+    assert r2.uploaded == ["image_03.png"]
+    assert keys == {"image_03.png": "jobs/JOB1/frames/image_03.png"}
+
+
+def test_a_face_ref_the_scene_loop_already_copied_is_not_copied_again(tmp_path, monkeypatch):
+    """A face ref can also be another scene's own image. Re-copying it is
+    wasted work and a second R2 round trip for a file already there."""
+    from image_platform import _v959_materialise_face_frames
+    root = tmp_path / "images"
+    root.mkdir()
+    (root / "a.png").write_bytes(b"fresh source")
+    _patch_storage(monkeypatch, root)
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    (job_dir / "image_03.png").write_bytes(b"already there")
+    r2 = _FakeR2()
+
+    out = _v959_materialise_face_frames(
+        _FakeDb([_FakeVariant("a.png")]), [7], {7: (3, _FakeNode(7, 71))},
+        "JOB1", job_dir, {}, r2, already_copied={"image_03.png"})
+
+    assert out == {7: "jobs/JOB1/frames/image_03.png"}
+    assert (job_dir / "image_03.png").read_bytes() == b"already there"
+    assert r2.uploaded == []
