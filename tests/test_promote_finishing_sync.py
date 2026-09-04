@@ -78,6 +78,9 @@ def test_run_path_calls_the_sync_after_promote():
     render polling — the function existing is not the fix (v949 lesson:
     checkers that verify declarations, not decisions)."""
     src = open(_STP, encoding="utf-8").read()
-    promote_at = src.index("job_id = promote(client, batch_id, report)")
+    # Prefix match on purpose: v892.12 Task 5 added `job_config, job_config_source`
+    # to the promote call and the exact-string form went stale while the sync
+    # it guards was still in place. The call's identity is `job_id = promote(`.
+    promote_at = src.index("job_id = promote(client, batch_id, report")
     render_at = src.index("rc = poll_render(client, job_id, args, report)")
     assert "sync_finishing_after_promote(client, job_id, md_text" in src[promote_at:render_at]
