@@ -434,8 +434,10 @@ class Clip(Base):
     # clip's segment. It changes nothing about the render: Flow requires a
     # muted upload and charswap_prepare_source strips the track on the way in.
     swap_audio = Column(String(20), nullable=True)
-    # v959 — movie-section face references. NULL on every clip that renders the
-    # normal way. A JSON list of R2 frame keys (`jobs/<job>/frames/<file>`),
+    # v959 — movie-section face references. NULL on every clip that is not a
+    # movie section (a charswap clip is NULL here too, and it does not render
+    # the normal way either).
+    # A JSON list of R2 frame keys (`jobs/<job>/frames/<file>`),
     # resolved at job creation from the scene's `face_refs` image nodes the same
     # way end_frame is resolved from end_frame_image. The worker attaches each
     # one as an Ingredients chip BESIDE the scene chip (start_frame).

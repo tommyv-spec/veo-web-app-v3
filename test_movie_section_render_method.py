@@ -240,13 +240,13 @@ def test_the_arm_is_not_shipped_yet():
 
 
 def test_the_import_route_carries_the_latch():
-    """The latch sits in the batch-import route, which needs a database session
-    and a request body, so no unit test can call it. Pin its text instead —
-    the same way test_charswap_render_method pins the worker's arm condition.
+    """Pin what the latch DOES, not how it is worded.
 
-    Read only the route, not the whole module: the condition has to be in THAT
-    function, and the wording of the 400 is prose that may be reworded without
-    breaking anything."""
+    The latch sits in the batch-import route, which needs a database session and
+    a request body, so no unit test can call it. So this reads the route's own
+    source and checks the two things that make it a latch: the condition asks
+    about THIS render method, and the body under it refuses with a 400. The
+    prose of the 400 is free to be reworded."""
     import inspect
 
     import image_platform
@@ -257,16 +257,131 @@ def test_the_import_route_carries_the_latch():
     latch = src[src.index("if not MOVIE_SECTION_ARM_SHIPPED and any("):]
     condition = latch[:latch.index("):") + 2]
     assert "MOVIE_SECTION_RENDER_METHOD" in condition
-    assert "render arm is not shipped yet" in src
+    # And the body under that condition raises, rather than logging and
+    # carrying on — "logging and continuing IS failing open".
+    body = latch[latch.index("):") + 2:]
+    assert body.lstrip().startswith("raise HTTPException(")
+    assert "400" in body[:200]
 
 
 # --- 3. the columns exist on both rows and serialise ------------------------
 
 def test_clip_row_has_face_ref_frames_column():
+    from sqlalchemy import Text
+
     from models import Clip
     assert "face_ref_frames_json" in Clip.__table__.columns
+    col = Clip.__table__.columns["face_ref_frames_json"]
+    # Nullable because every legacy row has to keep working, and Text because
+    # the value is a JSON list of frame keys, not one key.
+    assert col.nullable and isinstance(col.type, Text)
 
 
 def test_assignment_row_has_face_ref_node_ids_column():
+    from sqlalchemy import Text
+
     from image_platform import ImageSceneAssignment
     assert "face_ref_node_ids_json" in ImageSceneAssignment.__table__.columns
+    col = ImageSceneAssignment.__table__.columns["face_ref_node_ids_json"]
+    assert col.nullable and isinstance(col.type, Text)
+
+
+def test_both_migration_dialects_register_the_columns():
+    """A column added to the model and not to BOTH migration lists exists on a
+    fresh database and is missing on every deployed one."""
+    src = (_HERE / "image_platform.py").read_text(encoding="utf-8")
+    for table, col in (("image_scene_assignments", "face_ref_node_ids_json"),
+                       ("clips", "face_ref_frames_json")):
+        assert f"ALTER TABLE {table} ADD COLUMN {col} TEXT" in src
+        assert (f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "
+                f"{col} TEXT") in src
+
+
+def test_the_columns_are_in_the_readback_contract():
+    """Startup swallows a failed migration and keeps serving, so the readback
+    proof is the only thing that says the columns really landed."""
+    from image_platform import CHARSWAP_COLUMNS
+    assert "face_ref_node_ids_json" in CHARSWAP_COLUMNS["image_scene_assignments"]
+    assert "face_ref_frames_json" in CHARSWAP_COLUMNS["clips"]
+
+
+# --- 4. binding helpers are pure and fail closed ----------------------------
+
+def test_face_ref_node_ids_resolve_in_declared_order():
+    from image_platform import _v959_face_ref_node_ids
+    idx_to_node = {1: 101, 2: 202, 3: 303}
+    assert _v959_face_ref_node_ids({"scene_index": 1, "face_refs": [3, 2]}, idx_to_node) == [303, 202]
+
+
+def test_face_ref_node_ids_refuse_unrendered_image():
+    from image_platform import _v959_face_ref_node_ids
+    with pytest.raises(ValueError, match="image_9"):
+        _v959_face_ref_node_ids({"scene_index": 1, "face_refs": [9]}, {1: 101})
+
+
+def test_movie_section_veo_model_forces_omni_when_unset():
+    from image_platform import _v959_movie_section_veo_model, V943_CHARSWAP_VEO_MODEL
+    assert _v959_movie_section_veo_model(None, True) == (V943_CHARSWAP_VEO_MODEL, None)
+    assert _v959_movie_section_veo_model("Omni Flash", True) == (None, None)
+    assert _v959_movie_section_veo_model(None, False) == (None, None)
+
+
+def test_movie_section_veo_model_refuses_explicit_veo():
+    from image_platform import _v959_movie_section_veo_model
+    model, conflict = _v959_movie_section_veo_model("Veo 3.1 - Fast", True)
+    assert model is None and "movie-section" in conflict
+
+
+# --- 5. the binding reaches every boundary the end frame crosses ------------
+#
+# These read the route source, the same way the charswap suite pins its own
+# route wiring: the functions need a database session and a request body, so a
+# unit test cannot call them. A face ref that is bound on three of four
+# surfaces is exactly the silent drop check_field_plumbing.py exists for.
+
+def _function_source(name, filename="image_platform.py"):
+    """Source text of ONE top-level function, so a match cannot leak in."""
+    import ast
+    src = (_HERE / filename).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
+            return ast.get_source_segment(src, n) or ""
+    raise AssertionError(f"{name}() not found in {filename}")
+
+
+def test_the_import_writes_face_ref_node_ids_onto_the_assignment():
+    src = _function_source("_import_scene_table_impl")
+    assert "end_frame_image_node_id=end_frame_node_id_resolved" in src, "fixture is out of date"
+    assert "_v959_face_ref_node_ids(" in src
+    assert "face_ref_node_ids_json=" in src
+
+
+def test_prepare_uploads_the_face_frames_and_puts_them_on_the_payload():
+    """A face ref that never enters the upload set has no file on disk, and the
+    worker discovers that hours later as a 404 on download_frame."""
+    src = _function_source("prepare_batch_for_video")
+    assert "end_frame_image_local_index" in src, "fixture is out of date"
+    assert "face_ref_node_ids_json" in src            # the upload set
+    assert '"face_ref_local_indexes"' in src          # the payload rows
+
+
+def test_promote_carries_the_face_refs_from_the_assignment_to_the_clip():
+    src = _function_source("promote_batch_to_video")
+    # dialogue_list + clip_specs — a binding on one of the two is the v943.6
+    # shape of failure: the row says one thing and the stored dialogue another.
+    assert src.count('"face_ref_local_indexes":') == 2
+    assert src.count('"face_ref_node_ids":') == 2
+    assert "face_ref_frames_json=" in src                  # Clip(...)
+
+
+def test_promote_forces_omni_and_refuses_a_section_with_no_prompt():
+    src = _function_source("promote_batch_to_video")
+    assert "_v959_movie_section_veo_model(" in src
+    assert "raise HTTPException(400, _v959_conflict)" in src
+    # D11 — build_prompt must never author a section, so a section clip with an
+    # empty Text prompt is refused rather than filled in. The lookup has to be
+    # the SAME field the Clip's prompt_text is built from, or the guard passes
+    # on a prompt the clip will not carry.
+    assert '(_v959_dlg or {}).get("veo_prompt_override")' in src
+    assert "build_prompt must never author a section" in src

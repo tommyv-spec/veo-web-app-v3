@@ -777,7 +777,8 @@ CHARSWAP_COLUMNS = {
 
 
 def verify_charswap_columns() -> Dict[str, Any]:
-    """Prove the v943 columns really exist, and can really be read.
+    """Prove the render-method columns (v943 charswap + v959 movie-section)
+    really exist, and can really be read.
 
     Startup swallows a failed migration and keeps serving (main.py ~495-503),
     so "the deploy came up" is not evidence that these columns landed. This
@@ -1804,7 +1805,8 @@ class ImageSceneAssignment(Base):
     swap_audio = Column(String(20), nullable=True)
     # v959 — movie-section face reference IMAGE NODES (JSON list of ImageNode
     # ids), bound at import from `- **face_refs:** image_K, image_L`. NULL on
-    # every scene that renders the normal way.
+    # every scene that is not a movie section (a charswap scene is NULL here
+    # too, and it does not render the normal way either).
     face_ref_node_ids_json = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -9315,6 +9317,14 @@ def _import_scene_table_impl(
               f"avatar_upload={_v943_avatar_node_id} "
               f"sources={sorted(_v943_source_keys)}", flush=True)
 
+    # v959 — markdown image index → ImageNode id, for face_refs binding below.
+    # PHASE 1 created a node for every parsed `### Image N`, so a face ref that
+    # is missing here names an image the batch never rendered.
+    _v959_image_index_to_node_id = {
+        _i: _n.id for _i, _n in created_nodes_by_image_index.items()
+        if _n is not None
+    }
+
     assignments_created = 0
     for s in storyboard_scenes:
         img_idx = s["image_index"]
@@ -9545,6 +9555,15 @@ def _import_scene_table_impl(
             # on every legacy row the same way the four above stay NULL.
             swap_audio=(
                 s.get("swap_audio") if s.get("render_method") == "charswap" else None
+            ),
+            # v959 — the face reference IMAGE NODES for a movie-section scene,
+            # resolved here for the same reason the end frame is (v718i): the
+            # markdown says image_K, everything downstream needs a node id.
+            # NULL on every scene that is not a movie section.
+            face_ref_node_ids_json=(
+                _json.dumps(
+                    _v959_face_ref_node_ids(s, _v959_image_index_to_node_id))
+                if s.get("render_method") == MOVIE_SECTION_RENDER_METHOD else None
             ),
         )
         db.add(assignment)
@@ -10236,6 +10255,19 @@ def prepare_batch_for_video(
         if end_frame_nid is not None and end_frame_nid not in seen:
             referenced_image_node_ids.append(end_frame_nid)
             seen.add(end_frame_nid)
+        # v959 — face reference images must be on disk for the worker to attach
+        # them as Ingredients chips. Same reason as the end frame above: a face
+        # ref is never a scene's OWN image, so nothing else puts it here, and a
+        # missing file surfaces as a 404 at render time.
+        try:
+            _v959_face_nids = _json.loads(
+                scene.get("face_ref_node_ids_json") or "[]") or []
+        except Exception:
+            _v959_face_nids = []
+        for _fr_nid in _v959_face_nids:
+            if _fr_nid not in seen:
+                referenced_image_node_ids.append(_fr_nid)
+                seen.add(_fr_nid)
         # v892.2 (NEW 2026-08-18) — the composite PLATE image needs uploading
         # for exactly the same reason as the two above: the v892 plate clip
         # renders FROM it, so without a frame on disk there is nothing to
@@ -10665,6 +10697,18 @@ def prepare_batch_for_video(
         _v943_avatar = scene.get("swap_avatar_upload_id")
         # v943.1 — export-time source audio; None on every normal scene.
         _v943_1_audio = scene.get("swap_audio")
+        # v959 — face reference images for a movie-section scene, and their
+        # positions in the uploaded image list. Empty on every normal scene.
+        # The local index is what the frontend and main.py's Clip writer use to
+        # find the file, exactly as they do for the end frame above.
+        try:
+            _v959_nids = _json.loads(
+                scene.get("face_ref_node_ids_json") or "[]") or []
+        except Exception:
+            _v959_nids = []
+        _v959_face_local_idxs = [
+            node_id_to_local_index.get(_n) for _n in _v959_nids
+        ]
 
         scene_assignments_payload.append({
             "scene_index": scene["scene_index"],
@@ -10719,6 +10763,9 @@ def prepare_batch_for_video(
             "swap_avatar_upload_id": _v943_avatar,
             # v943.1 — export-time source audio.
             "swap_audio": _v943_1_audio,
+            # v959 — movie-section face refs; empty on every normal scene.
+            "face_ref_node_ids": _v959_nids,
+            "face_ref_local_indexes": _v959_face_local_idxs,
         })
 
         # v681 — scenes with no `- **line:**` bullets but a real video
@@ -10837,6 +10884,13 @@ def prepare_batch_for_video(
                 "swap_avatar_upload_id": _v943_avatar,
                 # v943.1 — export-time source audio.
                 "swap_audio": _v943_1_audio,
+                # v959 — face refs denormed onto the line for the same reason
+                # v718i.2 denormed the end frame: the frontend dialogue payload
+                # builder reads scenes_metadata (this flat per-line array), not
+                # scene_assignments, so a binding that lives only on the
+                # per-scene payload arrives as None on every clip.
+                "face_ref_node_ids": _v959_nids,
+                "face_ref_local_indexes": _v959_face_local_idxs,
             })
             veo_prompts_flat.append(silent_vp)
             pads_flat.append(None)
@@ -11022,6 +11076,13 @@ def prepare_batch_for_video(
                 "swap_avatar_upload_id": _v943_avatar,
                 # v943.1 — export-time source audio.
                 "swap_audio": _v943_1_audio,
+                # v959 — face refs denormed onto the line for the same reason
+                # v718i.2 denormed the end frame: the frontend dialogue payload
+                # builder reads scenes_metadata (this flat per-line array), not
+                # scene_assignments, so a binding that lives only on the
+                # per-scene payload arrives as None on every clip.
+                "face_ref_node_ids": _v959_nids,
+                "face_ref_local_indexes": _v959_face_local_idxs,
             })
             veo_prompts_flat.append(vp)
             pads_flat.append(pad)
@@ -12198,6 +12259,44 @@ def _v943_charswap_veo_model(existing_model, has_charswap):
     )
 
 
+def _v959_face_ref_node_ids(scene, image_index_to_node_id):
+    """ImageNode ids for a movie-section scene's face_refs, in declared order.
+
+    Refuses an image the batch never rendered — the worker would otherwise
+    discover the missing frame hours later as a 404 on download_frame.
+    """
+    out = []
+    for idx in scene.get("face_refs") or []:
+        nid = image_index_to_node_id.get(idx)
+        if nid is None:
+            raise ValueError(
+                f"Scene {scene['scene_index']}: face_refs image_{idx} has no rendered "
+                f"image node in this batch (v959)")
+        out.append(nid)
+    return out
+
+
+def _v959_movie_section_veo_model(existing_model, has_movie_section):
+    """Same contract as _v943_charswap_veo_model: (model_to_stamp, conflict).
+
+    A movie section is rendered on the Ingredients tab, which only the Omni
+    composer has. Every Veo model would render the clip with the face chips
+    silently dropped, so an explicit Veo model is a conflict to report, never
+    something to overwrite.
+    """
+    if not has_movie_section:
+        return None, None
+    named = (existing_model or "").strip()
+    if not named:
+        return V943_CHARSWAP_VEO_MODEL, None
+    if "omni" in named.lower():
+        return None, None  # already an Omni model — leave the exact name alone
+    return None, (
+        f"This batch has movie-section scenes, which render only on the Omni "
+        f"composer's Ingredients tab, but the job config asks for {named!r}. "
+        f"Remove the model override or drop the movie-section scenes (v959).")
+
+
 @router.post("/batches/{batch_id}/promote-to-video")
 def promote_batch_to_video(
     batch_id: str,
@@ -12610,6 +12709,23 @@ def promote_batch_to_video(
         # All clips in this scene share the same start frame.
         start_frame_key = f"jobs/{new_job_id}/frames/{dst_filename}"
 
+        # v959 — the face reference images for this scene, read off the
+        # assignment row the same way render_method is. Both lists stay empty
+        # on every scene that is not a movie section. The local index is this
+        # node's position in `nodes`, which is what names its frame file
+        # (`image_{idx:02d}`) — the same number `idx` is for the scene image.
+        _v959_face_nids: List[int] = []
+        if _assignment is not None:
+            try:
+                _v959_face_nids = _json.loads(
+                    getattr(_assignment, "face_ref_node_ids_json", None) or "[]"
+                ) or []
+            except Exception:
+                _v959_face_nids = []
+        _v959_face_local_idxs = [
+            (_nodes_by_id.get(_fid) or (None, None))[0] for _fid in _v959_face_nids
+        ]
+
         # Track which clip indices belong to this scene — main.py's
         # blend-mode end_frame logic reads scenes_list[N]["clips"]
         # to find scene-boundary cuts.
@@ -12681,6 +12797,10 @@ def promote_batch_to_video(
                     getattr(_assignment, "swap_audio", None)
                     if _assignment is not None else None
                 ),
+                # v959 — movie-section face refs, so this path's stored dialogue
+                # says the same thing the Clip row does. Empty on a normal line.
+                "face_ref_node_ids": _v959_face_nids,
+                "face_ref_local_indexes": _v959_face_local_idxs,
             })
 
             clip_specs.append({
@@ -12725,6 +12845,11 @@ def promote_batch_to_video(
                     getattr(_assignment, "swap_audio", None)
                     if _assignment is not None else None
                 ),
+                # v959 — movie-section face refs straight off the assignment
+                # row. The frames themselves are materialised below, once the
+                # whole spec list is known.
+                "face_ref_node_ids": _v959_face_nids,
+                "face_ref_local_indexes": _v959_face_local_idxs,
             })
 
             clips_in_this_scene.append(current_clip_index)
@@ -12794,6 +12919,106 @@ def promote_batch_to_video(
             f"[v945.3] promote batch={batch_id}: charswap scene present → "
             f"veo_model={_v943_model}"
         )
+
+    # v959 — a movie section renders on the Ingredients tab, which only the Omni
+    # composer has. Same failure the v945.3 block above fixes: this path wrote no
+    # veo_model at all, so the worker fell back to a Veo model that has no
+    # Ingredients path and the face chips would be dropped without a word.
+    _v959_has = any(
+        (spec.get("render_method") or "").strip().lower() == MOVIE_SECTION_RENDER_METHOD
+        for spec in clip_specs
+    )
+    _v959_model, _v959_conflict = _v959_movie_section_veo_model(
+        config_dict.get("veo_model"), _v959_has)
+    if _v959_conflict:
+        raise HTTPException(400, _v959_conflict)
+    if _v959_model:
+        config_dict["veo_model"] = _v959_model
+        log.info(
+            f"[v959] promote batch={batch_id}: movie-section scenes present → "
+            f"veo_model={_v959_model}"
+        )
+
+    # v959 / D11 — the section prompt is the build's own text or nothing.
+    #
+    # build_prompt writes OUR clip grammar (one speaker, a described
+    # performance). A section is the mentor's grammar: a Setting paragraph plus
+    # a timestamped multi-speaker block. Auto-building one is not a degraded
+    # section, it is a different video — the v943.5 failure, where a swap clip
+    # with a NULL prompt got the dialogue template and rendered a talking head.
+    # So refuse here rather than let the worker fill the gap.
+    for spec in clip_specs:
+        if (spec.get("render_method") or "").strip().lower() != MOVIE_SECTION_RENDER_METHOD:
+            continue
+        _v959_dlg = (
+            dialogue_list[spec["clip_index"]]
+            if spec["clip_index"] < len(dialogue_list) else None
+        )
+        if not ((_v959_dlg or {}).get("veo_prompt_override") or "").strip():
+            raise HTTPException(
+                400,
+                f"Scene {spec['scene_index']}: render_method=movie-section needs "
+                f"its `### Clip N.1` Text prompt (Setting + timestamped section); "
+                f"build_prompt must never author a section (v959)"
+            )
+
+    # v959 — materialise a frame file for every FACE REFERENCE node.
+    #
+    # The copy loop above copies one frame per entry in _scene_plan, i.e. per
+    # scene's OWN image. A face ref is referenced only by `face_refs:` and is
+    # never a scene's own image, so nothing copied it — exactly the gap v892.2
+    # and v892.10 fixed for the composite plate, in both implementations.
+    #
+    # The frame key has to be built the same way start_frame_key is
+    # (`jobs/<job>/frames/image_<local index>.<ext of THAT node's variant>`), so
+    # it cannot be spelled out from the local index alone. Materialising it here
+    # produces the file and the key in one place.
+    #
+    # This one REFUSES instead of warning: a movie section with a face chip
+    # missing renders a stranger, and the operator would only find out after the
+    # render. It runs before the Job row is created, so nothing is left behind.
+    _v959_face_frames: Dict[int, str] = {}
+    for _fid in sorted({
+        _n for _s in clip_specs
+        if (_s.get("render_method") or "").strip().lower() == MOVIE_SECTION_RENDER_METHOD
+        for _n in (_s.get("face_ref_node_ids") or [])
+    }):
+        _fhit = _nodes_by_id.get(_fid)
+        if _fhit is None:
+            raise HTTPException(
+                500,
+                f"v959: face reference image node {_fid} is not in this batch — "
+                f"the section clip would render with a face chip missing"
+            )
+        _fidx, _fnode = _fhit
+        _fvariant = db.query(ImageVariant).filter(
+            ImageVariant.id == _fnode.chosen_variant_id).first()
+        if not _fvariant:
+            raise HTTPException(
+                500, f"v959: face reference node {_fid} has no chosen variant")
+        _fsrc = images_root() / _fvariant.image_path
+        if not _fsrc.exists():
+            _storage_download_to_local(_fvariant.image_path)
+        if not _fsrc.exists():
+            raise HTTPException(
+                500,
+                f"v959: face reference node {_fid} file is unavailable at "
+                f"{_fsrc} and could not be restored from R2")
+        _fext = _fsrc.suffix or ".png"
+        _ffn = f"image_{_fidx:02d}{_fext}"
+        try:
+            copy2(_fsrc, job_images_dir / _ffn)
+        except Exception as _fe:
+            raise HTTPException(
+                500, f"v959: face reference node {_fid} copy failed: {_fe}")
+        if _r2_configured and _r2_storage is not None:
+            try:
+                _r2_storage.upload_job_frame(new_job_id, _ffn, job_images_dir / _ffn)
+                frames_storage_keys[_ffn] = f"jobs/{new_job_id}/frames/{_ffn}"
+            except Exception as _fue:
+                log.warning(f"[v959] face frame {_ffn} R2 upload failed: {_fue}")
+        _v959_face_frames[_fid] = f"jobs/{new_job_id}/frames/{_ffn}"
+        log.info(f"[v959] face frame materialised: node={_fid} -> {_ffn}")
 
     # v827 TEMP DIAG — proves the promote payload no longer fabricates a last
     # frame. Remove once an operator export confirms the closing clip logs
@@ -13004,6 +13229,18 @@ def promote_batch_to_video(
             swap_avatar_upload_id=spec.get("swap_avatar_upload_id"),
             # v943.1 — export-time source audio, carried the same way.
             swap_audio=spec.get("swap_audio"),
+            # v959 — the face reference FRAMES, in the order the build declared
+            # them. NULL on every clip that is not a movie section. The keys
+            # come from the materialise loop above, so every one of them names a
+            # file that exists.
+            face_ref_frames_json=(
+                _json.dumps([
+                    _v959_face_frames[_fid]
+                    for _fid in (spec.get("face_ref_node_ids") or [])
+                ])
+                if (spec.get("render_method") or "").strip().lower()
+                == MOVIE_SECTION_RENDER_METHOD else None
+            ),
         )
         db.add(clip)
 
