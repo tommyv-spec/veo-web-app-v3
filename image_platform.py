@@ -744,17 +744,17 @@ MOVIE_SECTION_RENDER_METHOD = "movie-section"
 MOVIE_SECTION_WINDOWS_S = (8, 10)
 MOVIE_SECTION_MAX_FACE_REFS = 2
 
-# The flow_worker movie_section_* arm has ALREADY shipped and deployed (35528b8)
-# with this still False, so the flip does not ride the arm's push — shipping the
-# code and trusting it are two different decisions. This stays False until the
-# off-platform E2E run proves the arm end to end; flipping it is its own commit
-# (v959 Task 11 Step 0), carrying that run's report path in the commit body.
-# Until then a movie-section build cannot be imported at all, and that is the
-# point: an untrusted arm plus a clean import means the build renders on the
-# ordinary path with its face refs dropped — which looks like a bad take, not a
-# missing feature. The import route refuses it while this is False; the PARSER
-# keeps parsing, because the E2E driver and the remaining tasks need it to.
-MOVIE_SECTION_ARM_SHIPPED = False
+# Flipped True on 2026-09-04 after the off-platform E2E proved the arm end to end
+# (docs/experiments/movie-style-e2e-2026-09-01/v8/e2e/E2E_REPORT.md): settings verified on Omni,
+# the DOM on Ingredients, scene + face chips distinct, the generate body carrying
+# every media id as referenceImages with an r2v model key, both takes fetched as
+# real mp4s with audio, every line spoken verbatim, the join passing the dead-space
+# gate. Shipping the code (35528b8, deployed earlier by a peer push) and trusting
+# it were two different decisions, and this flag was the second one. While it was
+# False the import route refused every movie-section build; the PARSER kept
+# parsing so the E2E driver could run. Set it back to False to close the gate
+# again if the arm ever needs to be distrusted — nothing else has to change.
+MOVIE_SECTION_ARM_SHIPPED = True
 
 # v943 — the columns a charswap job cannot work without. Named once so the
 # readback check and the migration list can never drift apart by hand.

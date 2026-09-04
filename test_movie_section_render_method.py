@@ -232,11 +232,11 @@ def test_two_sections_parse():
 
 # --- the import latch: declared, but the render arm is not shipped ----------
 
-def test_the_arm_is_not_shipped_yet():
+def test_the_arm_is_shipped():
     """The parser understands the method before anything can render it. While
     this is False the import route refuses a build that declares it."""
     import image_platform
-    assert image_platform.MOVIE_SECTION_ARM_SHIPPED is False
+    assert image_platform.MOVIE_SECTION_ARM_SHIPPED is True  # flipped after the E2E proof (Task 11 Step 0)
 
 
 def test_the_import_route_carries_the_latch():
