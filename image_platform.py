@@ -10260,8 +10260,15 @@ def prepare_batch_for_video(
         # them as Ingredients chips. Same reason as the end frame above: a face
         # ref is never a scene's OWN image, so nothing else puts it here, and a
         # missing file surfaces as a 404 at render time. An unreadable column
-        # raises out of here rather than reading as "no face refs".
-        for _fr_nid in _v959_stored_face_ref_node_ids(scene):
+        # raises out of here rather than reading as "no face refs" — and this is
+        # a FastAPI route with no handler for a bare ValueError, so it is turned
+        # into a 500 that carries the text. Without that, the one sentence
+        # naming the broken scene lives only in the Render log.
+        try:
+            _v959_upload_nids = _v959_stored_face_ref_node_ids(scene)
+        except ValueError as _v959_je:
+            raise HTTPException(500, str(_v959_je))
+        for _fr_nid in _v959_upload_nids:
             if _fr_nid not in seen:
                 referenced_image_node_ids.append(_fr_nid)
                 seen.add(_fr_nid)
@@ -10697,8 +10704,14 @@ def prepare_batch_for_video(
         # v959 — face reference images for a movie-section scene, and their
         # positions in the uploaded image list. Empty on every normal scene.
         # The local index is what the frontend and main.py's Clip writer use to
-        # find the file, exactly as they do for the end frame above.
-        _v959_nids = _v959_stored_face_ref_node_ids(scene)
+        # find the file, exactly as they do for the end frame above. Same
+        # conversion as the upload set above: a broken column leaves this route
+        # as a 500 that says which scene, not as a bare ValueError whose text
+        # only the server log ever sees.
+        try:
+            _v959_nids = _v959_stored_face_ref_node_ids(scene)
+        except ValueError as _v959_je:
+            raise HTTPException(500, str(_v959_je))
         _v959_face_local_idxs = [
             node_id_to_local_index.get(_n) for _n in _v959_nids
         ]
@@ -12331,8 +12344,10 @@ def _v959_materialise_face_frames(db, node_ids, nodes_by_id, job_id,
         filename = f"image_{local_idx:02d}{src.suffix or '.png'}"
         key = f"jobs/{job_id}/frames/{filename}"
         if filename in written:
-            # Already on disk and already mirrored by the caller's own copy
-            # loop; copying it again would only cost a second R2 round trip.
+            # Already written to disk by the caller's own copy loop; copying it
+            # again would only cost a second R2 round trip. (Written, not
+            # mirrored — the R2 upload happens only when storage is configured
+            # and the put succeeds.)
             out[nid] = key
             log.info(f"[v959] face frame {filename} already written — reused")
             continue
@@ -13015,16 +13030,21 @@ def promote_batch_to_video(
         """
         return (spec.get("render_method") or "").strip().lower() == MOVIE_SECTION_RENDER_METHOD
 
-    def _prompt_override_for(spec):
-        """The authored Text prompt for this spec, off its parallel dialogue row.
+    def _dialogue_row_for(spec):
+        """This spec's parallel dialogue row, or an empty one when it has none.
 
-        One lookup for both readers: the D11 refusal below and the prompt_text
-        fill further down. A guard that reads a different field from the one the
-        clip is actually built from is not a guard.
+        ONE row selection for every reader: the D11 refusal below, and the Text
+        prompt, the negative prompt, Prompt B and the B line further down. A
+        guard that reads a different ROW from the one the clip is actually built
+        from is not a guard — and four hand-written index lookups is how one of
+        them comes to pick a different row from the other three.
+
+        dialogue_list and clip_specs are built in lockstep above (one append to
+        each per line), so the row exists whenever the index does. `{}` for the
+        impossible case keeps every reader below free of its own None check.
         """
         _i = spec["clip_index"]
-        _row = dialogue_list[_i] if _i < len(dialogue_list) else None
-        return (_row or {}).get("veo_prompt_override")
+        return (dialogue_list[_i] if _i < len(dialogue_list) else None) or {}
 
     _v959_has = any(_v959_is_section(spec) for spec in clip_specs)
     _v959_model, _v959_conflict = _v959_movie_section_veo_model(
@@ -13054,7 +13074,7 @@ def promote_batch_to_video(
     for spec in clip_specs:
         if not _v959_is_section(spec):
             continue
-        if not (_prompt_override_for(spec) or "").strip():
+        if not (_dialogue_row_for(spec).get("veo_prompt_override") or "").strip():
             raise HTTPException(
                 400,
                 f"Scene {spec['scene_index']}: render_method=movie-section needs "
@@ -13195,19 +13215,15 @@ def promote_batch_to_video(
 
     for spec in clip_specs:
         # v575: look up the parallel dialogue entry to find any v572
-        # prebuilt prompt override. dialogue_list and clip_specs are
-        # built in lockstep above (one append to each per line), so
-        # dialogue_list[spec["clip_index"]] always exists when clip_specs
-        # has the same index.
-        _clip_idx = spec["clip_index"]
-        _matching_dialogue = (
-            dialogue_list[_clip_idx]
-            if _clip_idx < len(dialogue_list) else None
-        )
-        # v959 — the SAME lookup the D11 guard above ran, so the guard cannot
-        # pass on a prompt this clip is not built from.
-        _veo_override = _prompt_override_for(spec)
-        _veo_neg = (_matching_dialogue or {}).get("veo_negative_prompt_override") if _matching_dialogue else None
+        # prebuilt prompt override.
+        #
+        # v959 — this is the SAME row selection the D11 guard above ran, made
+        # once in _dialogue_row_for, so the guard cannot pass on a prompt this
+        # clip is not built from, and the text, the negative prompt, Prompt B
+        # and the B line all come off one row rather than four lookups.
+        _matching_dialogue = _dialogue_row_for(spec)
+        _veo_override = _matching_dialogue.get("veo_prompt_override")
+        _veo_neg = _matching_dialogue.get("veo_negative_prompt_override")
         # When a prebuilt override exists, compose the final Veo prompt
         # (text + optional Negative prompt trailer) and stamp it onto
         # Clip.prompt_text. The Flow worker's clip.get('prompt') check
@@ -13257,8 +13273,8 @@ def promote_batch_to_video(
         # v892.9 — stamp Prompt B too. The Flow worker retries a
         # generation-policy-blocked clip on prompt_text_b before escalating
         # (v805); with it NULL the block is terminal and the clip just fails.
-        _prompt_text_b = (_matching_dialogue or {}).get("veo_prompt_b") or None
-        _dialogue_text_b = (_matching_dialogue or {}).get("veo_prompt_b_line") or None
+        _prompt_text_b = _matching_dialogue.get("veo_prompt_b") or None
+        _dialogue_text_b = _matching_dialogue.get("veo_prompt_b_line") or None
 
         clip = Clip(
             job_id=new_job_id,

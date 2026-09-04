@@ -382,10 +382,17 @@ def test_promote_forces_omni_and_refuses_a_section_with_no_prompt():
     assert "_v959_movie_section_veo_model(" in src
     assert "raise HTTPException(400, _v959_conflict)" in src
     # D11 — build_prompt must never author a section, so a section clip with an
-    # empty Text prompt is refused rather than filled in. The guard and the
-    # prompt_text fill share ONE lookup: a guard that reads a different field
+    # empty Text prompt is refused rather than filled in. The guard and every
+    # prompt field share ONE row selection: a guard that reads a different row
     # from the one the clip is built from is not a guard.
-    assert src.count("_prompt_override_for(spec)") == 3  # def + guard + fill
+    assert "_prompt_override_for" not in src, "superseded by _dialogue_row_for"
+    assert src.count("_dialogue_row_for(spec)") == 3  # def + guard + assignment
+    # and the row that selection returns is what fills the text, the negative
+    # prompt, Prompt B and the B line — four readers, one row.
+    for field in ("veo_prompt_override", "veo_negative_prompt_override",
+                  "veo_prompt_b", "veo_prompt_b_line"):
+        assert f'_matching_dialogue.get("{field}")' in src \
+            or f'_dialogue_row_for(spec).get("{field}")' in src, field
     assert "build_prompt must never author a section" in src
     # A section with no face refs is the same class of broken: the parser makes
     # them mandatory, so an empty list means the row lost them on the way here.
@@ -420,6 +427,18 @@ def test_no_face_ref_reader_swallows_a_broken_column():
     assert src.count("_v959_stored_face_ref_node_ids(") == 4  # def + 3 readers
     assert "_v959_face_nids = []" not in src
     assert "_v959_nids = []" not in src
+
+
+def test_every_route_turns_a_broken_face_ref_column_into_a_readable_500():
+    """The helper raises a plain ValueError, which is right for a pure function
+    and wrong for a FastAPI route: no handler exists for it, so the caller gets
+    a bare 500 and the one sentence naming the broken scene stays in the server
+    log. All three readers sit inside routes, so all three convert."""
+    src = (_HERE / "image_platform.py").read_text(encoding="utf-8")
+    assert src.count("except ValueError as _v959_je:") == 3
+    assert src.count("raise HTTPException(500, str(_v959_je))") == 3
+    prep = _function_source("prepare_batch_for_video")
+    assert prep.count("raise HTTPException(500, str(_v959_je))") == 2
 
 
 # --- 6. reading the stored column ------------------------------------------
