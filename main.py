@@ -987,8 +987,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
     }
     # "/g/" = the Amazon deep-link interstitial. It MUST be public: it is the
     # link customers tap from a DM or a caption, and they have no account here.
+    # "/korella" = the bio short links (2026-09-04): /korella, /korella/nuri,
+    # /korella/noemi, /korella/martha — the same deep-link page as /g/, with
+    # the product name in the URL customers see. Public for the same reason.
     PUBLIC_PREFIXES = {"/static/", "/auth/", "/api/local-worker/", "/api/user-worker/",
-                       "/api/images/worker/", "/g/"}
+                       "/api/images/worker/", "/g/", "/korella"}
     
     async def dispatch(self, request: Request, call_next):
         # Skip auth if Google OAuth is not configured
@@ -1139,6 +1142,39 @@ def _valid_tag(s: str) -> bool:
     if not (5 <= len(s) <= 50) or s[-3] != "-" or not s[-2:].isdigit():
         return False
     return all(c.isalnum() or c in "._-" for c in s) and s[0].isalnum()
+
+
+# === /korella — the bio short links (2026-09-04) ===
+#
+# The bio link on every account used to be linktwin.co (being cancelled) and
+# then the raw /g/<ASIN>/<tag> form, which reads like a tracking string. The
+# operator asked for something short, trustworthy, and carrying the product
+# name. This is that: /korella/nuri, /korella/noemi, /korella/martha — one per
+# persona so bio traffic still reports by account — and bare /korella for any
+# surface where the persona does not matter. All four serve the SAME
+# interstitial as /g/ (no second implementation), tagged with the account's
+# own Amazon tracking id, and log the click as `bio-<who>` so bio taps and DM
+# taps stay apart in the click log. Unknown persona -> 404, never a guess.
+KORELLA_ASIN = "B0GVKNB82S"
+BIO_TAGS = {
+    "nuri": "kavenokorel00-20",
+    "noemi": "kavenokorella2-20",
+    "martha": "kavenokorella3-20",
+}
+
+
+@app.get("/korella", response_class=HTMLResponse, include_in_schema=False)
+def korella_bio_link_default():
+    return amazon_deeplink(KORELLA_ASIN, BIO_TAGS["nuri"], p="bio-korella")
+
+
+@app.get("/korella/{who}", response_class=HTMLResponse, include_in_schema=False)
+def korella_bio_link(who: str):
+    tag = BIO_TAGS.get((who or "").lower())
+    if not tag:
+        return HTMLResponse("Not found", status_code=404,
+                            headers={"Cache-Control": "no-store"})
+    return amazon_deeplink(KORELLA_ASIN, tag, p=f"bio-{who.lower()}")
 
 
 @app.get("/g/{asin}/{tracking_id}", response_class=HTMLResponse, include_in_schema=False)
