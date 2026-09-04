@@ -583,6 +583,15 @@ def main():
             if sess and enabled and Path(sess).exists():
                 enabled_accounts.append(str(n))
 
+        # The child inherits this process's environment, so if the setup script
+        # itself was run with its output redirected, the worker it launches
+        # buffers too: flow_worker.py prints its poll line in three places and
+        # only ONE flushes, which hides ~24 minutes and makes a working worker
+        # read as hung. Set here rather than in the generated launchers, because
+        # this is a different path from all of them — setup running the worker
+        # directly instead of writing a script that will.
+        os.environ["PYTHONUNBUFFERED"] = "1"
+
         if multi and len(enabled_accounts) > 1:
             print(f"  Detected {len(enabled_accounts)} accounts: {','.join(enabled_accounts)}")
             cmd = [sys.executable, "flow_worker.py", "--accounts", ",".join(enabled_accounts)]

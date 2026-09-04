@@ -22389,6 +22389,11 @@ echo.
 :: Load .env and run worker — all in THIS process
 cd /d "%WORKER_DIR%"
 for /f "usebackq tokens=1,* delims==" %%a in ("%WORKER_DIR%\\.env") do set "%%a=%%b"
+:: Unbuffered, same reason as every other launcher: flow_worker.py prints its
+:: poll line in three places and only ONE flushes, so redirecting this window
+:: to a file hides the next ~24 minutes and a working worker reads as hung.
+:: After the .env loop, so a stale .env cannot put the buffering back.
+set PYTHONUNBUFFERED=1
 !PY! flow_worker.py --count {accounts}
 
 :: If worker exits, don't close so user can see errors
