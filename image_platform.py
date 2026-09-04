@@ -722,6 +722,15 @@ CHARSWAP_DEFAULT_PROMPT = (
     "only replace the subject of the video with the subject from the image"
 )
 
+# v959 — the mentor's clip method inside the platform. Declared per scene:
+#   - **render_method:** movie-section
+#   - **face_refs:** image_K[, image_L]      (1-2 face reference images)
+#   - **clip_duration_s:** 8 | 10            (the section WINDOW, mandatory)
+# One scene = one Ingredients clip = one line carrying every spoken word.
+MOVIE_SECTION_RENDER_METHOD = "movie-section"
+MOVIE_SECTION_WINDOWS_S = (8, 10)
+MOVIE_SECTION_MAX_FACE_REFS = 2
+
 # v943 — the columns a charswap job cannot work without. Named once so the
 # readback check and the migration list can never drift apart by hand.
 CHARSWAP_COLUMNS = {
@@ -5907,12 +5916,12 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         _rm_raw = _parse_bullet_field(block, "render_method")
         if _rm_raw:
             _rm = _rm_raw.strip().split()[0].strip().lower()
-            if _rm != "charswap":
+            if _rm not in ("charswap", MOVIE_SECTION_RENDER_METHOD):
                 raise ValueError(
                     f"Scene {scene_index}: render_method {_rm_raw!r} is not a "
-                    f"known method (expected 'charswap', or leave the bullet "
-                    f"out for the normal render path — see "
-                    f"template_reference.md §v943)"
+                    f"known method (expected 'charswap' or 'movie-section', or "
+                    f"leave the bullet out for the normal render path — see "
+                    f"template_reference.md §v943 / §v959)"
                 )
             render_method = _rm
         _ssv_raw = _parse_bullet_field(block, "swap_source_video")
@@ -5934,7 +5943,15 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 ("swap_mode", swap_mode),
             ) if v
         ]
-        if _swap_declared and len(_swap_declared) != 3:
+        # v959 — the swap bullets belong to charswap alone. A movie-section
+        # scene renders from images, so it has no source video to swap into.
+        if render_method == MOVIE_SECTION_RENDER_METHOD and (swap_source_video or swap_mode):
+            raise ValueError(
+                f"Scene {scene_index}: render_method=movie-section does not take "
+                f"swap_source_video / swap_mode (v959)"
+            )
+        if (render_method != MOVIE_SECTION_RENDER_METHOD
+                and _swap_declared and len(_swap_declared) != 3):
             _missing = [n for n in ("render_method", "swap_source_video", "swap_mode")
                         if n not in _swap_declared]
             raise ValueError(
@@ -5973,6 +5990,51 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                     f"swap_mode too (v943.1)"
                 )
             swap_audio = _sa
+
+        # v959 — face reference images for a movie-section clip. They ride the
+        # composer BESIDE the wide scene chip (`image:`), exactly the way the
+        # mentor attaches a face file next to the scene file (§5c: "face chip =
+        # the face, scene chip = the world"). Fails closed like everything on
+        # this branch: a typo here would import cleanly and render a stranger.
+        face_refs: List[int] = []
+        _fr_raw = _parse_bullet_field(block, "face_refs")
+        if _fr_raw and render_method != MOVIE_SECTION_RENDER_METHOD:
+            raise ValueError(
+                f"Scene {scene_index}: `- **face_refs:**` only means something on "
+                f"a render_method=movie-section scene (v959)"
+            )
+        if render_method == MOVIE_SECTION_RENDER_METHOD:
+            if not _fr_raw:
+                raise ValueError(
+                    f"Scene {scene_index}: render_method=movie-section needs "
+                    f"`- **face_refs:** image_K[, image_L]` (1-{MOVIE_SECTION_MAX_FACE_REFS} "
+                    f"face reference images) — the face chips are what hold identity "
+                    f"across sections (v959, §5c)"
+                )
+            for tok in [t.strip() for t in _fr_raw.split(",") if t.strip()]:
+                m_fr = _re.fullmatch(r"image_(\d+)", tok)
+                if not m_fr:
+                    raise ValueError(
+                        f"Scene {scene_index}: face_refs entry {tok!r} is not "
+                        f"`image_N` (v959)")
+                face_refs.append(int(m_fr.group(1)))
+            if not (1 <= len(face_refs) <= MOVIE_SECTION_MAX_FACE_REFS):
+                raise ValueError(
+                    f"Scene {scene_index}: face_refs takes 1-{MOVIE_SECTION_MAX_FACE_REFS} "
+                    f"images, got {len(face_refs)} (v959)")
+            if len(set(face_refs)) != len(face_refs):
+                raise ValueError(f"Scene {scene_index}: face_refs repeats an image (v959)")
+            for fr in face_refs:
+                if fr not in known_image_indexes:
+                    raise ValueError(
+                        f"Scene {scene_index}: face_refs image_{fr} is not a defined "
+                        f"`### Image {fr}` block (v959)")
+                if image_index is not None and fr == image_index:
+                    raise ValueError(
+                        f"Scene {scene_index}: face_refs image_{fr} is the scene's own "
+                        f"`image:` — a face chip is a close-up, the scene chip is the "
+                        f"wide anchor; they cannot be the same file (v959, §5c)")
+
         if render_method:
             print(f"[v943/parse] scene_{scene_index} render_method={render_method} "
                   f"swap_mode={swap_mode} source={swap_source_video!r} "
@@ -6136,6 +6198,23 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 f"scene per swap clip (v943)."
             )
 
+        # v959 — one section, one clip, one line. Same reason as v943: clip rows
+        # are 1:1 with `- **line:**`, so a second line would fan the section into
+        # two renders of the same prompt. The single line carries EVERY spoken
+        # word of the section in order — it is what whisper aligns at export.
+        if render_method == MOVIE_SECTION_RENDER_METHOD:
+            if len(lines_list) != 1:
+                raise ValueError(
+                    f"Scene {scene_index}: render_method=movie-section renders "
+                    f"exactly one clip and needs exactly one '- **line:**' (the "
+                    f"whole section's words, in order); found {len(lines_list)} (v959)")
+            _win = clip_durations[0] if clip_durations else None
+            if _win not in MOVIE_SECTION_WINDOWS_S:
+                raise ValueError(
+                    f"Scene {scene_index}: render_method=movie-section needs "
+                    f"`- **clip_duration_s:** 8` or `10` — it is the section window "
+                    f"the pacing gate measures against; got {_win!r} (v959, §5b)")
+
         scenes.append({
             "scene_index": scene_index,
             "image_index": image_index,
@@ -6160,15 +6239,28 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "composite_plate_image": composite_plate_image,  # v892 — None | int; background layer of an assembled frame
             "end_frame_image": end_frame_image,  # v718i (NEW 2026-05-18) — None | int; explicit end-frame image for Veo native interpolation
             # v943 — charswap declaration. All three None on a normal scene.
-            "render_method": render_method,          # None | 'charswap'
+            "render_method": render_method,          # None | 'charswap' | 'movie-section'
             "swap_source_video": swap_source_video,  # None | declared asset name
             "swap_mode": swap_mode,                  # None | 'video-led' | 'image-led'
             # v943.1 — export-time audio, NOT a render setting.
             "swap_audio": swap_audio,                # None | 'source-original' | 'none'
+            "face_refs": face_refs,                  # v959 — [] on every non-section scene
         })
 
     if not scenes:
         return []
+
+    # v959 — two coherent systems, never mixed in one build (movie-style-scene-
+    # design.md §10.6 "mixing their halves is what breaks"). text_card scenes
+    # have no clip grammar and are exempt.
+    _shot = [s for s in scenes if (s.get("scene_type") or "shot") != "text_card"]
+    _ms = [s["scene_index"] for s in _shot if s.get("render_method") == MOVIE_SECTION_RENDER_METHOD]
+    if _ms and len(_ms) != len(_shot):
+        _other = [s["scene_index"] for s in _shot if s.get("render_method") != MOVIE_SECTION_RENDER_METHOD]
+        raise ValueError(
+            f"render_method=movie-section must cover all shot scenes of a build or "
+            f"none: scenes {_ms} declare it, scenes {_other} do not (v959)")
+
     scenes.sort(key=lambda s: s["scene_index"])
     return scenes
 
