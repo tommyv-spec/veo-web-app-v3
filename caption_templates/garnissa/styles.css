@@ -1,0 +1,28 @@
+/* garnissa — the source ad's caption look (decode of sophie-founder-origin-047,
+   frames at 6s / 20s / 40.5s): dark regular-weight sans text, lowercase except
+   "I" and proper nouns, each LINE on its own tight white box with soft corners,
+   1-2 lines per chunk, no per-word highlight, no shadow. Font size copies the
+   source (glyph height ~2.2% of frame height). Casing is applied to the
+   transcript before rendering, so no text-transform here. */
+
+.line {
+    background-color: #FFFFFF;
+    border-radius: 4px;
+    padding: 2px 9px;
+    margin: 3px 0;
+}
+
+.word {
+    font-family: "Segoe UI", Arial, Helvetica, sans-serif;
+    font-size: 17px;
+    font-weight: 600;
+    color: #111111;
+    padding: 0 2px;
+    letter-spacing: 0.1px;
+}
+
+/* the source has no karaoke highlight: the narrated word looks like the rest */
+.word-being-narrated {
+    color: #111111;
+    background-color: transparent;
+}
