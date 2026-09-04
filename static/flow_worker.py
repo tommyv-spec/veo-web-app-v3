@@ -3889,7 +3889,13 @@ def check_ultra_account(page, label="", timeout=5):
         # NEVER ULTRA this session (caught at startup).
         # `label` must be truthy: a blank label would let one account's
         # verification suppress another's genuine non-ULTRA kill (shared "" key).
-        if label and label in _ULTRA_VERIFIED:
+        # Session-wide, not per-label. Measured 2026-09-04 02:38 on kaveno.biz:
+        # "[STARTUP] ✓ Account verified: ULTRA", then the SUBMIT probe (label
+        # "Flow") saw no badge on the project page and hard-stopped the worker —
+        # "[Flow] ❌ Account is NOT ULTRA", job failed — because the carve-out
+        # below only asked whether THIS label had verified. The account had; the
+        # startup label did. One badge sighting in the session is the evidence.
+        if _ULTRA_VERIFIED:
             print(f"{prefix}⚠ ULTRA badge not found on re-check, but account was verified earlier this session — transient state (likely post cookie-clear reload). Reloading + re-polling, NOT killing.", flush=True)
             try:
                 page.reload(wait_until="domcontentloaded", timeout=30000)
