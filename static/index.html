@@ -1996,6 +1996,20 @@
         .clips-grid.expanded-mode { display: flex; flex-direction: column; grid-template-columns: none; gap: 12px; }
         .clip-card.clip-paired { grid-column: span 2; }
         .clips-grid.expanded-mode .clip-card.clip-paired { grid-column: span 1; }
+        /* v698A.3 — B-roll lives in its OWN section under the spoken track
+           (the layer-lane pattern every NLE and Descript use). A bounded
+           section is the strongest grouping cue there is, so the cutaways
+           read as one kind of thing instead of as a second clip stuck onto
+           each spoken card. Each run of cutaways gets a subheader naming
+           the sentence it rides under. */
+        .broll-section { margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--border-color); }
+        .broll-section-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 4px; }
+        .broll-section-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+        .broll-help { font-size: 11px; color: var(--text-muted); line-height: 1.5; margin-bottom: 4px; }
+        .broll-group-header { grid-column: 1 / -1; font-size: 12px; color: var(--text-muted); margin: 8px 0 -4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .broll-group-header .broll-group-line { font-style: italic; }
+        .clip-text-covers { color: var(--text-muted); font-style: italic; font-size: 11px; }
+        .broll-approve-error { margin: 8px 0; padding: 8px 10px; border-radius: var(--radius-sm); background: rgba(239,68,68,0.14); border: 1px solid rgba(239,68,68,0.4); color: #fca5a5; font-size: 11px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
         /* Dual-view: collapsed shown by default, expanded hidden */
         .clip-video-expanded { display: none; width: 100%; }
         .clips-grid.expanded-mode .clip-video-collapsed { display: none; }
@@ -11973,28 +11987,15 @@ Ambient: same kitchen room tone, soft pour sound.
                     if (Array.isArray(cachedClips) && cachedClips.length > 0 && id === selectedJobId) {
                         cachedClipsData = cachedClips; cachedJobId = id;
                         const cListEl = document.getElementById('clipsList');
-                        const hasLineup = cachedClips.some(x => x.in_lineup === false);
-                        let visible = hasLineup ? cachedClips.filter(x => x.in_lineup !== false) : cachedClips;
-                        // v700c — attach audio_pair sibling to each visual_pair
-                        // BEFORE filtering audio_pair out of the visible list,
-                        // so renderClip can produce a dual-thumbnail paired card.
-                        const _v700cMapCache = {};
-                        cachedClips.forEach(x => { _v700cMapCache[x.id] = x; });
-                        visible.forEach(x => {
-                            if ((x.clip_role||'').toLowerCase() === 'visual_pair' && x.paired_clip_id) {
-                                const twin = _v700cMapCache[x.paired_clip_id];
-                                if (twin) x._audioTwin = twin;
-                            }
-                        });
-                        // v698A — hide audio_pair clips (paired-card sibling rendered via visual_pair).
-                        visible = visible.filter(c => (c.clip_role || '').toLowerCase() !== 'audio_pair' || (c.error_code || '') === 'CONTENT_POLICY_VIOLATION');
-                        // v701j — collapse all CONTENT_POLICY_VIOLATION clips
-                        // sharing the SAME rejected image into ONE upload card.
-                        // Backend's v701d cascade retries every sibling on a
-                        // single upload, so the user only needs to act once.
-                        // Showing N identical "image rejected" cards spams
-                        // the grid (8+ cards in a single voiceover-job).
-                        visible = _dedupePolicyViolations(visible);
+                        // v698A.3 — ONE helper builds the whole panel: lineup
+                        // filter, policy-violation dedupe, and the A-roll /
+                        // B-roll split. Pre-v698A.3 this cached-first-paint
+                        // path carried its OWN copy of the filter chain and
+                        // emitted the old paired card, so opening a cached job
+                        // flashed the confusing pairing UI for a moment before
+                        // the fetch landed. Both paths now share one renderer.
+                        const _panelCache = renderClipsPanel(cachedClips, id, 'false');
+                        const visible = _panelCache.visibleClips;
                         // v657 — match the main-render path's #clipsToolbar
                         // structure so the diff-path doesn't insert a
                         // second expand button. Pre-v657 the cache-render
@@ -12007,7 +12008,7 @@ Ambient: same kitchen room tone, soft pour sound.
                             ? `<button id="retryStuckBtn" class="expand-toggle" onclick="retryStuckClips('${id}')" title="Re-queue all clips that are stuck (worker dropped them)" style="margin-right:8px;background:rgba(245,158,11,0.18);color:#fbbf24;border-color:rgba(245,158,11,0.5);">🔄 Retry stuck (${_stuckCountCache})</button>`
                             : '';
                         const expandBtn = `<div id="clipsToolbar" style="display:flex;justify-content:flex-end;margin-bottom:8px;">${_retryCacheBtn}<button id="expandToggleBtn" class="expand-toggle" onclick="toggleVariantsExpanded()">${variantsExpanded ? '⊟ Collapse' : '⊞ Expand'}</button></div>`;
-                        cListEl.innerHTML = `<div id="reviewBannerSlot"></div>` + expandBtn + `<div class="clips-grid ${variantsExpanded ? 'expanded-mode' : ''}" data-exports-loaded="false">${visible.map(x => renderClip(x, id)).join('')}</div>`;
+                        cListEl.innerHTML = `<div id="reviewBannerSlot"></div>` + expandBtn + _panelCache.html;
                         visible.forEach(clip => {
                             clipStates[clip.clip_index] = getClipStateKey(clip);
                             clipVideoKeys[clip.clip_index] = getClipVideoKey(clip);
@@ -12039,35 +12040,15 @@ Ambient: same kitchen room tone, soft pour sound.
             // fetches in background. ~KB per job, no quota concerns.
             try { localStorage.setItem(`clips_${id}`, JSON.stringify(clips)); } catch(e) {}
             if(!clips.length){c.innerHTML='<p style="color:var(--text-muted);text-align:center;padding:10px">Starting...</p>';return;}
-            // Filter out clips excluded from lineup (only when a custom lineup exists)
-            const hasLineup = clips.some(x => x.in_lineup === false);
-            let visibleClips = hasLineup ? clips.filter(x => x.in_lineup !== false) : clips;
-            // v700c — attach the audio_pair sibling to every visual_pair
-            // clip (looked up by paired_clip_id) BEFORE filtering audio_pairs
-            // out of the visible list. renderClip switches to a dual-thumbnail
-            // paired-card layout when ._audioTwin is present.
-            const _v700cClipsById = {};
-            clips.forEach(x => { _v700cClipsById[x.id] = x; });
-            visibleClips.forEach(x => {
-                if ((x.clip_role||'').toLowerCase() === 'visual_pair' && x.paired_clip_id) {
-                    const twin = _v700cClipsById[x.paired_clip_id];
-                    if (twin) x._audioTwin = twin;
-                }
-            });
-            // v698A — hide audio_pair clips from the standalone card list.
-            // Their content (line + voice) is bound to a visual_pair sibling
-            // and surfaces via the paired-card badge on that visual_pair card.
-            // audio_pair clips have clip_index ≥ 100000 (Phase 3a offset) so
-            // they sort to the bottom even if not filtered, but they shouldn't
-            // appear as separate review cards at all.
-            visibleClips = visibleClips.filter(
-                c => (c.clip_role || '').toLowerCase() !== 'audio_pair'
-                  || (c.error_code || '') === 'CONTENT_POLICY_VIOLATION'
-            );
-            // v701j — collapse all CONTENT_POLICY_VIOLATION clips sharing
-            // the SAME rejected image into ONE upload card. See
-            // _dedupePolicyViolations for the grouping logic.
-            visibleClips = _dedupePolicyViolations(visibleClips);
+            // v698A.3 — the lineup filter, the policy-violation dedupe and
+            // the A-roll / B-roll split all live in renderClipsPanel now, so
+            // this path and the cached first-paint path above cannot drift.
+            const _panel = renderClipsPanel(clips, id, 'true');
+            const visibleClips = _panel.visibleClips;
+            // v698A.3 — `container` is the FIRST grid (A-roll). It anchors the
+            // toolbar insert and the exports-loaded flag only; every card
+            // lookup below searches the whole panel (`c`) so B-roll cards in
+            // the second grid are patched too.
             let container=c.querySelector('.clips-grid');
             if(!container){
                 const hasCompleted=clips.some(x=>x.status==='completed'),generating=clips.filter(x=>x.status==='generating'||x.status==='pending'||x.status==='redo_queued'||x.status==='flow_redo_queued'||x.status==='preparing');
@@ -12082,7 +12063,7 @@ Ambient: same kitchen room tone, soft pour sound.
                     ? `<button id="retryStuckBtn" class="expand-toggle" onclick="retryStuckClips('${id}')" title="Re-queue all clips that are stuck in pending/generating/redo (worker dropped them)" style="margin-right:8px;background:rgba(245,158,11,0.18);color:#fbbf24;border-color:rgba(245,158,11,0.5);">🔄 Retry stuck (${stuckCount})</button>`
                     : '';
                 const expandBtn = `<div id="clipsToolbar" style="display:flex;justify-content:flex-end;margin-bottom:8px;">${retryStuckBtn}<button id="expandToggleBtn" class="expand-toggle" onclick="toggleVariantsExpanded()">${variantsExpanded ? '⊟ Collapse' : '⊞ Expand'}</button></div>`;
-                c.innerHTML=bannerHtml+expandBtn+`<div class="clips-grid ${variantsExpanded ? 'expanded-mode' : ''}" data-exports-loaded="true">${visibleClips.map(x=>renderClip(x,id)).join('')}</div>`;
+                c.innerHTML=bannerHtml+expandBtn+_panel.html;
                 visibleClips.forEach(clip=>{clipStates[clip.clip_index]=getClipStateKey(clip);clipVideoKeys[clip.clip_index]=getClipVideoKey(clip);clipUIKeys[clip.clip_index]=getClipUIKey(clip);});loadExistingExports(id);
                 // Preload variant videos for instant switching
                 visibleClips.forEach(clip => preloadClipVariants(clip, id));
@@ -12140,7 +12121,9 @@ Ambient: same kitchen room tone, soft pour sound.
                     // landed and the card stayed frozen on "generating" until a manual
                     // refresh (which rebuilds every card via the initial-render path).
                     // Same DOM-position-vs-clip_index drift the v705 fix patched in approve().
-                    const targetCard = container.querySelector(`.clip-card[data-clip-index="${clip.clip_index}"]`);
+                    // v698A.3 — search the whole panel, not just the first
+                    // grid: b-roll cards live in the second grid now.
+                    const targetCard = c.querySelector(`.clip-card[data-clip-index="${clip.clip_index}"]`);
                     if (targetCard) {
                         targetCard.outerHTML = renderClip(clip, id);
                     } else {
@@ -12153,7 +12136,8 @@ Ambient: same kitchen room tone, soft pour sound.
                 } else if (newUIKey !== oldUIKey) {
                     // Only UI changed (approval, variant selection) → patch in-place, preserve <video>.
                     // v761e — same data-clip-index lookup (patchClipUI no-ops on null).
-                    const targetCard = container.querySelector(`.clip-card[data-clip-index="${clip.clip_index}"]`);
+                    // v698A.3 — panel-wide lookup (b-roll sits in grid 2).
+                    const targetCard = c.querySelector(`.clip-card[data-clip-index="${clip.clip_index}"]`);
                     patchClipUI(targetCard, clip, id);
                     clipStates[clip.clip_index] = getClipStateKey(clip);
                     clipUIKeys[clip.clip_index] = newUIKey;
@@ -12209,6 +12193,186 @@ Ambient: same kitchen room tone, soft pour sound.
             if(container.dataset.exportsLoaded !== 'true'){container.dataset.exportsLoaded='true';loadExistingExports(id);}
             }catch(e){}
         }
+        // ============================================================
+        // v698A.3 — ONE renderer for the whole clips panel.
+        //
+        // Why: a v698A.2 job places MANY cutaways under ONE spoken sentence.
+        // The old paired card drew the sentence's voice clip once per cutaway,
+        // so three fragments of one sentence read as three separate spoken
+        // lines. Operator (2026-09-04): "the UI is still confusing with the
+        // pairing of the brolls — they should just be in a different section".
+        //
+        // The layout is the layer lane every editor already knows: the spoken
+        // takes (A-roll) on top, a bounded B-roll section below with the
+        // cutaways in timeline order, each run under a subheader naming the
+        // sentence it rides under. No card ever shows a second clip.
+        //
+        // Both loadClips render paths (cached first paint + network) call
+        // this, so they cannot drift; each only prepends its own banner and
+        // toolbar. `exportsLoaded` is the data-exports-loaded value the caller
+        // needs ("false" from the cache path per v701l, "true" from the
+        // network path which loads exports itself).
+        function renderClipsPanel(clips, id, exportsLoaded) {
+            const all = Array.isArray(clips) ? clips : [];
+            const _role = (x) => (x.clip_role || '').toLowerCase();
+            // Lineup filter (only when a custom lineup exists).
+            const hasLineup = all.some(x => x.in_lineup === false);
+            let visible = hasLineup ? all.filter(x => x.in_lineup !== false) : all;
+            // v806/v701j — policy-violation folding runs on the FULL visible
+            // list, BEFORE the split, so a rejected cutaway keeps its own
+            // upload card; it just lands inside the B-roll grid.
+            visible = _dedupePolicyViolations(visible);
+            const byId = {};
+            all.forEach(x => { byId[x.id] = x; });
+            const brollClips = visible.filter(x => _role(x) === 'visual_pair');
+            let arollClips = visible.filter(x => _role(x) !== 'visual_pair');
+            // v698A.3 — a 1:1 audio twin (the pre-many-to-one design) is a
+            // SPOKEN take, so it belongs in the A-roll grid instead of being
+            // hidden behind a pair card. It carries clip_index ≥ 100000 (the
+            // Phase 3a offset) which would sort it to the bottom, so order it
+            // at its visual's index. Nothing to sort when no twin exists —
+            // a job with no visual_pair keeps its exact original order.
+            const _visualForTwin = {};
+            all.forEach(x => {
+                if (_role(x) === 'visual_pair' && x.paired_clip_id) _visualForTwin[x.paired_clip_id] = x;
+            });
+            const _twinSortKey = (x) => {
+                const v = (_role(x) === 'audio_pair') ? _visualForTwin[x.id] : null;
+                return v ? (v.clip_index || 0) : (x.clip_index || 0);
+            };
+            if (arollClips.some(x => _role(x) === 'audio_pair' && _visualForTwin[x.id])) {
+                arollClips = arollClips.slice().sort((a, b) => _twinSortKey(a) - _twinSortKey(b));
+            }
+            brollClips.sort((a, b) => (a.clip_index || 0) - (b.clip_index || 0));
+            const gridCls = `clips-grid ${variantsExpanded ? 'expanded-mode' : ''}`;
+            // `html` is built on FIRST READ only. The poll calls this helper
+            // every 5s just for the split and then patches cards in place —
+            // rendering every card to a string it throws away would be pure
+            // waste on a 50-clip job.
+            let _html = null;
+            const _build = () => {
+                const arollGrid = `<div class="${gridCls}" data-exports-loaded="${exportsLoaded}">${arollClips.map(x => renderClip(x, id)).join('')}</div>`;
+                return arollGrid + (brollClips.length ? renderBrollSection(brollClips, byId, id) : '');
+            };
+            return {
+                get html() { if (_html === null) _html = _build(); return _html; },
+                arollClips, brollClips, visibleClips: arollClips.concat(brollClips),
+            };
+        }
+        // v698A.3 — a cutaway is reviewable when its render finished and the
+        // operator has not already ruled on it. Same two-part gate renderClip
+        // uses for canReview.
+        function _brollPending(cl) {
+            return cl.status === 'completed'
+                && cl.approval_status !== 'approved'
+                && cl.approval_status !== 'rejected'
+                && cl.approval_status !== 'max_attempts';
+        }
+        function renderBrollSection(brollClips, clipsById, jid) {
+            // Group by the spoken clip each run rides under, ordered by that
+            // SPOKEN clip's clip_index (a cutaway's own index says nothing
+            // about where it lands in the video). Orphans go last.
+            const groups = [];
+            const byPair = new Map();
+            brollClips.forEach(cl => {
+                const key = cl.paired_clip_id || null;
+                if (!byPair.has(key)) {
+                    const g = { key, spoken: key ? (clipsById[key] || null) : null, clips: [] };
+                    byPair.set(key, g);
+                    groups.push(g);
+                }
+                byPair.get(key).clips.push(cl);
+            });
+            groups.sort((a, b) => {
+                const ka = a.spoken ? (a.spoken.clip_index || 0) : Number.MAX_SAFE_INTEGER;
+                const kb = b.spoken ? (b.spoken.clip_index || 0) : Number.MAX_SAFE_INTEGER;
+                if (ka !== kb) return ka - kb;
+                return (a.clips[0].clip_index || 0) - (b.clips[0].clip_index || 0);
+            });
+            let body = '';
+            groups.forEach(g => {
+                let header;
+                if (g.spoken) {
+                    const line = (g.spoken.dialogue_text || g.spoken.voiceover_line || '').trim();
+                    const words = line.split(/\s+/).filter(w => w);
+                    const shown = words.slice(0, 8).join(' ') + (words.length > 8 ? '…' : '');
+                    header = `under #${(g.spoken.clip_index || 0) + 1} <span class="broll-group-line">"${escapeHtml(shown)}"</span>`;
+                } else {
+                    header = 'under — (no spoken clip)';
+                }
+                const gPending = g.clips.filter(_brollPending);
+                const gBtn = gPending.length >= 2
+                    ? `<button class="btn btn-approve btn-sm broll-approve-btn" style="padding:2px 8px;font-size:10px;" onclick="event.stopPropagation();approveClipsSeq([${gPending.map(x => x.id).join(',')}])" title="approve every pending cutaway under this sentence">✓ approve these ${gPending.length}</button>`
+                    : '';
+                body += `<div class="broll-group-header">${header}${gBtn}</div>` + g.clips.map(x => renderClip(x, jid)).join('');
+            });
+            const allPending = brollClips.filter(_brollPending);
+            const allBtn = allPending.length
+                ? `<button class="btn btn-approve btn-sm broll-approve-btn" style="padding:3px 10px;font-size:11px;" onclick="event.stopPropagation();approveClipsSeq([${allPending.map(x => x.id).join(',')}])" title="approve every cutaway that is finished and not yet approved">✓ approve all b-roll (${allPending.length})</button>`
+                : '';
+            const gridCls = `clips-grid ${variantsExpanded ? 'expanded-mode' : ''}`;
+            return `<div class="broll-section">`
+                + `<div class="broll-section-head"><span class="broll-section-title">🎬 B-roll (${brollClips.length})</span>${allBtn}</div>`
+                + `<div class="broll-help">Silent cutaways. Each rides under the sentence shown and starts on its first word (placed at export, v698A.2).</div>`
+                + `<div class="${gridCls} broll-grid">${body}</div>`
+                + `</div>`;
+        }
+        // v698A.3 — approve a list of clips one at a time. A failure on one
+        // cutaway must NOT stop the rest: every id is tried, the successes
+        // stay applied server-side, and the failures are named in one banner
+        // with a retry that re-posts only those. loadClips runs in `finally`
+        // so the page shows exactly what the server accepted.
+        let _approveSeqRunning = false;
+        function _setBrollApproveButtonsDisabled(disabled) {
+            document.querySelectorAll('.broll-approve-btn').forEach(b => { b.disabled = !!disabled; });
+        }
+        function _renderBrollApproveError(failedIds, firstError) {
+            const old = document.getElementById('brollApproveError');
+            if (old) old.remove();
+            if (!failedIds.length) return;
+            const label = failedIds.map(cid => {
+                const cl = cachedClipsData ? cachedClipsData.find(x => x.id === cid) : null;
+                return cl ? `#${(cl.clip_index || 0) + 1}` : `id ${cid}`;
+            }).join(', ');
+            const html = `<div id="brollApproveError" class="broll-approve-error">`
+                + `<span>Could not approve ${escapeHtml(label)} — ${escapeHtml(firstError || 'unknown error')}</span>`
+                + `<button class="btn btn-secondary btn-sm" style="padding:2px 8px;font-size:10px;" onclick="event.stopPropagation();approveClipsSeq([${failedIds.join(',')}])">↻ retry</button>`
+                + `</div>`;
+            const slot = document.getElementById('reviewBannerSlot');
+            if (slot) { slot.insertAdjacentHTML('afterend', html); return; }
+            const list = document.getElementById('clipsList');
+            if (list) list.insertAdjacentHTML('afterbegin', html);
+        }
+        async function approveClipsSeq(ids) {
+            const list = (ids || []).filter(x => x);
+            if (!list.length || _approveSeqRunning) return;
+            _approveSeqRunning = true;
+            _setBrollApproveButtonsDisabled(true);
+            const failed = [];
+            let firstError = '';
+            const jid = selectedJobId;
+            try {
+                for (const cid of list) {
+                    try {
+                        const r = await fetch(`${API}/clips/${cid}/approve`, { method: 'POST' });
+                        if (!r.ok) {
+                            let msg = `HTTP ${r.status}`;
+                            try { const b = await r.json(); if (b && b.detail) msg = b.detail; } catch (_) {}
+                            failed.push(cid);
+                            if (!firstError) firstError = msg;
+                        }
+                    } catch (e) {
+                        failed.push(cid);
+                        if (!firstError) firstError = (e && e.message) ? e.message : String(e);
+                    }
+                }
+            } finally {
+                try { await loadClips(jid); } catch (e) { console.error('[v698A.3] reload after approve batch failed', e); }
+                _approveSeqRunning = false;
+                _setBrollApproveButtonsDisabled(false);
+                _renderBrollApproveError(failed, firstError);
+            }
+        }
         // v806 — KEEP each CONTENT_POLICY_VIOLATION clip as its OWN card,
         // even when several clips share the same rejected image. Earlier
         // (v701j) we collapsed N siblings into one card to avoid "duplicate"
@@ -12262,6 +12426,12 @@ Ambient: same kitchen room tone, soft pour sound.
             }
             return out;
         }
+        // v698A.3 — the three key helpers below still read clip._audioTwin,
+        // but nothing assigns it any more: with b-roll in its own section
+        // every clip (cutaway, spoken take, 1:1 audio twin) is its own card
+        // with its own clip_index, so it carries its own keys and a status
+        // change re-renders ITS card. The twin fold is inert, kept only so a
+        // stale cached object with the old field still keys the same way.
         function getClipStateKey(clip){
             // v701f — paired clips re-render when EITHER side changes.
             // Without including audio twin's state in the diff key,
@@ -12465,31 +12635,21 @@ Ambient: same kitchen room tone, soft pour sound.
             // upload-replacement path. Standalone clips (non-paired) take
             // this branch directly; paired clips (visual_pair + audio_pair)
             // surface the upload button per-side in renderPairedSide.
-            // v928 — a visual_pair WITH an audio twin no longer takes this
-            // branch. Pre-v928 an image-attributable reject on the b-roll side
-            // replaced the WHOLE paired card with the single-column violation
-            // card, so the twin voice clip (often already completed) vanished
-            // from review — the operator could not play or approve it until the
-            // b-roll was fixed. Now the pair keeps its 2-column layout and the
-            // rejected column carries the frame + reason + upload button
-            // (renderPairedSide failed branch). Standalone clips and anchor-only
-            // audio_pair rejects still take the full-card path below.
-            const _v928PairedReject = (c.clip_role||'').toLowerCase() === 'visual_pair' && c._audioTwin;
-            if (IMAGE_ATTRIBUTABLE_CODES.has(c.error_code || '') && !_v928PairedReject) {
+            // v698A.3 — the v928 paired-card carve-out is gone with the paired
+            // card itself: every clip, cutaway included, is now a standalone
+            // card, so an image-attributable reject always surfaces the frame
+            // + reason + upload button. A rejected cutaway renders this card
+            // inside the B-roll grid.
+            if (IMAGE_ATTRIBUTABLE_CODES.has(c.error_code || '')) {
                 return renderClipPolicyViolation(c, jid);
             }
-            // v700c — paired card for v698A visual_pair clips. When the
-            // visual_pair has an attached audio twin (._audioTwin populated
-            // by loadClips via paired_clip_id lookup) we render a dual-
-            // thumbnail card: 🎬 b-roll left, 🎙️ voice right, each with
-            // its own variant nav + per-side actions, plus pair-level
-            // shortcuts ([approve both][redo both]) at the bottom. Speaker
-            // clips (HOOK / CTA, clip_role NULL) and audio_pair clips
-            // (already filtered out of the visible list) fall through to
-            // the standard renderer below.
-            if ((c.clip_role||'').toLowerCase() === 'visual_pair' && c._audioTwin) {
-                return renderClipPaired(c, jid);
-            }
+            // v698A.3 — b-roll mode is derived from the clip itself, never
+            // passed in, so EVERY render path (first paint, cached paint, the
+            // poll's full card replacement, a variant switch) produces the
+            // same card for the same clip. renderClipPaired is no longer
+            // reached from here: cutaways live in their own section now
+            // (renderBrollSection) and no card shows a second clip.
+            const isBroll = (c.clip_role || '').toLowerCase() === 'visual_pair';
             // v464: approved requires BOTH status=completed AND approval_status=approved.
             // The review-status endpoint counts with the same two-part check, so the UI
             // label and the banner count stay consistent even if a status-update path
@@ -12683,20 +12843,23 @@ Ambient: same kitchen room tone, soft pour sound.
                 expandedActs = acts;
             }
             
-            // v698A — visual_pair badge. When a clip has clip_role='visual_pair'
-            // it's the b-roll silent visual whose audio comes from a paired
-            // audio_pair render (anchor torso+hands frame, persona lip-syncing
-            // the voiceover_line). Surface this in the clip header so users
-            // know the audio source isn't visible in this card; the full
-            // dual-thumbnail paired-card layout lands in a follow-up.
-            const _v698aPairedBadge = ((c.clip_role || '').toLowerCase() === 'visual_pair')
-                ? `<span class="badge" style="background:rgba(99,102,241,0.18);color:#818cf8;font-size:10px;font-weight:600;padding:2px 6px;border-radius:8px;margin-left:4px;" title="v698A — b-roll visual paired with audio twin (persona lip-sync from voiceover_anchor_image)">🎙️ paired</span>`
+            // v698A.3 — no "paired" badge on a cutaway any more. The card is
+            // inside the B-roll section, under a subheader naming the sentence
+            // it rides under, so the badge only repeated what the section
+            // already says. The one badge left here is for a 1:1 audio twin
+            // (the pre-many-to-one design): it IS a spoken take, so it sits in
+            // the A-roll grid and says which cutaway its voice carries.
+            const _v698aTwinVisual = (!isBroll && (c.clip_role || '').toLowerCase() === 'audio_pair' && cachedClipsData)
+                ? cachedClipsData.find(x => (x.clip_role || '').toLowerCase() === 'visual_pair' && x.paired_clip_id === c.id)
+                : null;
+            const _v698aPairedBadge = _v698aTwinVisual
+                ? `<span class="badge" style="background:rgba(99,102,241,0.18);color:#818cf8;font-size:10px;font-weight:600;padding:2px 6px;border-radius:8px;margin-left:4px;" title="v698A.3 — this take's voice rides under a cutaway in the B-roll section below">🎙 voice for b-roll #${(_v698aTwinVisual.clip_index || 0) + 1}</span>`
                 : '';
-            // Show the voiceover_line on visual_pair cards (the audio twin's
-            // line, since c.dialogue_text on the visual side is empty per
-            // Phase 3c silent override).
-            const _v698aDisplayText = ((c.clip_role || '').toLowerCase() === 'visual_pair' && c.voiceover_line)
-                ? `<span style="color:#818cf8;font-size:11px;" title="Audio twin lip-syncs this line">🎙 ${c.voiceover_line}</span>`
+            // v698A.3 — a cutaway says which WORDS it covers. It is silent,
+            // and (since v698A.2) many cutaways can ride under one sentence,
+            // so "🎙 <line>" wrongly read as this clip's own spoken line.
+            const _v698aDisplayText = isBroll
+                ? `<span class="clip-text-covers">covers: "${escapeHtml((c.voiceover_line || '').trim() || '—')}"</span>`
                 : c.dialogue_text;
 
             // v815 — auto-substituted-image badge (prominent-people rejection).
@@ -13895,7 +14058,9 @@ Ambient: same kitchen room tone, soft pour sound.
                         // otherwise pair-blind patchClipUI runs over it and
                         // clobbers the pair badge with the visual's own status.
                         if (visualClip) {
-                            if (audioClip && !visualClip._audioTwin) visualClip._audioTwin = audioClip;
+                            // v698A.3 — no twin is folded into the visual any
+                            // more (no paired card exists to fold it for); each
+                            // side is its own card and carries its own keys.
                             clipStates[visualClip.clip_index] = getClipStateKey(visualClip);
                             clipUIKeys[visualClip.clip_index] = getClipUIKey(visualClip);
                         }
@@ -14084,9 +14249,9 @@ Ambient: same kitchen room tone, soft pour sound.
         }
         function toggleVariantsExpanded() {
             variantsExpanded = !variantsExpanded;
-            // Instant toggle: just flip CSS class, no DOM rebuild
-            const grid = document.querySelector('.clips-grid');
-            if(grid) grid.classList.toggle('expanded-mode', variantsExpanded);
+            // Instant toggle: just flip CSS class, no DOM rebuild.
+            // v698A.3 — BOTH grids (A-roll + B-roll), not just the first.
+            document.querySelectorAll('.clips-grid').forEach(grid => grid.classList.toggle('expanded-mode', variantsExpanded));
             const btn = document.getElementById('expandToggleBtn');
             if(btn) btn.innerHTML = variantsExpanded ? '⊟ Collapse' : '⊞ Expand';
             // Show/hide back-to-top button
@@ -14307,7 +14472,10 @@ Ambient: same kitchen room tone, soft pour sound.
             // v705: look up by data-clip-index (server clip_index), not DOM array
             // position. cards[clipIdx] painted the spinner on the neighbor tile
             // after a delete shifted DOM positions out of sync with clip_index.
-            const container=document.querySelector('.clips-grid');
+            // v698A.3: search the whole panel, not the FIRST grid — a cutaway's
+            // card lives in the B-roll grid, so the old .clips-grid lookup
+            // never found it and the redo showed no "queued" state at all.
+            const container=document.getElementById('clipsList');
             if(!container) return;
             const card=container.querySelector(`.clip-card[data-clip-index="${clipIdx}"]`);
             if(!card) { console.warn(`[markClipRegenerating v705] no card for clip_index=${clipIdx}`); return; }
