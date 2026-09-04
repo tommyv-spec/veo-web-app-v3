@@ -181,18 +181,49 @@ def audio_cache_name(chain_key, denoised):
 
 
 def compose_cache_key(pip_y, pip_enabled, chroma_similarity, chroma_blend,
-                      music, music_db, audio_fingerprint, hook_corner):
+                      music, music_db, audio_fingerprint, hook_corner,
+                      picture_fp=None):
     """Every visual setting AND the audio this mp4 muxes in.
 
     The audio is the half that was missing. It is not a "setting", which is
     exactly why it was overlooked — the old comment said every repair setting
     was in the name, and it was true, and the file still shipped the wrong voice.
+
+    v698A.2.5 — `picture_fp` is the fingerprint of the PICTURE file when it is
+    not the base export (the cutaway edit). It is appended only then, so every
+    name a Korella job ever produced stays exactly what it was.
     """
     music_key = music.stem[:24] if music else "none"
     corner_key = "off" if not hook_corner else f"{hook_corner:.3f}"
-    return (f"y{pip_y}_p{int(pip_enabled)}_k{chroma_similarity:.3f}_"
-            f"b{chroma_blend:.3f}_m{music_key}_{music_db:.1f}_"
-            f"a{audio_fingerprint}_hc{corner_key}")
+    key = (f"y{pip_y}_p{int(pip_enabled)}_k{chroma_similarity:.3f}_"
+           f"b{chroma_blend:.3f}_m{music_key}_{music_db:.1f}_"
+           f"a{audio_fingerprint}_hc{corner_key}")
+    if picture_fp:
+        key += f"_pic{picture_fp}"
+    return key
+
+
+def band_in_use_for(repairs, segs, sup):
+    """v698A.2.5 — is the 16:9 support band actually composited? The same test
+    compose() applies at its PIP stage: PIP on, windows found, track present."""
+    return bool(repairs and repairs.get("pip_enabled") and segs and sup is not None)
+
+
+def choose_picture(base, cutaway_edit, hook_end, band_in_use):
+    """v698A.2.5 — which file the captions are burned over.
+
+    A v698A many-to-one job exports its finished picture as `final_broll_`
+    (speaker windows + cutaways placed on their words). The pipeline was written
+    for the Korella layout — speaker export + a 16:9 band and a green hook — and
+    used that file only as a hook background, so the first auto-edit of such a
+    job captioned the speaker and threw the cutaways away. The cutaway edit is
+    the picture exactly when nothing else is composited over the frame: no
+    green hook and no band in use. Audio always stays the export's.
+    Returns (picture_path, "final_broll" | "export").
+    """
+    if cutaway_edit is not None and float(hook_end or 0.0) == 0.0 and not band_in_use:
+        return cutaway_edit, "final_broll"
+    return base, "export"
 
 
 def cap_pass_name(offset, template, source_fingerprint):
@@ -225,7 +256,7 @@ def local_styles():
         if TEMPLATES_DIR.exists() else []
 
 
-def pick_companion(outs, base_fn, prefix):
+def pick_companion(outs, base_fn, prefix, exact=False):
     """v698A.2.4 — the companion file (`final_broll_` / `support_track_`) that
     belongs to THIS export. The base is `final_export_<job8>_<stamp>_<hash>.mp4`
     and every export stamps its companions with the same `<job8>_<stamp>_<hash>`
@@ -234,6 +265,10 @@ def pick_companion(outs, base_fn, prefix):
     the NEWEST companion by name — stamps sort chronologically — said out loud;
     None when the job has no such file. `list-outputs` is sorted by name, which
     is why a bare `next(...)` used to return the OLDEST b-roll.
+
+    v698A.2.5 — `exact=True` returns None instead of the newest fallback: the
+    cutaway edit that becomes the PICTURE must be this export's own, never a
+    neighbour's under this export's audio.
     """
     mp4s = [f for f in (outs or []) if f.startswith(prefix) and f.endswith(".mp4")]
     if not mp4s:
@@ -244,6 +279,8 @@ def pick_companion(outs, base_fn, prefix):
     same = [f for f in mp4s if stem and stem in f]
     if same:
         return sorted(same)[0]
+    if exact:
+        return None
     newest = sorted(mp4s)[-1]
     print(f"  {prefix}*: none carries this export's stem ({stem or '?'}) — using the newest: {newest}")
     return newest
@@ -353,6 +390,12 @@ def fetch_job_files(job_id, work: Path, music_filename=None, hook_bg_filename=No
     # nothing here ever looked for it — which is why the hook had no real
     # background to use and fell back to blurring a scrap of the 16:9 track.
     broll_fn = pick_companion(outs, base_fn, "final_broll_")
+    # v698A.2.5 — the cutaway EDIT that may become the whole picture: this
+    # export's own `final_broll_` (exact stem) or nothing. Decided BEFORE the
+    # hook-background override below, which may replace `broll_fn` with a
+    # still or with any video the operator named — that file is a hook
+    # background, never the picture.
+    cutaway_edit_fn = pick_companion(outs, base_fn, "final_broll_", exact=True)
     # v938.16 — an explicit hook background wins over the auto-picked one, and
     # may be a still image (see autoedit_qc.HOOK_BG_EXTENSIONS).
     if hook_bg_filename:
@@ -365,6 +408,7 @@ def fetch_job_files(job_id, work: Path, music_filename=None, hook_bg_filename=No
         raise AutoEditError(f"music file is not in this job's outputs: {music_filename}")
     base, sup = work / base_fn, (work / sup_fn if sup_fn else None)
     broll = work / broll_fn if broll_fn else None
+    cutaway_edit = work / cutaway_edit_fn if cutaway_edit_fn else None
     music = work / music_fn if music_fn else None
     download(f"/api/jobs/{job_id}/outputs/{base_fn}", token, base)
     if sup_fn:
@@ -375,12 +419,14 @@ def fetch_job_files(job_id, work: Path, music_filename=None, hook_bg_filename=No
         download(f"/api/jobs/{job_id}/outputs/{broll_fn}", token, broll)
     else:
         print("  no full-frame b-roll (final_broll_*) — hook-corner layout will blur a fallback")
+    if cutaway_edit_fn and cutaway_edit_fn != broll_fn:
+        download(f"/api/jobs/{job_id}/outputs/{cutaway_edit_fn}", token, cutaway_edit)
     if music_fn:
         download(f"/api/jobs/{job_id}/outputs/{music_fn}", token, music)
     # v958 — only NOW may the marker vouch for this cache (see the wipe above).
     if _wipe_clean:
         _marker.write_text(base_fn, encoding="utf-8")
-    return base, sup, music, broll
+    return base, sup, music, broll, cutaway_edit
 
 
 def probe_duration(path):
@@ -1062,7 +1108,7 @@ def watermark_font():
 def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio,
             pip_y=PIP_Y, pip_enabled=True, chroma_similarity=0.10,
             chroma_blend=0.02, music=None, music_db=-20.0,
-            hook_corner=None, broll=None):
+            hook_corner=None, broll=None, picture_fp=None):
     # Every visual/audio repair setting is in the cache name. A re-run with a
     # stronger key or different music must never silently reuse the old video.
     #
@@ -1076,7 +1122,8 @@ def compose(base, sup, work: Path, dur, hook_end, key_hex, segs, audio,
     # Fingerprinting the bytes (not the mtime) means an identical re-render
     # still hits the cache.
     cache_key = compose_cache_key(pip_y, pip_enabled, chroma_similarity, chroma_blend,
-                                  music, music_db, file_fingerprint(audio), hook_corner)
+                                  music, music_db, file_fingerprint(audio), hook_corner,
+                                  picture_fp=picture_fp)
     nocap = work / f"nocap_wm_{cache_key}.mp4"
     if nocap.exists():
         print("compose: cached")
@@ -1379,7 +1426,8 @@ def pip_difference_ratio(output: Path, base: Path, segs, pip_y: int):
 
 
 def run_quality_checks(output: Path, base: Path, expected_dur: float, buckets,
-                       windows, segs, pip_y: int, hook_end: float, repairs):
+                       windows, segs, pip_y: int, hook_end: float, repairs,
+                       picture_source: str = "export"):
     from autoedit_qc import build_qc_report, caption_face_overlap_metrics
 
     checks = []
@@ -1484,7 +1532,7 @@ def run_quality_checks(output: Path, base: Path, expected_dur: float, buckets,
     else:
         checks.append({"id": "support_footage", "status": "pass",
                        "message": "Support footage was unavailable or intentionally disabled"})
-    return build_qc_report(checks)
+    return build_qc_report(checks, picture_source=picture_source)
 
 
 def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, repairs=None):
@@ -1499,7 +1547,7 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
     repairs = normalize_repairs(repairs)
     work.mkdir(parents=True, exist_ok=True)
     progress("download")
-    base, sup, music, broll = fetch_job_files(
+    base, sup, music, broll, cutaway_edit = fetch_job_files(
         job_id, work, repairs["music_filename"], repairs.get("hook_bg"))
     dur = probe_duration(base)
     scan_file = work / "scan.json"
@@ -1511,12 +1559,22 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
     else:
         hook_end, key_hex, segs = s["hook_end"], s["key_hex"], [tuple(x) for x in s["segs"]]
         print("scan: cached")
+    # v698A.2.5 — WHICH file is the picture. Faces, layout, composition and the
+    # caption occupancy all read it; the audio below still reads `base`.
+    picture, picture_source = choose_picture(
+        base, cutaway_edit, hook_end, band_in_use_for(repairs, segs, sup))
+    if picture_source == "final_broll":
+        print(f"[autoedit/v698A.2.5] picture = {picture.name} (cutaway edit); "
+              f"audio = {base.name}", flush=True)
     # The 4th element records WHICH face detector produced these numbers — a
     # Haar-era chin must be re-measured when YuNet is active (v938.1).
-    if len(s.get("layout", [])) != 4 or s["layout"][3] != face_detector_tag():
+    # v698A.2.5 — and WHICH picture they were measured on.
+    if (len(s.get("layout", [])) != 4 or s["layout"][3] != face_detector_tag()
+            or s.get("picture") != picture.name):
         progress("layout")
-        auto_offset, pip_y, chin = detect_layout(base, dur, segs)
+        auto_offset, pip_y, chin = detect_layout(picture, dur, segs)
         s["layout"] = [auto_offset, pip_y, chin, face_detector_tag()]
+        s["picture"] = picture.name
     else:
         auto_offset, pip_y, chin = s["layout"][:3]
         print(f"layout: cached (offset {auto_offset:+.3f}, pip_y {pip_y}, chin {chin:.2f})")
@@ -1551,21 +1609,22 @@ def prepare_composition(job_id: str, work: Path, progress=lambda stage: None, re
               f"hook_corner=0 to disable)", flush=True)
     progress("compose")
     nocap = compose(
-        base, sup, work, dur, hook_end, key_hex, segs, audio, pip_y,
+        picture, sup, work, dur, hook_end, key_hex, segs, audio, pip_y,
         pip_enabled=repairs["pip_enabled"],
         chroma_similarity=repairs["chroma_similarity"],
         chroma_blend=repairs["chroma_blend"],
         music=music, music_db=repairs["music_db"],
         hook_corner=hook_corner, broll=broll,
+        picture_fp=(file_fingerprint(picture) if picture_source == "final_broll" else None),
     )
     start_s, end_s = repairs["trim_start_s"], repairs["trim_end_s"]
     trim_key = f"s{start_s:.2f}_e{end_s:.2f}"
     nocap, trimmed_dur = trim_media(nocap, work / f"nocap_trim_{trim_key}.mp4",
                                     start_s, end_s, dur)
-    base, _ = trim_media(base, work / f"base_trim_{trim_key}.mp4",
-                         start_s, end_s, dur)
+    picture, _ = trim_media(picture, work / f"base_trim_{trim_key}.mp4",
+                            start_s, end_s, dur)
     segs = shifted_segments(segs, start_s, trimmed_dur)
-    return nocap, trimmed_dur, segs, auto_offset, pip_y, chin, base, audio
+    return nocap, trimmed_dur, segs, auto_offset, pip_y, chin, picture, audio, picture_source
 
 
 def resolve_hook_corner(hook_corner, hook_end, key_hex, has_fullframe_bg):
@@ -2633,7 +2692,7 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
     """The whole pass. `progress` gets called with a stage-name string."""
     from autoedit_qc import normalize_repairs
     repairs = normalize_repairs(repairs)
-    nocap, dur, segs, auto_offset, pip_y, chin, base, audio = prepare_composition(
+    nocap, dur, segs, auto_offset, pip_y, chin, base, audio, picture_source = prepare_composition(
         job_id, work, progress, repairs=repairs)
     buckets = []
     windows = []
@@ -2704,7 +2763,7 @@ def run_autoedit(job_id: str, work: Path, out: Path, template: str = "korella",
     hook_end = max(0.0, float(scan.get("hook_end", 0.0)) - repairs["trim_start_s"])
     progress("quality-check")
     report = run_quality_checks(out, base, dur, buckets, windows, segs, pip_y,
-                                hook_end, repairs)
+                                hook_end, repairs, picture_source=picture_source)
     (work / "qc_report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"quality: {report['verdict']}"

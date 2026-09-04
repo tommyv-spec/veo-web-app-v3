@@ -216,8 +216,14 @@ def caption_face_overlap_metrics(buckets, windows, frame_height=1920, band_heigh
     }
 
 
-def build_qc_report(checks):
-    """Build the stored READY / NEEDS_MANUAL_EDIT report."""
+def build_qc_report(checks, picture_source="export"):
+    """Build the stored READY / NEEDS_MANUAL_EDIT report.
+
+    v698A.2.5 — `picture_source` records WHICH file the captions were burned
+    over: "final_broll" (the job's cutaway edit) or "export" (the speaker
+    file). Top-level, next to the verdict, so the record can answer "did this
+    auto-edit carry the cutaways?" without opening the video.
+    """
     normalized = []
     reasons = []
     for check in checks:
@@ -236,4 +242,5 @@ def build_qc_report(checks):
         "verdict": "READY" if not reasons else "NEEDS_MANUAL_EDIT",
         "reasons": reasons,
         "checks": normalized,
+        "picture_source": picture_source if picture_source in ("final_broll", "export") else "export",
     }
