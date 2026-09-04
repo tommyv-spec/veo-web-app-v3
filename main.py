@@ -22525,6 +22525,15 @@ cat > "$DIR/start_worker.sh" << LAUNCHEOF
 #!/bin/bash
 cd "$DIR"
 set -a; source .env; set +a
+# Unbuffered, or the poll line sits in a ~24 minute stdout buffer whenever this
+# launcher's output is redirected to a file, and a worker that is running
+# perfectly looks dead. flow_worker.py prints that line in three places and only
+# ONE of them flushes. tools/launch_workers.py already sets this for the
+# launches it owns; a start through THIS file did not, and on 2026-09-04 that
+# cost two sessions most of a day deciding whether a healthy idle worker had
+# hung. The discriminator is whether the platform owes clips -- a silent log is
+# not evidence in either direction.
+export PYTHONUNBUFFERED=1
 $PY flow_worker.py --count {accounts}
 LAUNCHEOF
 chmod +x "$DIR/start_worker.sh"
