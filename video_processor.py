@@ -5586,6 +5586,93 @@ def _generate_black_video(output_path: Path, duration: float, width: int, height
         raise RuntimeError(f"Black video generation failed: {err}")
 
 
+def frame_plan(targets: list, master_duration: float, fps: float = 24.0) -> list:
+    """v698A.2.2 — budget every timeline segment in WHOLE FRAMES, measured from
+    ABSOLUTE boundaries, so the concat cannot drift.
+
+    The old rule gave each fitted clip `-t {target_duration}` seconds. ffmpeg
+    keeps every frame whose start is before `t`, so a 1.90 s window at 24 fps
+    comes out 46 frames = 1.9167 s — up to one frame LONG, half a frame on
+    average. Concatenating 17 of those pushed the last cut 0.375 s past its
+    word (measured on d74ab616 export f17fd655: 16 cuts late by +0.04 s ...
+    +0.35 s, monotonic).
+
+    The new rule:
+
+        F(t)   = round(t * fps)              # absolute frame index of a boundary
+        n_k    = F(end_k) - F(start_k)       # frames for segment k
+
+    Because every boundary's frame index comes from the ABSOLUTE time, the sum
+    of the segments up to boundary k is exactly F(boundary_k): the rounding
+    never accumulates and each cut lands within half a frame (0.021 s at
+    24 fps) of its target.
+
+    Pure function — no ffmpeg, no I/O — so it is unit-tested directly
+    (tests/check_frame_plan.py).
+
+    Args:
+        targets: the assembler's target dicts, each with "start" and "end"
+            seconds. Any order; the plan sorts them by "start".
+        master_duration: the full timeline length in seconds. A trailing gap
+            becomes a black segment.
+        fps: the frame rate the SEGMENT FILES actually carry. For the b-roll
+            that is 24 — every fitted clip is re-encoded with `-r 24` (v560)
+            and concat_videos normalises every input through `fps=24` (v692e).
+
+    Returns:
+        A list of segment dicts in chronological order:
+            {"kind": "clip"|"black", "index": <target index>|None,
+             "frames": n, "start_f": F(start), "end_f": F(end)}
+        A clip that is fully swallowed by the previous clip's overlap
+        (n <= 0) does NOT appear in the list at all — the caller must treat a
+        missing index as "skip this clip". Today such a clip is still appended
+        and pushes everything after it later.
+    """
+    def _F(t: float) -> int:
+        return int(round(float(t) * fps))
+
+    order = sorted(range(len(targets)), key=lambda i: float(targets[i]["start"]))
+    plan: list = []
+    cursor_f = 0
+
+    for i in order:
+        t = targets[i]
+        start_f = _F(t["start"])
+        end_f = _F(t["end"])
+
+        gap_f = start_f - cursor_f
+        if gap_f > 0:
+            # One frame or more of gap is a real fill. This replaces the old
+            # MIN_BLACK seconds test — a gap smaller than one frame simply
+            # rounds to zero frames and disappears on its own.
+            plan.append({
+                "kind": "black", "index": None, "frames": gap_f,
+                "start_f": cursor_f, "end_f": start_f,
+            })
+            cursor_f = start_f
+
+        # Overlap rule, in frames: a clip never rewinds the cursor.
+        clip_start_f = max(start_f, cursor_f)
+        n_frames = end_f - clip_start_f
+        if n_frames <= 0:
+            continue  # fully overlapped — caller skips it entirely
+
+        plan.append({
+            "kind": "clip", "index": i, "frames": n_frames,
+            "start_f": clip_start_f, "end_f": end_f,
+        })
+        cursor_f = max(cursor_f, end_f)
+
+    total_f = _F(master_duration)
+    if total_f > cursor_f:
+        plan.append({
+            "kind": "black", "index": None, "frames": total_f - cursor_f,
+            "start_f": cursor_f, "end_f": total_f,
+        })
+
+    return plan
+
+
 def export_with_master_audio(
     clip_info: list,
     dialogue_lines: list,
