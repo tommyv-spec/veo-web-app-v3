@@ -15599,6 +15599,25 @@ class FinishingUpdate(BaseModel):
     markdown: str
 
 
+@app.get("/api/jobs/{job_id}/finishing")
+async def get_job_finishing(
+    job_id: str,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v960.1 — read back what the build declared. The read companion to the
+    POST below.
+
+    The ✂️ Auto-Edit card needs this because it cannot get the declaration any
+    other way: `/autoedit-status` 404s on a job that has never run, which is
+    exactly the job whose dropdown most needs the declared caption template.
+    Read-only, no side effects — unlike the POST, which stores a spec and can
+    fire the auto-finish chain.
+    """
+    job = get_user_job(db, job_id, current_user)
+    return {"job_id": job_id, "finishing_spec": _job_finishing_spec(job)}
+
+
 @app.post("/api/jobs/{job_id}/finishing")
 async def update_job_finishing(
     job_id: str,

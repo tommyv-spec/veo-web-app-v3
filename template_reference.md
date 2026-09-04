@@ -20018,3 +20018,45 @@ on disk as the reference the constants were lifted from and the one-off fallback
 (generated). Plan:
 `docs/superpowers/plans/2026-09-04-autoedit-finishing-spec-from-the-build.md` (two Codex passes, six
 findings, all applied). Operator 2026-09-04.
+
+### v960.1 — the dropdown default is the last place the declaration can land (2026-09-04)
+
+v960 shipped with a hole the executor found and named: **the operator still had to pick the caption
+style by hand.** The ✂️ Auto-Edit card sends `template` explicitly on every click, and an explicitly
+sent field always wins over a declaration (the rev-459 rule v944 is built on), so the server's derive
+can never apply a declared `captions:` for the template. The dropdown's default is the only place it
+can land — and that default read the LAST RUN's template first. A job whose build says
+`captions: garnissa`, whose first run went out as korella, would offer korella forever.
+
+**The precedence now, highest first:** what the operator currently has selected on screen · the
+build's declared template · the last run's · the server default · the first name. The declaration
+was inserted at rung two, ahead of the last run, because a declaration is authored intent and is
+stable while a prior run is incidental. The operator's own pick is untouched and still wins for that
+click; nothing about the explicit-wins contract changed.
+
+**Why this does not fight "settings stick to the job" (operator 2026-08-25).** That rule was written
+for the hook layout, which has NO declaration channel — inheriting the last run is the only memory it
+has. The caption template does have one, and v944 exists precisely so a finish stops being decided by
+"whatever the platform defaulted to that day".
+
+**Measured before changing it:** nine builds in the tree declare a real template — eight declare
+`korella`, which is also the server default and what their runs already used, so the ranking moves
+nothing for them; one declares `garnissa`, which is the job this was reported on.
+
+**New read endpoint.** `GET /api/jobs/{job_id}/finishing` returns `{"job_id", "finishing_spec"}`, the
+read companion to the POST that was already there. The card cannot get the declaration any other way:
+`/autoedit-status` 404s on a job that has never run, which is exactly the job whose dropdown most
+needs it. It is access-checked, writes nothing and does not touch the auto-finish trigger.
+
+**Fails soft in four ways, all to the pre-v960.1 behaviour:** an older server (404), a job that
+declared nothing, `captions: none`, and a network error all read as "no declared template". A declared
+name the server does not have is ignored rather than rendered as a dead option.
+
+**Known asymmetry, deliberately not fixed here.** `captions_enabled` still defaults from the last run,
+so a build declaring `captions: none` does not turn the checkbox off on a fresh card. Eight builds
+declare `none`, and changing their default was not asked for. Worth doing with the operator in the
+loop, not as a side effect of this.
+
+**Touched:** `code/main.py` (the GET), `code/static/index.html` (`_autoEditGetDeclaredTemplate` plus
+the dropdown's fallback chain), `code/tests/check_v960_1_declared_template_default.py`, this status
+line. Operator 2026-09-04.

@@ -16542,6 +16542,24 @@ Ambient: same kitchen room tone, soft pour sound.
             return data;
         }
 
+        // v960.1 — the caption template the BUILD declared, or null. The card
+        // uses it as the dropdown's default so a job whose build says
+        // `captions: garnissa` opens on garnissa instead of on whatever the
+        // last run happened to use. Null on an older server, on a job that
+        // declared nothing, and on `captions: none` — all three mean "no
+        // declared template", and the dropdown falls back exactly as before.
+        async function _autoEditGetDeclaredTemplate(jobId) {
+            try {
+                const r = await fetch(`${API}/jobs/${jobId}/finishing`);
+                if (!r.ok) return null;
+                const d = await r.json();
+                const c = d && d.finishing_spec && d.finishing_spec.captions;
+                return (c && c !== 'none') ? c : null;
+            } catch (e) {
+                return null;
+            }
+        }
+
         // v938.4 — the newest run's filename, so the downloads list can mark
         // which Automatic Finish is the current one. Older results look
         // identical otherwise and the operator cannot tell them apart.
@@ -16721,6 +16739,11 @@ async function renderAutoEditCard(jobId, hasExport) {
 
                 const tpl = await _autoEditGetTemplates();
                 if (!tpl) { _autoEditRearm(jobId); return; }   // old server → no card, exports still render
+                // v960.1 — read the build's declared caption template before the
+                // card is built. Never fatal: null just means the dropdown falls
+                // back to the last run, exactly as it did before.
+                const declaredCaptionTemplate = await _autoEditGetDeclaredTemplate(jobId);
+                if (selectedJobId !== jobId) return;      // operator switched jobs mid-fetch
                 const status = await _autoEditGetStatus(jobId);
                 // v938.5 — a transient failure must not repaint anything. Keep
                 // the card exactly as it is and try again on the next tick.
@@ -16797,8 +16820,19 @@ async function renderAutoEditCard(jobId, hasExport) {
 
                 const names = [].concat(tpl.local || [], tpl.builtin || []);
                 const savedTemplate = status && names.indexOf(status.template) !== -1 ? status.template : null;
+                // v960.1 — the BUILD's declared template outranks the last run's.
+                // The card sends `template` explicitly on every click, so the
+                // server's v944 derive can never apply the declaration for it;
+                // the dropdown's default is the only place it can land. The
+                // declaration is authored intent and is stable, while the last
+                // run is incidental — a job re-queued once with a different
+                // style should not have that stick over what the build says.
+                // The operator's own pick still wins: it is `pickedTemplate`
+                // above, and changing the dropdown applies to that click.
+                const declaredTemplate = declaredCaptionTemplate
+                    && names.indexOf(declaredCaptionTemplate) !== -1 ? declaredCaptionTemplate : null;
                 const chosen = pickedTemplate && names.indexOf(pickedTemplate) !== -1
-                    ? pickedTemplate : (savedTemplate || tpl.default || names[0] || '');
+                    ? pickedTemplate : (declaredTemplate || savedTemplate || tpl.default || names[0] || '');
                 const options = names.map(n =>
                     `<option value="${_autoEditAttr(n)}"${n === chosen ? ' selected' : ''}>${escapeHtml(n)}</option>`
                 ).join('');
