@@ -168,27 +168,28 @@ def test_linter_tolerates_a_trailing_comma_in_face_refs(tmp_path):
 def test_linter_fails_face_refs_without_method(tmp_path):
     md = MIN_BUILD.format(scenes=LEGACY_SCENE + "- **face_refs:** image_2\n")
     code, out = _lint(md, tmp_path)
-    assert code != 0 and "v959" in out and "face_refs" in out
+    found = _findings(out)
+    assert code != 0 and "v959" in found and "face_refs" in found
 
 
 def test_linter_fails_mixed_build(tmp_path):
     md = MIN_BUILD.format(
         scenes=SECTION_SCENE + "\n" + LEGACY_SCENE.replace("### Scene 1", "### Scene 2"))
     code, out = _lint(md, tmp_path)
-    assert code != 0 and "all shot scenes" in out
+    assert code != 0 and "all shot scenes" in _findings(out)
 
 
 def test_linter_fails_bad_window(tmp_path):
     md = MIN_BUILD.format(
         scenes=SECTION_SCENE.replace("- **clip_duration_s:** 10", "- **clip_duration_s:** 6"))
     code, out = _lint(md, tmp_path)
-    assert code != 0 and "clip_duration_s" in out
+    assert code != 0 and "clip_duration_s" in _findings(out)
 
 
 def test_linter_fails_duplicate_face_ref(tmp_path):
     md = MIN_BUILD.format(scenes=SECTION_SCENE.replace("image_2, image_3", "image_2, image_2"))
     code, out = _lint(md, tmp_path)
-    assert code != 0 and "repeats" in out
+    assert code != 0 and "repeats" in _findings(out)
 
 
 def test_linter_fails_an_unknown_render_method(tmp_path):
@@ -264,6 +265,52 @@ def test_linter_fails_swap_bullets_on_a_section_scene(tmp_path):
         "does not take swap_source_video / swap_mode" in _findings(out))
 
 
+def test_linter_fails_an_audio_bullet_on_a_section_scene(tmp_path):
+    # `audio:` re-muxes the swap source's own track, so it means something only
+    # on a charswap scene. A movie-section scene has no swap source either.
+    md = MIN_BUILD.format(scenes=SECTION_SCENE + "- **audio:** none\n")
+    code, out = _lint(md, tmp_path)
+    assert code != 0 and "only means something on a charswap scene" in _findings(out)
+
+
+def test_linter_fails_a_non_integer_window(tmp_path):
+    # The parser fullmatches `\d+`, so `8.0` is not a window — and a linter
+    # that read the leading digits would call this build importable.
+    md = MIN_BUILD.format(
+        scenes=SECTION_SCENE.replace("- **clip_duration_s:** 10",
+                                     "- **clip_duration_s:** 8.0"))
+    code, out = _lint(md, tmp_path)
+    assert code != 0 and "clip_duration_s" in _findings(out)
+
+
+def test_linter_fails_a_window_written_above_the_line(tmp_path):
+    # The parser attaches the bullet to the line ABOVE it, so one written first
+    # is dangling and the section reads no window at all.
+    scene = SECTION_SCENE.replace("- **clip_duration_s:** 10\n", "")
+    scene = scene.replace("- **speaker:** on-camera\n",
+                          "- **speaker:** on-camera\n- **clip_duration_s:** 10\n")
+    code, out = _lint(MIN_BUILD.format(scenes=scene), tmp_path)
+    assert code != 0 and "clip_duration_s must follow the line it belongs to" in _findings(out)
+
+
+def test_linter_accepts_a_zero_padded_window(tmp_path):
+    # The parser does int("08") == 8, so this imports; the linter must agree.
+    md = MIN_BUILD.format(
+        scenes=SECTION_SCENE.replace("- **clip_duration_s:** 10",
+                                     "- **clip_duration_s:** 08"))
+    code, out = _lint(md, tmp_path)
+    assert "v959" not in _findings(out)
+
+
+def test_v959_numbers_match_the_parser(tmp_path):
+    # The linter keeps its own literals so it can run with no platform import;
+    # this is the guard against them drifting from the parser's constants.
+    import image_platform
+    import verify_video_format as v
+    assert v.V959_WINDOWS_S == image_platform.MOVIE_SECTION_WINDOWS_S
+    assert v.V959_MAX_FACE_REFS == image_platform.MOVIE_SECTION_MAX_FACE_REFS
+
+
 # --- 2. the stand-downs (one test per gate) ----------------------------------
 
 # His Setting paragraph describes a shirt "with the sleeves cut away". The v807
@@ -284,6 +331,17 @@ def test_v807_still_fails_a_legacy_build(tmp_path):
         "[He grins.]", "[He grins.] the camera cuts to his face")
     code, out = _lint(md, tmp_path)
     assert code != 0 and "v807" in _findings(out)
+
+
+def test_v807_scan_reaches_a_section_after_the_clips(tmp_path):
+    # The exemption cuts out the CLIP block, not the rest of the file: a clip
+    # block ends at the next `### Clip`, the next `## ` section, or EOF. Two
+    # hits in `## Captions`, zero from the sleeves inside the clip.
+    md = MIN_BUILD.format(scenes=SECTION_SCENE).replace(
+        "Setting: The loading lot.", _SLEEVES)
+    md += "\n## Captions\n\nthe camera cuts to her face, then a hard cut ends it\n"
+    code, out = _lint(md, tmp_path)
+    assert code != 0 and "v807: 2 editing/transition phrase(s)" in _findings(out)
 
 
 def test_v594_counts_face_refs_as_used(tmp_path):
