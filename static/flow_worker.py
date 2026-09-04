@@ -1630,6 +1630,18 @@ def _install_flow_api_capture(page):
                 f"videoModelKey={model_key or '-'} shape={ingredient_shape or '-'}",
                 flush=True,
             )
+            # v959 — keep the LAST submit's shape on the page so an arm can
+            # read it back. The jsonl below is the durable record; this is the
+            # in-run one, and it is what tells a movie-section submit that the
+            # request really went out as referenceImages (Ingredients) and not
+            # as a startImage animation of the scene frame.
+            try:
+                page._flow_api_last = {"ts": time.time(),
+                                       "endpoint": endpoint.rsplit('/', 1)[-1],
+                                       "videoModelKey": model_key,
+                                       "shape": ingredient_shape}
+            except Exception:
+                pass
             try:
                 with open(out_path, 'a', encoding='utf-8') as f:
                     f.write(json.dumps({
@@ -5679,7 +5691,8 @@ _POLICY_GEN_LOCK = threading.Lock()
 POLICY_FAIL_ATTEMPT = 3
 
 
-def policy_gen_next_action(clip_id, current_model, generation_attempt=1):
+def policy_gen_next_action(clip_id, current_model, generation_attempt=1,
+                           render_method=None):
     """Decide what to do on a generation-policy block for this clip.
     Returns (action, message): action is 'retry_swap' | 'fail'.
 
@@ -5708,13 +5721,27 @@ def policy_gen_next_action(clip_id, current_model, generation_attempt=1):
     same-prompt-re-blocks rationale doesn't apply. Ladder becomes
     prompt_b -> swap -> fail; the fail thresholds shift by one (n>=3,
     generation_attempt >= POLICY_FAIL_ATTEMPT+1) ONLY for clips that have a
-    Prompt B. Clips without one keep the exact pre-v805 ladder."""
+    Prompt B. Clips without one keep the exact pre-v805 ladder.
+
+    v959 — render_method. A movie-section clip has ONE rung: Prompt B in the
+    SAME mode. The Omni->Veo swap is not a fallback for it, because Veo has no
+    Ingredients tab at all, so the swapped retry would render something that
+    could not be the section. render_method=None (every clip today) takes the
+    ladder above, unchanged."""
     _model_known = bool(current_model)
     _already_swapped = _model_known and not is_omni(current_model)
     _has_pb = bool(_CLIP_PROMPT_B.get(clip_id))
     with _POLICY_GEN_LOCK:
         n = _POLICY_GEN_ATTEMPTS.get(clip_id, 0) + 1
         _POLICY_GEN_ATTEMPTS[clip_id] = n
+    # v959 — the section ladder is prompt_b -> fail, or fail at once when no
+    # Prompt B exists. Placed before the swap rung so no path can reach it.
+    if (render_method or "") == "movie-section":
+        if _has_pb and clip_id not in _PROMPT_B_TRIED:
+            _PROMPT_B_TRIED[clip_id] = True
+            print(f"[promptB][v959] clip {clip_id}: policy block — retrying the SAME mode with Prompt B", flush=True)
+            return ('retry_prompt_b', "Policy block — retrying the section with Prompt B (same Ingredients mode)")
+        return ('fail', "⚠️ Generation blocked by Flow content policy — a movie-section clip has no model swap; change the prompt (v959).")
     _extra = 1 if _has_pb else 0
     if _already_swapped or (generation_attempt or 1) >= (POLICY_FAIL_ATTEMPT + _extra) or n >= (2 + _extra):
         return ('fail', "⚠️ Generation blocked by Flow content policy (also failed after switching the model) — change the prompt.")
@@ -5907,7 +5934,7 @@ def prominent_promptb_decision(clip_id):
 
 
 def route_generation_policy(clip_id, current_model, is_prominent, account_name="",
-                            generation_attempt=1):
+                            generation_attempt=1, render_method=None):
     """Route a generation-time Flow policy block to the right recovery UI.
 
     is_prominent True  -> v821: gen-time prominent is often a MASKED dialogue
@@ -5925,6 +5952,11 @@ def route_generation_policy(clip_id, current_model, is_prominent, account_name="
 
     v772 — generation_attempt (DB-persisted) is forwarded so the durable
     terminal-fail backstop works across worker restarts / dispatch re-queues.
+
+    v959 — render_method is forwarded too, and EVERY call site passes it. A
+    site left on the old form would hand the ladder None and quietly put a
+    movie-section clip back on the model-swap rung, which for that method is a
+    guaranteed wrong render. A test greps this file for exactly that.
     """
     prefix = f"[{account_name}] " if account_name else ""
     if is_prominent:
@@ -5960,7 +5992,9 @@ def route_generation_policy(clip_id, current_model, is_prominent, account_name="
             "Flow flagged a prominent person and there is no reworded line (Prompt B) to try. "
             "Rework the dialogue line - do NOT swap the image (the avatar face is not the fix).")
         return ('fail_terminal', 'prominent (no Prompt B) - rework the line, no image swap')
-    return policy_gen_next_action(clip_id, current_model, generation_attempt=generation_attempt)
+    # Kept on ONE line on purpose: the v959 guard is a per-line grep for a call
+    # without render_method=, and a wrapped call reads as one to it.
+    return policy_gen_next_action(clip_id, current_model, generation_attempt=generation_attempt, render_method=render_method)
 
 
 # Reason-specific messages for TERMINAL video-gen content rejects. Each shows the
@@ -7618,7 +7652,7 @@ class HumanPacer:
                                                 clip_log(clip_id, _fail_ci, "FAILED", f"terminal content reject ({_term_reason})")
                                                 continue
                                             _is_prom = tile_text_is_prominent(page, _pi)
-                                            _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, self.account_name, generation_attempt=_clip_obj.get('generation_attempt', 1))
+                                            _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, self.account_name, generation_attempt=_clip_obj.get('generation_attempt', 1), render_method=_clip_obj.get('render_method'))
                                             # v821 — unreachable for gen-time prominent (route_generation_policy now returns retry_prompt_b / fail_terminal, never fail_prominent). Kept as a defensive no-op.
                                             if _pa == 'fail_prominent':
                                                 print(f"[{self.account_name}] [PolicyScan] 🖼 Clip {_fail_ci+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
@@ -9149,6 +9183,14 @@ def _rendered_variant_for(clip_id):
 _CHARSWAP_CLIP_IDS = set()
 _CHARSWAP_SUBMIT_CONFIRMED_IDS = set()
 
+# v959 — the same two sets for the movie-section arm. Separate names rather
+# than one shared pair so a log line can always say WHICH method a refused
+# clip carried; the door below treats them identically, because the reason is
+# identical: the redo lane runs a plain image-to-video rebuild and has an arm
+# for neither method.
+_MOVIE_SECTION_CLIP_IDS = set()
+_MOVIE_SECTION_SUBMIT_CONFIRMED_IDS = set()
+
 
 def update_clip_status(clip_id, status, output_url=None, error_message=None, retries=3):
     """Update clip status via API with retry on failure.
@@ -9175,16 +9217,28 @@ def update_clip_status(clip_id, status, output_url=None, error_message=None, ret
       leave the status untouched so the harvest can still complete it.
     - not confirmed → 'failed' straight away (what the server door would do
       anyway), keeping the parking reason in the message.
+
+    v959 — the movie-section arm joins this door on the same terms. The redo
+    renderer is plain image-to-video: handed a section clip it would animate
+    the wide scene frame and write that over an honest failure. The method name
+    is read off the clip's own set so the message names what it really was.
     """
-    if status == 'flow_redo_queued' and clip_id in _CHARSWAP_CLIP_IDS:
-        if clip_id in _CHARSWAP_SUBMIT_CONFIRMED_IDS:
+    _redo_method = None
+    if status == 'flow_redo_queued':
+        if clip_id in _CHARSWAP_CLIP_IDS:
+            _redo_method = 'charswap'
+        elif clip_id in _MOVIE_SECTION_CLIP_IDS:
+            _redo_method = 'movie-section'
+    if _redo_method:
+        if (clip_id in _CHARSWAP_SUBMIT_CONFIRMED_IDS
+                or clip_id in _MOVIE_SECTION_SUBMIT_CONFIRMED_IDS):
             print(f"[v945.15.3] clip {clip_id}: REFUSING flow_redo_queued park — "
-                  f"charswap with a confirmed submit; status left untouched so the "
+                  f"{_redo_method} with a confirmed submit; status left untouched so the "
                   f"harvest can finish (park reason was: {str(error_message)[:120]!r})",
                   flush=True)
             return True
         status = 'failed'
-        error_message = ("charswap cannot be redone and its submit was never "
+        error_message = (f"{_redo_method} cannot be redone and its submit was never "
                          "confirmed (v945.15.3); park reason: "
                          + str(error_message or ''))[:200]
     data = {
@@ -15031,14 +15085,33 @@ def _omni_ingredients_mode(page) -> bool:
 
     `page._clip_has_end_frame` is set by set_clip_input_mode() before the tab is
     chosen and before any upload runs. Unset (older call paths / first settings
-    pass) reads as False = Frames, i.e. exactly the v784 behavior."""
+    pass) reads as False = Frames, i.e. exactly the v784 behavior.
+
+    v959 — a THIRD way in: `page._force_ingredients`. A movie-section clip
+    carries ONE scene image and no end frame, and still has to sit on the
+    Ingredients tab, because that is the only tab that takes reference images.
+    The flag is written by set_clip_input_mode on EVERY call (True only when a
+    caller asks for it), so no clip can inherit the previous clip's answer, and
+    a clip that never sets it reads exactly as it did before v959. The model
+    check is unchanged: no model but Omni offers the tab at all, so forcing it
+    on a Veo model still comes back False and the arm refuses before it
+    attaches anything."""
     return bool(is_omni(getattr(page, "_veo_model", ""))
-                and getattr(page, "_clip_has_end_frame", False))
+                and (getattr(page, "_clip_has_end_frame", False)
+                     or getattr(page, "_force_ingredients", False)))
 
 
-def set_clip_input_mode(page, start_image, end_image, context=""):
+def set_clip_input_mode(page, start_image, end_image, context="",
+                        force_ingredients=False):
     """v881: set THIS clip's input shape + flip the Frames/Ingredients tab when
     the shape changed since the last clip.
+
+    v959 — force_ingredients=True says "Ingredients even though this clip has
+    no end frame" (movie-section: one wide scene chip plus 1-2 face chips). It
+    is reset on EVERY call, before anything else can happen, so a section clip
+    cannot leak the tab onto the next ordinary clip — whose frame upload has no
+    slot there. Reset on ENTRY rather than on exit because no error path can
+    skip an entry.
 
     The full settings pass runs once per project, so a mixed job (some clips
     start-only, some start+end) needs a per-clip tab toggle. This does the
@@ -15057,6 +15130,7 @@ def set_clip_input_mode(page, start_image, end_image, context=""):
     still open); when that could not be read the answer is 'Unverified', which
     fails the arm's equality gate the same way a wrong tab does."""
     prefix = f"{context} " if context else ""
+    page._force_ingredients = bool(force_ingredients)
     page._clip_has_end_frame = bool(start_image and end_image)
     mode = 'Ingredients' if _omni_ingredients_mode(page) else 'Frames'
     applied = getattr(page, "_input_mode_applied", None)
@@ -18109,7 +18183,7 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
         # (policy_gen_next_action records the swap in _POLICY_SWAP_DONE, so the next
         # redo uses the other model); the n>=2 / attempt>=POLICY_FAIL_ATTEMPT guards
         # then cap it. Fixes the clip-3-stuck-forever case (2026-06-04 logs).
-        _action, _msg = policy_gen_next_action(clip_id, getattr(page, '_veo_model', '') or '', attempt)
+        _action, _msg = policy_gen_next_action(clip_id, getattr(page, '_veo_model', '') or '', attempt, render_method=clip.get('render_method'))
         if _action == 'fail':
             print(f"[REDO] ⛔ Clip {clip_index+1} failed immediately on "
                   f"{getattr(page, '_veo_model', '?')} (still blocked after model swap) — "
@@ -18400,7 +18474,7 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                             print(f"[REDO] ⛔ Clip {clip_index+1} terminal content reject ({_term_reason}) — change-prompt card shown (no retry/swap)", flush=True)
                         else:
                             _is_prom = tile_text_is_prominent(page, 0)
-                            _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, generation_attempt=clip.get('generation_attempt', 1))
+                            _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, generation_attempt=clip.get('generation_attempt', 1), render_method=clip.get('render_method'))
                             # v821 — unreachable for gen-time prominent (route_generation_policy now returns retry_prompt_b / fail_terminal, never fail_prominent). Kept as a defensive no-op.
                             if _pa == 'fail_prominent':
                                 print(f"[REDO] 🖼 Clip {clip_index+1} prominent-people block — replace-image card shown (no model swap)", flush=True)
@@ -19468,15 +19542,21 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         # below, and signal (B)'s [data-tile-id] selector is dead in the
         # current Flow DOM (tiles: 0 on projects visibly holding tiles), which
         # was false-flagging real swap submits whenever (A) missed its window.
+        #
+        # v959 — the movie-section arm sits behind the same check with the same
+        # problem, so it shares the exemption. Both arms stamp
+        # page._charswap_submit_confirmed when their own gate accepted the
+        # submit; that stamp is the stronger verdict either way.
         _cs_ghost_exempt = False
         try:
-            _cs_ghost_exempt = bool(charswap_selected(clip) and (
+            _cs_ghost_exempt = bool((charswap_selected(clip)
+                                     or movie_section_selected(clip)) and (
                 (getattr(page, "_charswap_submit_confirmed", None) or {})
                 .get(clip.get('id'))))
         except Exception:
             _cs_ghost_exempt = False
         if _cs_ghost_exempt:
-            print(f"[{account_name}] [v945.15.2] clip {clip_index+1} charswap submit "
+            print(f"[{account_name}] [v945.15.2] clip {clip_index+1} arm submit "
                   f"already CONFIRMED by the arm's own gate — ghost check skipped",
                   flush=True)
         if not clip_failed and not _cs_ghost_exempt:
@@ -20228,6 +20308,150 @@ def charswap_mode_refusal(clip):
                 "pose-matched composite) and this clip has none; choose a "
                 "start frame or render video-led")
     return f"unknown swap_mode {mode!r}; render video-led or wait"
+
+
+# ---------------------------------------------------------------------------
+# v959 — MOVIE-SECTION ARM. Nothing here runs unless render_method is exactly
+# 'movie-section'. The mentor's clip: Ingredients tab, one WIDE scene chip,
+# 1-2 face chips beside it, the build's own Setting+section prompt, Omni.
+#
+# Only COMMENTS sit between charswap_mode_refusal above and the first def
+# below. The worker tests read one function out of this file by slicing from
+# its `def` to the next `def`, so a module-level statement parked in that gap
+# is executed as part of the function above it — which is how a constant here
+# broke five charswap tests before it was moved down.
+# ---------------------------------------------------------------------------
+
+
+def movie_section_selected(clip):
+    """True only for a clip whose render_method is exactly 'movie-section'."""
+    try:
+        return (clip.get('render_method') or '') == 'movie-section'
+    except AttributeError:
+        return False
+
+
+MOVIE_SECTION_DIAG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                       "movie_section_diag.jsonl")
+
+
+def movie_section_write_diag(**fields):
+    """One JSON line per stage, beside the worker — the charswap_diag pattern.
+
+    A console window that scrolled away, or a worker restarted before anyone
+    read it, is why the evidence goes to a file as well as to stdout.
+    """
+    try:
+        fields.setdefault("ts", datetime.now().isoformat(timespec="seconds"))
+        with open(MOVIE_SECTION_DIAG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(fields, default=str) + "\n")
+    except Exception:
+        # Diagnostics must never be able to fail a render.
+        pass
+
+
+def movie_section_fetch_inputs(clip, temp_dir, context="[v959]"):
+    """(scene_path, [face_paths]) or (None, []) — every input, or nothing.
+
+    The scene chip is the clip's start frame (the WIDE anchor the build chose,
+    §5c). Faces come from face_ref_urls. Local paths win when present so the
+    off-platform E2E driver can hand files straight in.
+
+    All-or-nothing on purpose: a section rendered with the scene chip and one
+    of its two faces is not a cheaper version of the clip, it is a different
+    clip. Refusing here costs no render slot.
+    """
+    scene = clip.get('start_frame_local')
+    if not scene and clip.get('start_frame_url'):
+        scene = download_frame(clip['start_frame_url'],
+                               os.path.join(temp_dir, f"ms_scene_{clip.get('clip_index', 0)}.png"))
+    faces = list(clip.get('face_ref_locals') or [])
+    if not faces:
+        for k, url in enumerate(clip.get('face_ref_urls') or []):
+            p = download_frame(url, os.path.join(temp_dir, f"ms_face_{clip.get('clip_index', 0)}_{k}.png"))
+            if not p:
+                print(f"{context} face ref {k} did not download: {url[-60:]}", flush=True)
+                return None, []
+            faces.append(p)
+    if not scene or not faces:
+        print(f"{context} inputs incomplete: scene={bool(scene)} faces={len(faces)}", flush=True)
+        return None, []
+    return scene, faces
+
+
+def movie_section_chip_verdict(chip_ids, faces_wanted):
+    """(ok, why): the composer must hold scene + every face, all distinct.
+
+    Distinctness matters because the attach helper's success signal is a chip
+    COUNT increase: two chips carrying the same media id means one image went
+    up twice and a face never made it.
+    """
+    want = 1 + int(faces_wanted)
+    ids = list(chip_ids or [])
+    if len(ids) != want:
+        return False, f"composer holds {len(ids)} chip(s), needs {want} (1 scene + {faces_wanted} face)"
+    if len(set(ids)) != len(ids):
+        return False, "chips are not distinct — the same image attached twice"
+    return True, f"{want} distinct chips"
+
+
+def movie_section_submit_verdict(seen, hits, want, api_last):
+    """(accept, why) for a section submit.
+
+    seen/hits/want come from charswap_install_submit_probe (it is N-generic:
+    `want` is the chip count it was given). api_last is page._flow_api_last —
+    the shape the generate request carried. A missing capture is 'unverified',
+    not a failure: the request listener that fills it is off unless
+    FLOW_API_CAPTURE=1, and the probe has already proved every chip reached
+    the body, which is the fact that decides whether this is a section render.
+    """
+    if not seen:
+        return False, "no generate request observed after the click"
+    if hits < want:
+        return False, f"generate body carried {hits}/{want} media ids — a chip did not make it"
+    if not api_last:
+        return True, f"{hits}/{want} media in body; input shape unverified (capture off)"
+    shape = api_last.get("shape") or "-"
+    model_key = api_last.get("videoModelKey") or "-"
+    if shape != "referenceImages":
+        return False, f"submit shape was {shape}, not referenceImages — the composer was not on Ingredients"
+    if "r2v" not in model_key:
+        return False, f"videoModelKey {model_key} is not a reference-to-video key"
+    return True, f"{hits}/{want} media, shape=referenceImages, model={model_key}"
+
+
+def movie_section_attach_and_prompt(page, scene_path, face_paths, prompt, context="[v959]"):
+    """Attach scene + faces, verify the composer, arm the prompt. Returns (ok, chip_ids)."""
+    page._movie_section_block_reason = None
+    ok, why = attach_ingredient_image_with_check(page, scene_path, context=f"{context}-scene",
+                                                 clear_existing=True)
+    if not ok:
+        page._movie_section_block_reason = f"scene chip did not attach ({why})"
+        movie_section_write_diag(stage="scene_attach_failed", reason=why)
+        return False, []
+    for k, fp in enumerate(face_paths):
+        # clear_existing=False: a True here would delete the scene chip it must
+        # sit beside (the v881 pair discipline, tools/flow_clip_section.py).
+        ok, why = attach_ingredient_image_with_check(page, fp, context=f"{context}-face{k+1}",
+                                                     clear_existing=False)
+        if not ok:
+            page._movie_section_block_reason = f"face chip {k+1} did not attach ({why})"
+            movie_section_write_diag(stage="face_attach_failed", face=k + 1, reason=why)
+            return False, []
+    chip_ids = charswap_composer_chip_media_ids(page)
+    ok, why = movie_section_chip_verdict(chip_ids, len(face_paths))
+    movie_section_write_diag(stage="chips_read", chip_ids=chip_ids, verdict=why)
+    if not ok:
+        page._movie_section_block_reason = why
+        return False, chip_ids
+    charswap_install_submit_probe(page, chip_ids)   # N-generic: want = len(chip_ids)
+    fill_prompt_textarea(page, prompt)
+    time.sleep(2)
+    armed, armed_why = charswap_arm_generate(page, prompt, chip_ids, context=context)
+    if not armed:
+        page._movie_section_block_reason = f"composer not ready to generate: {armed_why}"
+        return False, chip_ids
+    return True, chip_ids
 
 
 def charswap_submit_gate(seen, both):
@@ -22711,6 +22935,138 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             except Exception:
                 pass
 
+        # v959 — MOVIE-SECTION ARM. Selected by render_method == 'movie-section'
+        # and by nothing else, exactly like the swap arm above it: a clip with
+        # the field absent or NULL falls straight through to the arms below,
+        # which are unchanged. The mentor's clip shape (measured, see
+        # wiki/concepts/prompting/movie-style-prompting.md §5): Ingredients tab,
+        # one WIDE scene chip, 1-2 face chips beside it, and the build's own
+        # Setting + timestamped section as the Text prompt, verbatim.
+        elif movie_section_selected(clip):
+            _ms_ctx = f"[v959 clip {clip_index+1}]"
+            print(f"{_ms_ctx} movie-section (window={clip.get('section_window_s')}s, "
+                  f"faces={len(clip.get('face_ref_urls') or [])})", flush=True)
+            # Register with the parking refusal in update_clip_status: the redo
+            # lane has no arm for this method either (v945.15.3's door).
+            try:
+                _MOVIE_SECTION_CLIP_IDS.add(clip.get('id'))
+            except Exception:
+                pass
+            if first_submission_in_project:
+                # A section still needs the project's render settings applied once.
+                check_and_dismiss_popup(page)
+                try:
+                    _ms_settings_ok = select_frames_to_video_mode(
+                        page, variants_count=job.get('flow_variants_count', 2))
+                    page._duration_applied = page._duration
+                except Exception as _ms_serr:
+                    print(f"{_ms_ctx} settings failed: {_ms_serr}", flush=True)
+                    movie_section_write_diag(stage="settings_failed", job_id=job_id,
+                                             clip_index=clip_index,
+                                             error=str(_ms_serr)[:200])
+                    update_clip_status(clip['id'], 'failed',
+                                       error_message=f"Settings failed: {str(_ms_serr)[:100]}")
+                    permanently_failed_clips.add(clip_index)
+                    continue
+                # Same reason as v945.15 on the swap arm: only Omni offers the
+                # Ingredients tab, so an unproven model here is a guaranteed
+                # wrong render. Refusing before the attach costs no slot.
+                if not _ms_settings_ok or not is_omni(getattr(page, "_veo_model", "")):
+                    _why = ("movie-section settings not verified on an Omni model — a non-Omni "
+                            "composer has no Ingredients tab (v959)")
+                    movie_section_write_diag(stage="settings_failed", job_id=job_id, clip_index=clip_index,
+                                             model_debug=getattr(page, "_model_apply_debug", None),
+                                             veo_model_wanted=getattr(page, "_veo_model", None))
+                    print(f"{_ms_ctx} FAILED CLOSED: {_why}", flush=True)
+                    update_clip_status(clip['id'], 'failed', error_message=_why[:200])
+                    permanently_failed_clips.add(clip_index)
+                    continue
+                first_submission_in_project = False
+            # force_ingredients=True: a section carries ONE scene image and no
+            # end frame, so the v881 start&end rule would put it on Frames —
+            # where there is no add_2 Create button and the attach dies. The
+            # returned string is what the DOM SAID (v945.3), so 'Unverified'
+            # fails this equality gate the same way a wrong tab does.
+            _ms_mode = set_clip_input_mode(page, True, False, context=_ms_ctx,
+                                           force_ingredients=True)
+            if _ms_mode != 'Ingredients':
+                _why = (f"movie-section needs the Ingredients tab; DOM says {_ms_mode} "
+                        f"(model={getattr(page, '_veo_model', None) or '-'}) — refusing before a render (v959)")
+                print(f"{_ms_ctx} FAILED CLOSED: {_why}", flush=True)
+                movie_section_write_diag(stage="tab_not_ingredients", job_id=job_id,
+                                         clip_index=clip_index, observed_mode=_ms_mode,
+                                         veo_model=getattr(page, "_veo_model", None))
+                update_clip_status(clip['id'], 'failed', error_message=_why[:200])
+                permanently_failed_clips.add(clip_index)
+                continue
+            _ms_scene, _ms_faces = movie_section_fetch_inputs(clip, temp_dir, context=_ms_ctx)
+            if not _ms_scene:
+                movie_section_write_diag(stage="inputs_unavailable", job_id=job_id,
+                                         clip_index=clip_index,
+                                         face_refs_declared=len(clip.get('face_ref_urls') or []))
+                update_clip_status(clip['id'], 'failed', error_message="movie-section inputs unavailable")
+                permanently_failed_clips.add(clip_index)
+                continue
+            # D11 — the prompt is the build's own Setting+section text, captured at
+            # the top of the loop BEFORE build_flow_prompt substitutes (the same
+            # `_cs_platform_prompt = prompt` capture the charswap arm uses).
+            # There is no default to fall back on: the section IS the prompt.
+            _ms_prompt = _cs_platform_prompt
+            if not (_ms_prompt or "").strip():
+                movie_section_write_diag(stage="no_prompt", job_id=job_id, clip_index=clip_index)
+                update_clip_status(clip['id'], 'failed',
+                                   error_message="movie-section clip has no authored prompt — refused (v959)")
+                permanently_failed_clips.add(clip_index)
+                continue
+            _ms_ok, _ms_chips = movie_section_attach_and_prompt(page, _ms_scene, _ms_faces, _ms_prompt, context=_ms_ctx)
+            if not _ms_ok:
+                _why = getattr(page, '_movie_section_block_reason', None) or "movie-section chips did not attach"
+                print(f"{_ms_ctx} not submitting: {_why}", flush=True)
+                update_clip_status(clip['id'], 'failed', error_message=(_why[:150] + " — recreate the job")[:200])
+                permanently_failed_clips.add(clip_index)
+                continue
+            # Clear the captured shape FIRST: it holds the last submit the page
+            # saw, which on clip 2 of a job is clip 1's. A stale entry could
+            # hand this clip's verdict a shape no request of its own carried.
+            try:
+                page._flow_api_last = None
+            except Exception:
+                pass
+            click_generate_button(page, f"v959 clip {clip_index+1}")
+            # The probe is N-generic, so the second return (its 2-media test)
+            # means nothing here; the counts below are what the verdict reads.
+            _ms_seen, _ = charswap_await_submit_verdict(page)
+            _ms_probe = getattr(page, "_charswap_submit_probe", None) or {}
+            _ms_accept, _ms_why = movie_section_submit_verdict(
+                _ms_seen, int(_ms_probe.get('hits', 0)), int(_ms_probe.get('want', 0)),
+                getattr(page, "_flow_api_last", None))
+            movie_section_write_diag(stage="submit_verdict", job_id=job_id, clip_index=clip_index,
+                                     accepted=_ms_accept, why=_ms_why, chip_ids=_ms_chips,
+                                     section_window_s=clip.get('section_window_s'),
+                                     generate_requests_observed=_ms_probe.get('n_requests', 0),
+                                     body_media_ids=_ms_probe.get('body_media_ids') or [],
+                                     api_last=getattr(page, "_flow_api_last", None))
+            print(f"{_ms_ctx} submit verdict: {_ms_accept} — {_ms_why}", flush=True)
+            if not _ms_accept:
+                print(f"{_ms_ctx} FAILED CLOSED: {_ms_why}", flush=True)
+                update_clip_status(clip['id'], 'failed', error_message=f"movie-section submit not proven: {_ms_why}"[:200])
+                permanently_failed_clips.add(clip_index)
+                continue
+            human_delay(1, 2)
+            _tiles_in_this_project += 1
+            # v945.15.2, one arm along — the downstream ghost check runs on a
+            # dead [data-tile-id] selector and would park this proven submit for
+            # a redo lane that refuses it, killing the clip. Both stamps: the
+            # page map the ghost check reads, and the module set the parking
+            # door reads (page objects do not cross every path that parks).
+            try:
+                _ms_map = getattr(page, "_charswap_submit_confirmed", None) or {}
+                _ms_map[clip.get('id')] = True
+                page._charswap_submit_confirmed = _ms_map
+                _MOVIE_SECTION_SUBMIT_CONFIRMED_IDS.add(clip.get('id'))
+            except Exception:
+                pass
+
         elif first_submission_in_project:
             # First clip actually being submitted to this project — needs frames and full setup.
             # NOTE: after restore, clips_done may skip clips 0..N, so i>0 here but the project
@@ -23430,7 +23786,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         clip_log(_df_clip['id'], _dfc, "FAILED", f"terminal content filter {_df_term}")
                         continue
                     _is_prom = _dfc in _prom_killed
-                    _pa, _pmsg = route_generation_policy(_df_clip['id'], getattr(page, "_veo_model", ""), _is_prom, generation_attempt=_df_clip.get('generation_attempt', 1))
+                    _pa, _pmsg = route_generation_policy(_df_clip['id'], getattr(page, "_veo_model", ""), _is_prom, generation_attempt=_df_clip.get('generation_attempt', 1), render_method=_df_clip.get('render_method'))
                     # v821 — unreachable for gen-time prominent (route_generation_policy now returns retry_prompt_b / fail_terminal, never fail_prominent). Kept as a defensive no-op.
                     if _pa == 'fail_prominent':
                         print(f"[Flow] 🖼 clip {_dfc+1} prominent-people block — replace-image card shown (no model swap); job continues", flush=True)
@@ -24034,7 +24390,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                                 print(f"[Flow] [PolicyScan] ⛔ Clip {_fail_ci+1} terminal content reject ({_term_reason}) — change-prompt card shown (no retry/swap)", flush=True)
                                                 continue
                                             _is_prom = tile_text_is_prominent(page, _pi)
-                                            _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, generation_attempt=_clip_obj.get('generation_attempt', 1))
+                                            _pa, _pmsg = route_generation_policy(clip_id, getattr(page, "_veo_model", ""), _is_prom, generation_attempt=_clip_obj.get('generation_attempt', 1), render_method=_clip_obj.get('render_method'))
                                             # v821 — unreachable for gen-time prominent (route_generation_policy now returns retry_prompt_b / fail_terminal, never fail_prominent). Kept as a defensive no-op.
                                             if _pa == 'fail_prominent':
                                                 permanently_failed_clips.add(_fail_ci)
