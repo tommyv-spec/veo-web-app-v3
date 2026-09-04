@@ -6164,6 +6164,8 @@ For each scene in the new authored sequence:
 
 **Status (2026-09-04): DEPLOYED `d777e9d` — production proof PENDING on `d74ab616`'s first export.** Plan: `docs/superpowers/plans/2026-09-04-cutaways-via-v825-master-alignment.md` (Codex loop: 2 passes, 5 findings applied). Operator direction: *"don't we already check each word anyway at export? don't reinvent the wheel"* and *"like we do in assemble we use the final audio to match the brolls"*.
 
+**Status update (2026-09-04 12:05): PROVEN for placement on `d74ab616` export `f17fd655`** (`method=words`, 7/7 sentences, 0 fallbacks; the server's fragment boundaries match an independent Whisper run within 0.15 s) — the delivered b-roll still drifts up to +0.35 s late by the end of the video because the assembler's concat accumulates a frame per fitted clip; that is v698A.2.2 (frame budgeting from absolute boundaries), planned the same day.
+
 **The problem.** In a v698A many-to-one job several silent cutaways ride under ONE spoken sentence (`audio_from_scene`). The export placed them by dividing the sentence's window in proportion to each fragment's LETTER COUNT (`pairing_resolver.split_span`, v701zd), so a cutaway could start a word early or late — the picture did not change on the words it covers.
 
 **The rule.** The export already listens to the finished audio word by word for the stills lane (v825: `video_processor.transcribe_master_audio` + `resolve_support_spans`, with the v864-v867 memory guards and lock). A shared sentence's cutaways use THAT pass — never a second mechanism:
