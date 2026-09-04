@@ -20060,3 +20060,37 @@ loop, not as a side effect of this.
 **Touched:** `code/main.py` (the GET), `code/static/index.html` (`_autoEditGetDeclaredTemplate` plus
 the dropdown's fallback chain), `code/tests/check_v960_1_declared_template_default.py`, this status
 line. Operator 2026-09-04.
+
+### v960.2 — the worker's install set is READ, not typed (2026-09-04)
+
+Found while deploying v960. The auto-edit worker's install set was written out by hand in **two**
+places that had to agree — the download allow-list in `serve_autoedit_worker_file` and
+`AUTOEDIT_WORKER_FILES`, which both installers loop over — and both named the `korella` caption
+template alone.
+
+**Why nobody noticed.** The RUNNING worker never reads either list. It imports from a repo checkout
+and `local_styles()` finds templates by listing the directory, so adding `korella2line`, and later
+`garnissa` for v960, made them work immediately on this machine. Only a **freshly installed** worker
+pulls from the download route, and it would have got neither — surfacing as "template not found" on
+somebody else's machine, long after the template was declared working and with nothing pointing back
+here. The same shape as the v948.2 incident (a deploy-confirmed change failing on the worker's stale
+copy and reading like an ordinary job error), one layer earlier.
+
+**The fix.** `_autoedit_caption_template_files()` lists `code/caption_templates/`, treating a
+directory as a template when it holds `pycaps.template.json` — the same test `local_styles()` uses, so
+the installer cannot drift from the pipeline. It returns the download name, the install subfolder and
+the path on the server, and the allow-list and `_autoedit_worker_files()` are both built from it. The
+install set went from 12 files to 18: three templates × three runtime files, plus the nine modules.
+A `README.md` beside a template is documentation and is not shipped.
+
+**It is still an allow-list.** Every accepted key comes from a directory listing on the server, so a
+path parameter never reaches the filesystem and `..` still cannot get in. That property was the
+reason the list was explicit in the first place, and it is unchanged.
+
+**The general rule, again:** a second hand-maintained copy of a list that already exists somewhere is
+a bug with a delay fuse — v944 refused to hardcode the caption template names for this reason and
+v892.2 paid for a hand-mirrored field list. If two lists must agree, derive one from the other, or
+derive both from the thing they describe.
+
+**Touched:** `code/main.py`, `code/tests/check_v960_2_worker_template_files.py`, this status line.
+Operator 2026-09-04.

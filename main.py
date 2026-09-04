@@ -21299,6 +21299,46 @@ async def serve_flow_worker():
     return Response(content=worker_path.read_text(), media_type="text/x-python")
 
 
+def _autoedit_caption_template_files():
+    """v960.2 — every LOCAL caption template's runtime files, read off the disk.
+
+    Returns `[(download_name, install_subdir, path_relative_to_code), ...]`,
+    the shape both the download allow-list and the two installers need.
+
+    Why this is derived and not typed out: it was typed out, in TWO places that
+    had to agree, and both said `korella` only. `korella2line` and then
+    `garnissa` (v960) were added as directories — which is all the RUNNING
+    worker needs, because `local_styles()` reads the directory — so nobody
+    noticed that a freshly INSTALLED worker could render neither. It would have
+    surfaced as "template not found" on somebody else's machine, long after the
+    template was declared working. Same lesson as v944 refusing to hardcode the
+    template names and v892.2's hand-maintained field mirror: a second copy of
+    a list that already exists is a bug with a delay fuse.
+
+    A directory counts as a template when it holds `pycaps.template.json`, the
+    same test `local_styles()` uses. Only the three runtime files are served —
+    a `README.md` beside them is documentation, not something the worker needs.
+    """
+    out = []
+    root = Path(__file__).parent / "caption_templates"
+    if not root.exists():
+        return out
+    for d in sorted(root.iterdir(), key=lambda p: p.name):
+        if not (d / "pycaps.template.json").exists():
+            continue
+        for rel in ("pycaps.template.json", "styles.css",
+                    "resources/Montserrat-ExtraBold.ttf"):
+            f = d / rel
+            if not f.exists():
+                continue
+            sub = f"caption_templates\\{d.name}"
+            if "/" in rel:                       # the font lives one level down
+                sub += "\\resources"
+            out.append((f"{d.name}/{f.name}", sub,
+                        Path("caption_templates") / d.name / rel))
+    return out
+
+
 @app.get("/api/user-worker/download/autoedit/{name:path}")
 async def serve_autoedit_worker_file(name: str):
     """Serve the auto-edit worker and the modules it imports.
@@ -21330,13 +21370,15 @@ async def serve_autoedit_worker_file(name: str):
         "measure_capcut_match.py": Path("measure_capcut_match.py"),
         "audio_processor.py": Path("audio_processor.py"),
         "config.py": Path("config.py"),
-        # the korella house style — without these the worker still runs but only
-        # offers pycaps' builtin looks, not ours
-        "korella/pycaps.template.json": Path("caption_templates/korella/pycaps.template.json"),
-        "korella/styles.css": Path("caption_templates/korella/styles.css"),
-        "korella/Montserrat-ExtraBold.ttf":
-            Path("caption_templates/korella/resources/Montserrat-ExtraBold.ttf"),
     }
+    # v960.2 — our house styles, read off the disk rather than typed out here.
+    # Without them the worker still runs but only offers pycaps' builtin looks.
+    # This used to name korella alone, so an installed worker could not render
+    # korella2line or garnissa. Still an allow-list: every key comes from a
+    # directory listing on the server, so a path parameter never reaches the
+    # filesystem and `..` still cannot get in.
+    for _name, _sub, _rel in _autoedit_caption_template_files():
+        ALLOWED[_name] = _rel
     rel = ALLOWED.get(name)
     if rel is None:
         raise HTTPException(404, f"not part of the auto-edit worker: {name}")
@@ -21916,10 +21958,20 @@ AUTOEDIT_WORKER_FILES = [
     ("measure_capcut_match.py", ""),
     ("audio_processor.py", ""),
     ("config.py", ""),
-    ("korella/pycaps.template.json", "caption_templates\\korella"),
-    ("korella/styles.css", "caption_templates\\korella"),
-    ("korella/Montserrat-ExtraBold.ttf", "caption_templates\\korella\\resources"),
 ]
+
+
+def _autoedit_worker_files():
+    """v960.2 — the module list above plus EVERY local caption template.
+
+    The templates are appended from the directory rather than typed out; see
+    `_autoedit_caption_template_files`. Both installers call this, so the
+    installer and the download allow-list can no longer disagree about which
+    styles exist.
+    """
+    return AUTOEDIT_WORKER_FILES + [
+        (name, sub) for name, sub, _rel in _autoedit_caption_template_files()
+    ]
 
 
 def _generate_autoedit_installer_unix(token: str, app_url: str) -> str:
@@ -21937,7 +21989,7 @@ def _generate_autoedit_installer_unix(token: str, app_url: str) -> str:
     fetches = "\n".join(
         'curl -sfL "$APP/api/user-worker/download/autoedit/%s" -o "$AE/%s%s" || fail_dl'
         % (fn, (sub.replace("\\", "/") + "/") if sub else "", fn.rsplit("/", 1)[-1])
-        for fn, sub in AUTOEDIT_WORKER_FILES
+        for fn, sub in _autoedit_worker_files()
     )
     script = r'''#!/bin/bash
 # Kaveno Auto-Edit worker setup (Mac / Linux).
@@ -22043,7 +22095,7 @@ def _generate_autoedit_installer(token: str, app_url: str) -> str:
     fetches = "\n".join(
         'curl -sfL "%%APP%%/api/user-worker/download/autoedit/%s" -o "%%AE%%\\%s%s" || goto :dlfail'
         % (fn, (sub + "\\") if sub else "", fn.rsplit("/", 1)[-1])
-        for fn, sub in AUTOEDIT_WORKER_FILES
+        for fn, sub in _autoedit_worker_files()
     )
     return f"""@echo off
 setlocal EnableDelayedExpansion
