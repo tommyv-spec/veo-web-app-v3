@@ -136,7 +136,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.sessions import SessionMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from finishing_models import ExportSettings, AutoEditRequest
 from sqlalchemy.orm import Session as DBSession
 
@@ -172,6 +172,17 @@ from image_platform import (
 
 
 # ============ Pydantic Models ============
+
+# v959 — the render methods that exist, written down ONCE.
+#
+# A render method only exists because it has its own arm in the Flow worker, so
+# this same tuple answers two questions that are always the same answer today:
+# which values the API accepts on a line, and which clips the redo lane must
+# refuse (its renderer is plain image-to-video and has an arm for neither).
+# `movie-section` is `image_platform.MOVIE_SECTION_RENDER_METHOD`; the test
+# suite pins the two spellings together so they cannot drift apart.
+_RENDER_METHODS = ("charswap", "movie-section")
+
 
 class DialogueLineInput(BaseModel):
     id: int
@@ -287,6 +298,41 @@ class DialogueLineInput(BaseModel):
     # about, and an undeclared field reaches the Clip row as NULL while every
     # surface upstream of it looks correctly wired.
     swap_audio: Optional[str] = None
+    # v959 — movie-section face references. These are the POSITIONS in the
+    # upload list of the 1-2 face images the section clip is seeded with, and
+    # they travel exactly like end_frame_image_local_index: declared here, dumped
+    # into Job.dialogue_json with the rest of the line, and turned into real
+    # frame files by the background task below. Empty/NULL on every clip that is
+    # not a movie section. Undeclared, pydantic would drop it and the section
+    # would render with no face chips — a stranger on screen.
+    face_ref_local_indexes: Optional[List[int]] = None
+
+    @field_validator("render_method")
+    @classmethod
+    def _v959_known_render_method(cls, v):
+        """Refuse a render method the platform has no arm for.
+
+        This field is copied straight onto the Clip row and the worker branches
+        on it, so without this check a hand-written POST /api/jobs could stamp
+        any string — including one the import latch is holding back — and the
+        request would look perfectly valid all the way to the renderer.
+
+        Empty means "no method", which is how every reader downstream already
+        spells it (`(... or "").strip().lower()`), so an empty value normalises
+        to None here instead of failing. The two live values are normalised too,
+        because three of those readers compare WITHOUT stripping and a stored
+        " Charswap " would silently render the ordinary way.
+        """
+        if v is None:
+            return None
+        norm = str(v).strip().lower()
+        if not norm:
+            return None
+        if norm not in _RENDER_METHODS:
+            raise ValueError(
+                f"render_method must be null or one of {list(_RENDER_METHODS)} "
+                f"— got {v!r}, which no render arm knows how to draw")
+        return norm
 
 
 class SceneInput(BaseModel):
@@ -3474,6 +3520,21 @@ async def _setup_job_background(
                           f"prompt override — stamping the swap default so "
                           f"build_prompt cannot auto-construct a dialogue "
                           f"prompt for a silent swap scene", flush=True)
+                # v959 D11 — the same door, one arm along, with the opposite
+                # remedy. A swap clip has a sensible default prompt; a movie
+                # section does not, because the section prompt IS the operator's
+                # timestamped multi-speaker text. There is nothing to stamp, so
+                # this refuses instead. Both promote lanes already refuse it
+                # (image_platform), and v945.8's lesson is that a guard on one of
+                # two creators is not a guard.
+                if not _veo_prompt_override and (
+                        (line_data.get("render_method") or "").strip().lower()
+                        == "movie-section"):
+                    raise ValueError(
+                        f"Clip {idx}: render_method=movie-section carries no Veo "
+                        f"prompt override — build_prompt would author a dialogue "
+                        f"prompt for a section, and a section is never built, "
+                        f"only written (v959)")
                 _veo_negative_override = (line_data.get("veo_negative_prompt_override") or "").strip() or None
                 # v805 — Prompt B policy fallback. Ships VERBATIM (no
                 # build_prompt pass, no negative trailer): it is the
@@ -3542,6 +3603,32 @@ async def _setup_job_background(
                         f"[v718i.3] Clip {idx}: explicit end-frame override "
                         f"(Option C native interpolation) → image_local_index="
                         f"{_explicit_end_idx_v718i} → end_fname={end_fname}",
+                        flush=True,
+                    )
+
+                # v959 — face reference frames for a movie-section clip, resolved
+                # from the uploaded frames list exactly like the explicit end
+                # frame above. Bounds-checked the same way; an out-of-range index
+                # is a refused clip, not a silent drop that the worker would only
+                # discover hours later as a 404 on download_frame. An EMPTY list
+                # is refused too: the parser makes face refs mandatory on a
+                # section, so empty here means they were lost on the way.
+                _face_keys_v959 = None
+                if (line_data.get("render_method") or "").strip().lower() == "movie-section":
+                    _fr_idxs = line_data.get("face_ref_local_indexes") or []
+                    _bad = [i for i in _fr_idxs
+                            if not (isinstance(i, int) and 0 <= i < num_images)]
+                    if _bad or not _fr_idxs:
+                        raise ValueError(
+                            f"Clip {idx}: movie-section face_ref_local_indexes "
+                            f"{_fr_idxs!r} do not all resolve to uploaded frames "
+                            f"({num_images}) (v959)")
+                    _face_keys_v959 = json.dumps(
+                        [f"jobs/{job_id}/frames/{uploaded_frames_list[i]}"
+                         for i in _fr_idxs])
+                    print(
+                        f"[v959] Clip {idx}: movie-section face refs → "
+                        f"local_indexes={_fr_idxs} → {_face_keys_v959}",
                         flush=True,
                     )
 
@@ -3711,6 +3798,13 @@ async def _setup_job_background(
                     clip.dialogue_text_b = _veo_prompt_b_line
                     clip.start_frame = start_frame_key
                     clip.end_frame = end_frame_key
+                    # v959 — the face-ref frame keys, written the same way the
+                    # start and end frames are. Only ever ASSIGNED when this
+                    # clip resolved some: the CLI promote lane fills this column
+                    # itself before the row gets here, and writing None over it
+                    # would strip a section's face chips on the way past.
+                    if _face_keys_v959 is not None:
+                        clip.face_ref_frames_json = _face_keys_v959
                     clip.status = ClipStatus.PENDING.value
 
             db.commit()
@@ -17769,6 +17863,9 @@ async def local_worker_get_pending_job(
         # v943 — charswap keys. Added only when the clip really is a swap, so a
         # legacy clip's payload keeps the exact shape it had before.
         clip_data = _v943_maybe_charswap(clip_data, clip, base_url, "local-worker")
+        # v959 — movie-section keys, on the same terms: nothing is added unless
+        # the clip declares that method.
+        clip_data = _v959_maybe_movie_section(clip_data, clip, base_url, "local-worker")
 
         clips_data.append(clip_data)
     
@@ -18667,6 +18764,46 @@ def _v943_charswap_payload(clip, base_url: str, lane: str) -> dict:
     }
 
 
+def _v959_maybe_movie_section(clip_data: dict, clip, base_url: str, lane: str) -> dict:
+    """Add the movie-section keys to a clip payload, only for a section clip.
+
+    A legacy clip comes back with the dict it went in with — same keys, same
+    values. That is the v943 regression contract, kept word for word: a Veo
+    render is stochastic and can never be byte-compared, but the JSON the worker
+    is handed can.
+    """
+    if (getattr(clip, "render_method", None) or "") != "movie-section":
+        return clip_data
+    clip_data.update(_v959_movie_section_payload(clip, base_url, lane))
+    return clip_data
+
+
+def _v959_movie_section_payload(clip, base_url: str, lane: str) -> dict:
+    """The extra job-payload keys a movie-section clip needs, and nothing else.
+
+    face_ref_urls are served by the same authenticated frame proxy as
+    start_frame_url (GET /api/{lane}/frames/{job_id}/{filename}), so the worker
+    downloads them with download_frame exactly like a start frame. `lane` picks
+    which of the two proxies to name — the worker lanes carry different
+    credentials, so a URL from the wrong one is a 401 hours later.
+
+    section_window_s is the clip's own render length, which for a section is the
+    pacing window the words were written against (8 or 10 seconds).
+    """
+    import json as _json
+    import os as _os
+    keys = _json.loads(getattr(clip, "face_ref_frames_json", None) or "[]")
+    return {
+        "render_method": clip.render_method,
+        "input_mode": "Ingredients",
+        "section_window_s": getattr(clip, "veo_render_duration_s", None),
+        "face_ref_urls": [
+            f"{base_url}/api/{lane}/frames/{clip.job_id}/{_os.path.basename(k)}"
+            for k in keys
+        ],
+    }
+
+
 def _v945_14_reject_charswap_redos(db, redo_clips, lane):
     """v945.14 — the redo lane has NO swap arm; never hand it a swap clip.
 
@@ -18684,11 +18821,20 @@ def _v945_14_reject_charswap_redos(db, redo_clips, lane):
     is flipped back to 'failed' with the recreate instruction, never handed
     out. This is deliberately status-destructive — a swap clip in this queue
     is ALREADY wrong, and 'failed' is the only honest state it can hold.
+
+    v959 — the same door now covers the movie-section arm, because it is the
+    same door: the redo renderer is plain image-to-video, it has no arm for
+    either method, and a section handed to it would come back as an ordinary
+    render of the wide frame written over an honest failure. The methods are
+    read off _RENDER_METHODS rather than named here, so a third arm cannot ship
+    with this door left open behind it. The messages name whichever method the
+    clip actually carries.
     """
     kept = []
     flipped = 0
     for clip in redo_clips:
-        if (getattr(clip, "render_method", None) or "").strip().lower() != "charswap":
+        _method = (getattr(clip, "render_method", None) or "").strip().lower()
+        if _method not in _RENDER_METHODS:
             kept.append(clip)
             continue
         # v945.15.1 — PRESERVE WHY BEFORE CLEARING (the v899.5 lesson, again).
@@ -18707,15 +18853,18 @@ def _v945_14_reject_charswap_redos(db, redo_clips, lane):
         clip.claimed_by_worker = None
         clip.claimed_at = None
         clip.approval_status = "pending_review"
+        # The code is this DOOR's name and stays what it has always been — it is
+        # what an operator greps for in a log. The message names the method the
+        # clip actually carries, so a refused section does not read as a swap.
         clip.error_code = "CHARSWAP_NO_REDO"
         clip.error_message = (
-            "charswap cannot render via the redo lane (no swap arm — it would "
-            "deliver a plain render of the start image). Recreate this clip as "
-            "a FRESH job instead; v945.14.")
+            f"{_method} cannot render via the redo lane (no arm for it there — "
+            f"it would deliver a plain render of the start image). Recreate this "
+            f"clip as a FRESH job instead; v945.14.")
         flipped += 1
         try:
             add_job_log(db, clip.job_id,
-                        f"Clip {clip.clip_index + 1} is charswap — refused by the "
+                        f"Clip {clip.clip_index + 1} is {_method} — refused by the "
                         f"redo lane ({lane}), marked failed; recreate as a fresh "
                         f"job (v945.14)",
                         "ERROR", "redo")
@@ -18724,9 +18873,10 @@ def _v945_14_reject_charswap_redos(db, redo_clips, lane):
     if flipped:
         db.commit()
         # v945.14 TEMP DIAG — remove once operator-side evidence shows the door
-        # refusing (or a month passes with no swap clip ever reaching it).
-        print(f"[v945.14] {lane} redo poll refused {flipped} charswap clip(s) "
-              f"— flipped to failed with recreate instruction", flush=True)
+        # refusing (or a month passes with no armed clip ever reaching it).
+        print(f"[v945.14/v959] {lane} redo poll refused {flipped} clip(s) with "
+              f"their own render arm — flipped to failed with recreate "
+              f"instruction", flush=True)
     return kept
 
 
@@ -18757,14 +18907,15 @@ async def local_worker_download_swap_avatar(
 async def verify_charswap_columns_endpoint(
     current_user: User = Depends(get_current_user),
 ):
-    """Prove the v943 columns exist and can be read on the live database.
+    """Prove the render-method columns (v943 charswap + v959 movie-section)
+    exist and can be read on the live database.
 
     Startup catches a failed image migration and keeps serving, so a healthy
     deploy is not evidence the columns landed. This is the evidence.
     """
     from image_platform import verify_charswap_columns as _verify
     result = await asyncio.to_thread(_verify)
-    print(f"[v943] column readback: {result}", flush=True)
+    print(f"[v943/v959] column readback: {result}", flush=True)
     return result
 
 
@@ -19836,6 +19987,8 @@ async def user_worker_get_pending_job(
         }
         # v943 — see the local-worker payload; keys appear only on a swap clip.
         _clip_data = _v943_maybe_charswap(_clip_data, clip, base_url, "user-worker")
+        # v959 — and the section keys, only on a section clip.
+        _clip_data = _v959_maybe_movie_section(_clip_data, clip, base_url, "user-worker")
         clips_data.append(_clip_data)
     
     return {

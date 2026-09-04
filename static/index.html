@@ -10939,6 +10939,17 @@ Ambient: same kitchen room tone, soft pour sound.
                             (promoteMeta.end_frame_image_local_index !== undefined
                                 ? promoteMeta.end_frame_image_local_index
                                 : null),
+                        // v959 — movie-section face references, sent for the
+                        // same reason as the end-frame pair above. The local
+                        // indexes are the browser-only hop: the backend turns
+                        // them into real frame files, and a build promoted from
+                        // the UI without them would render a section with no
+                        // face chips — a stranger's face on screen. The field
+                        // plumbing checker is satisfied by the SERVER-side
+                        // promote, so a miss here would be completely silent.
+                        // Empty arrays, not null: a section always has 1-2.
+                        face_ref_node_ids: promoteMeta.face_ref_node_ids || [],
+                        face_ref_local_indexes: promoteMeta.face_ref_local_indexes || [],
                         // v943 — character swap. Same plumbing lesson as the
                         // two blocks above and as v892.2 below: a field the
                         // payload does not send arrives NULL, and a swap clip

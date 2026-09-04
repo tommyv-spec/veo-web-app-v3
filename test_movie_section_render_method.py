@@ -639,3 +639,274 @@ def test_a_face_ref_the_scene_loop_already_copied_is_not_copied_again(tmp_path, 
     assert out == {7: "jobs/JOB1/frames/image_03.png"}
     assert (job_dir / "image_03.png").read_bytes() == b"already there"
     assert r2.uploaded == []
+
+
+# --- 8. the payload helper adds keys ONLY on a movie-section clip -----------
+#
+# Same regression contract as the charswap helper: a Veo render is stochastic
+# and can never be byte-compared, but the JSON the worker is handed can. So the
+# proof that this arm changed nothing for everybody else is that a legacy clip
+# comes back with the dict it went in with.
+
+class _Clip:
+    def __init__(self, **kw):
+        self.render_method = None
+        self.face_ref_frames_json = None
+        self.veo_render_duration_s = None
+        self.job_id = "job1"
+        self.__dict__.update(kw)
+
+
+def test_legacy_clip_payload_untouched_by_movie_section_helper():
+    from main import _v959_maybe_movie_section
+    before = {"id": 1, "prompt": "p", "start_frame_url": "u"}
+    after = _v959_maybe_movie_section(dict(before), _Clip(), "https://x", "user-worker")
+    assert after == before
+
+
+def test_a_charswap_clip_is_not_touched_by_the_movie_section_helper():
+    """The two arms sit on the same branch point, so each helper has to ignore
+    the other's clips or a swap clip would leave with an Ingredients mode."""
+    from main import _v959_maybe_movie_section
+    before = {"id": 2, "prompt": "p"}
+    after = _v959_maybe_movie_section(
+        dict(before), _Clip(render_method="charswap"), "https://x", "local-worker")
+    assert after == before
+
+
+def test_movie_section_payload_carries_refs_mode_and_window():
+    from main import _v959_maybe_movie_section
+    clip = _Clip(render_method="movie-section", veo_render_duration_s=10,
+                 face_ref_frames_json=json.dumps(["jobs/job1/frames/f2.png",
+                                                  "jobs/job1/frames/f3.png"]))
+    out = _v959_maybe_movie_section({"id": 1}, clip, "https://x", "user-worker")
+    assert out["render_method"] == "movie-section"
+    assert out["input_mode"] == "Ingredients"
+    assert out["section_window_s"] == 10
+    assert out["face_ref_urls"] == ["https://x/api/user-worker/frames/job1/f2.png",
+                                    "https://x/api/user-worker/frames/job1/f3.png"]
+
+
+def test_the_face_ref_urls_follow_the_lane_they_were_asked_for():
+    """The two worker lanes carry different credentials, so a face ref handed to
+    the local worker on the user-worker path is a 401 hours later."""
+    from main import _v959_movie_section_payload
+    clip = _Clip(render_method="movie-section", veo_render_duration_s=8,
+                 face_ref_frames_json=json.dumps(["jobs/job1/frames/f2.png"]))
+    out = _v959_movie_section_payload(clip, "https://x", "local-worker")
+    assert out["face_ref_urls"] == ["https://x/api/local-worker/frames/job1/f2.png"]
+
+
+def test_a_null_face_ref_column_gives_an_empty_list_not_a_crash():
+    """Import refuses a section with no face refs on both promote lanes, so a
+    NULL column here means the row is already wrong. The payload still has to be
+    buildable — the worker's own readiness check is what stops the render."""
+    from main import _v959_movie_section_payload
+    out = _v959_movie_section_payload(
+        _Clip(render_method="movie-section"), "https://x", "user-worker")
+    assert out["face_ref_urls"] == []
+    assert out["section_window_s"] is None
+
+
+def test_both_claim_lanes_call_the_movie_section_helper():
+    """v945.8's rule, one arm along: a guard on one of two doors is not a guard.
+    The helper is called next to its charswap twin at BOTH claim sites."""
+    src = (_HERE / "main.py").read_text(encoding="utf-8")
+    assert src.count("_v959_maybe_movie_section(") == 3   # def + both lanes
+    for lane in ("local-worker", "user-worker"):
+        assert f'_v959_maybe_movie_section(clip_data, clip, base_url, "{lane}")' in src \
+            or f'_v959_maybe_movie_section(_clip_data, clip, base_url, "{lane}")' in src, lane
+
+
+@pytest.mark.skip(reason="the worker arm lands in Task 5; unskip it there")
+def test_every_payload_key_the_helper_emits_is_read_by_the_worker():
+    """The contract between the two halves of this feature. The helper's keys
+    are read off the helper itself, so a renamed key cannot pass by being
+    renamed in the test too."""
+    from main import _v959_movie_section_payload
+    clip = _Clip(render_method="movie-section", veo_render_duration_s=10,
+                 face_ref_frames_json=json.dumps(["jobs/job1/frames/f2.png"]))
+    keys = list(_v959_movie_section_payload(clip, "https://x", "user-worker"))
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    missing = [k for k in keys
+               if f'"{k}"' not in src and f"'{k}'" not in src]
+    assert not missing, f"the worker never reads: {missing}"
+
+
+# --- 9. the API refuses a render method it does not have an arm for ---------
+
+def test_render_method_accepts_the_two_known_values():
+    from main import DialogueLineInput
+    for m in ("charswap", "movie-section"):
+        assert DialogueLineInput(id=1, text="x", render_method=m).render_method == m
+
+
+def test_render_method_none_and_empty_mean_the_ordinary_renderer():
+    """Every downstream reader spells this `(... or "").strip().lower()`, so an
+    empty string already means "no method". Normalising it here once keeps the
+    stored row equal to what those three comparisons expect."""
+    from main import DialogueLineInput
+    assert DialogueLineInput(id=1, text="x").render_method is None
+    assert DialogueLineInput(id=1, text="x", render_method="").render_method is None
+    assert DialogueLineInput(
+        id=1, text="x", render_method="  Movie-Section ").render_method == "movie-section"
+
+
+def test_render_method_rejects_a_third_value():
+    """The field is copied straight onto the Clip row, so without this a
+    hand-crafted POST /api/jobs could stamp any string past the import latch."""
+    from pydantic import ValidationError
+
+    from main import DialogueLineInput
+    with pytest.raises(ValidationError) as e:
+        DialogueLineInput(id=1, text="x", render_method="deepfake")
+    assert "render_method" in str(e.value)
+
+
+def test_the_api_render_method_list_matches_the_parser_constant():
+    """Two lists of the same two strings is how one of them comes to disagree."""
+    import main
+    from image_platform import MOVIE_SECTION_RENDER_METHOD
+    assert MOVIE_SECTION_RENDER_METHOD in main._RENDER_METHODS
+    assert "charswap" in main._RENDER_METHODS
+    assert len(main._RENDER_METHODS) == 2
+
+
+# --- 10. the THIRD door: the browser's own promote payload ------------------
+
+def test_the_browser_promote_payload_sends_the_face_refs():
+    """check_field_plumbing.py is satisfied by EITHER promote path, so a miss
+    here passes the checker and still arrives NULL on every job promoted from
+    the UI — the v892.2 failure exactly."""
+    src = (_HERE / "static" / "index.html").read_text(encoding="utf-8")
+    assert "end_frame_image_local_index:" in src, "fixture is out of date"
+    assert "face_ref_node_ids: promoteMeta.face_ref_node_ids" in src
+    assert "face_ref_local_indexes: promoteMeta.face_ref_local_indexes" in src
+
+
+# --- 11. the job creators on the POST /api/jobs lane ------------------------
+
+def test_the_face_ref_indexes_cross_into_the_background_task_by_model_dump():
+    """There is no per-field hop in the Clip writer. The whole line model is
+    dumped into Job.dialogue_json and the background task reads it back, which
+    is exactly how end_frame_image_local_index travels — so declaring the field
+    on DialogueLineInput IS the promote-path change."""
+    src = _function_source("_create_job_impl", "main.py")
+    assert "dialogue_list = [d.model_dump() for d in request.dialogue_lines]" in src
+    assert '"lines": dialogue_list' in src
+
+
+def test_the_background_task_resolves_face_frames_from_the_upload_list():
+    src = _function_source("_setup_job_background", "main.py")
+    assert 'line_data.get("end_frame_image_local_index")' in src, "fixture is out of date"
+    assert 'line_data.get("face_ref_local_indexes")' in src
+    assert "clip.face_ref_frames_json" in src
+
+
+def test_the_background_task_refuses_a_face_ref_index_off_the_end():
+    """Bounds-checked the same way the explicit end frame is: an out-of-range
+    index is a refused clip, not a silent drop that 404s at download time."""
+    src = _function_source("_setup_job_background", "main.py")
+    guard = src[src.index("_face_keys_v959"):]
+    assert "raise ValueError(" in guard[:1200]
+    assert "do not all resolve to uploaded frames" in guard[:1200]
+
+
+def test_post_jobs_refuses_a_section_with_no_authored_prompt():
+    """D11 + v945.8: a section is never built, only written. build_prompt would
+    author a dialogue prompt for it, and the worker then trusts a non-empty
+    prompt_text — which is the talking-head render this whole chain exists to
+    stop, reachable through POST /api/jobs instead of promote."""
+    src = _function_source("_setup_job_background", "main.py")
+    assert "CHARSWAP_DEFAULT_PROMPT as _cs_default" in src, "fixture is out of date"
+    # The two empty-override guards sit together; the section one is the second.
+    guards = src.split("if not _veo_prompt_override and (")
+    assert len(guards) == 3, "expected exactly two empty-override guards"
+    section_guard = guards[2][:900]
+    assert '== "movie-section"' in section_guard
+    # It REFUSES rather than stamping a default: a swap has a sensible default
+    # prompt, a section has none — the section prompt is the operator's text.
+    assert "raise ValueError(" in section_guard
+    assert "(v959)" in section_guard
+    assert "_cs_default" not in section_guard
+
+
+# --- 12. the redo lane refuses BOTH methods --------------------------------
+#
+# rules/v945.md:207-230 records what happens when it does not: three failed
+# charswap clips were requeued ~30 min later and the redo lane, whose payload
+# carries no arm keys, delivered plain renders of the start frame OVER the
+# honest failures.
+
+class _RedoClip:
+    def __init__(self, render_method=None, clip_index=0):
+        self.render_method = render_method
+        self.clip_index = clip_index
+        self.job_id = "job1"
+        self.status = "flow_redo_queued"
+        self.claimed_by_worker = "w1"
+        self.claimed_at = "now"
+        self.approval_status = None
+        self.error_code = None
+        self.error_message = None
+        self.redo_reason = None
+
+
+class _RedoDb:
+    def __init__(self):
+        self.commits = 0
+
+    def commit(self):
+        self.commits += 1
+
+
+def test_a_movie_section_clip_is_refused_by_the_redo_lane():
+    from main import _v945_14_reject_charswap_redos
+    clip = _RedoClip(render_method="movie-section")
+    kept = _v945_14_reject_charswap_redos(_RedoDb(), [clip], "user-worker")
+    assert kept == []
+    assert clip.status == "failed"
+    assert "movie-section" in (clip.error_message or "")
+    assert clip.claimed_by_worker is None
+
+
+def test_a_charswap_clip_still_behaves_exactly_as_before():
+    from main import _v945_14_reject_charswap_redos
+    clip = _RedoClip(render_method="charswap")
+    clip.error_message = "generate request missing both media ids"
+    kept = _v945_14_reject_charswap_redos(_RedoDb(), [clip], "local-worker")
+    assert kept == []
+    assert clip.status == "failed"
+    assert clip.error_code == "CHARSWAP_NO_REDO"
+    assert "charswap" in (clip.error_message or "")
+    # v945.15.1 — the parking reason survives the flip.
+    assert "generate request missing both media ids" in (clip.redo_reason or "")
+
+
+def test_an_ordinary_clip_passes_through_the_redo_door_untouched():
+    from main import _v945_14_reject_charswap_redos
+    clip = _RedoClip(render_method=None)
+    db = _RedoDb()
+    kept = _v945_14_reject_charswap_redos(db, [clip], "user-worker")
+    assert kept == [clip]
+    assert clip.status == "flow_redo_queued"
+    assert db.commits == 0
+
+
+def test_the_redo_door_reads_one_list_of_the_methods_that_have_an_arm():
+    import main
+    assert main._RENDER_METHODS == ("charswap", "movie-section")
+    src = _function_source("_v945_14_reject_charswap_redos", "main.py")
+    assert "_RENDER_METHODS" in src
+
+
+# --- 13. the live column readback names both methods ------------------------
+
+def test_the_column_readback_route_names_both_methods():
+    """Startup catches a failed migration and keeps serving, so a healthy deploy
+    is not evidence the columns landed — this route is. Its wording is what an
+    operator reads when asking whether v959 is really on the database."""
+    src = (_HERE / "main.py").read_text(encoding="utf-8")
+    assert "the render-method columns (v943 charswap + v959 movie-section)" in src
+    assert "[v943/v959] column readback" in src
+
