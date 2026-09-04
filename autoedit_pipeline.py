@@ -1264,9 +1264,18 @@ def render_captions(nocap: Path, out: Path, template: str, offset=-0.05, subtitl
         raise AutoEditError(f"pycaps render failed: {tail or detail[-200:] or 'no output'}")
 
 
-def render_captions_dynamic(nocap: Path, out: Path, template: str, windows, work: Path):
+def render_captions_dynamic(nocap: Path, out: Path, template: str, windows, work: Path,
+                            subtitle_data=None):
     """Render pycaps once per distinct height, then splice the passes by time
-    window (captions land identically because the input/transcript is identical)."""
+    window (captions land identically because the input/transcript is identical).
+
+    v698A.2.5 — `subtitle_data` seeds the transcript every pass replays, so a
+    CORRECTED transcript (a misheard brand name fixed in the JSON, see
+    feedback_captions-are-checked-against-the-script-before-publish) can be
+    burned at every planned height instead of only at one constant offset.
+    The caller must clear the cached `cap_pass_*` files first: their names key
+    on the video and the offset, not on the transcript.
+    """
     offsets = sorted({o for _, _, o in windows})
     passes = {}
     # v938.16 — the pass name carries a fingerprint of the VIDEO it was burned
@@ -1279,6 +1288,8 @@ def render_captions_dynamic(nocap: Path, out: Path, template: str, windows, work
     # compose. Anything cached here must be named after everything baked into it.
     src_key = file_fingerprint(nocap)
     first_data = None          # v938.23 — the transcript every later pass replays
+    if subtitle_data and Path(subtitle_data).exists():
+        first_data = Path(subtitle_data)
     for o in offsets:
         tag = str(o).replace('-', 'm').replace('.', '_')
         p = work / cap_pass_name(o, template, src_key)
@@ -1677,14 +1688,18 @@ def caption_engine() -> str:
 
 
 def _render_caption_pass(nocap: Path, out: Path, template: str, windows, work: Path,
-                         dur: float, audio: Path):
-    """One entry point for both caption renderers, so run_autoedit does not care."""
+                         dur: float, audio: Path, subtitle_data=None):
+    """One entry point for both caption renderers, so run_autoedit does not care.
+    v698A.2.5 — `subtitle_data` (optional) replays a given transcript in both
+    pycaps modes; None keeps today's behaviour."""
     engine = caption_engine()
     if engine == "pycaps":
         if len({o for _, _, o in windows}) > 1:
-            render_captions_dynamic(nocap, out, template, windows, work)
+            render_captions_dynamic(nocap, out, template, windows, work,
+                                    subtitle_data=subtitle_data)
         else:
-            render_captions(nocap, out, template, windows[0][2] if windows else -0.05)
+            render_captions(nocap, out, template, windows[0][2] if windows else -0.05,
+                            subtitle_data=subtitle_data)
         return
     import autoedit_captions as _ac
     print("captions: pycaps unavailable — falling back to the plainer libass "
