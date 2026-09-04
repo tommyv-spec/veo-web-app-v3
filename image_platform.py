@@ -731,6 +731,14 @@ MOVIE_SECTION_RENDER_METHOD = "movie-section"
 MOVIE_SECTION_WINDOWS_S = (8, 10)
 MOVIE_SECTION_MAX_FACE_REFS = 2
 
+# Flipped in the same push that ships the flow_worker movie_section_* arm and
+# its E2E proof (v959 Task 11). The parser lands ahead of the arm, so until then
+# a build that declares the method would import clean and render on the ordinary
+# path with its face refs dropped — which looks like a bad take, not a missing
+# feature. The import route refuses it while this is False; the PARSER keeps
+# parsing, because the later tasks and the E2E driver need it to.
+MOVIE_SECTION_ARM_SHIPPED = False
+
 # v943 — the columns a charswap job cannot work without. Named once so the
 # readback check and the migration list can never drift apart by hand.
 CHARSWAP_COLUMNS = {
@@ -5981,21 +5989,42 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                     f"'source-original' or 'none' (v943.1)"
                 )
             if render_method != "charswap":
+                # v959 — a movie-section scene can never grow the swap trio, so
+                # sending its author off to declare one is a road that does not
+                # exist. Same fault, different way out.
+                if render_method == MOVIE_SECTION_RENDER_METHOD:
+                    _audio_fix = (
+                        "a movie-section scene has no swap source either — "
+                        "drop the bullet (v959)"
+                    )
+                else:
+                    _audio_fix = (
+                        "Remove the bullet, or declare render_method / "
+                        "swap_source_video / swap_mode too (v943.1)"
+                    )
                 raise ValueError(
                     f"Scene {scene_index}: `- **audio:**` only means something "
                     f"on a charswap scene — it re-muxes the swap source's own "
                     f"audio track onto the exported segment, and a scene with "
-                    f"no swap_source_video has no track to take. Remove the "
-                    f"bullet, or declare render_method / swap_source_video / "
-                    f"swap_mode too (v943.1)"
+                    f"no swap_source_video has no track to take. {_audio_fix}"
                 )
             swap_audio = _sa
 
+        # v959 — a text_card is drawn by ffmpeg, not rendered as a clip, so a
+        # render method on one has nothing to act on. Raised here, ahead of the
+        # face-refs requirement below, so the author reads the real problem
+        # instead of being asked for face chips a card could never use.
+        if render_method == MOVIE_SECTION_RENDER_METHOD and is_text_card:
+            raise ValueError(
+                f"Scene {scene_index}: text_card scenes take no render_method (v959)"
+            )
+
         # v959 — face reference images for a movie-section clip. They ride the
         # composer BESIDE the wide scene chip (`image:`), exactly the way the
-        # mentor attaches a face file next to the scene file (§5c: "face chip =
-        # the face, scene chip = the world"). Fails closed like everything on
-        # this branch: a typo here would import cleanly and render a stranger.
+        # mentor attaches a face file next to the scene file (movie-style-
+        # prompting.md §5c: "face chip = the face, scene chip = the world").
+        # Fails closed like everything on this branch: a typo here would import
+        # cleanly and render a stranger.
         face_refs: List[int] = []
         _fr_raw = _parse_bullet_field(block, "face_refs")
         if _fr_raw and render_method != MOVIE_SECTION_RENDER_METHOD:
@@ -6009,36 +6038,40 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                     f"Scene {scene_index}: render_method=movie-section needs "
                     f"`- **face_refs:** image_K[, image_L]` (1-{MOVIE_SECTION_MAX_FACE_REFS} "
                     f"face reference images) — the face chips are what hold identity "
-                    f"across sections (v959, §5c)"
+                    f"across sections (v959, "
+                    f"wiki/concepts/prompting/movie-style-prompting.md §5c)"
                 )
             for tok in [t.strip() for t in _fr_raw.split(",") if t.strip()]:
                 m_fr = _re.fullmatch(r"image_(\d+)", tok)
                 if not m_fr:
                     raise ValueError(
                         f"Scene {scene_index}: face_refs entry {tok!r} is not "
-                        f"`image_N` (v959)")
+                        f"`image_N` (v959)"
+                    )
                 face_refs.append(int(m_fr.group(1)))
             if not (1 <= len(face_refs) <= MOVIE_SECTION_MAX_FACE_REFS):
                 raise ValueError(
-                    f"Scene {scene_index}: face_refs takes 1-{MOVIE_SECTION_MAX_FACE_REFS} "
-                    f"images, got {len(face_refs)} (v959)")
+                    f"Scene {scene_index}: face_refs takes "
+                    f"1-{MOVIE_SECTION_MAX_FACE_REFS} images, "
+                    f"got {len(face_refs)} (v959)"
+                )
             if len(set(face_refs)) != len(face_refs):
-                raise ValueError(f"Scene {scene_index}: face_refs repeats an image (v959)")
+                raise ValueError(
+                    f"Scene {scene_index}: face_refs repeats an image (v959)"
+                )
             for fr in face_refs:
                 if fr not in known_image_indexes:
                     raise ValueError(
                         f"Scene {scene_index}: face_refs image_{fr} is not a defined "
-                        f"`### Image {fr}` block (v959)")
+                        f"`### Image {fr}` block (v959)"
+                    )
                 if image_index is not None and fr == image_index:
                     raise ValueError(
                         f"Scene {scene_index}: face_refs image_{fr} is the scene's own "
                         f"`image:` — a face chip is a close-up, the scene chip is the "
-                        f"wide anchor; they cannot be the same file (v959, §5c)")
-
-        if render_method:
-            print(f"[v943/parse] scene_{scene_index} render_method={render_method} "
-                  f"swap_mode={swap_mode} source={swap_source_video!r} "
-                  f"audio={swap_audio or 'none (default)'}", flush=True)
+                        f"wide anchor; they cannot be the same file (v959, "
+                        f"wiki/concepts/prompting/movie-style-prompting.md §5c)"
+                    )
 
         # Parse interleaved `- **line:**` / `- **action_note:**` / `- **pad:**`
         # bullets. Order matters: action_note and pad attach to the closest
@@ -6207,13 +6240,30 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 raise ValueError(
                     f"Scene {scene_index}: render_method=movie-section renders "
                     f"exactly one clip and needs exactly one '- **line:**' (the "
-                    f"whole section's words, in order); found {len(lines_list)} (v959)")
+                    f"whole section's words, in order); "
+                    f"found {len(lines_list)} (v959)"
+                )
             _win = clip_durations[0] if clip_durations else None
             if _win not in MOVIE_SECTION_WINDOWS_S:
+                _windows = " or ".join(str(w) for w in MOVIE_SECTION_WINDOWS_S)
                 raise ValueError(
                     f"Scene {scene_index}: render_method=movie-section needs "
-                    f"`- **clip_duration_s:** 8` or `10` — it is the section window "
-                    f"the pacing gate measures against; got {_win!r} (v959, §5b)")
+                    f"`- **clip_duration_s:** {_windows}` — it is the section "
+                    f"window the pacing gate measures against; got {_win!r} "
+                    f"(v959, wiki/concepts/prompting/movie-style-prompting.md §5b)"
+                )
+
+        # The two render methods each get their own diagnostic. Both sit here,
+        # after the lines are parsed, because the v959 line prints the window
+        # and the window is one of the parsed lines' fields.
+        if render_method == MOVIE_SECTION_RENDER_METHOD:
+            print(f"[v959/parse] scene_{scene_index} render_method=movie-section "
+                  f"face_refs={face_refs} "
+                  f"window={clip_durations[0] if clip_durations else None}", flush=True)
+        elif render_method:
+            print(f"[v943/parse] scene_{scene_index} render_method={render_method} "
+                  f"swap_mode={swap_mode} source={swap_source_video!r} "
+                  f"audio={swap_audio or 'none (default)'}", flush=True)
 
         scenes.append({
             "scene_index": scene_index,
@@ -6253,13 +6303,32 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
     # v959 — two coherent systems, never mixed in one build (movie-style-scene-
     # design.md §10.6 "mixing their halves is what breaks"). text_card scenes
     # have no clip grammar and are exempt.
-    _shot = [s for s in scenes if (s.get("scene_type") or "shot") != "text_card"]
-    _ms = [s["scene_index"] for s in _shot if s.get("render_method") == MOVIE_SECTION_RENDER_METHOD]
-    if _ms and len(_ms) != len(_shot):
-        _other = [s["scene_index"] for s in _shot if s.get("render_method") != MOVIE_SECTION_RENDER_METHOD]
+    _shot_scenes = [s for s in scenes if (s.get("scene_type") or "shot") != "text_card"]
+    _section_scene_indexes = sorted(
+        s["scene_index"] for s in _shot_scenes
+        if s.get("render_method") == MOVIE_SECTION_RENDER_METHOD
+    )
+    if _section_scene_indexes and len(_section_scene_indexes) != len(_shot_scenes):
+        # A silent scene cannot take the advice "declare it here too": the
+        # method needs a line and a silent scene has none. Name that dead end
+        # rather than sending the author round in a circle.
+        for s in _shot_scenes:
+            if (s.get("render_method") != MOVIE_SECTION_RENDER_METHOD
+                    and (s.get("speaker_mode") or "").lower() == "silent"):
+                raise ValueError(
+                    f"Scene {s['scene_index']}: a movie-section build has no "
+                    f"silent scenes (every section carries words, D2) — make it "
+                    f"a text_card or fold the b-roll into a section (v959)"
+                )
+        _other_scene_indexes = sorted(
+            s["scene_index"] for s in _shot_scenes
+            if s.get("render_method") != MOVIE_SECTION_RENDER_METHOD
+        )
         raise ValueError(
-            f"render_method=movie-section must cover all shot scenes of a build or "
-            f"none: scenes {_ms} declare it, scenes {_other} do not (v959)")
+            f"render_method=movie-section must cover all shot scenes of a build "
+            f"or none: scenes {_section_scene_indexes} declare it, scenes "
+            f"{_other_scene_indexes} do not (v959)"
+        )
 
     scenes.sort(key=lambda s: s["scene_index"])
     return scenes
@@ -9123,6 +9192,23 @@ def _import_scene_table_impl(
     # test and miss the first, and that combination leaves
     # `_v943_avatar_node_id` None and writes a NULL scene image, which is the
     # zero-clips-no-error bug f798f94 exists to prevent. One spelling.
+
+    # v959 — the movie-section latch. Refused whole, before any row is written,
+    # for the same reason the charswap bindings are resolved here: a build that
+    # cannot be rendered must not be half-imported. Same one spelling of the
+    # question as v945.8 above.
+    if not MOVIE_SECTION_ARM_SHIPPED and any(
+        (s.get("render_method") or "").strip().lower() == MOVIE_SECTION_RENDER_METHOD
+        for s in storyboard_scenes
+    ):
+        raise HTTPException(
+            400,
+            "render_method=movie-section is declared but the movie-section "
+            "render arm is not shipped yet — this build would render on the "
+            "ordinary path with its face refs dropped. "
+            "Wait for v959 Task 11 (v959)"
+        )
+
     _v943_scenes = [
         s for s in storyboard_scenes
         if (s.get("render_method") or "").strip().lower() == "charswap"
