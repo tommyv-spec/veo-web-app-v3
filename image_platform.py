@@ -744,13 +744,16 @@ MOVIE_SECTION_RENDER_METHOD = "movie-section"
 MOVIE_SECTION_WINDOWS_S = (8, 10)
 MOVIE_SECTION_MAX_FACE_REFS = 2
 
-# Flipped in v959 Task 11 Step 0, in the same push that ships the flow_worker
-# movie_section_* arm (Task 5) and the E2E run that proves it (Task 10). The
-# parser lands ahead of the arm, so until then a build that declares the method
-# would import clean and render on the ordinary path with its face refs dropped
-# — which looks like a bad take, not a missing feature. The import route refuses
-# it while this is False; the PARSER keeps parsing, because the later tasks and
-# the E2E driver need it to.
+# The flow_worker movie_section_* arm has ALREADY shipped and deployed (35528b8)
+# with this still False, so the flip does not ride the arm's push — shipping the
+# code and trusting it are two different decisions. This stays False until the
+# off-platform E2E run proves the arm end to end; flipping it is its own commit
+# (v959 Task 11 Step 0), carrying that run's report path in the commit body.
+# Until then a movie-section build cannot be imported at all, and that is the
+# point: an untrusted arm plus a clean import means the build renders on the
+# ordinary path with its face refs dropped — which looks like a bad take, not a
+# missing feature. The import route refuses it while this is False; the PARSER
+# keeps parsing, because the E2E driver and the remaining tasks need it to.
 MOVIE_SECTION_ARM_SHIPPED = False
 
 # v943 — the columns a charswap job cannot work without. Named once so the

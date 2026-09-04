@@ -3138,9 +3138,11 @@ def _v959_face_ref_keys(idx, line_data, uploaded_frames_list, job_id) -> Optiona
     Raised as ValueError, which the background task's own handler turns into a
     failed job carrying this text — the same way the D11 refusal above does.
     """
-    from image_platform import MOVIE_SECTION_MAX_FACE_REFS as _max
     if (line_data.get("render_method") or "").strip().lower() != "movie-section":
         return None
+    # Imported AFTER the guard: this is called once per line of every job, and
+    # an ordinary line should not pay for an import it never reads.
+    from image_platform import MOVIE_SECTION_MAX_FACE_REFS as _max
     _idxs = line_data.get("face_ref_local_indexes") or []
     _n = len(uploaded_frames_list)
     # bool is a subclass of int, so it has to be excluded by name.
@@ -3149,10 +3151,17 @@ def _v959_face_ref_keys(idx, line_data, uploaded_frames_list, job_id) -> Optiona
     _dupes = sorted({i for i in _idxs if not isinstance(i, bool)
                      and isinstance(i, int) and _idxs.count(i) > 1})
     if not _idxs or _bad or _dupes or len(_idxs) > _max:
+        # Both offender lists, not one-or-the-other: a list can be out of range
+        # AND repeated, and naming half of it sends the operator back for a
+        # second look. The empty and over-the-cap refusals have no offending
+        # index at all — the list ITSELF is the fault and it is already printed
+        # above — so the tail is dropped rather than shown as "bad: []".
+        _offenders = _bad + _dupes
+        _tail = f"; bad: {_offenders}" if _offenders else ""
         raise ValueError(
             f"Clip {idx}: movie-section face_ref_local_indexes {_idxs!r} must be "
-            f"1-{_max} distinct positions in the {_n} uploaded frames; "
-            f"bad: {_bad or _dupes} (v959)")
+            f"1-{_max} distinct positions in the {_n} uploaded frames"
+            f"{_tail} (v959)")
     return json.dumps(
         [f"jobs/{job_id}/frames/{uploaded_frames_list[i]}" for i in _idxs])
 
@@ -18819,10 +18828,11 @@ def _v959_movie_section_payload(clip, base_url: str, lane: str) -> dict:
     section_window_s is the clip's own render length, which for a section is the
     pacing window the words were written against (8 or 10 seconds).
 
-    This runs inside BOTH claim-poll loops, so anything it raises that is not an
-    HTTPException comes back as an unexplained 500 on the poll and stops every
-    OTHER clip of that job from being handed out. A broken column therefore
-    refuses THIS clip, by id, and says why.
+    This runs inside BOTH claim-poll loops, and a raise here ends the whole
+    poll, not just this clip's turn in it. What the HTTPException buys is the
+    wording: the poll answers with a message naming the broken clip instead of
+    an unexplained 500; it still refuses as a whole — a job handed out minus one
+    clip is worse than one that fails loudly.
     """
     import json as _json
     import os as _os

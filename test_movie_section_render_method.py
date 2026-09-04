@@ -778,11 +778,13 @@ def test_both_claim_lanes_call_the_movie_section_helper():
         assert f'base_url, "{lane}")' in body, fn
 
 
-# --- 8b. a corrupt face-ref column refuses ONE clip, not the whole poll -----
+# --- 8b. a corrupt face-ref column refuses the poll, naming the clip --------
 #
-# The payload helper runs inside both claim-poll loops. Anything it raises that
-# is not an HTTPException surfaces as an unexplained 500 on the poll, which
-# stops every OTHER clip in that job from being handed out too.
+# The payload helper runs inside both claim-poll loops, so a raise here ends the
+# whole poll, not just this clip's turn in it. The HTTPException is what makes
+# the poll answer with a message naming the broken clip instead of an
+# unexplained 500; it still refuses as a whole — a job handed out minus one clip
+# is worse than one that fails loudly.
 
 def _section_clip(**kw):
     kw.setdefault("render_method", "movie-section")
@@ -843,19 +845,10 @@ def test_a_face_ref_key_belonging_to_another_job_is_refused():
     assert "OTHERJOB" in str(e.value.detail)
 
 
-@pytest.mark.skip(reason="the worker arm lands in Task 5; unskip it there")
-def test_every_payload_key_the_helper_emits_is_read_by_the_worker():
-    """The contract between the two halves of this feature. The helper's keys
-    are read off the helper itself, so a renamed key cannot pass by being
-    renamed in the test too."""
-    from main import _v959_movie_section_payload
-    clip = _Clip(render_method="movie-section", veo_render_duration_s=10,
-                 face_ref_frames_json=json.dumps(["jobs/job1/frames/f2.png"]))
-    keys = list(_v959_movie_section_payload(clip, "https://x", "user-worker"))
-    src = WORKER_SRC.read_text(encoding="utf-8")
-    missing = [k for k in keys
-               if f'"{k}"' not in src and f"'{k}'" not in src]
-    assert not missing, f"the worker never reads: {missing}"
+# The key contract between the two halves of this feature — every key the
+# helper emits is a key the worker reads — is tested in
+# test_movie_section_worker_arm.py::test_payload_keys_match_worker_reads, which
+# reads the arm's own source. It lives beside the arm it checks.
 
 
 # --- 9. the API refuses a render method it does not have an arm for ---------
@@ -979,7 +972,9 @@ def test_face_ref_keys_refuse_an_index_off_the_end():
             4, {"render_method": "movie-section", "face_ref_local_indexes": [0, 9]},
             _FRAMES, "JOB1")
     # M1 — the message names the OFFENDING index, not just the whole list.
-    assert "9" in str(e.value)
+    # Anchored on the `bad:` tail: the message also echoes the input list, so a
+    # bare `"9" in ...` would pass even if the tail named nothing.
+    assert "bad: [9]" in str(e.value)
 
 
 def test_face_ref_keys_refuse_a_non_integer_index():
@@ -1013,7 +1008,8 @@ def test_face_ref_keys_refuse_a_repeated_index():
             4, {"render_method": "movie-section",
                 "face_ref_local_indexes": [2, 2]},
             _FRAMES, "JOB1")
-    assert "2" in str(e.value)
+    # The `bad:` tail, not the echoed input list, which also contains a 2.
+    assert "bad: [2]" in str(e.value)
 
 
 def test_face_ref_keys_take_the_cap_from_the_parser_not_a_literal():
@@ -1030,12 +1026,12 @@ def test_post_jobs_refuses_a_section_with_no_authored_prompt():
     prompt_text — which is the talking-head render this whole chain exists to
     stop, reachable through POST /api/jobs instead of promote."""
     src = _function_source("_setup_job_background", "main.py")
-    assert "CHARSWAP_DEFAULT_PROMPT as _cs_default" in src, "fixture is out of date"
-    # The two empty-override guards sit together; the section one is the second.
-    guards = src.split("if not _veo_prompt_override and (")
-    assert len(guards) == 3, "expected exactly two empty-override guards"
-    section_guard = guards[2][:900]
-    assert '== "movie-section"' in section_guard
+    # Anchored on the guard's OWN test, not on the charswap guard next to it:
+    # splitting on the swap wording made this pin move whenever that wording was
+    # edited, which is a pin that checks the neighbour instead of the subject.
+    _at = src.find('== "movie-section"')
+    assert _at != -1, "_setup_job_background has no movie-section render_method test"
+    section_guard = src[max(0, _at - 500):_at + 500]
     # It REFUSES rather than stamping a default: a swap has a sensible default
     # prompt, a section has none — the section prompt is the operator's text.
     assert "raise ValueError(" in section_guard
