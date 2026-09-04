@@ -14463,12 +14463,6 @@ async def _do_export_final_impl(
                                 _v864_release()
                                 _avail_w, _rss_mb_w = _v864_mem()
                                 _min_w = int(_os_w.environ.get("SUPPORT_TRACK_MIN_AVAIL_MB", "600"))
-                                # [TEMP v698A.2] remove once operator-side evidence lands.
-                                print(
-                                    f"[Export/v698A.2] pre-whisper mem: avail={_avail_w}MB "
-                                    f"rss={_rss_mb_w}MB (need >={_min_w}MB, None=unknown/dev)",
-                                    flush=True,
-                                )
                                 if _avail_w is not None and _avail_w < _min_w:
                                     raise RuntimeError(f"memory avail={_avail_w}MB < {_min_w}MB")
                                 async with _V864_SUPPORT_LOCK:
@@ -14565,10 +14559,6 @@ async def _do_export_final_impl(
                                         _wins_w, _reason = _tfw_w(
                                             _cont, [(_s["start"] if _s else None) for _s in _sps]
                                         )
-                                    _letters = [
-                                        (_pre_targets[t]["start"], _pre_targets[t]["end"])
-                                        for t in _tidxs
-                                    ]
                                     if _wins_w is None:
                                         _v698a_wa["fallback_groups"] += 1
                                         _v698a_wa["reasons"].append(f"slot {_slot}: {_reason}")
@@ -14586,24 +14576,6 @@ async def _do_export_final_impl(
                                         _pre_targets[_t]["target_duration"] = _w[1] - _w[0]
                                         _pre_targets[_t]["confidence"] = _conf
                                     _ok_groups += 1
-                                    # [TEMP v698A.2] per-fragment proof: letters vs words.
-                                    _parts = []
-                                    for k in range(_n):
-                                        _ins_k = _ins_by_gk.get((_gno, k + 1)) or {}
-                                        _parts.append(
-                                            f"k={k + 1} \"{' '.join(_frags[k].split()[:3])}\" "
-                                            f"letters={_letters[k][0]:.2f}s "
-                                            f"words={_wins_w[k][0]:.2f}s "
-                                            f"(word \"{_ins_k.get('start_word', '')}\" "
-                                            f"conf={float(_sps[k].get('confidence') or 1.0):.1f})"
-                                        )
-                                    print(
-                                        f"[Export/v698A.2] {_label} container "
-                                        f"{_cont[0]:.2f}-{_cont[1]:.2f}s (envelope "
-                                        f"{_env[0]:.2f}-{_env[1]:.2f}s) | "
-                                        + " | ".join(_parts) + " | method=words",
-                                        flush=True,
-                                    )
                                 _v698a_wa["method"] = "words" if _ok_groups else "chars"
                                 print(
                                     f"[Export/v698A.2] method={_v698a_wa['method']} "

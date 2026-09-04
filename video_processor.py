@@ -199,6 +199,37 @@ def get_duration(info: dict) -> float:
     return 8.0  # Default assumption for Veo clips
 
 
+def probe_frame_count(path: Path) -> int:
+    """v698A.2.2 — count the video frames a file ACTUALLY holds.
+
+    `nb_frames` from the container header is a guess and is often absent or
+    wrong after a re-encode, so this decodes: `-count_frames` walks the
+    stream and reports `nb_read_frames`. Slower, and the only number worth
+    asserting a frame budget against.
+
+    Returns -1 when the probe fails or reports nothing (the caller decides
+    whether that is fatal); never raises.
+    """
+    cmd = [
+        FFPROBE_BIN, "-v", "error",
+        "-count_frames", "-select_streams", "v:0",
+        "-show_entries", "stream=nb_read_frames",
+        "-of", "default=nokey=1:noprint_wrappers=1",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, encoding="utf-8", errors="replace", timeout=300,
+        )
+        if result.returncode != 0:
+            return -1
+        raw = (result.stdout or "").strip().splitlines()
+        return int(raw[0]) if raw and raw[0].strip().isdigit() else -1
+    except Exception:
+        return -1
+
+
 def check_vad_available() -> bool:
     """Check if silence detection is available (requires only ffmpeg, which is always present)."""
     code, _, _ = run([FFMPEG_BIN, "-version"])
@@ -4408,8 +4439,18 @@ def swap_audio_with_speed_match(
     return speed, out_dur, mode_label
 
 
-def concat_videos(files: List[Path], output: Path) -> None:
+def concat_videos(files: List[Path], output: Path,
+                  expect_frames: Optional[List[int]] = None) -> None:
     """Concatenate multiple videos into one.
+
+    v698A.2.2 — `expect_frames` (one count per input, same order) holds the
+    join to a frame budget. The master-aligned b-roll assembler passes its
+    frame plan here: every normalised input MUST still carry the frames it was
+    built with, and the joined file MUST carry their sum. Either mismatch
+    raises BEFORE anything is muxed, naming the exact input. A normalisation
+    that changes a 24 fps CFR input's frame count is then a visible failure,
+    never a shipped drift. Without `expect_frames` (every other caller) the
+    function is unchanged and probes nothing.
 
     v692c: switched to the ffmpeg concat **filter** (one `-i` per input
     fed through `concat=n=N:v=1:a=1`) instead of the concat **demuxer**
@@ -4439,6 +4480,11 @@ def concat_videos(files: List[Path], output: Path) -> None:
     n = len(files)
     if n == 0:
         raise RuntimeError("concat_videos: no files to concatenate")
+    if expect_frames is not None and len(expect_frames) != n:
+        raise RuntimeError(
+            f"[v698A.2.2] concat: expect_frames has {len(expect_frames)} counts "
+            f"for {n} inputs"
+        )
 
     # v692e — two-pass normalize-then-stream-copy strategy. v692d's single-pass
     # concat filter failed with "matches no streams" because one of the inputs
@@ -4542,6 +4588,21 @@ def concat_videos(files: List[Path], output: Path) -> None:
             # ~450MB charged to the cgroup at exactly the moment RSS peaks;
             # pass 2 reads them back through the concat demuxer sequentially, so
             # keeping them cached buys nothing.
+            # v698A.2.2 — hold the normalisation to the frame budget. Probe
+            # BEFORE dropping the page cache, so the decode reads what is
+            # still warm.
+            if expect_frames is not None:
+                _want = int(expect_frames[i])
+                _got = probe_frame_count(norm_out)
+                print(
+                    f"[VideoProcessor/v698A.2.2] normalised input {i}: "
+                    f"asked {_want} frames, got {_got}",
+                    flush=True,
+                )
+                if _got != _want:
+                    raise RuntimeError(
+                        f"[v698A.2.2] concat: input {i} asked {_want}, got {_got}"
+                    )
             drop_page_cache(norm_out)
             normalized.append(norm_out)
 
@@ -4574,6 +4635,21 @@ def concat_videos(files: List[Path], output: Path) -> None:
             raise RuntimeError(
                 f"v692e concat failed: {err_tail[-300:]}"
             )
+        # v698A.2.2 — the joined file must carry the sum of the budgets. Probe
+        # before the page cache is dropped and before anything is muxed on top.
+        if expect_frames is not None:
+            _want_total = sum(int(x) for x in expect_frames)
+            _got_total = probe_frame_count(output)
+            print(
+                f"[VideoProcessor/v698A.2.2] joined: asked {_want_total} frames "
+                f"({len(expect_frames)} segments), got {_got_total}",
+                flush=True,
+            )
+            if _got_total != _want_total:
+                raise RuntimeError(
+                    f"[v698A.2.2] concat: joined asked {_want_total}, "
+                    f"got {_got_total}"
+                )
         # v872 — the finished export is the single biggest file we write; it is
         # uploaded to R2 by a separate read pass and never re-read here.
         drop_page_cache(output)
@@ -5407,33 +5483,52 @@ def process_clip_for_alignment(
     target_duration: float,
     output_path: Path,
     max_speed: float = 1.5,
+    exact_frames: Optional[int] = None,
 ) -> dict:
     """
     Adjust a single clip to match target_duration:
     - Speed factor 1.0–max_speed → speed up with setpts/atempo
     - Speed factor > max_speed (clip too long) → speed up at max_speed cap, then trim
     - Speed factor < 1.0 (clip too short) → boomerang loop until target_duration
-    
+
+    v698A.2.2 — `exact_frames`: when given, the clip ends after exactly that
+    many video frames (`-frames:v N`) instead of after `target_duration`
+    seconds (`-t`). `-t` keeps every frame whose start is before t, so a
+    1.90 s target at 24 fps came out 46 frames = 1.9167 s — up to one frame
+    long, and 17 of those in a row pushed the last cut 0.375 s past its word.
+    The SPEED FACTOR is still computed from `target_duration`, so the look of
+    the clip is unchanged; only its length becomes exact. Without
+    `exact_frames` the function behaves exactly as before (`-t`), which is the
+    Whisper-master fallback path and every other caller.
+
     Output is always video-only (no audio).
-    Returns: {method, speed_factor, original_duration, target_duration}
+    Returns: {method, speed_factor, original_duration, target_duration,
+              frames_asked}
     """
     info = ffprobe_json(clip_path)
     clip_duration = get_duration(info)
-    
+
     if target_duration <= 0:
         target_duration = clip_duration  # safety fallback
-    
+
     speed_factor = clip_duration / target_duration
-    
+
     print(f"[MasterAlign]   Clip {clip_path.name}: {clip_duration:.2f}s → {target_duration:.2f}s "
-          f"(factor={speed_factor:.2f}×, max={max_speed:.1f}×)")
-    
+          f"(factor={speed_factor:.2f}×, max={max_speed:.1f}×)"
+          + (f" [exact {exact_frames} frames]" if exact_frames else ""))
+
     result = {
         "original_duration": clip_duration,
         "target_duration": target_duration,
         "speed_factor": speed_factor,
+        "frames_asked": int(exact_frames) if exact_frames else None,
     }
-    
+
+    # v698A.2.2 — the length option every branch ends on. `-frames:v N` stops
+    # the encoder after exactly N frames; `-t` is the old seconds rule.
+    _len_opt = (["-frames:v", str(int(exact_frames))] if exact_frames
+                else ["-t", f"{target_duration:.6f}"])
+
     min_speed = min(1.0, max_speed)  # Allow slight slowdown if max_speed < 1.0
     
     if min_speed <= speed_factor <= max_speed:
@@ -5456,7 +5551,7 @@ def process_clip_for_alignment(
             "-r", "24", "-vsync", "cfr",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p",
-            "-t", f"{target_duration:.6f}",
+            *_len_opt,
             str(output_path)
         ]
     elif speed_factor > max_speed:
@@ -5470,7 +5565,7 @@ def process_clip_for_alignment(
             "-r", "24", "-vsync", "cfr",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p",
-            "-t", f"{target_duration:.6f}",
+            *_len_opt,
             str(output_path)
         ]
         print(f"[MasterAlign]   Capped at {max_speed:.1f}× speed + trim to {target_duration:.2f}s "
@@ -5503,7 +5598,7 @@ def process_clip_for_alignment(
                 "-r", "24", "-vsync", "cfr",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
                 "-pix_fmt", "yuv420p",
-                "-t", f"{target_duration:.6f}",
+                *_len_opt,
                 str(output_path)
             ]
             code, _, err = run(cmd)
@@ -5540,13 +5635,20 @@ def process_clip_for_alignment(
         if code != 0:
             raise RuntimeError(f"Loop concat failed: {err}")
         
-        # Trim to exact target duration
+        # Trim to exact target duration (v698A.2.2: exact frame count when the
+        # caller passed one — the loop branch drifts like the others). The
+        # frame budget only means 24 fps if the file is 24 fps, and this is the
+        # one branch that never forced CFR, so the exact path adds it here.
+        # Without exact_frames the command is byte-identical to before.
+        _loop_cfr = ["-r", "24", "-vsync", "cfr"] if exact_frames else []
         cmd = [
             FFMPEG_BIN, "-y", "-i", str(looped_path),
-            "-t", f"{target_duration:.6f}",
+            *([] if exact_frames else ["-t", f"{target_duration:.6f}"]),
             "-an",
+            *_loop_cfr,
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-pix_fmt", "yuv420p",
+            *(["-frames:v", str(int(exact_frames))] if exact_frames else []),
             str(output_path)
         ]
         code, _, err = run(cmd)
@@ -5570,15 +5672,25 @@ def process_clip_for_alignment(
     return result
 
 
-def _generate_black_video(output_path: Path, duration: float, width: int, height: int, fps: float = 24.0) -> None:
-    """Generate a silent black video of the given duration and resolution."""
+def _generate_black_video(output_path: Path, duration: float, width: int, height: int,
+                          fps: float = 24.0, frames: Optional[int] = None) -> None:
+    """Generate a silent black video of the given duration and resolution.
+
+    v698A.2.2 — `frames`: when given, the fill is exactly that many frames
+    (`-frames:v N`, source length `frames / fps`) instead of `duration`
+    seconds, so a gap in the frame plan costs precisely what it was budgeted.
+    Without it the function is unchanged.
+    """
+    if frames:
+        frames = int(frames)
+        duration = frames / float(fps)
     cmd = [
         FFMPEG_BIN, "-y",
         "-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:r={fps:.2f}:d={duration:.6f}",
         "-an",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
         "-pix_fmt", "yuv420p",
-        "-t", f"{duration:.6f}",
+        *(["-frames:v", str(frames)] if frames else ["-t", f"{duration:.6f}"]),
         str(output_path)
     ]
     code, _, err = run(cmd)
@@ -5671,6 +5783,65 @@ def frame_plan(targets: list, master_duration: float, fps: float = 24.0) -> list
         })
 
     return plan
+
+
+def _enforce_frame_count(segment_path: Path, asked: int, label: str,
+                         fps: float = 24.0) -> Tuple[int, bool]:
+    """v698A.2.2 — PROVE a segment holds exactly `asked` frames; repair once.
+
+    `-frames:v N` gives exactly N whenever the filtered stream can supply N
+    (verified on ffmpeg 8.1: asked 45/46/47, got 45/46/47). It cannot invent
+    an arbitrary tail — asking 100 of a 46-frame fit returned 48 — so the
+    count is measured, never assumed.
+
+    On a mismatch the segment is rebuilt ONCE from the file just written, in a
+    pure length pass: `tpad=stop_mode=clone` adds the missing frames by
+    holding the last one, `-frames:v asked` cuts a long one. Still wrong after
+    that → raise. The b-roll pipeline's own `except` in main.py catches it:
+    the speaker export is already finished and ships, only the cutaway file is
+    withheld. A wrong b-roll shipped silently is the failure this rule is
+    about; a withheld one is a visible failure.
+
+    Returns (measured frame count, whether a repair ran).
+    """
+    got = probe_frame_count(segment_path)
+    if got == asked:
+        return got, False
+
+    missing = max(0, asked - got) if got >= 0 else 0
+    print(
+        f"[MasterAlign/v698A.2.2] {label}: asked {asked} frames, got {got} "
+        f"— repairing once (pad {missing})",
+        flush=True,
+    )
+    repair_path = segment_path.parent / f"fix_{segment_path.name}"
+    cmd = [
+        FFMPEG_BIN, "-y", "-i", str(segment_path),
+        "-vf", f"tpad=stop_mode=clone:stop={missing}",
+        "-an",
+        "-r", f"{fps:.0f}", "-vsync", "cfr",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-frames:v", str(int(asked)),
+        str(repair_path),
+    ]
+    code, _, err = run(cmd)
+    if code != 0:
+        raise RuntimeError(
+            f"[v698A.2.2] {label}: asked {asked} frames, got {got}; "
+            f"repair encode failed: {(err or '')[-300:]}"
+        )
+    got2 = probe_frame_count(repair_path)
+    if got2 != asked:
+        raise RuntimeError(
+            f"[v698A.2.2] {label}: asked {asked} frames, got {got2} after repair"
+        )
+    os.replace(str(repair_path), str(segment_path))
+    print(
+        f"[MasterAlign/v698A.2.2] {label}: repaired to {asked} frames",
+        flush=True,
+    )
+    return got2, True
 
 
 def export_with_master_audio(
@@ -5823,7 +5994,63 @@ def export_with_master_audio(
         "total_black_duration": 0.0,
         "pre_computed_targets": pre_computed_targets is not None,
     }
-    
+
+    # === v698A.2.2 — the frame plan, built ONCE, before anything is encoded ===
+    # The whole timeline is budgeted in whole frames from ABSOLUTE boundaries,
+    # so the concat cannot drift. This applies to every timeline built from
+    # pre_computed_targets — the v698A many-to-one cutaways AND the 1:1
+    # audio_pair twins, which arrive the same way. The Whisper-master fallback
+    # (pre_computed_targets is None, known-weak alignment) keeps the old float
+    # timeline, the old `-t` fitting and the old transition behaviour, and
+    # makes no exactness promise.
+    _legacy_timeline = pre_computed_targets is None
+    # The fitted clips are re-encoded at `-r 24` (v560) and concat_videos
+    # normalises every input through `fps=24` (v692e), so 24 is the frame rate
+    # the SEGMENT FILES carry whatever `vid_fps` the source clips report.
+    plan_fps = 24.0
+    plan = None
+    plan_frames_by_index = {}
+    if not _legacy_timeline:
+        plan = frame_plan(targets, master_duration, plan_fps)
+        plan_frames_by_index = {
+            seg["index"]: seg["frames"] for seg in plan if seg["kind"] == "clip"
+        }
+        _plan_total = sum(seg["frames"] for seg in plan)
+        for _k, _seg in enumerate(plan):
+            # [TEMP v698A.2.2] remove once operator-side evidence lands.
+            print(
+                f"[TEMP v698A.2.2] segment {_k} kind={_seg['kind']} "
+                f"index={_seg['index']} start_f={_seg['start_f']} "
+                f"end_f={_seg['end_f']} frames={_seg['frames']} "
+                f"(target {_seg['start_f'] / plan_fps:.3f}-"
+                f"{_seg['end_f'] / plan_fps:.3f}s)",
+                flush=True,
+            )
+        _skipped = [i for i in range(len(targets)) if i not in plan_frames_by_index]
+        if _skipped:
+            print(
+                f"[MasterAlign] frame plan: clips {_skipped} are fully "
+                f"overlapped by an earlier clip — SKIPPED (they would have "
+                f"pushed every later cut late)",
+                flush=True,
+            )
+        # [TEMP v698A.2.2] remove once operator-side evidence lands.
+        print(
+            f"[TEMP v698A.2.2] [MasterAlign] frame plan: {len(plan)} segments, "
+            f"{_plan_total} frames = {_plan_total / plan_fps:.3f}s "
+            f"(master {master_duration:.3f}s @ {plan_fps:.0f}fps)",
+            flush=True,
+        )
+        stats["frame_plan"] = {
+            "fps": plan_fps,
+            "segments": len(plan),
+            "asked_frames": _plan_total,
+            "got_frames": 0,
+            "repaired": 0,
+            "skipped_clips": _skipped,
+        }
+
+
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         
@@ -5831,7 +6058,22 @@ def export_with_master_audio(
         processed_clips = {}  # index → aligned_path
         for i, (info, target) in enumerate(zip(clip_info, targets)):
             clip_path = Path(info["path"])
-            
+
+            # v698A.2.2 — a clip the plan swallowed entirely is never encoded.
+            if not _legacy_timeline and i not in plan_frames_by_index:
+                stats["clip_details"].append({
+                    "method": "skipped_fully_overlapped",
+                    "original_duration": 0.0,
+                    "target_duration": target.get("target_duration", 0.0),
+                    "speed_factor": 0.0,
+                    "frames_asked": 0,
+                    "frames_got": 0,
+                    "target_start": target["start"],
+                    "target_end": target["end"],
+                    "confidence": target.get("confidence", 1.0),
+                })
+                continue
+
             # Optional frame trimming first
             if frames_to_cut_start > 0 or frames_to_cut_end > 0:
                 skip_start = info.get("skip_start_trim", False)
@@ -5839,68 +6081,129 @@ def export_with_master_audio(
                 trimmed_path = temp_path / f"trimmed_{i:04d}.mp4"
                 trim_video(clip_path, trimmed_path, actual_start, frames_to_cut_end)
                 clip_path = trimmed_path
-            
+
             # Speed-adjust to dialogue duration
             aligned_path = temp_path / f"aligned_{i:04d}.mp4"
+            _exact = plan_frames_by_index.get(i) if not _legacy_timeline else None
             clip_result = process_clip_for_alignment(
                 clip_path, target["target_duration"], aligned_path,
                 max_speed=max_clip_speed,
+                exact_frames=_exact,
             )
+            # v698A.2.2 — measure what was actually produced; repair once; else
+            # fail the b-roll loudly (main.py's non-fatal except withholds the
+            # cutaway file, the speaker export already shipped).
+            if _exact:
+                _got, _repaired = _enforce_frame_count(
+                    aligned_path, int(_exact), f"clip {i}", plan_fps
+                )
+                clip_result["frames_got"] = _got
+                stats["frame_plan"]["got_frames"] += _got
+                if _repaired:
+                    stats["frame_plan"]["repaired"] += 1
             clip_result["target_start"] = target["start"]
             clip_result["target_end"] = target["end"]
             clip_result["confidence"] = target["confidence"]
             stats["clip_details"].append(clip_result)
-            
+
             processed_clips[i] = aligned_path
-        
+
         # Step 5: Build timeline with black fills
-        # Sort clips by their position in the master audio (clips may be in any order)
-        sorted_indices = sorted(range(len(targets)), key=lambda i: targets[i]["start"])
-        
         timeline_segments = []  # List of paths in chronological order
-        cursor = 0.0
-        MIN_BLACK = 0.04  # Minimum black segment duration (1 frame at 24fps)
-        
-        for i in sorted_indices:
-            target = targets[i]
-            clip_start = target["start"]
-            clip_end = target["end"]
-            
-            # Gap before this clip?
-            gap = clip_start - cursor
-            if gap > MIN_BLACK:
-                black_path = temp_path / f"black_pre_{i:04d}.mp4"
-                print(f"[MasterAlign]   Black: {cursor:.2f}s → {clip_start:.2f}s ({gap:.2f}s)")
-                _generate_black_video(black_path, gap, vid_width, vid_height, vid_fps)
+        expect_frames = None    # v698A.2.2 — per-segment budget for the concat
+
+        if not _legacy_timeline:
+            # v698A.2.2 — the frame plan IS the timeline. Walk it in order:
+            # black fills cost exactly their budgeted frames, clips are the
+            # files already fitted and proven above.
+            expect_frames = []
+            _bk = 0
+            for seg in plan:
+                if seg["kind"] == "black":
+                    black_path = temp_path / f"black_{_bk:04d}.mp4"
+                    _bk += 1
+                    print(
+                        f"[MasterAlign]   Black: {seg['start_f'] / plan_fps:.3f}s → "
+                        f"{seg['end_f'] / plan_fps:.3f}s ({seg['frames']} frames)"
+                    )
+                    _generate_black_video(
+                        black_path, seg["frames"] / plan_fps,
+                        vid_width, vid_height, plan_fps, frames=seg["frames"],
+                    )
+                    _got, _repaired = _enforce_frame_count(
+                        black_path, seg["frames"], f"black {_bk - 1}", plan_fps
+                    )
+                    stats["frame_plan"]["got_frames"] += _got
+                    if _repaired:
+                        stats["frame_plan"]["repaired"] += 1
+                    timeline_segments.append(black_path)
+                    stats["black_segments"] += 1
+                    stats["total_black_duration"] += seg["frames"] / plan_fps
+                else:
+                    timeline_segments.append(processed_clips[seg["index"]])
+                expect_frames.append(seg["frames"])
+        else:
+            # ---- legacy float timeline (Whisper-master fallback) ----
+            # Sort clips by their position in the master audio (clips may be in any order)
+            sorted_indices = sorted(range(len(targets)), key=lambda i: targets[i]["start"])
+
+            cursor = 0.0
+            MIN_BLACK = 0.04  # Minimum black segment duration (1 frame at 24fps)
+
+            for i in sorted_indices:
+                target = targets[i]
+                clip_start = target["start"]
+                clip_end = target["end"]
+
+                # Gap before this clip?
+                gap = clip_start - cursor
+                if gap > MIN_BLACK:
+                    black_path = temp_path / f"black_pre_{i:04d}.mp4"
+                    print(f"[MasterAlign]   Black: {cursor:.2f}s → {clip_start:.2f}s ({gap:.2f}s)")
+                    _generate_black_video(black_path, gap, vid_width, vid_height, vid_fps)
+                    timeline_segments.append(black_path)
+                    stats["black_segments"] += 1
+                    stats["total_black_duration"] += gap
+                elif gap < -MIN_BLACK:
+                    # Overlap — skip the overlapping portion (trim clip start forward)
+                    print(f"[MasterAlign]   ⚠ Clip {i} overlaps previous by {-gap:.2f}s — starting from cursor {cursor:.2f}s")
+                    clip_start = cursor
+
+                # The clip itself
+                timeline_segments.append(processed_clips[i])
+                cursor = max(cursor, clip_end)
+
+            # Trailing gap after last clip?
+            trail = master_duration - cursor
+            if trail > MIN_BLACK:
+                black_path = temp_path / f"black_outro.mp4"
+                print(f"[MasterAlign]   Black: {cursor:.2f}s → {master_duration:.2f}s ({trail:.2f}s)")
+                _generate_black_video(black_path, trail, vid_width, vid_height, vid_fps)
                 timeline_segments.append(black_path)
                 stats["black_segments"] += 1
-                stats["total_black_duration"] += gap
-            elif gap < -MIN_BLACK:
-                # Overlap — skip the overlapping portion (trim clip start forward)
-                print(f"[MasterAlign]   ⚠ Clip {i} overlaps previous by {-gap:.2f}s — starting from cursor {cursor:.2f}s")
-                clip_start = cursor
-            
-            # The clip itself
-            timeline_segments.append(processed_clips[i])
-            cursor = max(cursor, clip_end)
-        
-        # Trailing gap after last clip?
-        trail = master_duration - cursor
-        if trail > MIN_BLACK:
-            black_path = temp_path / f"black_outro.mp4"
-            print(f"[MasterAlign]   Black: {cursor:.2f}s → {master_duration:.2f}s ({trail:.2f}s)")
-            _generate_black_video(black_path, trail, vid_width, vid_height, vid_fps)
-            timeline_segments.append(black_path)
-            stats["black_segments"] += 1
-            stats["total_black_duration"] += trail
-        
+                stats["total_black_duration"] += trail
+
         print(f"[MasterAlign] Timeline: {len(timeline_segments)} segments "
               f"({len(processed_clips)} clips + {stats['black_segments']} black fills, "
               f"total black: {stats['total_black_duration']:.2f}s)")
-        
+
         # Step 6: Concat all segments (video only)
         video_only_path = temp_path / "video_only.mp4"
-        if transition and transition != "none" and stats["black_segments"] == 0:
+        # v698A.2.2 — a master-aligned b-roll NEVER takes the xfade path,
+        # whatever `transition` says: xfade OVERLAPS adjacent clips by
+        # transition_duration, which moves every cut off the word it was
+        # placed on. Plain concat only, and the concat is held to the frame
+        # plan (expect_frames) so a normalisation that changes a frame count
+        # raises with the input named instead of shipping a drift.
+        if not _legacy_timeline and transition and transition != "none":
+            print(
+                f"[MasterAlign] transition '{transition}' ignored for "
+                f"master-aligned b-roll (v698A.2.2): cuts must land on the "
+                f"speaker's words",
+                flush=True,
+            )
+        if (pre_computed_targets is None and transition and transition != "none"
+                and stats["black_segments"] == 0):
             # Only use xfade transitions when there are no black gaps
             # (xfade between clip and black doesn't look good)
             concat_videos_with_transitions(
@@ -5910,8 +6213,9 @@ def export_with_master_audio(
                 has_audio=False,
             )
         else:
-            concat_videos(timeline_segments, video_only_path)
-        
+            concat_videos(timeline_segments, video_only_path,
+                          expect_frames=expect_frames)
+
         # Step 7: Mux master audio on top
         print(f"[MasterAlign] Muxing master audio onto timeline video")
         cmd = [
@@ -5940,6 +6244,34 @@ def export_with_master_audio(
     print(f"[MasterAlign] Final duration: {stats['final_duration']:.2f}s")
     print(f"[MasterAlign] Methods: {stats['methods_used']}")
     print(f"[MasterAlign] Black segments: {stats['black_segments']} ({stats['total_black_duration']:.2f}s)")
+    if "frame_plan" in stats:
+        _fp = stats["frame_plan"]
+        # Measure the DELIVERED file, not the concat. The Step-7 mux uses
+        # `-shortest`, and when the video and the master audio are the same
+        # nominal length that drops the LAST video frame — reproduced locally
+        # on ffmpeg 8.1: a 264-frame join against an 11.000s mp3 delivers 263.
+        # It costs one frame off the TAIL and moves no cut, so it is recorded
+        # here rather than repaired; a bigger loss means something else broke.
+        _fp["delivered_frames"] = probe_frame_count(output_path)
+        # [TEMP v698A.2.2] remove once operator-side evidence lands.
+        print(
+            f"[TEMP v698A.2.2] [MasterAlign] frame plan: {_fp['segments']} segments, "
+            f"{_fp['asked_frames']} frames = "
+            f"{_fp['asked_frames'] / _fp['fps']:.3f}s; measured "
+            f"{_fp['got_frames']} frames, {_fp['repaired']} repaired; "
+            f"delivered {_fp['delivered_frames']} frames "
+            f"({_fp['delivered_frames'] - _fp['asked_frames']:+d} at the mux)",
+            flush=True,
+        )
+        if abs(_fp["delivered_frames"] - _fp["asked_frames"]) > 1:
+            print(
+                f"[MasterAlign] ⚠ v698A.2.2: the concat carried "
+                f"{_fp['asked_frames']} frames but the delivered file holds "
+                f"{_fp['delivered_frames']} — the mux lost more than the one "
+                f"tail frame `-shortest` costs; the cuts are still placed, the "
+                f"LENGTH is not what the plan asked for.",
+                flush=True,
+            )
 
     return stats
 

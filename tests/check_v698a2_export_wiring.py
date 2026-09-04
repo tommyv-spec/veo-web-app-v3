@@ -88,7 +88,13 @@ assert wp.rfind('stats["v698a_word_alignment"] = _v698a_wa') > i_exc
 # across f-string fragments, so count the two halves separately)
 assert wp.count("method=chars") >= 3, wp.count("method=chars")
 assert wp.count("reason=") >= 3, wp.count("reason=")
-assert "method=words" in wp
+# v698A.2.2 — the per-fragment "letters vs words" proof line was a [TEMP v698A.2]
+# print and is gone (its evidence landed: method=words on d74ab616 export
+# f17fd655). What must remain is the OUTCOME: a group that placed by words sets
+# method=words, and the summary print says which method won.
+assert '_v698a_wa["method"] = "words" if _ok_groups else "chars"' in wp
+assert "method={_v698a_wa['method']}" in wp
+assert "[TEMP v698A.2]" not in src, "the v698A.2 TEMP prints must be gone"
 # no clamping / no raise of the letter path inside the word pass
 assert "raise RuntimeError(\n                                f\"v698A many-to-one sub-span split failed" not in wp
 print("OK 3: word pass placed, reuses v825 + v864 guards, falls back to letters")
