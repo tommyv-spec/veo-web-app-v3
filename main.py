@@ -3116,6 +3116,47 @@ async def _create_job_impl(
     return response
 
 
+def _v959_face_ref_keys(idx, line_data, uploaded_frames_list, job_id) -> Optional[str]:
+    """The face-ref frame keys JSON for one line, or None when it is not a section.
+
+    POST /api/jobs is a hand-writable door, so it enforces the SAME rule every
+    other door enforces rather than trusting what it is handed: 1 to
+    MOVIE_SECTION_MAX_FACE_REFS references, each a whole number naming a real
+    position in the uploaded frames, and no position twice. The parser refuses
+    all of those at import and both promote lanes refuse them again; a door that
+    is looser than its neighbours is the one that gets used.
+
+    Why each rule matters, in one line apiece. EMPTY: the parser makes face refs
+    mandatory on a section, so empty here means they were lost on the way, and a
+    section with no chips renders a stranger. OUT OF RANGE: the key would be a
+    404 the worker only meets hours later, at render. NOT A WHOLE NUMBER: a
+    string or a float indexes nothing, and `True` is an int in Python — it would
+    quietly select frame 1. REPEATED: one of the two Ingredients slots is spent
+    on a chip already attached. OVER THE CAP: the mentor's method attaches the
+    wide scene image plus 1-2 faces, and a fourth chip pushes one of them out.
+
+    Raised as ValueError, which the background task's own handler turns into a
+    failed job carrying this text — the same way the D11 refusal above does.
+    """
+    from image_platform import MOVIE_SECTION_MAX_FACE_REFS as _max
+    if (line_data.get("render_method") or "").strip().lower() != "movie-section":
+        return None
+    _idxs = line_data.get("face_ref_local_indexes") or []
+    _n = len(uploaded_frames_list)
+    # bool is a subclass of int, so it has to be excluded by name.
+    _bad = [i for i in _idxs
+            if isinstance(i, bool) or not isinstance(i, int) or not (0 <= i < _n)]
+    _dupes = sorted({i for i in _idxs if not isinstance(i, bool)
+                     and isinstance(i, int) and _idxs.count(i) > 1})
+    if not _idxs or _bad or _dupes or len(_idxs) > _max:
+        raise ValueError(
+            f"Clip {idx}: movie-section face_ref_local_indexes {_idxs!r} must be "
+            f"1-{_max} distinct positions in the {_n} uploaded frames; "
+            f"bad: {_bad or _dupes} (v959)")
+    return json.dumps(
+        [f"jobs/{job_id}/frames/{uploaded_frames_list[i]}" for i in _idxs])
+
+
 async def _setup_job_background(
     job_id: str,
     images_dir: str,
@@ -3608,27 +3649,15 @@ async def _setup_job_background(
 
                 # v959 — face reference frames for a movie-section clip, resolved
                 # from the uploaded frames list exactly like the explicit end
-                # frame above. Bounds-checked the same way; an out-of-range index
-                # is a refused clip, not a silent drop that the worker would only
-                # discover hours later as a 404 on download_frame. An EMPTY list
-                # is refused too: the parser makes face refs mandatory on a
-                # section, so empty here means they were lost on the way.
-                _face_keys_v959 = None
-                if (line_data.get("render_method") or "").strip().lower() == "movie-section":
-                    _fr_idxs = line_data.get("face_ref_local_indexes") or []
-                    _bad = [i for i in _fr_idxs
-                            if not (isinstance(i, int) and 0 <= i < num_images)]
-                    if _bad or not _fr_idxs:
-                        raise ValueError(
-                            f"Clip {idx}: movie-section face_ref_local_indexes "
-                            f"{_fr_idxs!r} do not all resolve to uploaded frames "
-                            f"({num_images}) (v959)")
-                    _face_keys_v959 = json.dumps(
-                        [f"jobs/{job_id}/frames/{uploaded_frames_list[i]}"
-                         for i in _fr_idxs])
+                # frame above. The rules live in the helper so they can be tested
+                # against real lists instead of by reading this loop's source.
+                _face_keys_v959 = _v959_face_ref_keys(
+                    idx, line_data, uploaded_frames_list, job_id)
+                if _face_keys_v959 is not None:
                     print(
                         f"[v959] Clip {idx}: movie-section face refs → "
-                        f"local_indexes={_fr_idxs} → {_face_keys_v959}",
+                        f"local_indexes={line_data.get('face_ref_local_indexes')} "
+                        f"→ {_face_keys_v959}",
                         flush=True,
                     )
 
@@ -18789,10 +18818,34 @@ def _v959_movie_section_payload(clip, base_url: str, lane: str) -> dict:
 
     section_window_s is the clip's own render length, which for a section is the
     pacing window the words were written against (8 or 10 seconds).
+
+    This runs inside BOTH claim-poll loops, so anything it raises that is not an
+    HTTPException comes back as an unexplained 500 on the poll and stops every
+    OTHER clip of that job from being handed out. A broken column therefore
+    refuses THIS clip, by id, and says why.
     """
     import json as _json
     import os as _os
-    keys = _json.loads(getattr(clip, "face_ref_frames_json", None) or "[]")
+    _raw = getattr(clip, "face_ref_frames_json", None) or "[]"
+    try:
+        keys = _json.loads(_raw)
+        if not isinstance(keys, list):
+            # "null" parses to None and `for k in None` is a TypeError; a bare
+            # JSON string parses fine and iterates one CHARACTER at a time.
+            raise ValueError(f"expected a list, got {type(keys).__name__}")
+        # M2 — the URL is spelled from clip.job_id, not from the key, so a key
+        # carrying another job's id would produce a well-formed URL that 404s at
+        # render time. Refuse the mismatch instead of shipping the guess.
+        _wrong = [k for k in keys
+                  if not str(k).startswith(f"jobs/{clip.job_id}/")]
+        if _wrong:
+            raise ValueError(
+                f"face-ref keys belong to another job: {_wrong}")
+    except (ValueError, TypeError) as _e:
+        raise HTTPException(
+            500,
+            f"clip {clip.id}: face_ref_frames_json is unreadable ({_e}) — the "
+            f"section cannot be handed out (v959)") from _e
     return {
         "render_method": clip.render_method,
         "input_mode": "Ingredients",

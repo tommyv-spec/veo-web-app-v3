@@ -362,7 +362,7 @@ def test_prepare_uploads_the_face_frames_and_puts_them_on_the_payload():
     worker discovers that hours later as a 404 on download_frame."""
     src = _function_source("prepare_batch_for_video")
     assert "end_frame_image_local_index" in src, "fixture is out of date"
-    assert "_v959_stored_face_ref_node_ids(" in src   # the upload set + payload
+    assert "_v959_face_nids_or_500(" in src   # the upload set + payload
     # The per-scene payload and BOTH flat-row branches (silent scene, spoken
     # line) — the frontend reads the flat rows, not the per-scene payload.
     assert src.count('"face_ref_local_indexes"') == 3
@@ -412,11 +412,10 @@ def test_promote_asks_one_question_about_what_a_section_is():
 def test_promote_calls_the_materialise_helper_and_refuses_broken_json():
     src = _function_source("promote_batch_to_video")
     assert "_v959_materialise_face_frames(" in src
-    assert "_v959_stored_face_ref_node_ids(" in src
     # A broken column is a broken ROW, so it leaves as a 500 rather than as an
-    # empty face-ref list nobody notices.
-    assert "except ValueError as _v959_je:" in src
-    assert "raise HTTPException(500, str(_v959_je))" in src
+    # empty face-ref list nobody notices. The conversion itself now lives in
+    # _v959_face_nids_or_500 and is tested directly above.
+    assert "_v959_face_nids_or_500(" in src
 
 
 def test_no_face_ref_reader_swallows_a_broken_column():
@@ -424,21 +423,59 @@ def test_no_face_ref_reader_swallows_a_broken_column():
     so unreadable JSON is a broken row — and a section that renders with its
     face chips dropped renders a stranger."""
     src = (_HERE / "image_platform.py").read_text(encoding="utf-8")
-    assert src.count("_v959_stored_face_ref_node_ids(") == 4  # def + 3 readers
+    # def + the ONE call inside the route-facing wrapper below; every route
+    # reader goes through that wrapper rather than calling this directly.
+    assert src.count("_v959_stored_face_ref_node_ids(") == 2
     assert "_v959_face_nids = []" not in src
     assert "_v959_nids = []" not in src
 
 
-def test_every_route_turns_a_broken_face_ref_column_into_a_readable_500():
-    """The helper raises a plain ValueError, which is right for a pure function
-    and wrong for a FastAPI route: no handler exists for it, so the caller gets
-    a bare 500 and the one sentence naming the broken scene stays in the server
-    log. All three readers sit inside routes, so all three convert."""
+def test_the_500_wrapper_passes_a_good_column_straight_through():
+    from image_platform import _v959_face_nids_or_500
+    assert _v959_face_nids_or_500(
+        {"scene_index": 2, "face_ref_node_ids_json": "[303, 202]"}) == [303, 202]
+    assert _v959_face_nids_or_500({"scene_index": 2}) == []
+
+
+def test_the_500_wrapper_turns_a_broken_column_into_a_500_naming_the_scene():
+    """The pure reader raises a plain ValueError, which is right for a pure
+    function and wrong inside a FastAPI route: no handler exists for it, so the
+    caller gets a bare 500 and the one sentence naming the broken scene stays in
+    the server log."""
+    from fastapi import HTTPException
+
+    from image_platform import _v959_face_nids_or_500
+    with pytest.raises(HTTPException) as e:
+        _v959_face_nids_or_500(
+            {"scene_index": 7, "face_ref_node_ids_json": "[303,"})
+    assert e.value.status_code == 500
+    assert "Scene 7" in str(e.value.detail)
+    # the original stays attached, so the traceback still shows the JSON error
+    assert isinstance(e.value.__cause__, ValueError)
+
+
+def test_every_route_reader_goes_through_the_500_wrapper():
+    """One conversion written once, called at all three route sites — three
+    hand-written try/excepts is how one of them comes to swallow instead."""
     src = (_HERE / "image_platform.py").read_text(encoding="utf-8")
-    assert src.count("except ValueError as _v959_je:") == 3
-    assert src.count("raise HTTPException(500, str(_v959_je))") == 3
+    assert src.count("_v959_face_nids_or_500(") == 4  # def + 3 route readers
     prep = _function_source("prepare_batch_for_video")
-    assert prep.count("raise HTTPException(500, str(_v959_je))") == 2
+    assert prep.count("_v959_face_nids_or_500(") == 2
+    promote = _function_source("promote_batch_to_video")
+    assert promote.count("_v959_face_nids_or_500(") == 1
+
+
+def test_the_dialogue_row_lookup_fails_closed_on_an_index_it_cannot_have():
+    """It used to hand back `{}` and call the case impossible in the same
+    breath. If it really cannot happen, reaching it means clip_specs and
+    dialogue_list came out of step — which would silently build every following
+    clip from the wrong row."""
+    src = _function_source("promote_batch_to_video")
+    row = src[src.index("def _dialogue_row_for(spec):"):]
+    row = row[:row.index("\n    _v959_has")]
+    assert "impossible" not in row
+    assert "raise HTTPException(" in row
+    assert "500" in row
 
 
 # --- 6. reading the stored column ------------------------------------------
@@ -669,6 +706,7 @@ def test_a_face_ref_the_scene_loop_already_copied_is_not_copied_again(tmp_path, 
 
 class _Clip:
     def __init__(self, **kw):
+        self.id = 1
         self.render_method = None
         self.face_ref_frames_json = None
         self.veo_render_duration_s = None
@@ -729,12 +767,80 @@ def test_a_null_face_ref_column_gives_an_empty_list_not_a_crash():
 
 def test_both_claim_lanes_call_the_movie_section_helper():
     """v945.8's rule, one arm along: a guard on one of two doors is not a guard.
-    The helper is called next to its charswap twin at BOTH claim sites."""
-    src = (_HERE / "main.py").read_text(encoding="utf-8")
-    assert src.count("_v959_maybe_movie_section(") == 3   # def + both lanes
-    for lane in ("local-worker", "user-worker"):
-        assert f'_v959_maybe_movie_section(clip_data, clip, base_url, "{lane}")' in src \
-            or f'_v959_maybe_movie_section(_clip_data, clip, base_url, "{lane}")' in src, lane
+    The helper is called next to its charswap twin at BOTH claim sites.
+
+    Scoped to the two claim functions, so a docstring that merely mentions the
+    helper's name somewhere else in the file cannot satisfy this."""
+    for fn, lane in (("local_worker_get_pending_job", "local-worker"),
+                     ("user_worker_get_pending_job", "user-worker")):
+        body = _function_source(fn, "main.py")
+        assert f'_v959_maybe_movie_section(' in body, fn
+        assert f'base_url, "{lane}")' in body, fn
+
+
+# --- 8b. a corrupt face-ref column refuses ONE clip, not the whole poll -----
+#
+# The payload helper runs inside both claim-poll loops. Anything it raises that
+# is not an HTTPException surfaces as an unexplained 500 on the poll, which
+# stops every OTHER clip in that job from being handed out too.
+
+def _section_clip(**kw):
+    kw.setdefault("render_method", "movie-section")
+    return _Clip(**kw)
+
+
+def test_a_corrupt_face_ref_column_refuses_that_clip_by_name():
+    from fastapi import HTTPException
+
+    from main import _v959_movie_section_payload
+    clip = _section_clip(id=77, face_ref_frames_json='["jobs/job1/frames/f2.png"')
+    with pytest.raises(HTTPException) as e:
+        _v959_movie_section_payload(clip, "https://x", "user-worker")
+    assert e.value.status_code == 500
+    # The clip, so an operator reading the poll's 500 knows which row is broken.
+    assert "77" in str(e.value.detail)
+
+
+def test_a_face_ref_column_holding_null_is_refused_not_iterated():
+    """`json.loads("null")` is None and `for k in None` is a TypeError — an
+    unhandled one, from inside a poll that serves every clip of the job."""
+    from fastapi import HTTPException
+
+    from main import _v959_movie_section_payload
+    with pytest.raises(HTTPException) as e:
+        _v959_movie_section_payload(
+            _section_clip(id=78, face_ref_frames_json="null"),
+            "https://x", "user-worker")
+    assert e.value.status_code == 500
+    assert "78" in str(e.value.detail)
+
+
+def test_a_face_ref_column_holding_a_bare_string_is_refused():
+    """A JSON string parses fine and iterates one CHARACTER at a time, which
+    would hand the worker a URL per letter instead of failing."""
+    from fastapi import HTTPException
+
+    from main import _v959_movie_section_payload
+    with pytest.raises(HTTPException):
+        _v959_movie_section_payload(
+            _section_clip(id=79, face_ref_frames_json='"jobs/job1/frames/f2.png"'),
+            "https://x", "user-worker")
+
+
+def test_a_face_ref_key_belonging_to_another_job_is_refused():
+    """The URL is built from clip.job_id, not from the key, so a key copied
+    from another job would produce a well-formed URL that 404s at render."""
+    from fastapi import HTTPException
+
+    from main import _v959_movie_section_payload
+    with pytest.raises(HTTPException) as e:
+        _v959_movie_section_payload(
+            _section_clip(id=80, job_id="job1",
+                          face_ref_frames_json=json.dumps(
+                              ["jobs/OTHERJOB/frames/f2.png"])),
+            "https://x", "user-worker")
+    assert e.value.status_code == 500
+    assert "OTHERJOB" in str(e.value.detail)
 
 
 @pytest.mark.skip(reason="the worker arm lands in Task 5; unskip it there")
@@ -815,20 +921,107 @@ def test_the_face_ref_indexes_cross_into_the_background_task_by_model_dump():
     assert '"lines": dialogue_list' in src
 
 
-def test_the_background_task_resolves_face_frames_from_the_upload_list():
+def test_the_background_task_calls_the_face_ref_helper_and_stores_its_result():
+    """The ONE pin left on this loop: the rules themselves are tested against
+    the pure helper below, so all this has to show is that the loop uses it."""
     src = _function_source("_setup_job_background", "main.py")
     assert 'line_data.get("end_frame_image_local_index")' in src, "fixture is out of date"
-    assert 'line_data.get("face_ref_local_indexes")' in src
+    assert "_v959_face_ref_keys(" in src
     assert "clip.face_ref_frames_json" in src
 
 
-def test_the_background_task_refuses_a_face_ref_index_off_the_end():
-    """Bounds-checked the same way the explicit end frame is: an out-of-range
-    index is a refused clip, not a silent drop that 404s at download time."""
-    src = _function_source("_setup_job_background", "main.py")
-    guard = src[src.index("_face_keys_v959"):]
-    assert "raise ValueError(" in guard[:1200]
-    assert "do not all resolve to uploaded frames" in guard[:1200]
+# --- 11b. the face-ref index rules, as a pure function ----------------------
+#
+# Every other door enforces 1-2 DISTINCT refs (the parser, and both promote
+# lanes). POST /api/jobs is a hand-writable door, so it enforces the same rule
+# rather than trusting the caller.
+
+_FRAMES = ["image_00.png", "image_01.png", "image_02.png", "image_03.png"]
+
+
+def test_face_ref_keys_leaves_an_ordinary_line_alone():
+    from main import _v959_face_ref_keys
+    assert _v959_face_ref_keys(0, {"text": "hi"}, _FRAMES, "JOB1") is None
+    assert _v959_face_ref_keys(
+        0, {"render_method": "charswap"}, _FRAMES, "JOB1") is None
+
+
+def test_face_ref_keys_builds_the_keys_in_declared_order():
+    from main import _v959_face_ref_keys
+    out = _v959_face_ref_keys(
+        2, {"render_method": "movie-section", "face_ref_local_indexes": [3, 1]},
+        _FRAMES, "JOB1")
+    assert json.loads(out) == ["jobs/JOB1/frames/image_03.png",
+                               "jobs/JOB1/frames/image_01.png"]
+
+
+def test_face_ref_keys_reads_the_method_the_way_every_other_door_does():
+    from main import _v959_face_ref_keys
+    out = _v959_face_ref_keys(
+        2, {"render_method": " Movie-Section ", "face_ref_local_indexes": [0]},
+        _FRAMES, "JOB1")
+    assert json.loads(out) == ["jobs/JOB1/frames/image_00.png"]
+
+
+def test_face_ref_keys_refuse_an_empty_list():
+    from main import _v959_face_ref_keys
+    with pytest.raises(ValueError) as e:
+        _v959_face_ref_keys(
+            4, {"render_method": "movie-section", "face_ref_local_indexes": []},
+            _FRAMES, "JOB1")
+    assert "Clip 4" in str(e.value)
+
+
+def test_face_ref_keys_refuse_an_index_off_the_end():
+    from main import _v959_face_ref_keys
+    with pytest.raises(ValueError) as e:
+        _v959_face_ref_keys(
+            4, {"render_method": "movie-section", "face_ref_local_indexes": [0, 9]},
+            _FRAMES, "JOB1")
+    # M1 — the message names the OFFENDING index, not just the whole list.
+    assert "9" in str(e.value)
+
+
+def test_face_ref_keys_refuse_a_non_integer_index():
+    from main import _v959_face_ref_keys
+    for bad in ("1", 1.0, None, True):
+        with pytest.raises(ValueError):
+            _v959_face_ref_keys(
+                4, {"render_method": "movie-section",
+                    "face_ref_local_indexes": [bad]},
+                _FRAMES, "JOB1")
+
+
+def test_face_ref_keys_refuse_more_than_the_cap():
+    from image_platform import MOVIE_SECTION_MAX_FACE_REFS
+    from main import _v959_face_ref_keys
+    too_many = list(range(MOVIE_SECTION_MAX_FACE_REFS + 1))
+    with pytest.raises(ValueError) as e:
+        _v959_face_ref_keys(
+            4, {"render_method": "movie-section",
+                "face_ref_local_indexes": too_many},
+            _FRAMES, "JOB1")
+    assert str(MOVIE_SECTION_MAX_FACE_REFS) in str(e.value)
+
+
+def test_face_ref_keys_refuse_a_repeated_index():
+    """Two chips of the same face is one wasted Ingredients slot, and the parser
+    already refuses it — this door has to agree."""
+    from main import _v959_face_ref_keys
+    with pytest.raises(ValueError) as e:
+        _v959_face_ref_keys(
+            4, {"render_method": "movie-section",
+                "face_ref_local_indexes": [2, 2]},
+            _FRAMES, "JOB1")
+    assert "2" in str(e.value)
+
+
+def test_face_ref_keys_take_the_cap_from_the_parser_not_a_literal():
+    from image_platform import MOVIE_SECTION_MAX_FACE_REFS
+    src = _function_source("_v959_face_ref_keys", "main.py")
+    assert "MOVIE_SECTION_MAX_FACE_REFS" in src
+    # and the cap the parser enforces is really the one being reused
+    assert MOVIE_SECTION_MAX_FACE_REFS == 2
 
 
 def test_post_jobs_refuses_a_section_with_no_authored_prompt():

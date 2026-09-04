@@ -10260,15 +10260,10 @@ def prepare_batch_for_video(
         # them as Ingredients chips. Same reason as the end frame above: a face
         # ref is never a scene's OWN image, so nothing else puts it here, and a
         # missing file surfaces as a 404 at render time. An unreadable column
-        # raises out of here rather than reading as "no face refs" — and this is
-        # a FastAPI route with no handler for a bare ValueError, so it is turned
-        # into a 500 that carries the text. Without that, the one sentence
-        # naming the broken scene lives only in the Render log.
-        try:
-            _v959_upload_nids = _v959_stored_face_ref_node_ids(scene)
-        except ValueError as _v959_je:
-            raise HTTPException(500, str(_v959_je))
-        for _fr_nid in _v959_upload_nids:
+        # raises out of here rather than reading as "no face refs" — as a 500
+        # that carries the text, because this is a route. Without that, the one
+        # sentence naming the broken scene lives only in the Render log.
+        for _fr_nid in _v959_face_nids_or_500(scene):
             if _fr_nid not in seen:
                 referenced_image_node_ids.append(_fr_nid)
                 seen.add(_fr_nid)
@@ -10708,10 +10703,7 @@ def prepare_batch_for_video(
         # conversion as the upload set above: a broken column leaves this route
         # as a 500 that says which scene, not as a bare ValueError whose text
         # only the server log ever sees.
-        try:
-            _v959_nids = _v959_stored_face_ref_node_ids(scene)
-        except ValueError as _v959_je:
-            raise HTTPException(500, str(_v959_je))
+        _v959_nids = _v959_face_nids_or_500(scene)
         _v959_face_local_idxs = [
             node_id_to_local_index.get(_n) for _n in _v959_nids
         ]
@@ -12296,6 +12288,21 @@ def _v959_stored_face_ref_node_ids(scene):
             f"readable JSON ({raw!r}: {e}) (v959)")
 
 
+def _v959_face_nids_or_500(scene):
+    """The same read, for a caller that is a route.
+
+    The reader above raises a plain ValueError, which is right for a pure
+    function and wrong inside a FastAPI route: no handler exists for it, so the
+    caller gets a bare 500 and the one sentence naming the broken scene stays in
+    the server log. Written once and called at all three route sites — three
+    hand-written try/excepts is how one of them comes to swallow instead.
+    """
+    try:
+        return _v959_stored_face_ref_node_ids(scene)
+    except ValueError as _v959_je:
+        raise HTTPException(500, str(_v959_je)) from _v959_je
+
+
 def _v959_materialise_face_frames(db, node_ids, nodes_by_id, job_id,
                                   job_images_dir, frames_storage_keys, r2,
                                   already_copied=None):
@@ -12812,14 +12819,11 @@ def promote_batch_to_video(
         # on every scene that is not a movie section. The local index is this
         # node's position in `nodes`, which is what names its frame file
         # (`image_{idx:02d}`) — the same number `idx` is for the scene image.
-        try:
-            _v959_face_nids = _v959_stored_face_ref_node_ids({
-                "scene_index": scene_pos,
-                "face_ref_node_ids_json": getattr(
-                    _assignment, "face_ref_node_ids_json", None),
-            })
-        except ValueError as _v959_je:
-            raise HTTPException(500, str(_v959_je))
+        _v959_face_nids = _v959_face_nids_or_500({
+            "scene_index": scene_pos,
+            "face_ref_node_ids_json": getattr(
+                _assignment, "face_ref_node_ids_json", None),
+        })
         _v959_face_local_idxs = [
             (_nodes_by_id.get(_fid) or (None, None))[0] for _fid in _v959_face_nids
         ]
@@ -13031,7 +13035,7 @@ def promote_batch_to_video(
         return (spec.get("render_method") or "").strip().lower() == MOVIE_SECTION_RENDER_METHOD
 
     def _dialogue_row_for(spec):
-        """This spec's parallel dialogue row, or an empty one when it has none.
+        """This spec's parallel dialogue row.
 
         ONE row selection for every reader: the D11 refusal below, and the Text
         prompt, the negative prompt, Prompt B and the B line further down. A
@@ -13040,11 +13044,20 @@ def promote_batch_to_video(
         them comes to pick a different row from the other three.
 
         dialogue_list and clip_specs are built in lockstep above (one append to
-        each per line), so the row exists whenever the index does. `{}` for the
-        impossible case keeps every reader below free of its own None check.
+        each per line), so a missing row is not a case to paper over with an
+        empty dict: it means the two lists came out of step, and every clip from
+        here on would be built from the wrong row — or from no row at all, which
+        is a whole batch promoted with its authored prompts silently dropped. So
+        it refuses.
         """
         _i = spec["clip_index"]
-        return (dialogue_list[_i] if _i < len(dialogue_list) else None) or {}
+        if not (0 <= _i < len(dialogue_list)):
+            raise HTTPException(
+                500,
+                f"clip_index {_i} has no dialogue row ({len(dialogue_list)} "
+                f"rows) — clip_specs and dialogue_list are out of step, so the "
+                f"authored prompts cannot be matched to their clips")
+        return dialogue_list[_i] or {}
 
     _v959_has = any(_v959_is_section(spec) for spec in clip_specs)
     _v959_model, _v959_conflict = _v959_movie_section_veo_model(
