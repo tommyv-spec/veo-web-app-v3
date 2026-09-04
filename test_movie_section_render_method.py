@@ -1433,3 +1433,57 @@ def test_the_arms_param_is_percent_encoded_on_every_poll():
         body = body[:body.index("\n\n\n")] if "\n\n\n" in body else body[:600]
         assert "quote(','.join(WORKER_ARMS))" in body, worker
 
+
+
+# ---------------------------------------------------------------------------
+# v959.1 -- the render method is READABLE from outside.
+#
+# Nothing outside the database could tell whether a finished job had ever
+# carried a movie-section clip, so no automatic check could say whether v959
+# worked in production. tools/deploy_claims.py rides the next real section
+# build and reads these two fields off /api/jobs/<id>/clips.
+# ---------------------------------------------------------------------------
+def test_clip_response_declares_the_render_method_and_the_chip_flag():
+    from main import ClipResponse
+    fields = ClipResponse.model_fields
+    assert "render_method" in fields
+    assert "has_face_refs" in fields
+    # Defaults must read as "ordinary clip, no chips" so every legacy row is
+    # described correctly without touching it.
+    assert fields["render_method"].default is None
+    assert fields["has_face_refs"].default is False
+
+
+def test_every_clip_response_site_passes_the_new_fields():
+    """The v861.2 trap: ClipResponse is built with explicit kwargs, so a field
+    declared on the model alone reads its default forever. v861 shipped that
+    way and three batches rendered before anyone could see it."""
+    src = (_HERE / "main.py").read_text(encoding="utf-8")
+    sites = [i for i in range(len(src))
+             if src.startswith("ClipResponse(", i)
+             and not src[:i].endswith("class ")]      # the model itself, not a site
+    assert len(sites) >= 3, f"expected at least 3 construction sites, found {len(sites)}"
+    for i in sites:
+        block = src[i:i + 3000]
+        end = block.find("\n        )")
+        block = block[:end] if end != -1 else block
+        assert "render_method=" in block, f"site at offset {i} does not pass render_method"
+        assert "has_face_refs=" in block, f"site at offset {i} does not pass has_face_refs"
+
+
+def test_has_face_refs_is_true_only_for_a_non_empty_list():
+    """An empty list and a corrupt column both mean the chips never
+    materialised, which is the failure this flag exists to expose."""
+    from main import _v959_1_has_face_refs
+
+    class _C:
+        def __init__(self, raw):
+            self.face_ref_frames_json = raw
+
+    assert _v959_1_has_face_refs(_C('["a.jpg", "b.jpg"]')) is True
+    assert _v959_1_has_face_refs(_C("[]")) is False
+    assert _v959_1_has_face_refs(_C(None)) is False
+    assert _v959_1_has_face_refs(_C("")) is False
+    assert _v959_1_has_face_refs(_C("{not json")) is False
+    # a clip model without the column at all must not raise
+    assert _v959_1_has_face_refs(object()) is False

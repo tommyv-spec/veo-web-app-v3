@@ -488,6 +488,37 @@ class ClipResponse(BaseModel):
     # v939 — shadow-mode clip QC: did each rendered take say its whole line?
     # None until code/clip_qc.py scores it. Advisory only; chooses nothing.
     qc: Optional[Dict[str, Any]] = None
+    # v959.1 — which renderer this clip is for ('movie-section', 'charswap', or
+    # NULL for the ordinary one), and whether its face reference frames
+    # actually materialised. Read-only; neither field chooses anything.
+    #
+    # Why they are exposed at all: nothing outside the database could tell
+    # whether a finished job had ever carried a movie-section clip, so no
+    # automatic check could say whether v959 worked in production — the deploy
+    # could only be verified by a human opening the job. tools/deploy_claims.py
+    # now rides the next REAL section build and reads these two fields off it.
+    # has_face_refs is a bool, not the frame list: the claim needs to know the
+    # chips travelled, and the R2 keys are nobody else's business.
+    render_method: Optional[str] = None
+    has_face_refs: bool = False
+
+
+def _v959_1_has_face_refs(clip) -> bool:
+    """True when this clip's face reference frames actually materialised.
+
+    A movie-section clip whose chips never materialised is the exact failure
+    v959 exists to prevent: it renders on the ordinary image-to-video path with
+    the faces silently dropped, and the output looks plausible. So the honest
+    answer is 'did the column end up holding a non-empty list', not 'is the
+    column set' — an empty list and a corrupt one both mean no chips.
+    """
+    raw = getattr(clip, "face_ref_frames_json", None)
+    if not raw:
+        return False
+    try:
+        return bool(json.loads(raw))
+    except Exception:
+        return False
 
 
 class ClipQCRequest(BaseModel):
@@ -6803,6 +6834,11 @@ async def get_job_clips(
                 json.loads(c.auto_image_retry_json) if c.auto_image_retry_json else None
             ),  # v815
             qc=c._safe_qc(),  # v939 shadow-mode clip QC
+            # v959.1 — enumerate these HERE too, for the v861.2 reason above:
+            # ClipResponse is built with explicit kwargs, so declaring a field
+            # on the model is not enough and the row reads its default forever.
+            render_method=c.render_method,
+            has_face_refs=_v959_1_has_face_refs(c),
         )
         for c in clips
     ]
@@ -6906,6 +6942,11 @@ async def get_job_clips_active(
                 json.loads(c.auto_image_retry_json) if c.auto_image_retry_json else None
             ),  # v815
             qc=c._safe_qc(),  # v939 shadow-mode clip QC
+            # v959.1 — enumerate these HERE too, for the v861.2 reason above:
+            # ClipResponse is built with explicit kwargs, so declaring a field
+            # on the model is not enough and the row reads its default forever.
+            render_method=c.render_method,
+            has_face_refs=_v959_1_has_face_refs(c),
         )
         for c in clips
     ]
@@ -8816,7 +8857,12 @@ async def select_clip_variant(
             redo_reason=clip.redo_reason,
             selected_variant=variant_num,
             total_variants=len(versions),
-            versions=versions if versions else []
+            versions=versions if versions else [],
+            # v959.1 — this response already omits many fields, but a field
+            # that exists and reads null is worse than one that is absent: it
+            # would tell a caller this section clip is an ordinary one.
+            render_method=clip.render_method,
+            has_face_refs=_v959_1_has_face_refs(clip),
         )
     }
 
