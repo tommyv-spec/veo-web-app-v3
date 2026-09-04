@@ -12,9 +12,12 @@ Two halves:
    every single call, and the policy functions behave as before when
    `render_method` is None.
 
-The worker cannot be imported here — flow_worker.py boots a browser driver —
-so these read the shipped source and execute just the function under test.
-The charswap suite hits the same wall and solves it the same way.
+These read the shipped source and execute just the function under test rather
+than importing flow_worker. The module imports fine in principle; the reason
+not to is that `_bootstrap_browser_driver()` runs at MODULE SCOPE (:263) and,
+when `browser_driver.py` is missing or stale, fetches and rewrites it from
+`WEB_APP_URL` as a side effect of the import. A test run must not reach out to
+production or rewrite a worker file. The charswap suite solves it the same way.
 """
 import pathlib
 import re
@@ -100,20 +103,23 @@ def test_chip_verdict_holds_for_a_single_face_too():
     assert verdict(["scene", "face", "extra"], faces_wanted=1)[0] is False
 
 
+_GEN_OK = {"endpoint": "batchAsyncGenerateVideoReferenceImages",
+           "shape": "referenceImages", "videoModelKey": "abra_r2v_8s"}
+
+
 def test_submit_verdict_needs_every_media_and_reference_shape():
     verdict = _worker_function("movie_section_submit_verdict")
-    ok, why = verdict(seen=True, hits=3, want=3,
-                      api_last={"shape": "referenceImages", "videoModelKey": "abra_r2v_8s"})
+    ok, why = verdict(seen=True, hits=3, want=3, api_last=dict(_GEN_OK))
     assert ok
-    ok, why = verdict(seen=True, hits=2, want=3,
-                      api_last={"shape": "referenceImages", "videoModelKey": "abra_r2v_8s"})
+    ok, why = verdict(seen=True, hits=2, want=3, api_last=dict(_GEN_OK))
     assert not ok and "2/3" in why
     ok, why = verdict(seen=True, hits=3, want=3,
-                      api_last={"shape": "startImage", "videoModelKey": "abra_i2v_8s"})
+                      api_last={"endpoint": "batchAsyncGenerateVideoStartImage",
+                                "shape": "startImage", "videoModelKey": "abra_i2v_8s"})
     assert not ok and "startImage" in why
     ok, why = verdict(seen=False, hits=0, want=3, api_last=None)
     assert not ok
-    # capture switched off: the probe still proves the chips; the shape is unverified, not wrong
+    # nothing captured at all: the probe still proves the chips; unverified, not wrong
     ok, why = verdict(seen=True, hits=3, want=3, api_last=None)
     assert ok and "unverified" in why
 
@@ -123,8 +129,162 @@ def test_submit_verdict_rejects_a_non_reference_model_key():
     down a path that is not reference-to-video."""
     verdict = _worker_function("movie_section_submit_verdict")
     ok, why = verdict(seen=True, hits=3, want=3,
-                      api_last={"shape": "referenceImages", "videoModelKey": "abra_i2v_8s"})
+                      api_last={"endpoint": "batchAsyncGenerateVideoReferenceImages",
+                                "shape": "referenceImages", "videoModelKey": "abra_i2v_8s"})
     assert not ok and "abra_i2v_8s" in why
+
+
+def test_a_status_poll_overwriting_the_capture_is_unverified_not_a_refusal():
+    """THE REGRESSION THIS EXISTS FOR. The shared listener stashes EVERY watched
+    request, and a submit is immediately followed by status polls and log posts
+    that carry no shape at all. Judging that stash would refuse a clip that is
+    already rendering. Only a generate capture is judged."""
+    verdict = _worker_function("movie_section_submit_verdict")
+    for poll in ({"endpoint": "batchCheckAsyncVideoGenerationStatus", "shape": "",
+                  "videoModelKey": ""},
+                 {"endpoint": "batchLogFrontendEvents", "shape": "", "videoModelKey": ""},
+                 {"endpoint": "submitBatchLog", "shape": "", "videoModelKey": ""},
+                 {"endpoint": "agentInfo", "shape": "", "videoModelKey": ""}):
+        ok, why = verdict(seen=True, hits=3, want=3, api_last=poll)
+        assert ok, (poll, why)
+        assert "unverified" in why and poll["endpoint"] in why
+
+
+def test_a_generate_with_an_empty_shape_is_unverified_too():
+    """A generate whose body could not be parsed says nothing about the shape."""
+    verdict = _worker_function("movie_section_submit_verdict")
+    ok, why = verdict(seen=True, hits=3, want=3,
+                      api_last={"endpoint": "batchAsyncGenerateVideo", "shape": "",
+                                "videoModelKey": ""})
+    assert ok and "unverified" in why
+
+
+def test_a_real_start_image_generate_is_still_refused():
+    """The half this must never lose: a generate that really went out as an
+    image-to-video animation of the scene frame is not a section."""
+    verdict = _worker_function("movie_section_submit_verdict")
+    for bad in ({"endpoint": "batchAsyncGenerateVideoStartImage", "shape": "startImage",
+                 "videoModelKey": "abra_i2v_8s"},
+                {"endpoint": "batchAsyncGenerateVideoStartAndEndImage",
+                 "shape": "startImage+endImage", "videoModelKey": "abra_i2v_8s"}):
+        ok, why = verdict(seen=True, hits=3, want=3, api_last=bad)
+        assert not ok, bad
+
+
+# =============================================================================
+# 1b. fetching the inputs — all of them, or none
+# =============================================================================
+
+def _fetch_inputs(downloads_ok=True):
+    """movie_section_fetch_inputs with download_frame stubbed. `downloads_ok`
+    False makes the SECOND face fail, which is the partial case that matters."""
+    calls = []
+
+    def _dl(url, path):
+        calls.append((url, path))
+        if not downloads_ok and len(calls) >= 3:
+            return None
+        return path
+
+    fn = _worker_function("movie_section_fetch_inputs",
+                          {"download_frame": _dl, "print": lambda *a, **k: None})
+    return fn, calls
+
+
+def test_fetch_inputs_downloads_the_scene_and_every_face():
+    fn, calls = _fetch_inputs()
+    scene, faces = fn({"clip_index": 2, "start_frame_url": "https://x/s.png",
+                       "face_ref_urls": ["https://x/f1.png", "https://x/f2.png"]}, "/tmp")
+    assert scene and len(faces) == 2
+    assert len(calls) == 3
+
+
+def test_one_face_that_will_not_download_takes_the_whole_clip_down():
+    """A section rendered with the scene chip and one of its two faces is not a
+    cheaper version of the clip, it is a different clip."""
+    fn, _ = _fetch_inputs(downloads_ok=False)
+    assert fn({"clip_index": 0, "start_frame_url": "https://x/s.png",
+               "face_ref_urls": ["https://x/f1.png", "https://x/f2.png"]}, "/tmp") == (None, [])
+
+
+def test_no_scene_frame_at_all_is_refused():
+    fn, _ = _fetch_inputs()
+    assert fn({"clip_index": 0, "face_ref_urls": ["https://x/f1.png"]}, "/tmp") == (None, [])
+
+
+def test_locals_win_over_urls_and_download_nothing():
+    """The off-platform E2E driver hands the arm files instead of URLs."""
+    fn, calls = _fetch_inputs()
+    scene, faces = fn({"clip_index": 0, "start_frame_local": "/l/s.png",
+                       "face_ref_locals": ["/l/f1.png", "/l/f2.png"],
+                       "start_frame_url": "https://x/s.png",
+                       "face_ref_urls": ["https://x/f1.png", "https://x/f2.png"]}, "/tmp")
+    assert scene == "/l/s.png" and faces == ["/l/f1.png", "/l/f2.png"]
+    assert calls == []
+
+
+def test_a_partial_set_of_locals_is_refused_not_silently_completed():
+    """One local beside two declared URLs is a half-built hand-in. Accepting it
+    would render a two-face section with one face and call it a success."""
+    fn, _ = _fetch_inputs()
+    assert fn({"clip_index": 0, "start_frame_local": "/l/s.png",
+               "face_ref_locals": ["/l/f1.png"],
+               "face_ref_urls": ["https://x/f1.png", "https://x/f2.png"]}, "/tmp") == (None, [])
+
+
+# =============================================================================
+# 1c. attaching — the scene clears, every face must not
+# =============================================================================
+
+def _attach_fn(attach_results=None, chips=("s", "f1", "f2"), armed=(True, "ok")):
+    """movie_section_attach_and_prompt with every browser call stubbed."""
+    log = []
+
+    def _attach(page, path, context="", clear_existing=True, **kw):
+        log.append(("attach", path, clear_existing))
+        return (attach_results or {}).get(path, (True, None))
+
+    diag = []
+    fn = _worker_function("movie_section_attach_and_prompt", {
+        "attach_ingredient_image_with_check": _attach,
+        "movie_section_write_diag": lambda **f: diag.append(f),
+        "movie_section_chip_verdict": _worker_function("movie_section_chip_verdict"),
+        "charswap_composer_chip_media_ids": lambda page: list(chips),
+        "charswap_install_submit_probe": lambda page, ids: log.append(("probe", ids)),
+        "fill_prompt_textarea": lambda page, p: log.append(("prompt", p)),
+        "charswap_arm_generate": lambda page, p, ids, context="": armed,
+        "time": type("T", (), {"sleep": staticmethod(lambda s: None)}),
+    })
+    return fn, log, diag
+
+
+def test_the_scene_chip_clears_and_every_face_chip_does_not():
+    """clear_existing=True on a face would delete the scene chip it must sit
+    beside — the v881 pair discipline, one chip further along."""
+    fn, log, _ = _attach_fn()
+    ok, chips = fn(_Page(), "/s.png", ["/f1.png", "/f2.png"], "the section prompt")
+    assert ok and chips == ["s", "f1", "f2"]
+    assert [(e[1], e[2]) for e in log if e[0] == "attach"] == [
+        ("/s.png", True), ("/f1.png", False), ("/f2.png", False)]
+
+
+def test_a_face_that_will_not_attach_stops_before_the_probe():
+    fn, log, diag = _attach_fn(attach_results={"/f1.png": (False, 'no_buttons')})
+    page = _Page()
+    ok, chips = fn(page, "/s.png", ["/f1.png"], "prompt")
+    assert not ok and chips == []
+    assert "face chip 1" in page._movie_section_block_reason
+    assert [d["stage"] for d in diag] == ["face_attach_failed"]
+    assert not [k for k, *_ in log if k == "probe"]
+
+
+def test_the_chips_read_diag_records_what_was_on_the_composer_before():
+    """Three chips can mean 'scene + two faces' or 'one bled in from the last
+    clip and a face never attached'. The before-count is what tells them apart."""
+    fn, _, diag = _attach_fn()
+    fn(_Page(), "/s.png", ["/f1.png", "/f2.png"], "prompt")
+    read = [d for d in diag if d["stage"] == "chips_read"]
+    assert read and "chips_before" in read[0]
 
 
 # =============================================================================
@@ -331,6 +491,98 @@ def test_the_submit_verdict_gates_the_success_tail():
     tail = arm.index("human_delay(1, 2)")
     assert verdict < refuse < tail
     assert arm.index("_MOVIE_SECTION_SUBMIT_CONFIRMED_IDS.add(") > tail
+
+
+def test_the_probe_verdict_can_be_asked_for_every_chip_not_just_two():
+    """A section holds three chips. `hits >= 2` would call a submit that dropped
+    a face 'both media present' and stop the wait early on a half-attached body.
+    The charswap callers keep the old meaning through the default."""
+    fn = _worker_function("charswap_submit_body_verdict")
+
+    class _P:
+        _charswap_submit_probe = {"seen": True, "hits": 2}
+
+    assert fn(_P()) == (True, True)              # charswap, unchanged
+    assert fn(_P(), want=3) == (True, False)     # a section is one chip short
+    _P._charswap_submit_probe = {"seen": True, "hits": 3}
+    assert fn(_P(), want=3) == (True, True)
+
+
+def test_the_arm_waits_for_every_chip_it_attached():
+    arm = _arm_block(_worker_src())
+    assert "charswap_await_submit_verdict(page, want=len(_ms_chips))" in arm
+
+
+def test_the_await_signature_keeps_the_charswap_default():
+    signature = _body(_worker_src(), "charswap_await_submit_verdict")
+    signature = signature[:signature.index('"""')]
+    assert "want=2" in signature
+
+
+# --- 4.1 one project per section clip (v945.13, ported) ---------------------
+
+def test_the_arm_rotates_to_a_fresh_project_for_a_second_section():
+    """Three chips into a composer another clip already used is a bigger hazard
+    than the two the swap arm rotates for; v945.11 measured a chip surviving the
+    generic clear. Rotation is pre-click, so a refusal costs no render."""
+    arm = _arm_block(_worker_src())
+    rot = arm.index("_fa_try_create_new_project_api(")
+    settings = arm.index("select_frames_to_video_mode(")
+    attach = arm.index("movie_section_attach_and_prompt(")
+    assert arm.index("if not first_submission_in_project:") < rot < settings < attach
+    assert 'stage="project_rotation_failed"' in arm
+    assert 'stage="project_rotated"' in arm
+    # the rotation refusal is fail-closed like every other one
+    refusal = arm[rot:arm.index("first_submission_in_project = True", rot)]
+    assert "update_clip_status(clip['id'], 'failed'" in refusal
+    assert "permanently_failed_clips.add(clip_index)" in refusal
+
+
+def test_the_rotated_project_url_is_written_back_to_the_cache():
+    """Without this the job's cached project_url points at the old project and a
+    restart re-opens the composer this clip deliberately left."""
+    arm = _arm_block(_worker_src())
+    assert "cache['jobs'][job_id]['project_url'] = project_url" in arm
+    assert "save_cache(cache)" in arm
+
+
+# --- 4.2 the diag says which job and clip it is talking about ---------------
+
+def test_the_arm_stamps_its_identity_for_the_attach_stage_diag():
+    """The attach helper takes no job_id argument (several call paths share the
+    signature), so the identity rides on the page — the charswap pair's trick."""
+    arm = _arm_block(_worker_src())
+    assert "page._movie_section_job_id = clip.get('job_id') or job_id" in arm
+    assert "page._movie_section_clip_index = clip_index" in arm
+    assert arm.index("page._movie_section_job_id") < arm.index("movie_section_attach_and_prompt(")
+    helper = _body(_worker_src(), "movie_section_attach_and_prompt")
+    assert 'getattr(page, "_movie_section_job_id", None)' in helper
+    assert 'getattr(page, "_movie_section_clip_index", None)' in helper
+    # every diag line the helper writes carries them
+    assert helper.count("**_who") == 3
+
+
+def test_a_failed_diag_write_says_so_instead_of_vanishing():
+    """A silent diagnostic failure is how you end up with no evidence and no
+    idea there was none."""
+    assert "[v959] diag write failed" in _body(_worker_src(), "movie_section_write_diag")
+
+
+def test_the_diag_file_is_ignored_like_its_charswap_twin():
+    """Runtime observation from whichever machine ran the worker, on a SHARED
+    working tree where a stray `git add -A` sweeps whatever is untracked."""
+    ignored = (_HERE / ".gitignore").read_text(encoding="utf-8")
+    assert "static/movie_section_diag.jsonl" in ignored
+
+
+def test_the_force_flag_is_reset_in_the_clip_loop_preamble_too():
+    """set_clip_input_mode resets it, but readers that run BEFORE it — the full
+    settings pass, rebuild_clip — would otherwise see the previous clip's flag."""
+    src = _worker_src()
+    preamble = src.index("_cs_platform_prompt = prompt")
+    arm = src.index("elif movie_section_selected(clip):")
+    reset = src.index("page._force_ingredients = False", preamble)
+    assert reset < arm
 
 
 def test_the_captured_shape_is_cleared_before_the_click():

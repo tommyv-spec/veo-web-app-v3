@@ -33,6 +33,9 @@ static/chatgpt_jobs.example.json
 # is untracked (root CLAUDE.md §16.5), and a growing jsonl under static/ is
 # exactly the sort of file that gets committed by accident.
 static/charswap_diag.jsonl
+# v959 — the movie-section evidence file (see movie_section_write_diag). Same
+# file, same reasons, one render arm along.
+static/movie_section_diag.jsonl
 
 # Local runtime store — sqlite db, uploads, generated images, exports. Created
 # on first run; never shared (production keeps its own on Render + R2).

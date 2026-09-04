@@ -20345,9 +20345,11 @@ def movie_section_write_diag(**fields):
         fields.setdefault("ts", datetime.now().isoformat(timespec="seconds"))
         with open(MOVIE_SECTION_DIAG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(fields, default=str) + "\n")
-    except Exception:
-        # Diagnostics must never be able to fail a render.
-        pass
+    except Exception as e:
+        # Diagnostics must never be able to fail a render — but a diagnostic
+        # that fails SILENTLY leaves you with no evidence and no idea there is
+        # none, so say it out loud.
+        print(f"[v959] diag write failed: {e}", flush=True)
 
 
 def movie_section_fetch_inputs(clip, temp_dir, context="[v959]"):
@@ -20359,15 +20361,22 @@ def movie_section_fetch_inputs(clip, temp_dir, context="[v959]"):
 
     All-or-nothing on purpose: a section rendered with the scene chip and one
     of its two faces is not a cheaper version of the clip, it is a different
-    clip. Refusing here costs no render slot.
+    clip. Refusing here costs no render slot. That includes a PARTIAL hand-in —
+    one local file beside two declared URLs is a half-built input set, and
+    completing it silently would render a two-face section with one face.
     """
     scene = clip.get('start_frame_local')
     if not scene and clip.get('start_frame_url'):
         scene = download_frame(clip['start_frame_url'],
                                os.path.join(temp_dir, f"ms_scene_{clip.get('clip_index', 0)}.png"))
     faces = list(clip.get('face_ref_locals') or [])
+    declared = list(clip.get('face_ref_urls') or [])
+    if faces and declared and len(faces) != len(declared):
+        print(f"{context} face refs handed in partially: {len(faces)} local file(s) "
+              f"for {len(declared)} declared ref(s) — refusing", flush=True)
+        return None, []
     if not faces:
-        for k, url in enumerate(clip.get('face_ref_urls') or []):
+        for k, url in enumerate(declared):
             p = download_frame(url, os.path.join(temp_dir, f"ms_face_{clip.get('clip_index', 0)}_{k}.png"))
             if not p:
                 print(f"{context} face ref {k} did not download: {url[-60:]}", flush=True)
@@ -20399,19 +20408,33 @@ def movie_section_submit_verdict(seen, hits, want, api_last):
     """(accept, why) for a section submit.
 
     seen/hits/want come from charswap_install_submit_probe (it is N-generic:
-    `want` is the chip count it was given). api_last is page._flow_api_last —
-    the shape the generate request carried. A missing capture is 'unverified',
-    not a failure: the request listener that fills it is off unless
-    FLOW_API_CAPTURE=1, and the probe has already proved every chip reached
-    the body, which is the fact that decides whether this is a section render.
+    `want` is the chip count it was given). That pair is the decisive fact: it
+    proves every chip reached the generate body.
+
+    api_last is page._flow_api_last, and it must be read with care. The shared
+    listener stashes EVERY request it watches — status polls, frontend log
+    posts, credits, agentInfo — and the sync-API dispatcher delivers those in
+    bursts, so by the time this runs the stash is usually the status poll that
+    followed the submit, carrying no shape at all. Judging that would REFUSE a
+    clip that is already rendering. So:
+
+      - not a `batchAsyncGenerateVideo*` endpoint, or an empty shape
+        -> UNVERIFIED. Accept on the probe, and name what was captured instead.
+      - a generate with a real shape -> judged. referenceImages + an r2v key
+        pass; startImage / i2v / t2v is a different render and fails closed.
+
+    (The capture itself is ON by default; FLOW_API_CAPTURE=off is the
+    kill-switch. `api_last` being None means nothing has been captured yet.)
     """
     if not seen:
         return False, "no generate request observed after the click"
     if hits < want:
         return False, f"generate body carried {hits}/{want} media ids — a chip did not make it"
-    if not api_last:
-        return True, f"{hits}/{want} media in body; input shape unverified (capture off)"
-    shape = api_last.get("shape") or "-"
+    endpoint = (api_last or {}).get("endpoint") or ""
+    shape = (api_last or {}).get("shape") or ""
+    if "batchAsyncGenerateVideo" not in endpoint or not shape:
+        return True, (f"{hits}/{want} media in body; input shape unverified "
+                      f"(last capture was {endpoint or 'nothing'}/{shape or '-'})")
     model_key = api_last.get("videoModelKey") or "-"
     if shape != "referenceImages":
         return False, f"submit shape was {shape}, not referenceImages — the composer was not on Ingredients"
@@ -20421,13 +20444,28 @@ def movie_section_submit_verdict(seen, hits, want, api_last):
 
 
 def movie_section_attach_and_prompt(page, scene_path, face_paths, prompt, context="[v959]"):
-    """Attach scene + faces, verify the composer, arm the prompt. Returns (ok, chip_ids)."""
+    """Attach scene + faces, verify the composer, arm the prompt. Returns (ok, chip_ids).
+
+    The identity of the job and clip rides on the page (the arm stamps it)
+    rather than in the signature — the same trick the charswap pair uses, and
+    for the same reason: several call paths share the attach signature. Without
+    it these diag lines say WHAT went wrong with no way to tell which clip.
+    """
+    _who = {"job_id": getattr(page, "_movie_section_job_id", None),
+            "clip_index": getattr(page, "_movie_section_clip_index", None)}
     page._movie_section_block_reason = None
+    # What the composer held BEFORE we touched it. Three chips at the end can
+    # mean "scene + two faces" or "one bled in from the last clip and a face
+    # never attached"; only the before-count tells those apart.
+    try:
+        chips_before = charswap_composer_chip_media_ids(page)
+    except Exception:
+        chips_before = None
     ok, why = attach_ingredient_image_with_check(page, scene_path, context=f"{context}-scene",
                                                  clear_existing=True)
     if not ok:
         page._movie_section_block_reason = f"scene chip did not attach ({why})"
-        movie_section_write_diag(stage="scene_attach_failed", reason=why)
+        movie_section_write_diag(stage="scene_attach_failed", reason=why, **_who)
         return False, []
     for k, fp in enumerate(face_paths):
         # clear_existing=False: a True here would delete the scene chip it must
@@ -20436,11 +20474,12 @@ def movie_section_attach_and_prompt(page, scene_path, face_paths, prompt, contex
                                                      clear_existing=False)
         if not ok:
             page._movie_section_block_reason = f"face chip {k+1} did not attach ({why})"
-            movie_section_write_diag(stage="face_attach_failed", face=k + 1, reason=why)
+            movie_section_write_diag(stage="face_attach_failed", face=k + 1, reason=why, **_who)
             return False, []
     chip_ids = charswap_composer_chip_media_ids(page)
     ok, why = movie_section_chip_verdict(chip_ids, len(face_paths))
-    movie_section_write_diag(stage="chips_read", chip_ids=chip_ids, verdict=why)
+    movie_section_write_diag(stage="chips_read", chip_ids=chip_ids, verdict=why,
+                             chips_before=chips_before, **_who)
     if not ok:
         page._movie_section_block_reason = why
         return False, chip_ids
@@ -20923,19 +20962,28 @@ def charswap_install_submit_probe(page, chip_ids):
     return state
 
 
-def charswap_submit_body_verdict(page):
-    """(saw_a_submit, both_media_present) from the probe installed above.
+def charswap_submit_body_verdict(page, want=2):
+    """(saw_a_submit, every_media_present) from the probe installed above.
 
     Reads the probe state ONLY. It does not wait and it does not pump
     Playwright's event loop — callers after a Generate click must use
     charswap_await_submit_verdict instead. See that function for why.
+
+    v959 — `want` used to be the literal 2 a charswap attaches. A movie-section
+    clip attaches three, and 2-of-3 would have read as "every media present"
+    AND stopped the wait early on a body that dropped a face. The default keeps
+    every charswap caller exactly where it was.
     """
     state = getattr(page, "_charswap_submit_probe", None) or {}
-    return bool(state.get("seen")), int(state.get("hits", 0)) >= 2
+    return bool(state.get("seen")), int(state.get("hits", 0)) >= int(want)
 
 
-def charswap_await_submit_verdict(page, timeout_s=20, poll_ms=250):
+def charswap_await_submit_verdict(page, timeout_s=20, poll_ms=250, want=2):
     """Wait for the generate request, THEN read the probe. Returns (seen, both).
+
+    v959 — `want` is how many media ids count as a complete body; it defaults
+    to the 2 a charswap attaches, and the movie-section arm passes its own chip
+    count so a 2-of-3 body does not end the wait as a success.
 
     v945.8 — this function exists because the old call site read the verdict
     with no wait at all, and that is why every charswap run recorded
@@ -20979,7 +21027,7 @@ def charswap_await_submit_verdict(page, timeout_s=20, poll_ms=250):
     contradiction it is rather than as "never observed".
     """
     deadline = time.time() + max(0, timeout_s)
-    seen, both = charswap_submit_body_verdict(page)
+    seen, both = charswap_submit_body_verdict(page, want=want)
     while not (seen and both) and time.time() < deadline:
         try:
             page.wait_for_timeout(poll_ms)
@@ -20988,7 +21036,7 @@ def charswap_await_submit_verdict(page, timeout_s=20, poll_ms=250):
                 page.evaluate("() => 0")
             except Exception:
                 time.sleep(poll_ms / 1000.0)
-        seen, both = charswap_submit_body_verdict(page)
+        seen, both = charswap_submit_body_verdict(page, want=want)
     return seen, both
 
 
@@ -22329,6 +22377,15 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # is allowed to stand in for it, so the charswap arm below can tell
         # "the build authored this" from "build_flow_prompt invented it".
         _cs_platform_prompt = prompt
+        # v959 — clear the forced-Ingredients flag at the TOP of every clip.
+        # set_clip_input_mode resets it too, but several readers run before it
+        # (the full settings pass, rebuild_clip), and a stale True from the
+        # previous section clip would put an ordinary clip on a tab where its
+        # frame upload has no slot.
+        try:
+            page._force_ingredients = False
+        except Exception:
+            pass
         if not prompt:
             prompt = build_flow_prompt(
                 dialogue_line=clip.get('dialogue_text', ''),
@@ -22952,6 +23009,44 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 _MOVIE_SECTION_CLIP_IDS.add(clip.get('id'))
             except Exception:
                 pass
+            # ONE PROJECT PER SECTION CLIP — the v945.13 rotation, ported. The
+            # swap arm rotates because a reused project's composer is shared
+            # state this automation cannot reliably observe or clean, and
+            # v945.11 measured a chip surviving the generic clear. A section
+            # puts THREE chips into that composer instead of two, so the hazard
+            # is larger, not smaller. Rotation uses the same API create the job
+            # start uses and fails CLOSED — pre-click, so it costs no render.
+            if not first_submission_in_project:
+                _ms_new_url = None
+                try:
+                    _ms_new_url = _fa_try_create_new_project_api(
+                        page, context="v959-rotate")
+                except Exception as _ms_rot_e:
+                    print(f"{_ms_ctx} project rotation raised: {_ms_rot_e}", flush=True)
+                if not _ms_new_url:
+                    movie_section_write_diag(stage="project_rotation_failed",
+                                             job_id=clip.get('job_id') or job_id,
+                                             clip_index=clip_index)
+                    update_clip_status(clip['id'], 'failed', error_message=(
+                        "movie-section project rotation failed — refusing to attach "
+                        "into a composer another clip already used"))
+                    permanently_failed_clips.add(clip_index)
+                    continue
+                project_url = _ms_new_url
+                try:
+                    if job_id in cache.get('jobs', {}):
+                        cache['jobs'][job_id]['project_url'] = project_url
+                        save_cache(cache)
+                except Exception:
+                    pass
+                first_submission_in_project = True
+                _tiles_in_this_project = 0
+                movie_section_write_diag(stage="project_rotated",
+                                         job_id=clip.get('job_id') or job_id,
+                                         clip_index=clip_index,
+                                         project_url_tail=_ms_new_url[-40:])
+                print(f"{_ms_ctx} rotated to a fresh project for this section clip",
+                      flush=True)
             if first_submission_in_project:
                 # A section still needs the project's render settings applied once.
                 check_and_dismiss_popup(page)
@@ -23018,6 +23113,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                    error_message="movie-section clip has no authored prompt — refused (v959)")
                 permanently_failed_clips.add(clip_index)
                 continue
+            # Stamp the identity onto the page so the attach-stage diag lines
+            # name their job and clip; the attach signature is shared by
+            # several call paths, so it does not take them as arguments.
+            page._movie_section_job_id = clip.get('job_id') or job_id
+            page._movie_section_clip_index = clip_index
             _ms_ok, _ms_chips = movie_section_attach_and_prompt(page, _ms_scene, _ms_faces, _ms_prompt, context=_ms_ctx)
             if not _ms_ok:
                 _why = getattr(page, '_movie_section_block_reason', None) or "movie-section chips did not attach"
@@ -23035,7 +23135,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             click_generate_button(page, f"v959 clip {clip_index+1}")
             # The probe is N-generic, so the second return (its 2-media test)
             # means nothing here; the counts below are what the verdict reads.
-            _ms_seen, _ = charswap_await_submit_verdict(page)
+            _ms_seen, _ = charswap_await_submit_verdict(page, want=len(_ms_chips))
             _ms_probe = getattr(page, "_charswap_submit_probe", None) or {}
             _ms_accept, _ms_why = movie_section_submit_verdict(
                 _ms_seen, int(_ms_probe.get('hits', 0)), int(_ms_probe.get('want', 0)),
