@@ -192,8 +192,26 @@ def lint(path: str) -> int:
             fails.append(f"v943/v959: Scene {sn} render_method {rm_val!r} is not charswap or movie-section")
         if fr and not is_section:
             fails.append(f"v959: Scene {sn} has face_refs but render_method is not movie-section")
-        if is_section:
-            refs = [x.strip() for x in fr.group(1).split(",")] if fr else []
+        # The swap bullets belong to charswap alone: a movie-section scene
+        # renders from images, so there is no source video to swap into.
+        _swaps = [_b for _b in ("swap_source_video", "swap_mode")
+                  if re.search(rf"^-\s+\*\*{_b}:\*\*", blk, re.M)]
+        if is_section and _swaps:
+            fails.append(f"v959: Scene {sn} render_method=movie-section does not take "
+                         f"swap_source_video / swap_mode (found {_swaps})")
+        # A text_card is drawn by ffmpeg, never rendered as a clip, so a render
+        # method on one has nothing to act on. Said FIRST and alone, the way the
+        # parser raises it (image_platform.py :6048), so the author reads the
+        # real problem instead of being asked for face chips a card cannot use.
+        # Scoped to movie-section because that is where the parser draws the
+        # line: a charswap text_card with its full trio parses today (measured
+        # 2026-09-04), and a linter stricter than the parser is a false FAIL.
+        if is_section and is_text_card:
+            fails.append(f"v959: Scene {sn} — text_card scenes take no render_method")
+        elif is_section:
+            # An empty token is a trailing comma, not a ref: the parser drops
+            # those (image_platform.py :6075) and so must this.
+            refs = [x.strip() for x in fr.group(1).split(",") if x.strip()] if fr else []
             ref_nums = [int(m.group(1)) for m in
                         (re.fullmatch(r"image_(\d+)", r) for r in refs) if m]
             if not (1 <= len(ref_nums) <= 2) or len(ref_nums) != len(refs):

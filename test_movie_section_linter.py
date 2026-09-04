@@ -54,6 +54,15 @@ SECTION_SCENE = """### Scene 1
 - **action_note:** she watches him lift the sack one-handed [Start beat]
 """
 
+# A card is drawn by ffmpeg, never rendered as a clip, so it takes no render
+# method. It rides beside a real section scene here so the build stays legal.
+TEXT_CARD_SCENE = """### Scene 2
+
+- **scene_type:** text_card
+- **caption:** the end
+- **bg_color:** black
+"""
+
 MIN_BUILD = """# t
 ## Pre-Flight Checklist
 ### 1. x
@@ -144,7 +153,16 @@ def _findings(out):
 
 def test_linter_accepts_a_movie_section_build(tmp_path):
     code, out = _lint(MIN_BUILD.format(scenes=SECTION_SCENE), tmp_path)
-    assert "v959" not in out
+    assert "v959" not in _findings(out)
+
+
+def test_linter_tolerates_a_trailing_comma_in_face_refs(tmp_path):
+    # The parser drops empty tokens (image_platform.py ~L6075), so a trailing
+    # comma is a typo the import forgives — the linter must forgive it too.
+    md = MIN_BUILD.format(
+        scenes=SECTION_SCENE.replace("image_2, image_3", "image_2, image_3,"))
+    code, out = _lint(md, tmp_path)
+    assert "v959" not in _findings(out)
 
 
 def test_linter_fails_face_refs_without_method(tmp_path):
@@ -171,6 +189,79 @@ def test_linter_fails_duplicate_face_ref(tmp_path):
     md = MIN_BUILD.format(scenes=SECTION_SCENE.replace("image_2, image_3", "image_2, image_2"))
     code, out = _lint(md, tmp_path)
     assert code != 0 and "repeats" in out
+
+
+def test_linter_fails_an_unknown_render_method(tmp_path):
+    md = MIN_BUILD.format(
+        scenes=SECTION_SCENE.replace("- **render_method:** movie-section",
+                                     "- **render_method:** omni-section"))
+    code, out = _lint(md, tmp_path)
+    assert code != 0 and "is not charswap or movie-section" in _findings(out)
+
+
+def test_linter_fails_zero_face_refs(tmp_path):
+    md = MIN_BUILD.format(
+        scenes=SECTION_SCENE.replace("- **face_refs:** image_2, image_3\n", ""))
+    code, out = _lint(md, tmp_path)
+    assert code != 0 and "face_refs must name 1-2" in _findings(out)
+
+
+def test_linter_fails_three_face_refs(tmp_path):
+    # A fourth image so the count is the ONLY thing wrong with this build.
+    build = MIN_BUILD.replace(
+        "## Storyboard",
+        "### Image 4\n- **Image prompt:**\n```\nclose-up of the friend\n```\n## Storyboard")
+    md = build.format(
+        scenes=SECTION_SCENE.replace("image_2, image_3", "image_2, image_3, image_4"))
+    code, out = _lint(md, tmp_path)
+    assert code != 0 and "face_refs must name 1-2" in _findings(out)
+
+
+def test_linter_fails_a_face_ref_that_is_not_image_n(tmp_path):
+    md = MIN_BUILD.format(
+        scenes=SECTION_SCENE.replace("image_2, image_3", "image_2, faces/man.png"))
+    code, out = _lint(md, tmp_path)
+    found = _findings(out)
+    assert code != 0 and "face_refs must name 1-2" in found and "faces/man.png" in found
+
+
+def test_linter_fails_an_undefined_face_ref(tmp_path):
+    md = MIN_BUILD.format(
+        scenes=SECTION_SCENE.replace("image_2, image_3", "image_2, image_9"))
+    code, out = _lint(md, tmp_path)
+    assert code != 0 and "face_refs image_9 not defined" in _findings(out)
+
+
+def test_linter_fails_the_scenes_own_image_as_a_face_ref(tmp_path):
+    # image_1 is the scene's wide anchor; a face chip is a close-up, never it.
+    md = MIN_BUILD.format(
+        scenes=SECTION_SCENE.replace("image_2, image_3", "image_1, image_2"))
+    code, out = _lint(md, tmp_path)
+    assert code != 0 and "face_refs image_1 is the scene's own image" in _findings(out)
+
+
+def test_linter_fails_two_lines_on_a_section_scene(tmp_path):
+    md = MIN_BUILD.format(
+        scenes=SECTION_SCENE + "- **line:** then he should do what i do\n")
+    code, out = _lint(md, tmp_path)
+    assert code != 0 and "needs exactly one" in _findings(out)
+
+
+def test_linter_fails_a_render_method_on_a_text_card(tmp_path):
+    md = MIN_BUILD.format(
+        scenes=SECTION_SCENE + "\n" + TEXT_CARD_SCENE
+        + "- **render_method:** movie-section\n")
+    code, out = _lint(md, tmp_path)
+    assert code != 0 and "text_card scenes take no render_method" in _findings(out)
+
+
+def test_linter_fails_swap_bullets_on_a_section_scene(tmp_path):
+    md = MIN_BUILD.format(
+        scenes=SECTION_SCENE + "- **swap_source_video:** raw/refs/curls.mp4\n"
+        + "- **swap_mode:** image-led\n")
+    code, out = _lint(md, tmp_path)
+    assert code != 0 and (
+        "does not take swap_source_video / swap_mode" in _findings(out))
 
 
 # --- 2. the stand-downs (one test per gate) ----------------------------------
