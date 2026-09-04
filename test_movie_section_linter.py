@@ -344,6 +344,31 @@ def test_v807_scan_reaches_a_section_after_the_clips(tmp_path):
     assert code != 0 and "v807: 2 editing/transition phrase(s)" in _findings(out)
 
 
+def test_the_v807_cut_out_ends_at_a_two_space_clip_header(tmp_path):
+    """The cut-out's HEAD tolerates any spacing after `###`; its terminator did
+    not. So a build whose headers carry two spaces opened a cut-out that never
+    closed, and every clip after the first section was exempted with it — the
+    'cuts to' below went unread. Clip 1.1 is still exempt (its two 'cut away'
+    wardrobe hits do not count); the one hit is Clip 2.1's."""
+    md = MIN_BUILD.format(scenes=SECTION_SCENE + "\n" + TEXT_CARD_SCENE).replace(
+        "Setting: The loading lot.", _SLEEVES).replace("### Clip 1.1", "###  Clip 1.1")
+    md += ("\n###  Clip 2.1\n\n**Text prompt:**\n```\n"
+           "the camera cuts to the end card\n```\n")
+    code, out = _lint(md, tmp_path)
+    assert code != 0 and "v807: 1 editing/transition phrase(s)" in _findings(out)
+
+
+def test_a_later_section_cannot_supply_the_last_clips_missing_fields(tmp_path):
+    """The per-clip block had no `## ` bound, so the LAST clip's block ran to the
+    end of the file. A `**Text prompt:**` sitting in a later section counted as
+    that clip's own and the v750 check passed on text the clip never carried."""
+    md = MIN_BUILD.format(scenes=LEGACY_SCENE).replace(
+        "**Text prompt:**", "**Prompt A:**", 1)
+    md += "\n## Captions\n\n**Text prompt:** left over from an earlier draft\n"
+    code, out = _lint(md, tmp_path)
+    assert code != 0 and "v750: Clip 1.1 missing **Text prompt:**" in _findings(out)
+
+
 def test_v594_counts_face_refs_as_used(tmp_path):
     # Image 2 and Image 3 are named ONLY by `face_refs`; that is a real use.
     code, out = _lint(MIN_BUILD.format(scenes=SECTION_SCENE), tmp_path)

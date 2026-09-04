@@ -17639,6 +17639,7 @@ async def local_worker_get_pending_job(
     request: Request,
     worker_id: Optional[str] = Query(None, description="Worker ID for claiming"),
     exclude: Optional[str] = Query(None, description="Comma-separated job IDs to exclude (already being processed)"),
+    arms: Optional[str] = Query(None, description="v959: comma-separated render arms this worker build carries"),
     db: DBSession = Depends(get_db_session),
     authorized: bool = Depends(verify_local_worker_key)
 ):
@@ -17795,7 +17796,10 @@ async def local_worker_get_pending_job(
         if _age_cutoff is not None:
             query = query.filter(Job.created_at >= _age_cutoff)
 
-        job = query.order_by(Job.created_at.asc()).first()
+        # v959 — a worker that never advertised the movie-section arm walks past
+        # section jobs; see _v959_next_job_for_poller.
+        job = _v959_next_job_for_poller(
+            query.order_by(Job.created_at.asc()), arms, worker_id, "local-worker")
 
         if job and job.claimed_by_worker != worker_id:
             # Claim it
@@ -17821,8 +17825,10 @@ async def local_worker_get_pending_job(
         if _age_cutoff is not None:
             query = query.filter(Job.created_at >= _age_cutoff)
 
-        job = query.order_by(Job.created_at.asc()).first()
-    
+        # v959 — same gate on the look-without-claiming branch.
+        job = _v959_next_job_for_poller(
+            query.order_by(Job.created_at.asc()), arms, worker_id, "local-worker")
+
     # v455: piggyback abort signals on this poll. The worker polls /pending
     # constantly (every 5-8s), so including the abort list here avoids a
     # dedicated heartbeat channel. Only jobs currently claimed by *this*
@@ -17937,6 +17943,7 @@ async def local_worker_get_pending_job(
 async def local_worker_get_redo_clips(
     request: Request,
     worker_id: Optional[str] = Query(None, description="Worker ID for claiming"),
+    arms: Optional[str] = Query(None, description="v959: comma-separated render arms this worker build carries"),
     db: DBSession = Depends(get_db_session),
     authorized: bool = Depends(verify_local_worker_key)
 ):
@@ -18066,6 +18073,8 @@ async def local_worker_get_redo_clips(
 
     # v945.14 — a charswap clip must never leave through this door.
     redo_clips = _v945_14_reject_charswap_redos(db, redo_clips, "local-worker")
+    # v959 — and never a section clip to a worker with no arm for it.
+    redo_clips = _v959_hold_section_redos(redo_clips, arms, worker_id, "local-worker")
 
     if not redo_clips:
         return {"clips": []}
@@ -18800,6 +18809,93 @@ def _v943_charswap_payload(clip, base_url: str, lane: str) -> dict:
         # short render instead of a refused one.
         "swap_max_source_s": 10,
     }
+
+
+_V959_ARM = "movie-section"
+
+
+def _v959_poller_has_arm(arms_param: Optional[str]) -> bool:
+    """Did this polling worker say it can render a movie-section clip?
+
+    A worker reads the served flow_worker.py ONCE, when it starts. A process
+    that was already running when the arm shipped does not have it, and until
+    now nothing at claim time noticed: the job was handed over, the arm was
+    missing, and the clip rendered down the ordinary image-to-video path with
+    face_ref_urls and input_mode ignored — a wrong render that costs credits and
+    overwrites nothing but the operator's trust.
+
+    Fails CLOSED on purpose. No param, an empty param, a param listing other
+    arms — all mean "no arm". Only a worker that names it gets the work.
+    """
+    parts = [p.strip().lower() for p in (arms_param or "").split(",")]
+    return _V959_ARM in parts
+
+
+def _v959_clip_needs_arm(clip) -> bool:
+    """Is this one clip a movie-section clip?"""
+    return (getattr(clip, "render_method", None) or "").strip().lower() == _V959_ARM
+
+
+def _v959_job_needs_arm(job) -> bool:
+    """Does any clip on this job need the movie-section arm?
+
+    A job that cannot be read at all counts as needing the arm: guessing "no"
+    here is exactly the wrong render this gate exists to stop.
+    """
+    try:
+        clips = list(getattr(job, "clips", None) or [])
+    except Exception:
+        return True
+    return any(_v959_clip_needs_arm(c) for c in clips)
+
+
+def _v959_next_job_for_poller(ordered_query, arms_param: Optional[str],
+                              worker_id: Optional[str], lane: str, look_ahead: int = 25):
+    """The first queued job in order that this poller is allowed to render.
+
+    A worker that advertises the arm takes the head of the queue, exactly as
+    before — same query, same `.first()`. A worker WITHOUT the arm walks past
+    any job carrying a section clip and takes the next one it can actually
+    render; the section job is left untouched and stays queued for a worker that
+    has the arm. Skipping instead of returning nothing matters: a section job
+    sitting at the head would otherwise starve every ordinary job behind it.
+
+    look_ahead bounds the walk so a queue full of section jobs cannot turn one
+    poll into a full table scan.
+    """
+    if _v959_poller_has_arm(arms_param):
+        return ordered_query.first()
+    for job in ordered_query.limit(look_ahead).all():
+        if not _v959_job_needs_arm(job):
+            return job
+        print(f"[v959] job {job.id[:8]} held: worker {worker_id or '(none)'} "
+              f"({lane}) lacks the movie-section arm", flush=True)
+    return None
+
+
+def _v959_hold_section_redos(redo_clips, arms_param: Optional[str],
+                             worker_id: Optional[str], lane: str):
+    """Drop any movie-section clip from a redo hand-out to an armless worker.
+
+    In practice _v945_14_reject_charswap_redos has already flipped every section
+    clip to 'failed' before this runs — the redo renderer is plain
+    image-to-video and has no arm for the method at all. This is the same
+    fail-closed guard the pending lane uses, kept on this door too so a later
+    change to that one cannot quietly start handing sections to a worker that
+    would render them wrong.
+    """
+    if _v959_poller_has_arm(arms_param):
+        return redo_clips
+    kept = []
+    for clip in redo_clips:
+        if _v959_clip_needs_arm(clip):
+            print(f"[v959] job {getattr(clip, 'job_id', '?')} redo clip "
+                  f"{getattr(clip, 'id', '?')} held: "
+                  f"worker {worker_id or '(none)'} ({lane}) lacks the movie-section arm",
+                  flush=True)
+            continue
+        kept.append(clip)
+    return kept
 
 
 def _v959_maybe_movie_section(clip_data: dict, clip, base_url: str, lane: str) -> dict:
@@ -19861,6 +19957,7 @@ async def user_worker_get_pending_job(
     request: Request,
     worker_id: Optional[str] = Query(None),
     exclude: Optional[str] = Query(None),
+    arms: Optional[str] = Query(None, description="v959: comma-separated render arms this worker build carries"),
     db: DBSession = Depends(get_db_session),
     user_id: str = Depends(verify_user_worker_token)
 ):
@@ -19935,7 +20032,10 @@ async def user_worker_get_pending_job(
         if _age_cutoff is not None:
             query = query.filter(Job.created_at >= _age_cutoff)
 
-        job = query.order_by(Job.created_at.asc()).first()
+        # v959 — a worker that never advertised the movie-section arm walks past
+        # section jobs; see _v959_next_job_for_poller.
+        job = _v959_next_job_for_poller(
+            query.order_by(Job.created_at.asc()), arms, worker_id, "user-worker")
 
         if job:
             job.claimed_by_worker = worker_id
@@ -19967,7 +20067,9 @@ async def user_worker_get_pending_job(
         if _age_cutoff is not None:
             query = query.filter(Job.created_at >= _age_cutoff)
 
-        job = query.order_by(Job.created_at.asc()).first()
+        # v959 — same gate on the look-without-claiming branch.
+        job = _v959_next_job_for_poller(
+            query.order_by(Job.created_at.asc()), arms, worker_id, "user-worker")
 
     # v455: piggyback abort signals (same as local-worker endpoint)
     aborted_jobs = []
@@ -20082,6 +20184,7 @@ async def user_worker_get_pending_job(
 async def user_worker_get_redo_clips(
     request: Request,
     worker_id: Optional[str] = Query(None),
+    arms: Optional[str] = Query(None, description="v959: comma-separated render arms this worker build carries"),
     db: DBSession = Depends(get_db_session),
     user_id: str = Depends(verify_user_worker_token)
 ):
@@ -20187,6 +20290,8 @@ async def user_worker_get_redo_clips(
 
     # v945.14 — a charswap clip must never leave through this door.
     redo_clips = _v945_14_reject_charswap_redos(db, redo_clips, "user-worker")
+    # v959 — and never a section clip to a worker with no arm for it.
+    redo_clips = _v959_hold_section_redos(redo_clips, arms, worker_id, "user-worker")
 
     if not redo_clips:
         return {"clips": []}

@@ -471,6 +471,10 @@ def lint(path: str) -> int:
         # EOF — without the `## ` bound the LAST clip's block would run to the
         # end of the file and exempt every section after it (a `## Captions`
         # block saying "cuts to" would go unread).
+        # The head pattern below tolerates any spacing after `###`, so the
+        # terminator has to as well: with a literal `^### Clip` here, a build
+        # whose headers carry two spaces starts a cut-out that never ends and
+        # swallows the whole rest of the file.
         _v807_zone = veo
         if section_scene_nums:
             _skip: list[tuple[int, int]] = []
@@ -478,7 +482,7 @@ def lint(path: str) -> int:
                 if int(n) not in section_scene_nums:
                     continue
                 head = rf"^###\s+Clip\s+{n}\.{m}\b" if m else rf"^###\s+Clip\s+{n}\b(?!\.)"
-                cb = re.search(head + r".*?(?=^### Clip|^##\s|\Z)", veo, re.M | re.S)
+                cb = re.search(head + r".*?(?=^###\s+Clip|^##\s|\Z)", veo, re.M | re.S)
                 if cb:
                     _skip.append(cb.span())
             if _skip:
@@ -501,8 +505,14 @@ def lint(path: str) -> int:
             # Doc-style preference is unfenced; flag as WARN, not a render-blocker.
             warns.append("v750: code fences in Veo section (v750 prefers plain markdown; v750.1 still extracts fenced)")
         for n, m in clips:
+            # Same three bounds as the v807 cut-out above: the next clip, the
+            # next `## ` section, or EOF. Without the `## ` bound the LAST
+            # clip's block ran to the end of the file, so a `**Text prompt:**`
+            # or a house block sitting in a later section (`## Captions`,
+            # `## Notes`) counted as that clip's own and the checks below
+            # passed on text the clip never carried.
             head = rf"^### Clip {n}\.{m}\b" if m else rf"^### Clip {n}\b(?!\.)"
-            cb = re.search(head + r".*?(?=^### Clip|\Z)", veo, re.M | re.S)
+            cb = re.search(head + r".*?(?=^###\s+Clip|^##\s|\Z)", veo, re.M | re.S)
             if not cb:
                 continue
             blk = cb.group(0)

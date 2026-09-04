@@ -1635,13 +1635,33 @@ def _install_flow_api_capture(page):
             # in-run one, and it is what tells a movie-section submit that the
             # request really went out as referenceImages (Ingredients) and not
             # as a startImage animation of the scene frame.
+            _cap = {"ts": time.time(),
+                    "endpoint": endpoint.rsplit('/', 1)[-1],
+                    "videoModelKey": model_key,
+                    "shape": ingredient_shape}
             try:
-                page._flow_api_last = {"ts": time.time(),
-                                       "endpoint": endpoint.rsplit('/', 1)[-1],
-                                       "videoModelKey": model_key,
-                                       "shape": ingredient_shape}
+                page._flow_api_last = _cap
             except Exception:
                 pass
+            # v959 follow-up — a DEDICATED slot for the generate itself.
+            #
+            # The slot above holds the last watched request of ANY kind, and a
+            # submit is immediately followed by status polls, frontend log posts
+            # and credit reads, delivered in bursts. So by the time a verdict
+            # ran, that slot almost always held a poll with no shape at all, and
+            # every real submit was accepted through the "shape unverified"
+            # branch — the shape check never actually ran in production.
+            #
+            # Only a submit writes this one, so a verdict reading it is reading
+            # the submit's own body. The test is _SUBMIT_BIND_URL_SUBSTR, the
+            # same substring v770 already proved matches every submit endpoint
+            # and no status poll ('AsyncGenerateVideo' vs 'AsyncVideoGeneration')
+            # — see its comment below.
+            if _SUBMIT_BIND_URL_SUBSTR in endpoint:
+                try:
+                    page._flow_api_last_generate = _cap
+                except Exception:
+                    pass
             try:
                 with open(out_path, 'a', encoding='utf-8') as f:
                     f.write(json.dumps({
@@ -8882,13 +8902,27 @@ def check_abort(job_id):
         raise JobAbortedException(job_id)
 
 
+# v959 follow-up — WHAT THIS WORKER PROCESS CAN RENDER.
+#
+# A worker pulls the served flow_worker.py once, at startup. A process that was
+# already running when a new render arm shipped therefore does NOT have that arm,
+# and nothing about its polling said so: the server handed it a movie-section
+# clip and it rendered the wide scene frame down the ordinary image-to-video
+# path, silently ignoring face_ref_urls and input_mode. Every poll now advertises
+# the arms this build carries, and the server holds a job it cannot render.
+#
+# The charswap arm predates this and is deliberately NOT listed: every worker in
+# the field already has it, so gating on it would strand live jobs.
+WORKER_ARMS = ("movie-section",)
+
+
 def get_pending_job(exclude_ids=None):
     """Get next pending job from API and claim it for this worker.
-    
+
     Args:
         exclude_ids: Set of job IDs to exclude (already being processed)
     """
-    url = f"/jobs/pending?worker_id={WORKER_ID}"
+    url = f"/jobs/pending?worker_id={WORKER_ID}&arms={','.join(WORKER_ARMS)}"
     if exclude_ids:
         url += f"&exclude={','.join(exclude_ids)}"
     result = api_request("GET", url)
@@ -8980,8 +9014,13 @@ def refresh_clip_statuses(job):
 
 
 def get_redo_clips():
-    """Get clips that need regeneration and claim them for this worker"""
-    result = api_request("GET", f"/clips/redo-pending?worker_id={WORKER_ID}")
+    """Get clips that need regeneration and claim them for this worker.
+
+    Advertises the same arms as the pending poll (see WORKER_ARMS): a worker
+    that cannot render a method must not be handed a clip that needs it.
+    """
+    result = api_request(
+        "GET", f"/clips/redo-pending?worker_id={WORKER_ID}&arms={','.join(WORKER_ARMS)}")
     if result and result.get("clips"):
         clips = result["clips"]
         return clips
@@ -20414,24 +20453,33 @@ def movie_section_submit_verdict(seen, hits, want, api_last):
     `want` is the chip count it was given). That pair is the decisive fact: it
     proves every chip reached the generate body.
 
-    api_last is page._flow_api_last, and it must be read with care. The shared
-    listener stashes EVERY request it watches — status polls, frontend log
-    posts, credits, agentInfo — and the sync-API dispatcher delivers those in
-    bursts, so by the time this runs the stash is usually the status poll that
-    followed the submit, carrying no shape at all. Judging that would REFUSE a
-    clip that is already rendering. So:
+    api_last is page._flow_api_last_generate — the DEDICATED generate slot, not
+    the any-request one. That distinction is what makes the shape check real.
+    The shared listener stashes EVERY request it watches — status polls,
+    frontend log posts, credits, agentInfo — and the sync-API dispatcher
+    delivers those in bursts, so the any-request slot almost always held the
+    status poll that followed the submit, carrying no shape at all. Every real
+    submit therefore left through the "unverified" door below and the shape was
+    never actually judged. Only a `batchAsyncGenerateVideo*` request writes the
+    generate slot, so:
 
-      - not a `batchAsyncGenerateVideo*` endpoint, or an empty shape
-        -> UNVERIFIED. Accept on the probe, and name what was captured instead.
+      - nothing captured, or an empty shape -> UNVERIFIED. Accept on the probe,
+        and name what was captured instead. With the dedicated slot this branch
+        now means no generate was captured AT ALL (the capture is off, or the
+        request never went out), not "a poll overwrote it".
       - a generate with a real shape -> judged. The SHAPE is the proof: a
         referenceImages submit is a section. startImage / startImage+endImage
         is a different render and fails closed. The videoModelKey only ADDS to
         that — an unread one (the capture parses the body best-effort) is not
         evidence against a shape that already passed, so it is reported, not
-        refused; a key that IS read and is not r2v still fails.
+        refused; a key that IS read and is not r2v still fails. Letting an
+        unread key pass is only safe BECAUSE the shape above was really judged:
+        the composer was proven to be on Ingredients by the request body. If
+        this function ever goes back to reading a slot that polls can overwrite,
+        the soft key becomes a hole and both must be tightened together.
 
     (The capture itself is ON by default; FLOW_API_CAPTURE=off is the
-    kill-switch. `api_last` being None means nothing has been captured yet.)
+    kill-switch. `api_last` being None means no generate has been captured.)
     """
     if not seen:
         return False, "no generate request observed after the click"
@@ -23136,7 +23184,10 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # Clear the captured shape FIRST: it holds the last submit the page
             # saw, which on clip 2 of a job is clip 1's. A stale entry could
             # hand this clip's verdict a shape no request of its own carried.
+            # Both slots: the generate-only one is what the verdict judges, the
+            # any-request one is what the diag records beside it.
             try:
+                page._flow_api_last_generate = None
                 page._flow_api_last = None
             except Exception:
                 pass
@@ -23145,14 +23196,18 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # means nothing here; the counts below are what the verdict reads.
             _ms_seen, _ = charswap_await_submit_verdict(page, want=len(_ms_chips))
             _ms_probe = getattr(page, "_charswap_submit_probe", None) or {}
+            # The verdict judges the GENERATE slot, not the any-request slot:
+            # the polls that follow a submit used to sit in the other one and
+            # sent every real submit down the "shape unverified" branch.
             _ms_accept, _ms_why = movie_section_submit_verdict(
                 _ms_seen, int(_ms_probe.get('hits', 0)), int(_ms_probe.get('want', 0)),
-                getattr(page, "_flow_api_last", None))
+                getattr(page, "_flow_api_last_generate", None))
             movie_section_write_diag(stage="submit_verdict", job_id=job_id, clip_index=clip_index,
                                      accepted=_ms_accept, why=_ms_why, chip_ids=_ms_chips,
                                      section_window_s=clip.get('section_window_s'),
                                      generate_requests_observed=_ms_probe.get('n_requests', 0),
                                      body_media_ids=_ms_probe.get('body_media_ids') or [],
+                                     api_generate=getattr(page, "_flow_api_last_generate", None),
                                      api_last=getattr(page, "_flow_api_last", None))
             print(f"{_ms_ctx} submit verdict: {_ms_accept} — {_ms_why}", flush=True)
             if not _ms_accept:

@@ -19,6 +19,7 @@ when `browser_driver.py` is missing or stale, fetches and rewrites it from
 `WEB_APP_URL` as a side effect of the import. A test run must not reach out to
 production or rewrite a worker file. The charswap suite solves it the same way.
 """
+import json
 import pathlib
 import re
 import sys
@@ -619,6 +620,162 @@ def test_the_captured_shape_is_cleared_before_the_click():
     click = arm.index("click_generate_button(page,")
     read = arm.index('getattr(page, "_flow_api_last", None)')
     assert clear < click < read
+
+
+# =============================================================================
+# 4.3 the dedicated generate slot — what makes the shape check real
+# =============================================================================
+#
+# The capture listener stashes EVERY watched request. A submit is followed
+# within milliseconds by status polls, frontend log posts and credit reads, and
+# the verdict waits up to 20s for the probe — so the shared slot almost always
+# held a poll by the time it was read, and every real submit was accepted
+# through the "shape unverified" door. The shape was never actually judged in
+# production. A second slot, written only by a submit, fixes that.
+
+_GEN_URL = ("https://aisandbox-pa.googleapis.com/v1/flow:"
+            "batchAsyncGenerateVideoReferenceImages")
+_START_URL = ("https://aisandbox-pa.googleapis.com/v1/flow:"
+              "batchAsyncGenerateVideoStartImage")
+_POLL_URL = ("https://aisandbox-pa.googleapis.com/v1/flow:"
+             "batchCheckAsyncVideoGenerationStatus")
+_GEN_BODY = json.dumps({"requests": [{"videoModelKey": "abra_r2v_8s",
+                                      "referenceImages": [{"mediaId": "m1"}]}]})
+_START_BODY = json.dumps({"requests": [{"videoModelKey": "veo_3_1_i2v",
+                                        "startImage": {"mediaId": "m1"}}]})
+
+
+class _Req:
+    """The three attributes the listener reads off a Playwright request."""
+
+    def __init__(self, url, body=None):
+        self.url = url
+        self.method = "POST"
+        self.post_data = body
+
+
+def _capture_listener(tmp_path):
+    """Install the REAL capture listener on a fake page; hand back both.
+
+    Feeding fake requests through the shipped listener is the only honest way
+    to test which slot a request lands in — the alternative is re-typing the
+    condition in the test and pinning the copy.
+    """
+    installed = []
+
+    class _Page:
+        def on(self, event, fn):
+            installed.append((event, fn))
+
+    install = _worker_function("_install_flow_api_capture", extra_ns={
+        "_flow_api_capture_enabled": lambda: True,
+        "_flow_api_capture_path": lambda: str(tmp_path / "capture.jsonl"),
+        "SESSION_FOLDER": str(tmp_path),
+    })
+    page = _Page()
+    install(page)
+    assert installed and installed[0][0] == "request"
+    return page, installed[0][1]
+
+
+def test_a_status_poll_lands_in_the_shared_slot_and_not_the_generate_one(tmp_path):
+    page, listener = _capture_listener(tmp_path)
+    listener(_Req(_GEN_URL, _GEN_BODY))
+    captured = dict(page._flow_api_last_generate)
+    assert captured["shape"] == "referenceImages"
+    assert captured["videoModelKey"] == "abra_r2v_8s"
+    listener(_Req(_POLL_URL, "{}"))
+    assert page._flow_api_last["shape"] == ""          # the shared slot moved on
+    assert page._flow_api_last_generate == captured    # this one did not
+
+
+def test_the_slot_the_arm_reads_now_carries_a_shape_where_it_read_a_poll(tmp_path):
+    """The whole point: same two requests, two different verdicts."""
+    verdict = _worker_function("movie_section_submit_verdict")
+    page, listener = _capture_listener(tmp_path)
+    listener(_Req(_GEN_URL, _GEN_BODY))
+    listener(_Req(_POLL_URL, "{}"))
+    ok, why = verdict(True, 3, 3, getattr(page, "_flow_api_last", None))
+    assert ok and "unverified" in why                  # what it used to read
+    ok, why = verdict(True, 3, 3, getattr(page, "_flow_api_last_generate", None))
+    assert ok and "shape=referenceImages" in why       # what it reads now
+
+
+def test_a_start_image_submit_followed_by_a_poll_is_now_actually_refused(tmp_path):
+    """The wrong render this check exists to catch. Before the dedicated slot
+    the poll hid it and the clip was accepted."""
+    verdict = _worker_function("movie_section_submit_verdict")
+    page, listener = _capture_listener(tmp_path)
+    listener(_Req(_START_URL, _START_BODY))
+    listener(_Req(_POLL_URL, "{}"))
+    assert verdict(True, 3, 3, getattr(page, "_flow_api_last", None))[0] is True
+    ok, why = verdict(True, 3, 3, getattr(page, "_flow_api_last_generate", None))
+    assert not ok and "startImage" in why
+
+
+def test_nothing_captured_at_all_is_still_unverified_not_a_refusal(tmp_path):
+    """With the capture off, or before any request, the slot is empty. That must
+    stay an accept-on-the-probe — refusing would kill a clip already rendering."""
+    verdict = _worker_function("movie_section_submit_verdict")
+    ok, why = verdict(True, 3, 3, None)
+    assert ok and "unverified" in why
+
+
+def test_only_a_submit_endpoint_writes_the_generate_slot(tmp_path):
+    """Guarded by the v770 substring, which that rule already proved matches
+    every submit endpoint and no status poll."""
+    body = _body(_worker_src(), "_install_flow_api_capture")
+    assert "page._flow_api_last = _cap" in body
+    guard = body.index("if _SUBMIT_BIND_URL_SUBSTR in endpoint:")
+    assert guard < body.index("page._flow_api_last_generate = _cap")
+    assert body.count("_flow_api_last_generate") == 1
+
+
+def test_the_arm_clears_and_reads_the_generate_slot(tmp_path):
+    arm = _arm_block(_worker_src())
+    clear = arm.index("page._flow_api_last_generate = None")
+    click = arm.index("click_generate_button(page,")
+    read = arm.index('getattr(page, "_flow_api_last_generate", None)')
+    assert clear < click < read
+    # the verdict is handed the generate slot, not the shared one
+    call = arm[arm.index("movie_section_submit_verdict("):]
+    call = call[:call.index(")\n")]
+    assert '_flow_api_last_generate' in call and '"_flow_api_last", None' not in call
+
+
+def test_the_verdict_says_why_an_unread_model_key_is_allowed_to_pass(tmp_path):
+    """An unread videoModelKey stays a pass. That is only safe because the shape
+    above it is now really judged, and the docstring has to say so — otherwise
+    the next person to move this back to the shared slot reopens a hole."""
+    doc = _body(_worker_src(), "movie_section_submit_verdict")
+    doc = doc[doc.index('"""'):doc.index('"""', doc.index('"""') + 3)]
+    assert "_flow_api_last_generate" in doc
+    assert "only safe BECAUSE the shape above was really judged" in doc
+
+
+# =============================================================================
+# 4.4 the claim-time arm — a worker says what it can render
+# =============================================================================
+
+def test_both_polls_advertise_the_arms_this_build_carries():
+    """A worker pulls flow_worker.py once, at startup. A process older than the
+    arm's deploy does not have it, and would render a section clip as an
+    ordinary animation of the wide frame. Saying so at claim time is the only
+    place the server can tell."""
+    src = _worker_src()
+    assert 'WORKER_ARMS = ("movie-section",)' in src
+    assert 'f"/jobs/pending?worker_id={WORKER_ID}&arms={\',\'.join(WORKER_ARMS)}"' in src
+    assert ('f"/clips/redo-pending?worker_id={WORKER_ID}'
+            '&arms={\',\'.join(WORKER_ARMS)}"') in src
+
+
+def test_the_charswap_arm_is_deliberately_not_advertised():
+    """Every worker in the field already has it; gating on it would strand live
+    jobs behind a param no running worker sends."""
+    src = _worker_src()
+    block = src[src.index("WORKER_ARMS = ("):]
+    assert "charswap" not in block[:block.index("\n")]
+    assert "charswap arm predates this" in src
 
 
 def test_the_ghost_check_exempts_a_confirmed_section_submit():

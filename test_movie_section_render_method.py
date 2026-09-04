@@ -1118,3 +1118,160 @@ def test_the_column_readback_route_names_both_methods():
     assert "the render-method columns (v943 charswap + v959 movie-section)" in src
     assert "[v943/v959] column readback" in src
 
+
+# --- 14. the claim-time arm gate --------------------------------------------
+#
+# MOVIE_SECTION_ARM_SHIPPED says the SERVED worker file carries the arm. It says
+# nothing about a worker PROCESS that was already running when that file
+# shipped: a worker pulls flow_worker.py once, at startup. Such a worker would
+# take a section job down the ordinary image-to-video path with face_ref_urls
+# and input_mode ignored — a plain render of the wide two-shot, at full cost.
+# So the poll now advertises its arms and the server holds what it cannot run.
+
+def test_the_arm_param_is_read_case_and_space_insensitively():
+    from main import _v959_poller_has_arm
+    assert _v959_poller_has_arm("movie-section") is True
+    assert _v959_poller_has_arm(" Movie-Section , charswap ") is True
+    assert _v959_poller_has_arm("charswap,something-else") is False
+
+
+def test_a_poller_that_says_nothing_is_treated_as_having_no_arm():
+    """Fail closed. Every worker running before this shipped sends no param at
+    all, and those are exactly the ones without the arm."""
+    from main import _v959_poller_has_arm
+    assert _v959_poller_has_arm(None) is False
+    assert _v959_poller_has_arm("") is False
+    assert _v959_poller_has_arm(" , , ") is False
+
+
+class _ArmJob:
+    def __init__(self, jid, methods=()):
+        self.id = jid
+        self.clips = [_RedoClip(render_method=m) for m in methods]
+
+
+class _FakeOrderedQuery:
+    """The two reads the gate makes on an ordered query: first() and limit().all()."""
+
+    def __init__(self, jobs):
+        self.jobs = list(jobs)
+        self._limit = None
+
+    def first(self):
+        return self.jobs[0] if self.jobs else None
+
+    def limit(self, n):
+        self._limit = n
+        return self
+
+    def all(self):
+        return self.jobs[:self._limit] if self._limit is not None else list(self.jobs)
+
+
+def test_a_job_needs_the_arm_when_any_clip_on_it_is_a_section():
+    from main import _v959_job_needs_arm
+    assert _v959_job_needs_arm(_ArmJob("j", ("movie-section",))) is True
+    assert _v959_job_needs_arm(_ArmJob("j", (None, "movie-section"))) is True
+    assert _v959_job_needs_arm(_ArmJob("j", (None, "charswap"))) is False
+    assert _v959_job_needs_arm(_ArmJob("j", ())) is False
+
+
+def test_a_job_whose_clips_cannot_be_read_counts_as_needing_the_arm():
+    """Guessing 'no' here hands out the exact render this gate exists to stop."""
+    from main import _v959_job_needs_arm
+
+    class _Broken:
+        id = "j"
+
+        @property
+        def clips(self):
+            raise RuntimeError("detached from the session")
+
+    assert _v959_job_needs_arm(_Broken()) is True
+
+
+def test_a_section_job_is_not_handed_to_a_poller_without_the_arm():
+    from main import _v959_next_job_for_poller
+    q = _FakeOrderedQuery([_ArmJob("aaaaaaaa", ("movie-section",))])
+    assert _v959_next_job_for_poller(q, None, "w1", "local-worker") is None
+    assert _v959_next_job_for_poller(q, "charswap", "w1", "local-worker") is None
+
+
+def test_the_same_section_job_is_handed_over_once_the_poller_says_it_has_the_arm():
+    from main import _v959_next_job_for_poller
+    job = _ArmJob("aaaaaaaa", ("movie-section",))
+    q = _FakeOrderedQuery([job])
+    assert _v959_next_job_for_poller(q, "movie-section", "w1", "local-worker") is job
+
+
+def test_a_legacy_job_behind_a_held_section_job_is_still_handed_out():
+    """Returning nothing on a section job at the head would starve every
+    ordinary job behind it — the queue must keep moving."""
+    from main import _v959_next_job_for_poller
+    held = _ArmJob("aaaaaaaa", ("movie-section",))
+    legacy = _ArmJob("bbbbbbbb", (None,))
+    q = _FakeOrderedQuery([held, legacy])
+    assert _v959_next_job_for_poller(q, None, "w1", "user-worker") is legacy
+
+
+def test_an_armed_poller_takes_the_head_of_the_queue_exactly_as_before():
+    """No behaviour change for a worker that has the arm: same query, same
+    first(). The walk is only for the workers that would render it wrong."""
+    from main import _v959_next_job_for_poller
+    head = _ArmJob("aaaaaaaa", (None,))
+    q = _FakeOrderedQuery([head, _ArmJob("bbbbbbbb", (None,))])
+    assert _v959_next_job_for_poller(q, "movie-section", "w1", "local-worker") is head
+    assert q._limit is None      # first(), not a walk
+    # …and an ordinary queue reads the same for an armless poller.
+    q2 = _FakeOrderedQuery([head, _ArmJob("bbbbbbbb", (None,))])
+    assert _v959_next_job_for_poller(q2, None, "w1", "local-worker") is head
+
+
+def test_the_walk_is_bounded_so_one_poll_cannot_scan_the_table():
+    from main import _v959_next_job_for_poller
+    q = _FakeOrderedQuery([_ArmJob(f"job{i:04d}", ("movie-section",)) for i in range(60)])
+    assert _v959_next_job_for_poller(q, None, "w1", "local-worker") is None
+    assert q._limit == 25
+
+
+def test_a_section_redo_clip_is_held_from_a_worker_without_the_arm():
+    from main import _v959_hold_section_redos
+    section = _RedoClip(render_method="movie-section")
+    section.id = "c1"
+    legacy = _RedoClip(render_method=None)
+    legacy.id = "c2"
+    kept = _v959_hold_section_redos([section, legacy], None, "w1", "user-worker")
+    assert kept == [legacy]
+    # Held, not flipped — the v945.14 door owns the status change.
+    assert section.status == "flow_redo_queued"
+    # An armed worker sees the list untouched.
+    assert _v959_hold_section_redos(
+        [section, legacy], "movie-section", "w1", "user-worker") == [section, legacy]
+
+
+def test_both_pending_routes_and_both_redo_routes_call_the_gate():
+    """A gate on three of the four doors is not a gate."""
+    for route, call in (
+        ("local_worker_get_pending_job", "_v959_next_job_for_poller("),
+        ("user_worker_get_pending_job", "_v959_next_job_for_poller("),
+        ("local_worker_get_redo_clips", "_v959_hold_section_redos("),
+        ("user_worker_get_redo_clips", "_v959_hold_section_redos("),
+    ):
+        src = _function_source(route, "main.py")
+        assert call in src, route
+        # the arms param has to reach it, or the gate reads None forever
+        assert "arms: Optional[str] = Query(" in src, route
+    # no `.first()` left on a pending query — that is the ungated read
+    for route in ("local_worker_get_pending_job", "user_worker_get_pending_job"):
+        src = _function_source(route, "main.py")
+        assert "query.order_by(Job.created_at.asc()).first()" not in src, route
+
+
+def test_the_worker_advertises_the_arm_on_both_polls():
+    """Server-side gate + worker-side claim are one mechanism; a worker that
+    never sends the param is held out of every section job."""
+    src = (_HERE / "static" / "flow_worker.py").read_text(encoding="utf-8")
+    assert 'WORKER_ARMS = ("movie-section",)' in src
+    assert 'f"/jobs/pending?worker_id={WORKER_ID}&arms={\',\'.join(WORKER_ARMS)}"' in src
+    assert 'f"/clips/redo-pending?worker_id={WORKER_ID}&arms={\',\'.join(WORKER_ARMS)}"' in src
+
