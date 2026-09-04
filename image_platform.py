@@ -9224,10 +9224,11 @@ def _import_scene_table_impl(
 
     # v959 — the movie-section latch. Rows have already been flushed by the time
     # this runs (the batch and its image nodes); what makes the refusal whole is
-    # the wrapper's db.rollback() on HTTPException (~7190), which throws the
-    # whole transaction away. That is the same reason the charswap bindings are
-    # resolved here: a build that cannot be rendered must not be half-imported.
-    # Same one spelling of the question as v945.8 above.
+    # the caller, import_scene_table, whose HTTPException branch calls
+    # db.rollback() and throws the whole transaction away. That is the same
+    # reason the charswap bindings are resolved here: a build that cannot be
+    # rendered must not be half-imported. Same one spelling of the question as
+    # v945.8 above.
     if not MOVIE_SECTION_ARM_SHIPPED and any(
         (s.get("render_method") or "").strip().lower() == MOVIE_SECTION_RENDER_METHOD
         for s in storyboard_scenes
