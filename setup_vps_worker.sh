@@ -85,6 +85,15 @@ cat > "$WORKER_DIR/run.sh" << 'RUNSH'
 cd "$(dirname "$0")"
 [ -f .env ] && set -a && source .env && set +a
 export DISPLAY=:99
+# Unbuffered, or worker.log lags reality by ~24 minutes and a working worker
+# reads as hung. flow_worker.py prints its poll line in three places and only
+# ONE of them flushes, so the output only looks live when stdout is a terminal.
+# Here it is a PIPE into tee, which block-buffers harder than a file does --
+# and the whole point of `tee -a worker.log` is a log someone can read.
+# The discriminator, if you are ever staring at a silent log: ask whether the
+# platform OWES clips (tools/launch_workers.py says). A quiet log is not
+# evidence in either direction.
+export PYTHONUNBUFFERED=1
 pgrep -x Xvfb > /dev/null || { Xvfb :99 -screen 0 1920x1080x24 -ac & sleep 2; echo "✓ Xvfb started"; }
 while true; do
     python3 flow_worker.py --single 2>&1 | tee -a worker.log
@@ -127,6 +136,10 @@ User=$USER
 WorkingDirectory=$WORKER_DIR
 EnvironmentFile=$WORKER_DIR/.env
 Environment=DISPLAY=:99
+# Same reason as run.sh: systemd captures stdout through a pipe into the
+# journal, so without this journalctl lags by ~24 minutes and a healthy worker
+# looks dead. Only one of flow_worker.py three poll prints flushes.
+Environment=PYTHONUNBUFFERED=1
 ExecStartPre=/bin/bash -c 'pgrep Xvfb || Xvfb :99 -screen 0 1920x1080x24 -ac &'
 ExecStartPre=/bin/sleep 2
 ExecStart=/usr/bin/python3 $WORKER_DIR/flow_worker.py --single
