@@ -20369,7 +20369,10 @@ def movie_section_fetch_inputs(clip, temp_dir, context="[v959]"):
     if not scene and clip.get('start_frame_url'):
         scene = download_frame(clip['start_frame_url'],
                                os.path.join(temp_dir, f"ms_scene_{clip.get('clip_index', 0)}.png"))
-    faces = list(clip.get('face_ref_locals') or [])
+    # Blanks are dropped BEFORE the count guard: ["", "/f2.png"] is one usable
+    # file, not two. Counting the blank would clear the all-or-nothing check
+    # here and hand the attach an empty path instead.
+    faces = [p for p in (clip.get('face_ref_locals') or []) if p]
     declared = list(clip.get('face_ref_urls') or [])
     if faces and declared and len(faces) != len(declared):
         print(f"{context} face refs handed in partially: {len(faces)} local file(s) "
@@ -20420,8 +20423,12 @@ def movie_section_submit_verdict(seen, hits, want, api_last):
 
       - not a `batchAsyncGenerateVideo*` endpoint, or an empty shape
         -> UNVERIFIED. Accept on the probe, and name what was captured instead.
-      - a generate with a real shape -> judged. referenceImages + an r2v key
-        pass; startImage / i2v / t2v is a different render and fails closed.
+      - a generate with a real shape -> judged. The SHAPE is the proof: a
+        referenceImages submit is a section. startImage / startImage+endImage
+        is a different render and fails closed. The videoModelKey only ADDS to
+        that — an unread one (the capture parses the body best-effort) is not
+        evidence against a shape that already passed, so it is reported, not
+        refused; a key that IS read and is not r2v still fails.
 
     (The capture itself is ON by default; FLOW_API_CAPTURE=off is the
     kill-switch. `api_last` being None means nothing has been captured yet.)
@@ -20435,12 +20442,13 @@ def movie_section_submit_verdict(seen, hits, want, api_last):
     if "batchAsyncGenerateVideo" not in endpoint or not shape:
         return True, (f"{hits}/{want} media in body; input shape unverified "
                       f"(last capture was {endpoint or 'nothing'}/{shape or '-'})")
-    model_key = api_last.get("videoModelKey") or "-"
+    model_key = api_last.get("videoModelKey") or ""
     if shape != "referenceImages":
         return False, f"submit shape was {shape}, not referenceImages — the composer was not on Ingredients"
-    if "r2v" not in model_key:
+    if model_key and "r2v" not in model_key:
         return False, f"videoModelKey {model_key} is not a reference-to-video key"
-    return True, f"{hits}/{want} media, shape=referenceImages, model={model_key}"
+    return True, (f"{hits}/{want} media, shape=referenceImages, "
+                  f"model={model_key or 'unread'}")
 
 
 def movie_section_attach_and_prompt(page, scene_path, face_paths, prompt, context="[v959]"):

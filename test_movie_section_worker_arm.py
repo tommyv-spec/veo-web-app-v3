@@ -150,6 +150,19 @@ def test_a_status_poll_overwriting_the_capture_is_unverified_not_a_refusal():
         assert "unverified" in why and poll["endpoint"] in why
 
 
+def test_a_reference_images_generate_with_no_model_key_is_still_accepted():
+    """The SHAPE is the proof that the composer was on Ingredients. An unread
+    videoModelKey (the capture parses the body best-effort) says nothing
+    against it, so refusing on it would fail a proven section."""
+    verdict = _worker_function("movie_section_submit_verdict")
+    for key in ("", None):
+        ok, why = verdict(seen=True, hits=3, want=3,
+                          api_last={"endpoint": "batchAsyncGenerateVideoReferenceImages",
+                                    "shape": "referenceImages", "videoModelKey": key})
+        assert ok, key
+        assert "unread" in why and "referenceImages" in why
+
+
 def test_a_generate_with_an_empty_shape_is_unverified_too():
     """A generate whose body could not be parsed says nothing about the shape."""
     verdict = _worker_function("movie_section_submit_verdict")
@@ -230,6 +243,18 @@ def test_a_partial_set_of_locals_is_refused_not_silently_completed():
     assert fn({"clip_index": 0, "start_frame_local": "/l/s.png",
                "face_ref_locals": ["/l/f1.png"],
                "face_ref_urls": ["https://x/f1.png", "https://x/f2.png"]}, "/tmp") == (None, [])
+
+
+def test_an_empty_local_path_is_refused_at_the_fetch_not_inside_the_attach():
+    """`["", "/f2.png"]` is one usable file, not two. Counting the blank would
+    pass the all-or-nothing guard here and hand the attach an empty path, so
+    the failure would surface as a chip that would not attach — a much longer
+    way round to the same refusal, with a browser click spent on it."""
+    fn, calls = _fetch_inputs()
+    assert fn({"clip_index": 0, "start_frame_local": "/l/s.png",
+               "face_ref_locals": ["", "/l/f2.png"],
+               "face_ref_urls": ["https://x/f1.png", "https://x/f2.png"]}, "/tmp") == (None, [])
+    assert calls == []
 
 
 # =============================================================================
