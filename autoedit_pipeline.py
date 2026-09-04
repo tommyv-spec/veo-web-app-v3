@@ -225,6 +225,30 @@ def local_styles():
         if TEMPLATES_DIR.exists() else []
 
 
+def pick_companion(outs, base_fn, prefix):
+    """v698A.2.4 — the companion file (`final_broll_` / `support_track_`) that
+    belongs to THIS export. The base is `final_export_<job8>_<stamp>_<hash>.mp4`
+    and every export stamps its companions with the same `<job8>_<stamp>_<hash>`
+    stem (v825.6 support tracks, v938.15 full-frame b-roll). Exact stem match
+    first (the first aspect ratio wins for support tracks, as before); otherwise
+    the NEWEST companion by name — stamps sort chronologically — said out loud;
+    None when the job has no such file. `list-outputs` is sorted by name, which
+    is why a bare `next(...)` used to return the OLDEST b-roll.
+    """
+    mp4s = [f for f in (outs or []) if f.startswith(prefix) and f.endswith(".mp4")]
+    if not mp4s:
+        return None
+    stem = Path(base_fn or "").stem
+    if stem.startswith("final_export_"):
+        stem = stem[len("final_export_"):]
+    same = [f for f in mp4s if stem and stem in f]
+    if same:
+        return sorted(same)[0]
+    newest = sorted(mp4s)[-1]
+    print(f"  {prefix}*: none carries this export's stem ({stem or '?'}) — using the newest: {newest}")
+    return newest
+
+
 def api_get(path, token, stream=False):
     import requests
     r = requests.get(f"{BASE_URL}{path}", headers={"Authorization": f"Bearer {token}"},
@@ -314,13 +338,21 @@ def fetch_job_files(job_id, work: Path, music_filename=None, hook_bg_filename=No
     # Concurrency note: the queue admits ONE run per job (the FOR UPDATE
     # can_queue read + the 409 guard), so no second run races this marker.
     outs = api_get(f"/api/jobs/{job_id}/list-outputs", token).json()["files"]
-    sup_fn = next((f for f in outs if f.startswith("support_track_") and f.endswith(".mp4")), None)
+    # v698A.2.4 — the companion files must belong to the SAME export as the
+    # base. `list-outputs` is sorted by name, so `next(...)` took the OLDEST
+    # `final_broll_` while `base_fn` is the NEWEST export: on d74ab616 (three
+    # exports on 2026-09-04) the run composed export 3's speaker with export
+    # 1's b-roll, the one whose cutaways were still stacked on whole sentences.
+    # Every export stamps its companions with its own `<job8>_<stamp>_<hash>`
+    # stem (v825.6), so match on that; fall back to the newest by stamp, and
+    # say so, only when no companion carries the base's stem.
+    sup_fn = pick_companion(outs, base_fn, "support_track_")
     # v938.15 — jobs also export `final_broll_<job>_<stamp>.mp4`: the b-roll as a
     # FULL-FRAME 1080x1920 sharp video, not the 16:9 band. That is the file the
     # operator composites behind the corner speaker in CapCut, and until now
     # nothing here ever looked for it — which is why the hook had no real
     # background to use and fell back to blurring a scrap of the 16:9 track.
-    broll_fn = next((f for f in outs if f.startswith("final_broll_") and f.endswith(".mp4")), None)
+    broll_fn = pick_companion(outs, base_fn, "final_broll_")
     # v938.16 — an explicit hook background wins over the auto-picked one, and
     # may be a still image (see autoedit_qc.HOOK_BG_EXTENSIONS).
     if hook_bg_filename:
