@@ -10714,7 +10714,22 @@ def prepare_batch_for_video(
         # v961 — the scene-level value off the assignment row. When this
         # function is fed DB rows (the real batch path) the per-line array
         # is absent and THIS is the only carrier.
-        _scene_veo_model = scene.get("veo_model") or None
+        # v961.2 — take it from the FRESH PARSE first, exactly as v682p does
+        # for veo_prompts and for the same stated reason: "stop trying to keep
+        # assignment rows in sync with the markdown, just always read the
+        # markdown. source_markdown is the source of truth at prepare time."
+        # This also makes the field work on batches imported BEFORE the column
+        # existed, whose rows are NULL — without it they would need a fresh
+        # batch and 47 regenerated images to pick up a model declaration.
+        _fresh_for_model = fresh_scenes_by_idx.get(scene.get("scene_index"))
+        _scene_veo_model = (
+            ((_fresh_for_model or {}).get("veo_model") or None)
+            or (scene.get("veo_model") or None)
+        )
+        # v961.2 — also override the per-line array from the fresh parse, so a
+        # two-model scene is not flattened to the row's single value.
+        if _fresh_for_model and _fresh_for_model.get("clip_veo_models"):
+            scene_clip_veo_models = _fresh_for_model["clip_veo_models"]
 
         # v681 — text-card / caption / cast denorm. Scene-scoped fields
         # — same value across all dialogue lines in the scene.

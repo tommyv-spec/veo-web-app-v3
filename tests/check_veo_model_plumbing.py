@@ -95,6 +95,19 @@ assert f'getattr(_assignment, "{FIELD}", None)' in ip_src, \
      "its clip_specs would carry an always-absent key, making the v961 conflict "
      "check decorative and the Clip row NULL")
 
+# ── 3c. prepare_batch_for_video must prefer the FRESH MARKDOWN PARSE ─────────
+# v682p's stated doctrine for this function: "stop trying to keep assignment
+# rows in sync with the markdown, just always read the markdown. source_markdown
+# is the source of truth at prepare time." Reading only the row means a batch
+# imported before the column existed can never pick up a model declaration
+# without a fresh batch and a full image regeneration.
+assert '_fresh_for_model = fresh_scenes_by_idx.get(scene.get("scene_index"))' in ip_src, \
+    ("prepare_batch_for_video does not look veo_model up in the fresh parse — "
+     "it would read only the assignment row, which is NULL on any batch "
+     "imported before the column existed")
+assert '(_fresh_for_model or {}).get("veo_model")' in ip_src, \
+    "the fresh-parse value is not preferred over the stored row"
+
 # ── 4. the markdown parser reads the bullet and resolves it ──────────────────
 assert f"{FIELD}" in ip_src, "image_platform does not mention veo_model"
 assert "ALLOWED_VEO_MODELS" in ip_src, \
