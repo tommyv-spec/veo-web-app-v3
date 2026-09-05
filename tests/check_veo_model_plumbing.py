@@ -60,6 +60,41 @@ assert f"ALTER TABLE clips ADD COLUMN {FIELD} VARCHAR" in ip_src, \
 assert f"ALTER TABLE clips ADD COLUMN IF NOT EXISTS {FIELD} VARCHAR" in ip_src, \
     "postgres migration missing"
 
+# ── 3b. THE ASSIGNMENT ROW MUST CARRY IT TOO ─────────────────────────────────
+# The column on `clips` is NOT enough. BOTH promote paths — prepare_batch_for_video
+# (the batch/browser route) and promote_batch_to_video (the CLI route) — build
+# their per-scene dicts from ImageSceneAssignment ROWS, not from the markdown.
+# A value that lives only in the parser output is therefore always None by the
+# time a Clip row is written: the bullet parses, validates, passes every gate,
+# and reaches the worker as NULL.
+#
+# This is not hypothetical. `explicit_target_s` had exactly this bug until
+# v889.1 ("Until the assignment row gained the column this was ALWAYS None, so
+# the override never fired and the anchor gap won silently"), and v961 shipped
+# with it too — caught 2026-09-05 by tracing the promote path of a real batch,
+# after the auditor, the linter, the platform check and this very file were all
+# green. Hence this section.
+assert hasattr(image_platform.ImageSceneAssignment, FIELD), \
+    ("ImageSceneAssignment is missing the veo_model column — both promote paths "
+     "read scenes from these rows, so the per-clip model would always be NULL "
+     "on the Clip (the v889.1 / v698A.2.1 failure)")
+assert f'"{FIELD}": self.{FIELD}' in ip_src, \
+    "ImageSceneAssignment.to_dict() does not serialise veo_model"
+assert f'("image_scene_assignments", "{FIELD}",' in ip_src, \
+    "no image_scene_assignments.veo_model migration row"
+assert f"ALTER TABLE image_scene_assignments ADD COLUMN {FIELD} VARCHAR" in ip_src, \
+    "sqlite migration missing for image_scene_assignments"
+assert f"ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS {FIELD} VARCHAR" in ip_src, \
+    "postgres migration missing for image_scene_assignments"
+assert f'{FIELD}=s.get("{FIELD}")' in ip_src, \
+    "assignment creation does not persist veo_model from the parsed scene"
+assert f'"{FIELD}": next((m for m in clip_veo_models if m), None)' in ip_src, \
+    "the parser does not emit a SCENE-level veo_model for the assignment row"
+assert f'getattr(_assignment, "{FIELD}", None)' in ip_src, \
+    ("promote_batch_to_video does not read veo_model off the assignment row — "
+     "its clip_specs would carry an always-absent key, making the v961 conflict "
+     "check decorative and the Clip row NULL")
+
 # ── 4. the markdown parser reads the bullet and resolves it ──────────────────
 assert f"{FIELD}" in ip_src, "image_platform does not mention veo_model"
 assert "ALLOWED_VEO_MODELS" in ip_src, \

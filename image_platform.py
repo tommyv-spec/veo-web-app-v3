@@ -285,6 +285,9 @@ def run_image_platform_migrations():
         # only; Clip already carries its own target_duration_s.
         ("image_scene_assignments", "explicit_target_s",
          "ALTER TABLE image_scene_assignments ADD COLUMN explicit_target_s REAL"),
+        # v961: the scene's per-clip render model. NULL = the job-level model.
+        ("image_scene_assignments", "veo_model",
+         "ALTER TABLE image_scene_assignments ADD COLUMN veo_model VARCHAR(64)"),
         ("clips", "audio_from_scene",
          "ALTER TABLE clips ADD COLUMN audio_from_scene INTEGER"),
         # v718i (NEW 2026-05-18): end_frame_image_node_id on clips +
@@ -528,6 +531,9 @@ def run_image_platform_migrations():
         # v889 — see SQLite migration above.
         ("image_scene_assignments", "explicit_target_s",
          "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS explicit_target_s REAL"),
+        # v961: the scene's per-clip render model. NULL = the job-level model.
+        ("image_scene_assignments", "veo_model",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS veo_model VARCHAR(64)"),
         ("clips", "audio_from_scene",
          "ALTER TABLE clips ADD COLUMN IF NOT EXISTS audio_from_scene INTEGER"),
         # v718i (NEW 2026-05-18): see SQLite migration above.
@@ -1761,6 +1767,16 @@ class ImageSceneAssignment(Base):
     # overriding it). This column is the raw declaration, independent of any
     # anchor and of the 1-based/0-based scene numbering.
     explicit_target_s = Column(Float, nullable=True)
+
+    # v961 — the scene's per-clip render model, so a job can mix them.
+    # THE SAME TRAP AS explicit_target_s ABOVE: prepare_batch_for_video and
+    # promote_batch_to_video build their scene dicts from THESE ROWS, not
+    # from the markdown, so a value that lives only in the parser output is
+    # silently always None by the time a Clip row is written. Measured
+    # 2026-09-05: without this column the v961 bullet parsed, validated,
+    # passed every gate and reached the worker as NULL.
+    # NULL = no override, the job-level model applies.
+    veo_model = Column(String(64), nullable=True)
     # v681e.10: per-scene speaker_mode (NULL | 'on-camera' | 'voiceover' |
     # 'silent' | 'auto'). Denorm of the parsed value so prepare_batch_for_video
     # can detect silent scenes after assignments are loaded back from DB.
@@ -1896,6 +1912,7 @@ class ImageSceneAssignment(Base):
             # v889 — the AUTHORED bullet, not the derived duration. prepare
             # asks for exactly this key at the v667 anchor site.
             "explicit_target_s": self.explicit_target_s,
+            "veo_model": self.veo_model,          # v961 per-clip render model
             # v681e.10 — silent scenes are detected by prepare_batch_for_video
             # via this field; without it, silent scenes never reach the
             # synthetic flat-row branch and disappear from the storyboard editor.
@@ -6360,6 +6377,13 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "pads": pads,  # v644 — parallel to lines/action_notes; entries are str or None
             "clip_durations": clip_durations,  # v861 — parallel to lines; int (4|6|8|10) or None
             "clip_veo_models": clip_veo_models,  # v961 — parallel to lines; model string or None
+            # v961 — the SCENE's model, which is what survives onto the
+            # ImageSceneAssignment row (one row per scene). The per-line
+            # array above is richer, but the assignment table is scene-
+            # grained and BOTH promote paths build their scene dicts from
+            # THOSE ROWS, so a per-line-only value never reaches a Clip.
+            # First declared model in the scene wins; a scene is one shot.
+            "veo_model": next((m for m in clip_veo_models if m), None),
             "speaker_mode": speaker_mode,  # v537
             "cut_mode": cut_mode,  # v668 — None | 'whisper' | 'timeline' | 'auto'
             "explicit_target_s": explicit_target_s,  # v889 — authored, outranks the v667 anchor diff
@@ -9573,6 +9597,9 @@ def _import_scene_table_impl(
             # anchor diff. Before this line the parser read it and the row
             # threw it away, so the override never fired on this path.
             explicit_target_s=s.get("explicit_target_s"),
+            # v961 — the scene's render model. NULL on every scene that
+            # does not declare one, i.e. every pre-v961 build.
+            veo_model=s.get("veo_model"),
             # v681e.10 — denorm speaker_mode so prepare_batch_for_video
             # can detect silent scenes when assignments are loaded back
             # from DB. Without this, silent scenes are dropped from the
@@ -10684,6 +10711,10 @@ def prepare_batch_for_video(
         scene_clip_durations: List[Optional[int]] = scene.get("clip_durations") or []
         # v961 — parallel to lines, same shape as clip_durations above.
         scene_clip_veo_models: List[Optional[str]] = scene.get("clip_veo_models") or []
+        # v961 — the scene-level value off the assignment row. When this
+        # function is fed DB rows (the real batch path) the per-line array
+        # is absent and THIS is the only carrier.
+        _scene_veo_model = scene.get("veo_model") or None
 
         # v681 — text-card / caption / cast denorm. Scene-scoped fields
         # — same value across all dialogue lines in the scene.
@@ -10908,8 +10939,9 @@ def prepare_batch_for_video(
                 ) if scene_is_silent else None,
                 # v961 — a silent scene's own render model, from its dangling
                 # bullet. NULL = the job-level model applies.
-                "veo_model": (scene_clip_veo_models[0]
-                              if scene_clip_veo_models else None),
+                "veo_model": ((scene_clip_veo_models[0]
+                               if scene_clip_veo_models else None)
+                              or _scene_veo_model),
                 # v681 — scene metadata. text_card carries caption+bg+duration;
                 # silent scenes carry scene_type=shot (or None) so the
                 # video processor doesn't try to drawtext-render them.
@@ -11030,9 +11062,10 @@ def prepare_batch_for_video(
                 # scoped: a scene with two lines can render them on two models,
                 # exactly as v861 lets it render them at two durations. NULL =
                 # the job-level model applies, which is every pre-v961 build.
-                "veo_model": (scene_clip_veo_models[i_in_scene]
-                              if i_in_scene < len(scene_clip_veo_models)
-                              else None),
+                "veo_model": ((scene_clip_veo_models[i_in_scene]
+                               if i_in_scene < len(scene_clip_veo_models)
+                               else None)
+                              or _scene_veo_model),
                 # v681 — text-card / caption denorm onto the flat row.
                 # Scene-scoped (same as clip_mode/transition convention):
                 # only the first line of a scene carries the values; later
@@ -12990,6 +13023,14 @@ def promote_batch_to_video(
                     if _assignment is not None else None
                 ),
                 "composite_plate_prompt": ((vp_i or {}).get("plate_prompt") or None),
+                # v961 — the scene's render model, off the SAME assignment
+                # row render_method comes from. Without it the v961 conflict
+                # check below reads an always-absent key (decorative) and the
+                # Clip row is written NULL.
+                "veo_model": (
+                    getattr(_assignment, "veo_model", None)
+                    if _assignment is not None else None
+                ),
                 # v943 — charswap binding straight off the assignment row.
                 # None on every scene that renders the normal way.
                 "render_method": (
