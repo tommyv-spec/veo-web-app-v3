@@ -120,3 +120,10 @@ def test_v962_video_worker_does_not_kill_on_missing_badge_on_new_host():
     kill = body.index("cannot use Flow")
     carve = body.index('"flow.google.com" in _cur_url')
     assert carve < kill, "the new-host carve-out must come BEFORE the kill"
+    # v962.1 — and an EARLY return must precede the poll loop itself. On the
+    # pre-v962 build the process hung inside the two poll rounds for ~14 min
+    # (last line "ULTRA badge not seen yet — reloading + re-polling..."), so a
+    # branch placed after them is reachable only by luck.
+    early = body.index('"flow.google.com" in _early_url')
+    poll = body.index("for _round in range(2)")
+    assert early < poll, "the new-host decision must come BEFORE the badge poll, not after it"

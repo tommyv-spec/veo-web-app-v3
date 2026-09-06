@@ -3886,6 +3886,25 @@ def check_ultra_account(page, label="", timeout=5):
         timeout: seconds to wait for badge to render
     """
     prefix = f"[{label}] " if label else ""
+
+    # v962.1 — on flow.google.com there is NO badge to poll for (measured
+    # 2026-09-05: the diag found no plan-like text at all), so the two poll
+    # rounds below are pure exposure: on the pre-v962 build the process sat
+    # INSIDE them for ~14 minutes — "ULTRA badge not seen yet — reloading +
+    # re-polling..." was the last line, DIAG never printed — with a normal
+    # CPU and current_job=None, then died. The v962 warn-and-continue branch
+    # sits AFTER those rounds, so a hang in the poll made it unreachable.
+    # Decide on the URL first, before a single evaluate or reload. The later
+    # branch stays for the case where the host is only known after a reload.
+    try:
+        _early_url = (page.url or "").lower()
+    except Exception:
+        _early_url = ""
+    if "flow.google.com" in _early_url:
+        print(f"{prefix}[v962] on flow.google.com — skipping the ULTRA badge poll (no badge renders "
+              f"on this host; operator-confirmed Ultra; Flow gates generation itself).", flush=True)
+        _ULTRA_VERIFIED.add(label)
+        return True
     
     try:
         # Wait briefly for header to fully render
