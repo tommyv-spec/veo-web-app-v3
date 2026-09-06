@@ -1740,7 +1740,7 @@ def _flow_app_rendered(page):
     """True when Flow home is showing the APP (a New-project control exists),
     False when it is showing the marketing page or a bare shell."""
     try:
-        return bool(page.evaluate("""() => {
+        found = bool(page.evaluate("""() => {
             const ctrls = Array.from(document.querySelectorAll('button,[role=button]'));
             return ctrls.some(b => {
               const t = (b.innerText || b.getAttribute('aria-label') || '');
@@ -1748,6 +1748,24 @@ def _flow_app_rendered(page):
                      || /\\badd_2\\b/.test(t);
             });
         }"""))
+        if not found:
+            # v962 DIAG (temporary, 2026-09-06): this detector was written for
+            # the labs.google app and has never seen flow.google.com. When it
+            # says "no", print what the page DOES hold, so the next run tells
+            # us what to match instead of "marketing page" 204 times.
+            try:
+                diag = page.evaluate("""() => {
+                    const txt = el => (el.innerText || el.getAttribute('aria-label') || '')
+                                      .trim().replace(/\\s+/g, ' ').slice(0, 40);
+                    const b = Array.from(document.querySelectorAll('button,[role=button]')).map(txt).filter(Boolean);
+                    return {url: location.href, title: document.title,
+                            buttons: [...new Set(b)].slice(0, 30)};
+                }""")
+                print(f"[IMAGE] [v962-diag] app not detected on {diag.get('url')} "
+                      f"title={diag.get('title')!r} buttons={diag.get('buttons')}", flush=True)
+            except Exception as e:
+                print(f"[IMAGE] [v962-diag] could not read the page: {e}", flush=True)
+        return found
     except Exception:
         return False
 
