@@ -20365,4 +20365,8 @@ return before a single evaluate or reload. The later branch stays for the case w
 only known after a reload. Nothing changes on the legacy host.
 `test_v962_flow_host.py` asserts the early return precedes `for _round in range(2)`.
 
+**Correction (peer 08942e91, same morning): the badge is FLAKY on the new host, not absent** — line 85 of the observable run logged `✓ Account verified: ULTRA` on `flow.google.com` once, then the next submit's poll found nothing. A gate that only sometimes succeeds is not a gate, so the early return stands unchanged.
+
+**THE SECOND RELAUNCH TRAP — the worker updates ITSELF.** `start_worker.bat` is not the only thing that refreshes `~/veo-worker/flow_worker.py`: at startup the worker compares its own md5 to `/api/user-worker/download/flow_worker.py` (*"Checking for updates… Worker up to date (local=…, server=…)"*) and, on a mismatch, downloads the served file over itself and **re-executes as a new pid**. Measured 2026-09-06: a v962.1 copy placed on disk ahead of the push was replaced by the served v962 before Python ran — pid 12436 was the child of the launched 30220 — and the log showed the old code (no `[v962] skipping` line). **A local copy can never run ahead of the served file. Deploy first; then relaunch.** Peer 9e4b16cc's md5 of the on-disk file against the last eight commits is what caught it.
+
 **Touched:** `code/static/flow_worker.py`, `code/tests/test_v962_flow_host.py`. Code `1d44ca4`.
