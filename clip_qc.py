@@ -112,6 +112,7 @@ CLI
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -230,6 +231,99 @@ def normalize_words(text: str) -> List[str]:
     cleaned = cleaned.replace("—", " ").replace("–", " ").replace("-", " ")
     cleaned = re.sub(r"[^a-z'\s]", " ", cleaned)
     return [w.strip("'") for w in cleaned.split() if w.strip("'")]
+
+
+def auto_approval_decision(clip: Dict[str, Any]) -> Dict[str, str]:
+    """Return the fail-closed unattended approval decision for one clip.
+
+    This is deliberately narrower than the advisory QC report.  It approves
+    only a current, prospective, single-take spoken clip whose exact selected
+    take passed with no warnings and whose stored line still matches the
+    current dialogue.  Unknown or missing fields are review cases.
+    """
+    def review(reason: str) -> Dict[str, str]:
+        return {"action": "review", "reason": reason}
+
+    if clip.get("status") != "completed":
+        return review("clip is not completed")
+    if clip.get("approval_status") != "pending_review":
+        return review("clip is not pending_review")
+
+    active = str(clip.get("rendered_prompt_variant") or "A").strip().upper()
+    active_line = (str(clip.get("dialogue_text") or "").strip()
+                   if active == "A" else str(clip.get("dialogue_text_b") or "").strip())
+    if active not in {"A", "B"} or not active_line or not looks_like_speech(active_line):
+        return review("clip has no ordinary spoken dialogue")
+    clip_role = str(clip.get("clip_role") or "").strip().lower()
+    scene_type = str(clip.get("scene_type") or "").strip().lower()
+    render_method = str(clip.get("render_method") or "").strip().lower()
+    if clip_role in {
+        "visual_pair", "audio_pair", "composite_plate", "composite_key",
+    }:
+        return review(f"clip role is not ordinary spoken: {clip.get('clip_role')}")
+    if scene_type == "text_card":
+        return review("clip is a text card")
+    if render_method == "charswap":
+        return review("clip render method is charswap")
+
+    versions = clip.get("versions")
+    if not isinstance(versions, list) or len(versions) != 1:
+        return review("clip does not have exactly one rendered version")
+
+    qc = clip.get("qc")
+    if not isinstance(qc, dict):
+        return review("clip has no QC report")
+    if qc.get("version") != 1:
+        return review("QC report version is missing or stale")
+    if qc.get("checker") != "v939":
+        return review("QC report was not produced by checker v939")
+    if not str(qc.get("scored_at") or "").strip():
+        return review("QC report has no scored_at")
+    if qc.get("operator_state_at_scoring") != "pending_review":
+        return review("QC report was not scored prospectively")
+
+    takes = qc.get("takes")
+    if not isinstance(takes, list) or len(takes) != 1:
+        return review("QC report does not contain exactly one take")
+
+    def key(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        return str(value).strip()
+
+    selected = clip.get("selected_variant")
+    scored_selected = qc.get("selected_at_scoring")
+    recommended = qc.get("recommended_attempt")
+    version = versions[0] if isinstance(versions[0], dict) else {}
+    if not isinstance(selected, int) or selected != 1:
+        return review("selected_variant is not position 1 for the only version")
+    filename = key(version.get("filename"))
+    output_filename = key(clip.get("output_filename"))
+    if not filename or filename != output_filename:
+        return review("output and version filenames do not match")
+    if key(scored_selected) != "1":
+        return review("QC selected, recommended, and current takes do not match")
+    if key(recommended) is None or key(recommended) != key(version.get("attempt")):
+        return review("recommended attempt does not match the only version")
+    selected_take = takes[0]
+    if key(selected_take.get("attempt")) != key(version.get("attempt")):
+        return review("scored take attempt does not match the version")
+    if key(selected_take.get("filename")) != filename:
+        return review("scored take filename does not match the version")
+    file_sha256 = key(selected_take.get("file_sha256"))
+    if not file_sha256 or not re.fullmatch(r"[0-9a-f]{64}", file_sha256):
+        return review("scored take has no valid file hash")
+    if qc.get("verdict") != "PASS" or selected_take.get("verdict") != "PASS":
+        return review("clip or selected take did not PASS QC")
+    if selected_take.get("hard"):
+        return review("selected take has hard QC reasons")
+    if selected_take.get("warnings"):
+        return review("selected take has QC warnings")
+    if key(selected_take.get("line_variant")) != active:
+        return review("scored line variant is not the active prompt variant")
+    if normalize_words(str(selected_take.get("line") or "")) != normalize_words(active_line):
+        return review("scored line does not match current dialogue")
+    return {"action": "approve", "reason": "fresh clean prospective v939 PASS"}
 
 
 # ============================================================================
@@ -662,6 +756,8 @@ def score_variant(evidence: Dict[str, Any], **thresholds) -> Dict[str, Any]:
         tail_ok = tail_present_in_transcript(ref, hyp)
         v = verdict(align, asr, tail_ok, **verdict_kw)
         row = {
+            "filename": evidence.get("filename"),
+            "file_sha256": evidence.get("file_sha256"),
             "line_variant": cand.get("line_variant"),
             "line": cand.get("line"),
             "alignment": align,
@@ -1599,6 +1695,11 @@ def load_evidence(job_id: str, filename: str) -> Optional[Dict[str, Any]]:
     return data if data.get("evidence_version") == EVIDENCE_VERSION else None
 
 
+def _current_line_set(clip: Dict[str, Any]) -> List[Dict[str, str]]:
+    return [{"line_variant": label, "line": " ".join(normalize_words(text))}
+            for label, text in expected_lines(clip)]
+
+
 def save_evidence(job_id: str, filename: str, evidence: Dict[str, Any]) -> None:
     path = _cache_path(job_id, filename)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1618,7 +1719,8 @@ def build_evidence(session: Any, base: str, job_id: str,
     filename = variant["filename"]
     if not force:
         cached = load_evidence(job_id, filename)
-        if cached:
+        if cached and cached.get("filename") == filename \
+                and cached.get("line_set") == _current_line_set(clip):
             return cached
 
     url = f"/api/jobs/{job_id}/outputs/{filename}"
@@ -1654,6 +1756,8 @@ def build_evidence(session: Any, base: str, job_id: str,
             "clip_id": clip.get("id"),
             "attempt": variant.get("attempt"),
             "filename": filename,
+            "file_sha256": hashlib.sha256(resp.content).hexdigest(),
+            "line_set": _current_line_set(clip),
             "audio_duration": round(duration, 3),
             "asr_model": ASR_MODEL_ID,
             "asr_words": asr_words,
@@ -1717,6 +1821,8 @@ def build_report(clip: Dict[str, Any], results: Sequence[Dict[str, Any]],
         t = r.get("transcript") or {}
         takes.append({
             "attempt": r.get("attempt"),
+            "filename": r.get("filename"),
+            "file_sha256": r.get("file_sha256"),
             "verdict": r.get("verdict"),
             "score": r.get("score"),
             "hard": r.get("hard") or [],
@@ -1731,6 +1837,7 @@ def build_report(clip: Dict[str, Any], results: Sequence[Dict[str, Any]],
             "missing_words": (a.get("missing") or [])[:8],
             "wer": t.get("wer"),
             "line_variant": r.get("line_variant"),
+            "line": r.get("line"),
             # Truncated on purpose: the report has a 64,000-byte cap and a
             # long line times several takes is the only thing here that grows.
             "heard": (r.get("asr_text") or "")[:400],
@@ -2158,12 +2265,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 0 if not failed else 1
 
     reports = []
+    score_errors = 0
     for job_id in job_ids:
         try:
             report = score_job(session, base, job_id, force=args.force,
                                post=args.post)
         except Exception as exc:
             print(f"[clipqc] job {job_id} failed: {exc}", flush=True)
+            score_errors += 1
             continue
         reports.append(report)
         print_job_report(report)
@@ -2223,6 +2332,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                                   encoding="utf-8")
         print(f"\n[clipqc] wrote {args.out}")
 
+    post_errors = sum(
+        1 for report in reports for clip in report["clips"]
+        if args.post and clip.get("posted") != "ok"
+    )
+    evidence_errors = sum(
+        1 for report in reports for skipped in report["skipped"]
+        if skipped.get("reason") == "no take could be downloaded or decoded"
+    )
+    if score_errors or post_errors or evidence_errors:
+        print(f"[clipqc] incomplete run: {score_errors} job error(s), "
+              f"{post_errors} post error(s), {evidence_errors} evidence error(s)",
+              flush=True)
+        return 1
     return 0
 
 

@@ -391,6 +391,121 @@ def _qc(verdict="PASS", recommended=1, state="pending_review", takes=1):
             "takes": [{"attempt": i + 1, "hard": []} for i in range(takes)]}
 
 
+def _auto_clip(**overrides):
+    clip = {
+        "status": "completed", "approval_status": "pending_review",
+        "dialogue_text": "a clean spoken line", "clip_role": "spoken",
+        "render_method": "standard", "output_filename": "clip.mp4",
+        "versions": [{"attempt": 1, "version_key": "1.1", "filename": "clip.mp4"}],
+        "selected_variant": 1,
+        "qc": {"version": 1, "checker": "v939", "scored_at": "now",
+                "operator_state_at_scoring": "pending_review",
+                "selected_at_scoring": 1, "recommended_attempt": 1,
+                "verdict": "PASS", "line": "a clean spoken line",
+                "takes": [{"attempt": 1, "filename": "clip.mp4", "file_sha256": "a" * 64,
+                           "line_variant": "A", "line": "a clean spoken line",
+                           "verdict": "PASS", "hard": [], "warnings": []}]},
+    }
+    clip.update(overrides)
+    return clip
+
+
+def test_auto_approval_allows_only_a_fresh_clean_single_spoken_take():
+    assert q.auto_approval_decision(_auto_clip())["action"] == "approve"
+
+
+def test_auto_approval_refuses_stale_failed_warned_and_multi_take_data():
+    for change in (
+        {"status": "rendering"},
+        {"approval_status": "approved"},
+        {"versions": [{"attempt": 1}, {"attempt": 2}]},
+        {"qc": None},
+        {"qc": {"version": 1, "checker": "old", "scored_at": "now"}},
+        {"qc": {**_auto_clip()["qc"], "verdict": "FAIL"}},
+        {"qc": {**_auto_clip()["qc"], "takes": [{"attempt": 1, "verdict": "PASS",
+                                                    "hard": [], "warnings": ["note"]}]}},
+    ):
+        assert q.auto_approval_decision(_auto_clip(**change))["action"] == "review"
+
+
+def test_auto_approval_refuses_mismatched_line_take_metadata_and_excluded_lanes():
+    base = _auto_clip()
+    cases = [
+        {"dialogue_text": "a different spoken line"},
+        {"selected_variant": 2},
+        {"qc": {**base["qc"], "selected_at_scoring": 2}},
+        {"qc": {**base["qc"], "recommended_attempt": 2}},
+        {"qc": {**base["qc"], "takes": [{"attempt": 1, "verdict": "PASS",
+                                             "hard": ["tail_truncated"], "warnings": []}]}},
+        {"qc": {**base["qc"], "takes": [{**base["qc"]["takes"][0], "file_sha256": "bad"}]}},
+        {"output_filename": "other.mp4"},
+        {"qc": {**base["qc"], "takes": [base["qc"]["takes"][0],
+                                             {**base["qc"]["takes"][0], "attempt": 2}]}},
+        {"versions": [{"attempt": 1, "filename": None}]},
+        {"selected_variant": None},
+        {"clip_role": " visual_pair "},
+        {"clip_role": "AUDIO_PAIR"},
+        {"scene_type": " TEXT_CARD "},
+        {"render_method": " CHARSWAP "},
+        {"qc": {**base["qc"], "scored_at": ""}},
+        {"qc": {**base["qc"], "operator_state_at_scoring": "approved"}},
+        {"qc": {**base["qc"], "takes": [{**base["qc"]["takes"][0],
+                                             "line": "different line"}]}},
+    ]
+    for change in cases:
+        assert q.auto_approval_decision(_auto_clip(**change))["action"] == "review"
+
+
+def test_auto_approval_uses_active_b_line_and_normalizes_numbers_and_punctuation():
+    clip = _auto_clip(dialogue_text="", dialogue_text_b="Pay $40 now!",
+                      rendered_prompt_variant=" b ")
+    clip["qc"]["takes"][0].update({"line_variant": "B", "line": "pay forty dollars now"})
+    assert q.auto_approval_decision(clip)["action"] == "approve"
+
+
+def test_auto_approval_distinguishes_selected_position_from_attempt_number():
+    clip = _auto_clip(
+        versions=[{"attempt": 3, "version_key": "3.1", "filename": "clip.mp4"}],
+    )
+    clip["qc"]["recommended_attempt"] = 3
+    clip["qc"]["takes"][0]["attempt"] = 3
+    assert q.auto_approval_decision(clip)["action"] == "approve"
+    clip["selected_variant"] = None
+    assert q.auto_approval_decision(clip)["action"] == "review"
+
+
+def test_cache_line_set_is_normalized_and_changes_when_a_line_changes():
+    clip = _auto_clip(dialogue_text="Pay $40 now!", dialogue_text_b="Second line")
+    same = _auto_clip(dialogue_text="pay forty dollars now", dialogue_text_b="Second line")
+    changed = _auto_clip(dialogue_text="Pay $41 now!", dialogue_text_b="Second line")
+    assert q._current_line_set(clip) == q._current_line_set(same)
+    assert q._current_line_set(clip) != q._current_line_set(changed)
+
+
+def test_posting_cli_fails_when_a_named_job_cannot_be_scored(monkeypatch):
+    monkeypatch.setattr(q, "_auth_session", lambda token: object())
+    monkeypatch.setattr(q, "_default_base_url", lambda: "https://example.test")
+    monkeypatch.setattr(q, "score_job", lambda *args, **kwargs: (_ for _ in ()).throw(
+        RuntimeError("scoring failed")))
+    assert q.main(["--job", "job", "--post"]) == 1
+
+
+def test_posting_cli_fails_when_evidence_or_report_storage_fails(monkeypatch):
+    monkeypatch.setattr(q, "_auth_session", lambda token: object())
+    monkeypatch.setattr(q, "_default_base_url", lambda: "https://example.test")
+    monkeypatch.setattr(q, "print_job_report", lambda report: None)
+
+    def report(*args, **kwargs):
+        return {
+            "job_id": "job",
+            "clips": [{"results": [], "posted": "500 unavailable"}],
+            "skipped": [{"reason": "no take could be downloaded or decoded"}],
+        }
+
+    monkeypatch.setattr(q, "score_job", report)
+    assert q.main(["--job", "job", "--post"]) == 1
+
+
 def test_a_clip_you_have_not_reviewed_is_not_resolved():
     # Counting an unreviewed clip as agreement would count silence as a yes.
     assert q.resolve_clip(_clip(_qc(), status="pending_review"), "now") is None

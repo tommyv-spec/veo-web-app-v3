@@ -171,6 +171,7 @@ from auto_image_retry import parse_auto_image_retry_mode, VALID_RETRY_MODES, ord
 from worker import worker, WORKER_VERSION
 from error_handler import ErrorCode
 from job_age import job_age_cutoff
+import clip_qc
 
 # Image Platform (node-graph image generation via Flow UI worker)
 from image_platform import (
@@ -462,6 +463,7 @@ class ClipResponse(BaseModel):
     # Scene/mode fields
     clip_mode: Optional[str] = "fresh"  # v782 default fresh (was blend)
     scene_index: Optional[int] = 0
+    scene_type: Optional[str] = None
     # v861 per-clip render length. These are SET by the promote path and by
     # POST /api/jobs, and PATCHable, but were never returned — so the only way
     # to check what a clip would actually render at was to watch the output and
@@ -541,6 +543,18 @@ def _v959_1_has_face_refs(clip) -> bool:
 
 class ClipQCRequest(BaseModel):
     report: Dict[str, Any]
+
+
+class AutoApproveClipClaim(BaseModel):
+    clip_id: int
+    scored_at: str
+    selected_variant: int
+    filename: str
+    file_sha256: str
+
+
+class AutoApproveClipsRequest(BaseModel):
+    claims: List[AutoApproveClipClaim]
 
 
 class RedoRequest(BaseModel):
@@ -6841,6 +6855,7 @@ async def get_job_clips(
             total_variants=get_actual_versions_count(c),
             clip_mode=c.clip_mode or "fresh",
             scene_index=c.scene_index or 0,
+            scene_type=c.scene_type,
             # v861.2 — enumerate these HERE too: ClipResponse is built with
             # explicit kwargs, so declaring a field on the model is not enough.
             target_duration_s=c.target_duration_s,
@@ -6872,6 +6887,85 @@ async def get_job_clips(
         )
         for c in clips
     ]
+
+
+@app.post("/api/jobs/{job_id}/auto-approve-clips")
+async def auto_approve_clips(
+    job_id: str,
+    request: AutoApproveClipsRequest,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Atomically approve a complete set of freshly QC-verified clips."""
+    job = get_user_job(db, job_id, current_user)
+    rows = (db.query(Clip).filter(Clip.job_id == job_id)
+            .with_for_update().order_by(Clip.clip_index).all())
+    def conflict(detail: str):
+        db.rollback()
+        raise HTTPException(status_code=409, detail=detail)
+    pending = [c for c in rows if (c.approval_status or "pending_review") != "approved"]
+    if not pending:
+        conflict("no unapproved clips remain")
+    claim_map = {c.clip_id: c for c in request.claims}
+    if set(claim_map) != {c.id for c in pending} or len(claim_map) != len(request.claims):
+        conflict("claim ids do not match all unapproved clips")
+    if any(c.approval_status == "rejected" for c in pending):
+        conflict("rejected clips cannot be auto-approved")
+
+    live = {}
+    for clip in pending:
+        versions = deduplicate_versions(clip.versions_json, job_id=job_id)
+        live[clip.id] = {
+            "id": clip.id, "clip_index": clip.clip_index,
+            "dialogue_id": clip.dialogue_id or 0,
+            "dialogue_text": clip.dialogue_text or "", "dialogue_text_b": clip.dialogue_text_b,
+            "rendered_prompt_variant": clip.rendered_prompt_variant or "A",
+            "status": clip.status, "approval_status": clip.approval_status or "pending_review",
+            "output_filename": clip.output_filename, "versions": versions,
+            "selected_variant": clip.selected_variant, "clip_role": clip.clip_role,
+            "scene_type": clip.scene_type,
+            "render_method": clip.render_method, "qc": clip._safe_qc(),
+        }
+        decision = clip_qc.auto_approval_decision(live[clip.id])
+        if decision.get("action") != "approve":
+            conflict(f"clip {clip.id}: {decision.get('reason')}")
+        claim = claim_map[clip.id]
+        qc = live[clip.id]["qc"] or {}
+        take = (qc.get("takes") or [{}])[0]
+        if (claim.scored_at != qc.get("scored_at")
+                or claim.selected_variant != live[clip.id]["selected_variant"]
+                or claim.filename != take.get("filename")
+                or claim.file_sha256 != take.get("file_sha256")):
+            conflict(f"clip {clip.id}: evidence claim changed")
+
+    lineup = None
+    if job.clip_order_json:
+        try:
+            lineup = json.loads(job.clip_order_json)
+        except (TypeError, ValueError):
+            lineup = None
+    for clip in pending:
+        versions = json.loads(clip.versions_json) if clip.versions_json else []
+        filename = claim_map[clip.id].filename
+        for version in versions:
+            if version.get("filename") == filename:
+                version["approved"] = True
+        clip.versions_json = json.dumps(versions)
+        clip.approval_status = "approved"
+        if lineup is not None and clip.id not in lineup:
+            lineup.append(clip.id)
+    if lineup is not None:
+        job.clip_order_json = json.dumps(lineup)
+    for clip in pending:
+        db.add(JobLog(
+            job_id=job_id,
+            level="INFO",
+            category="approval",
+            clip_index=clip.clip_index,
+            message=f"Clip {clip.clip_index + 1} auto-approved by QC batch",
+        ))
+    db.commit()
+    return {"job_id": job_id, "approved_clip_ids": [c.id for c in pending], "status": "approved"}
 
 
 @app.get("/api/jobs/{job_id}/clips/active", response_model=List[ClipResponse])
@@ -6951,6 +7045,7 @@ async def get_job_clips_active(
             total_variants=get_actual_versions_count(c),
             clip_mode=c.clip_mode or "fresh",
             scene_index=c.scene_index or 0,
+            scene_type=c.scene_type,
             # v861.2 — enumerate these HERE too: ClipResponse is built with
             # explicit kwargs, so declaring a field on the model is not enough.
             target_duration_s=c.target_duration_s,
