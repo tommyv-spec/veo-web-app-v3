@@ -118,6 +118,21 @@ else
   echo "(UI checks skipped: node or tests/ui/run_ui_checks.mjs unavailable)"
 fi
 
+# Register the target-specific proof BEFORE starting the watcher. A missing or
+# unknown proof is a push blocker; otherwise the watcher could record a green
+# immediate check while the delayed proof was never registered.
+if [ -f "../tools/deploy_claims.py" ] && command -v python >/dev/null 2>&1; then
+  echo ""
+  if ! python ../tools/deploy_claims.py register "${targets_main}"; then
+    echo ""
+    echo "PUSH BLOCKED - deploy proof registration failed."
+    exit 1
+  fi
+else
+  echo "PUSH BLOCKED - deploy proof registration is unavailable."
+  exit 1
+fi
+
 # Start the live verification in the background. It waits for the sha to go
 # live, then re-runs the checks and the browser proof against the DELIVERED
 # page and records a verdict. Replaces the printed "remember to verify" that
@@ -125,12 +140,6 @@ fi
 if [ -f "../tools/spawn_watcher.py" ] && command -v python >/dev/null 2>&1; then
   echo ""
   python ../tools/spawn_watcher.py "${targets_main}" || true
-  # Some changes cannot be judged at deploy time -- a caption fix, a prompt
-  # change, a publish change. Register what will eventually prove them so the
-  # deploy is not silently treated as verified. A commit can say so itself with
-  # a "Proof: <what has to happen> | <the question>" trailer; otherwise the file
-  # map guesses, and anything unmatched is reported as UNCOVERED.
-  python ../tools/deploy_claims.py register "${targets_main}" || true
 else
   echo ""
   echo "After the push, CONFIRM it (never assume):"
