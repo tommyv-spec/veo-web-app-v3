@@ -176,3 +176,83 @@ def test_v962_2_path_helpers_answer_per_host():
         assert ns["flow_home_path"](OLD_PROJECT) == "/fx/tools/flow"
         assert ns["flow_project_path"](NEW_HOME, "abc") == "/project/abc"
         assert ns["flow_project_path"](OLD_HOME, "abc") == "/fx/tools/flow/project/abc"
+
+
+# ---------------------------------------------------------------------------
+# v962.3 — the settings overlay on flow.google.com is Angular Material.
+# Measured selectors (session 9e4b16cc, 2026-09-06): chip
+# button[aria-label='Settings trigger'], overlay .cdk-overlay-container with
+# [role='radiogroup'] / button[role='radio'] (aria-checked), model menu behind
+# button[aria-label='Select model family'] with [role='menuitem'] items.
+# ---------------------------------------------------------------------------
+
+def _func_body(src, name):
+    i = src.index(f"def {name}(")
+    j = src.find("\ndef ", i + 10)
+    return src[i:j if j != -1 else len(src)]
+
+
+def test_v962_3_both_workers_carry_the_material_settings_resolver():
+    for path in WORKERS:
+        src = open(path, encoding="utf-8").read()
+        tag = os.path.basename(path)
+        for fn in ("_v962_on_new_host", "_v962_open_settings", "_v962_pick_radio", "_v962_pick_model"):
+            assert f"def {fn}(" in src, (tag, fn)
+        assert "aria-label='Settings trigger'" in src, tag
+        assert "button[role='radio']" in src, tag
+        assert '"aria-checked"' in src, tag
+        assert "aria-label='Select model family'" in src, tag
+        assert ".cdk-overlay-container" in src, tag
+        # the menu-item selector lives in the module constant the picker reads
+        assert "_V962_MENU_ITEMS = " in src and "[role='menuitem']" in src, tag
+        assert "_V962_MENU_ITEMS" in _func_body(src, "_v962_pick_model"), tag
+
+
+def test_v962_3_video_settings_branch_precedes_the_legacy_retry_loop():
+    src = open(WORKERS[0], encoding="utf-8").read()
+    body = _func_body(src, "select_frames_to_video_mode")
+    branch = body.index("_v962_material_video_settings(")
+    loop = body.index("for full_attempt in range(3)")
+    assert branch < loop, "the new-host resolver must run BEFORE the Radix retry loop"
+    assert "_v962_on_new_host(page)" in body
+    # the resolver keeps the same criticality as the legacy pass (v945.15)
+    res = _func_body(src, "_v962_material_video_settings")
+    assert "critical = ['Video', 'Portrait']" in res
+    assert 'if target_model == "Omni Flash":' in res
+    # input mode is a DELIBERATE hold on the new host, said in the log line
+    assert "UNMEASURED on" in res and "deliberate hold" in res
+    # and the legacy path is still there, untouched in shape
+    assert "button.flow_tab_slider_trigger" in body
+    assert "button:has-text('x{n}')" in body
+
+
+def test_v962_3_image_settings_functions_branch_on_the_new_host():
+    src = open(WORKERS[1], encoding="utf-8").read()
+    for fn in ("_open_settings_dropdown", "select_image_mode", "configure_image_settings"):
+        body = _func_body(src, fn)
+        assert "_v962_on_new_host(page)" in body, fn
+    assert "_v962_material_image_settings(" in _func_body(src, "configure_image_settings")
+    # legacy Radix path still present
+    assert '"data-state"' in _func_body(src, "_open_settings_dropdown")
+    assert "flow_tab_slider_trigger" in _func_body(src, "select_image_mode")
+
+
+def test_v962_3_new_host_predicate_and_model_normaliser_run_without_a_browser():
+    for path in WORKERS:
+        src = open(path, encoding="utf-8").read()
+        tree = ast.parse(src)
+        pieces = [ast.get_source_segment(src, n) for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name in ("_v962_on_new_host", "_v962_norm_model")]
+        assert len(pieces) == 2, os.path.basename(path)
+        ns = {"re": re}
+        exec("\n".join(pieces), ns)
+
+        class _P:
+            def __init__(self, u):
+                self.url = u
+
+        assert ns["_v962_on_new_host"](_P(NEW_PROJECT))
+        assert not ns["_v962_on_new_host"](_P(OLD_PROJECT))
+        assert not ns["_v962_on_new_host"](_P(None))
+        assert ns["_v962_norm_model"]("Veo 3.1 - Lite [Lower Priority]") == "veo 3.1 - lite"
+        assert ns["_v962_norm_model"]("  Omni   Flash ") == "omni flash"

@@ -8225,6 +8225,234 @@ def _click_input_mode_tab(page, prefix=""):
         return ('Frames', False)
 
 
+# ---------------------------------------------------------------------------
+# v962.3 — the settings overlay on flow.google.com (2026-09-06)
+#
+# The new Flow app is Angular Material, not Radix. Measured by session
+# 9e4b16cc on a scratch profile: the composer chip is
+#   button[aria-label='Settings trigger'] (class settings-trigger-button),
+# opening it sets aria-expanded=true and mounts a cdk overlay holding
+# [role='radiogroup'] rows of button[role='radio'] (aria-checked) for mode
+# (Image/Video), aspect (16:9 … 9:16), count (x1..x4), resolution and, in
+# video mode, duration (4s/6s/8s/10s). The model is a menu behind
+# button[aria-label='Select model family'] with [role='menuitem'] entries.
+# None of the legacy selectors (button:has-text('xN'), data-state,
+# button.flow_tab_slider_trigger, aria-selected) exist there.
+#
+# Everything below runs ONLY when the page is on flow.google.com; the legacy
+# host takes the old path byte for byte. The Frames/Ingredients input-mode
+# tabs are NOT in this overlay on the new host (they moved to the composer's
+# "Add media" menu) and are still unmeasured, so that step reports a
+# deliberate hold instead of pretending.
+# ---------------------------------------------------------------------------
+_V962_SETTINGS_CHIP = "button[aria-label='Settings trigger'], button.settings-trigger-button"
+_V962_OVERLAY_GROUP = ".cdk-overlay-container [role='radiogroup']"
+_V962_MODEL_BTN = (".cdk-overlay-container button[aria-label='Select model family'], "
+                   "button[aria-label='Select model family']")
+_V962_MENU_ITEMS = ".cdk-overlay-container [role='menuitem'], [role='menuitem']"
+
+
+def _v962_on_new_host(page):
+    """True when the page is on flow.google.com (the Angular Material app)."""
+    try:
+        return "flow.google.com" in (page.url or "")
+    except Exception:
+        return False
+
+
+def _v962_open_settings(page, prefix=""):
+    """Open the Material settings overlay. Returns the chip locator, or None."""
+    try:
+        chip = page.locator(_V962_SETTINGS_CHIP).first
+        chip.wait_for(state="visible", timeout=30000)
+    except Exception:
+        print(f"{prefix}⚠ [v962.3] settings chip not found on flow.google.com "
+              f"(url={page.url})", flush=True)
+        return None
+    for _attempt in range(3):
+        try:
+            if (chip.get_attribute("aria-expanded") == "true"
+                    and page.locator(_V962_OVERLAY_GROUP).first.is_visible(timeout=500)):
+                return chip
+        except Exception:
+            pass
+        try:
+            human_click_locator(page, chip, f"{prefix}Settings chip")
+        except Exception:
+            try:
+                chip.click(force=True, timeout=3000)
+            except Exception:
+                pass
+        try:
+            page.locator(_V962_OVERLAY_GROUP).first.wait_for(state="visible", timeout=8000)
+            print(f"{prefix}✓ [v962.3] settings overlay open", flush=True)
+            return chip
+        except Exception:
+            time.sleep(0.7)
+    print(f"{prefix}⚠ [v962.3] settings overlay did not open after 3 clicks", flush=True)
+    return None
+
+
+def _v962_close_settings(page):
+    try:
+        page.keyboard.press("Escape")
+        time.sleep(0.3)
+    except Exception:
+        pass
+
+
+def _v962_pick_radio(page, text, label, prefix=""):
+    """Click the overlay radio whose text is `text` (exact first, then
+    contains). True only when aria-checked reads true afterwards."""
+    for sel in (f".cdk-overlay-container button[role='radio']:text-is('{text}')",
+                f".cdk-overlay-container button[role='radio']:has-text('{text}')"):
+        try:
+            r = page.locator(sel).first
+            r.wait_for(state="visible", timeout=4000)
+        except Exception:
+            continue
+        try:
+            if r.get_attribute("aria-checked") != "true":
+                human_click_locator(page, r, f"{prefix}{label} {text}")
+                time.sleep(0.4)
+            ok = r.get_attribute("aria-checked") == "true"
+        except Exception as e:
+            print(f"{prefix}⚠ [v962.3] {label} '{text}': {str(e)[:80]}", flush=True)
+            return False
+        print(f"{prefix}{'✓' if ok else '⚠'} [v962.3] {label}: {text}"
+              f"{'' if ok else ' (not checked after click)'}", flush=True)
+        return ok
+    print(f"{prefix}⚠ [v962.3] {label} radio '{text}' not in the overlay", flush=True)
+    return False
+
+
+def _v962_norm_model(s):
+    return re.sub(r"\s+", " ", (s or "").replace("[Lower Priority]", "")).strip().lower()
+
+
+def _v962_pick_model(page, target, prefix=""):
+    """Choose `target` in the 'Select model family' menu. The item names on the
+    new host are not yet measured, so the match is exact-first then contains,
+    and a miss prints every item so the next fix comes from evidence."""
+    try:
+        btn = page.locator(_V962_MODEL_BTN).first
+        btn.wait_for(state="visible", timeout=5000)
+    except Exception:
+        print(f"{prefix}⚠ [v962.3] model button (Select model family) not found", flush=True)
+        return False
+    try:
+        cur = (btn.inner_text(timeout=1000) or "").strip()
+    except Exception:
+        cur = ""
+    tnorm = _v962_norm_model(target)
+    if tnorm and tnorm in _v962_norm_model(cur):
+        print(f"{prefix}✓ [v962.3] model already {cur!r}", flush=True)
+        return True
+    try:
+        human_click_locator(page, btn, f"{prefix}Model menu")
+    except Exception:
+        try:
+            btn.click(force=True, timeout=3000)
+        except Exception:
+            pass
+    time.sleep(0.8)
+    items = page.locator(_V962_MENU_ITEMS)
+    try:
+        n = items.count()
+    except Exception:
+        n = 0
+    names = []
+    for i in range(n):
+        try:
+            names.append((items.nth(i).inner_text(timeout=500) or "").strip())
+        except Exception:
+            names.append("")
+    pick = None
+    for i, nm in enumerate(names):
+        if _v962_norm_model(nm) == tnorm:
+            pick = i
+            break
+    if pick is None:
+        for i, nm in enumerate(names):
+            nn = _v962_norm_model(nm)
+            if nn and tnorm and (tnorm in nn or nn in tnorm):
+                pick = i
+                break
+    if pick is None:
+        print(f"{prefix}⚠ [v962.3] model '{target}' not in the menu; items={names!r}", flush=True)
+        try:
+            page._model_apply_debug = f"v962.3 option-missing target={target!r} items={names!r}"
+        except Exception:
+            pass
+        page.keyboard.press("Escape")
+        time.sleep(0.3)
+        return False
+    try:
+        human_click_locator(page, items.nth(pick), f"{prefix}{names[pick]}")
+    except Exception:
+        items.nth(pick).click(force=True, timeout=3000)
+    time.sleep(0.6)
+    try:
+        cur = (btn.inner_text(timeout=1000) or "").strip()
+    except Exception:
+        cur = ""
+    ok = (_v962_norm_model(names[pick]) in _v962_norm_model(cur)) or (tnorm in _v962_norm_model(cur))
+    print(f"{prefix}{'✓' if ok else '⚠'} [v962.3] model {names[pick]!r} -> chip now {cur!r}", flush=True)
+    return ok
+
+
+def _v962_material_video_settings(page, prefix="", variants_count=2,
+                                  duration_only=False, input_mode_only=False):
+    """v962.3 — the whole video settings pass on flow.google.com. Same return
+    contract as select_frames_to_video_mode: True when every critical setting
+    is verified (Video + Portrait, + Model when the job asked for Omni)."""
+    target_model = ((getattr(page, "_veo_model", "") or "").strip()
+                    or DEFAULT_VEO_MODEL)
+    try:
+        _durn = int(float(str(getattr(page, "_duration", "8")).lower().rstrip('s') or "8"))
+    except Exception:
+        _durn = 8
+
+    if input_mode_only:
+        # Deliberate hold, not a bug: Frames/Ingredients are not radios in this
+        # overlay on the new host — they moved to the composer ("Add media" /
+        # "Add ingredients to the prompt box") and nobody has measured them yet.
+        print(f"{prefix}⚠ [v962.3] input mode (Frames/Ingredients) is UNMEASURED on "
+              f"flow.google.com — deliberate hold, not a bug; the composer's "
+              f"'Add media' menu is what unblocks it", flush=True)
+        return False
+
+    chip = _v962_open_settings(page, prefix)
+    if chip is None:
+        return False
+
+    applied = {}
+    if duration_only:
+        applied['Duration'] = _v962_pick_radio(page, f"{_durn}s", "Duration", prefix)
+        _v962_close_settings(page)
+        return bool(applied['Duration'])
+
+    applied['Video'] = _v962_pick_radio(page, "Video", "Mode", prefix)
+    time.sleep(0.5)  # the overlay re-renders its rows for video mode
+    applied['Portrait'] = _v962_pick_radio(page, "9:16", "Aspect", prefix)
+    applied['Variants'] = _v962_pick_radio(page, f"x{variants_count}", "Variants", prefix)
+    _res = getattr(page, "_resolution", None)
+    if _res:
+        applied['Resolution'] = _v962_pick_radio(page, str(_res), "Resolution", prefix)
+    applied['Duration'] = _v962_pick_radio(page, f"{_durn}s", "Duration", prefix)
+    applied['Model'] = _v962_pick_model(page, target_model, prefix)
+    _v962_close_settings(page)
+
+    critical = ['Video', 'Portrait']
+    if target_model == "Omni Flash":
+        critical.append('Model')  # v945.15 — an Omni job cannot ship on the default
+    missing = [k for k in critical if not applied.get(k)]
+    print(f"{prefix}[v962.3] settings: {applied}"
+          + (f" — MISSING critical {missing}" if missing else " — all critical OK"),
+          flush=True)
+    return not missing
+
+
 def select_frames_to_video_mode(page, context="", **kwargs):
     """
     Ensure all project settings are correct. Bulletproof version:
@@ -8247,6 +8475,14 @@ def select_frames_to_video_mode(page, context="", **kwargs):
     _input_mode_only = kwargs.get('input_mode_only', False)
     _agent_off_tried = False  # only force Agent OFF once (it reloads the page)
     _marketing_recovered = False  # v836 — click through the marketing landing once
+
+    # v962.3 — on flow.google.com the settings UI is Angular Material; the
+    # resolver above owns the whole pass there. The legacy host continues
+    # below unchanged.
+    if _v962_on_new_host(page):
+        return _v962_material_video_settings(
+            page, prefix, variants_count=variants_count,
+            duration_only=_duration_only, input_mode_only=_input_mode_only)
 
     for full_attempt in range(3):
         try:

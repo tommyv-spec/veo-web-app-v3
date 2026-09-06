@@ -20370,3 +20370,112 @@ only known after a reload. Nothing changes on the legacy host.
 **THE SECOND RELAUNCH TRAP — the worker updates ITSELF.** `start_worker.bat` is not the only thing that refreshes `~/veo-worker/flow_worker.py`: at startup the worker compares its own md5 to `/api/user-worker/download/flow_worker.py` (*"Checking for updates… Worker up to date (local=…, server=…)"*) and, on a mismatch, downloads the served file over itself and **re-executes as a new pid**. Measured 2026-09-06: a v962.1 copy placed on disk ahead of the push was replaced by the served v962 before Python ran — pid 12436 was the child of the launched 30220 — and the log showed the old code (no `[v962] skipping` line). **A local copy can never run ahead of the served file. Deploy first; then relaunch.** Peer 9e4b16cc's md5 of the on-disk file against the last eight commits is what caught it.
 
 **Touched:** `code/static/flow_worker.py`, `code/tests/test_v962_flow_host.py`. Code `1d44ca4`.
+
+### v962.2 — project creation on flow.google.com: the DOM click IS the route (2026-09-06)
+
+**Where it came from**: with v962.1 live the video worker claimed martha `8b800f8b` two minutes
+after launch and then failed at project creation — `[flow_api] createProject failed:  — DOM
+fallback` → `Click failed for New project button: Locator.wait_for: Timeout 10000ms` → `✓ Project
+URL: https://flow.google.com/404` → job failed → golden restore → self-resume → the same again. A
+restore loop is the repeated-fresh-sign-in pattern worker-launch rule 3 warns about, so the lane
+was stopped by hand while three sessions measured.
+
+**Three facts, each from a different source:**
+
+1. **The `/404` was self-inflicted** (this worker's log): `spa_navigate_to_flow_home` pushed the
+   OLD path as a literal — `window.next.router.push('/fx/tools/flow')` /
+   `history.pushState(…, '/fx/tools/flow')`. On the new app that route renders its client-side
+   404 page, which has no "New project" button. When the anchor click won first, project creation
+   worked (two real projects reached on stale jobs); when the pushState fallback won, the click timed
+   out on a 404 page. **A coin-flip between two navigation methods, not a flaky button.**
+2. **The tRPC layer does not exist on the new host** (session 9e4b16cc, scratch profile, 05:26):
+   clicking "add New project" fires `POST /_/AiSandboxAngularFrontend/data/batchexecute?rpcids=jHPbke`
+   (boq RPC, `f.req` + `at` token) and navigates to `/project/<uuid>`. The
+   `labs.google/fx/api/trpc/*` calls were the OLD frontend's own Next.js API — all 8 per worker
+   answer JSON 404 now. Replicating batchexecute by hand (`at`, `f.sid`, `bl`) is fragile.
+3. **`/project` with no id is a 404 page** — `image_worker.FLOW_APP_MINT_URL` is dead there. The
+   New-project click is the mint. Downstream of a project nothing moved: the generation host is
+   still `aisandbox-pa.googleapis.com` (session 08942e91, 861 MB capture read by era).
+
+**The rule** (both workers): SPA routes are derived from the host the page is on
+(`flow_home_path`, `flow_project_path` → `/` and `/project/{pid}` on `flow.google.com`); on the new
+host the tRPC `createProject` + HAR replay are skipped outright and the DOM click is taken directly,
+with a 30 s wait for the button after a rendered home, banner dismissal, and a required
+`/project/<uuid>` URL; `is_flow_home` is False on `/404`; the image worker skips the dead mint route.
+`test_v917`'s expected goto sequence changed from `[MINT, HOME]` to `[HOME]` for that reason only.
+
+**Live confirmation before shipping**: the image lane on `b4d405b` created
+`flow.google.com/project/13a43c87-…` via the DOM click after the tRPC call failed — the route this
+rule makes deterministic instead of a fallback after a wasted call.
+
+**Also corrected here**: the ULTRA badge DOES exist on the new host (exact `ULTRA` control on home
+and in the project); v962.1's "no badge renders" was measured on a page that had not rendered the
+app. The early return stays — the poll was measured slow/flaky — but the text no longer claims the
+badge is gone.
+
+**Next unknown — the bearer token.** `flow_api` generation (uploadImage, batchGenerateImages,
+`video:batchAsyncGenerate…`) rides a bearer sniffed from the page's DIRECT `aisandbox-pa` calls. On
+the new host a home load + New project made **zero** such calls (all via batchexecute), so the
+listener may never arm; both workers fall back to the DOM generation path after 3 API failures. The
+first real clip on the new host is the measurement.
+
+**A rogue relaunch during the pause**: at 05:27:46 a `launch_workers.py --start` from a session
+whose pid was already gone (not a scheduled task) started a bat worker on the old served build and
+walked martha straight back into the loop; stopped at 05:33. The launcher starts a lane it finds
+DOWN, so a deliberate pause is not safe from it — hold a matching `flow_worker.py` process, or
+expect the 08:10 finish task to do the same.
+
+**Touched:** `code/static/flow_worker.py`, `code/image_worker.py`, `code/tests/test_v962_flow_host.py`,
+`code/tests/test_v917_flow_app_entry.py`. Sessions 9e4b16cc (measurement), 08942e91 (capture +
+guards), this session (fix). Operator 2026-09-06.
+
+
+### v962.3 — the settings overlay on flow.google.com is Angular Material; one resolver per worker (2026-09-06)
+
+**Where it came from**: with v962.2 live, both workers reach a real `/project/<uuid>` on the new
+host and the next step is the settings pass. The legacy pass is written for Radix: it finds the
+chip by `button:has-text('xN')`, waits for `data-state="open"`, and clicks
+`button.flow_tab_slider_trigger` tabs, verifying `aria-selected`. None of that exists on
+`flow.google.com`. Session 9e4b16cc measured the new app on a scratch profile:
+
+| control | new host (measured) |
+|---|---|
+| chip | `button[aria-label='Settings trigger']` (class `settings-trigger-button`); `aria-expanded` |
+| overlay | `.cdk-overlay-container` holding `[role='radiogroup']` rows |
+| mode / aspect / count / resolution / duration | `button[role='radio']`, checked = `aria-checked="true"`; texts `Image`/`Video`, `16:9`…`9:16`, `x1`…`x4`, `720p`/`1080p`, `4s`/`6s`/`8s`/`10s` |
+| model | `button[aria-label='Select model family']` → `[role='menuitem']` entries |
+| Frames / Ingredients | NOT in the overlay — moved to the composer's "Add media" / "Add ingredients to the prompt box"; **unmeasured** |
+
+**The rule**: not literals patched into 130 selector sites, but ONE new-host resolver per worker
+(`_v962_material_video_settings` in the video worker, `_v962_material_image_settings` in the
+image worker, sharing `_v962_open_settings` / `_v962_pick_radio` / `_v962_pick_model`). The
+entry points branch into it when `page.url` is on `flow.google.com` and leave the legacy path
+byte-identical otherwise: `select_frames_to_video_mode` before its retry loop;
+`_open_settings_dropdown`, `select_image_mode`, `configure_image_settings` at their top. Return
+contracts are unchanged (video: True only when `Video` + `Portrait` — and `Model` for an Omni job,
+v945.15 — are verified; image: aspect + variants).
+
+**Three honest holes, each said in the log line, not papered over.**
+1. **Input mode is a deliberate hold.** `input_mode_only=True` on the new host prints
+   `[v962.3] input mode (Frames/Ingredients) is UNMEASURED on flow.google.com — deliberate hold,
+   not a bug` and returns False. Charswap and Omni-ingredients clips therefore refuse instead of
+   rendering with the wrong input mode — a wrong render can reach a build and get published; a
+   refusal cannot (peer b7's framing). What unblocks it: measuring the composer's "Add media" menu.
+2. **Model item names are unmeasured.** The picker matches exact-first (after stripping
+   `[Lower Priority]`), then contains, and on a miss prints every `[role='menuitem']` text and
+   stashes it in `page._model_apply_debug`, so the next fix is written from evidence. The v961
+   allowlist may need new names once seen.
+3. **Resolution radios (1K/2K image, 720p/1080p video) are best-effort, never critical.**
+
+**Proof standard** unchanged from v962: one clip completing on `flow.google.com` is the proof;
+until then this is a measured port of the settings step only. The post-settings chain
+(frame upload, prompt box, Generate, result/download) is still the legacy DOM and still unmeasured
+— 62's single-seeding walk is the next measurement, paused while the operator's Firefox session is
+signed out (four scratch seedings in 20 min may have earned that; worker-launch rule 3).
+
+**Tests**: `code/tests/test_v962_flow_host.py` — the resolver exists in both workers with the
+measured selectors; the video branch precedes the Radix retry loop; the image entry points
+branch; the predicate and model normaliser run without a browser.
+
+**Touched:** `code/static/flow_worker.py`, `code/image_worker.py`,
+`code/tests/test_v962_flow_host.py`. Measurement: session 9e4b16cc. Operator 2026-09-06.
