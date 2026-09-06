@@ -20535,3 +20535,57 @@ never references the CTA.
 
 **Touched:** `code/static/flow_worker.py`, `code/image_worker.py`, `code/tests/test_v962_flow_host.py`.
 Measurements: this session (probe), peer 62 (signed-in DOM). Operator 2026-09-06.
+
+### v962.5 — the model menu on flow.google.com: icon-prefixed labels and "Omni 1.1 Flash" (2026-09-06)
+
+**Measured** (first observable clip on v962.4, `worker_fg_0906c.log`, noemi `c8f7d6fc`): the v962.3
+resolver opened the overlay and verified Video / 9:16 / x2 / 8s, then the model menu listed
+`['volume_up\nOmni 1.1 Flash', 'volume_up\nVeo 3.1 - Lite', 'volume_up\nVeo 3.1 - Fast',
+'volume_up\nVeo 3.1 - Quality']` — every item carries its Material icon name on a first line, Omni is
+now called **"Omni 1.1 Flash"**, and there is no "[Lower Priority]" entry. The v962.3 matcher compared
+the whole text, so "Omni Flash" missed and the charswap clip failed closed (v945.15) — the right
+outcome for a miss, and the miss itself was the measurement the rule asked for.
+
+**The rule** (both workers): a menu item's label is its LAST non-empty line (`_v962_item_label`);
+the platform keeps `Omni Flash` as the job value and the worker maps it through
+`_V962_MODEL_ALIASES` (`omni flash` → `omni 1.1 flash`, `omni flash`); Lite/Fast/Quality match by
+label after the `[Lower Priority]` strip. The chip's "already set" read and the post-click check use
+the same alias test. The v961 allowlist is unchanged — builds still write `Omni Flash`.
+
+**Tests**: `test_v962_5_model_menu_measured_on_the_new_host_resolves` execs the helpers out of both
+sources against the measured menu and requires every platform value to resolve.
+
+**Touched:** `code/static/flow_worker.py`, `code/image_worker.py`, `code/tests/test_v962_flow_host.py`.
+Operator 2026-09-06.
+
+
+### v962.6 — project creation on flow.google.com renders IN PLACE; the DOM carries the id, not the URL (2026-09-06)
+
+**Measured** (worker's own profile, headless, `probe_newproject.py`, after job `0d456c24` failed with
+`clicked New project but no /project/<uuid> URL within 30s`): the control is one Material FAB
+(`button.mdc-fab` with innerText `add\nNew project`). A plain click creates the project and the page
+becomes the PROJECT page — `Back button to go to previous page`, `More options for the project`,
+`Add media menu`, `Add ingredients to the prompt box`, `Agent`, the settings chip
+`Video · 720p · 8s crop_16_9 x2` (`Settings trigger`), `Start generation`, and a Tools link
+`/project/77c8d936-…/tools` — while **`page.url` stayed `https://flow.google.com/` for 30 s**. Peer 62's
+morning run on the image profile saw the URL change; this profile did not. Both are the same app.
+
+**The rule** (both workers): the proof of a created project is the DOM, accepted alongside the URL.
+`_v962_project_id_from_dom` returns the id only when a generation control (`Start generation` /
+`Settings trigger`) is visible — so a tile on the home list can never be read as a new project — and
+takes the id from the `/project/<uuid>/tools` link first. Having the id, the worker navigates to the
+canonical `/project/<id>` so every URL-based check downstream (`is_flow_project`, cache resume, the
+callers' own `"/project/" in page.url` polls) sees the real address. The v962.2 30 s wait remains the
+first check; only the miss message changed.
+
+**Two more facts from the same probe, for the next layers.** The composer's controls on the project
+page are `button[aria-label='Add media menu']` (frames) and `button[aria-label='Add ingredients to
+the prompt box']` (ingredients) — the input-mode switch that v962.3 holds on — and the generate
+control is `button[aria-label='Start generation']`. Unmeasured beyond their presence.
+
+**Also measured tonight**: a golden restore followed by "Node EPIPE" in the Playwright driver with
+~330 MB of RAM free (peer 94's read of `worker_fg_0906c.err.log`) — the box, not the profile; a
+worker dying that way must not trigger a golden rebuild or a relaunch loop.
+
+**Touched:** `code/static/flow_worker.py` (`_v962_project_id_from_dom`, `_fa_or_dom_new_project_click`),
+`code/image_worker.py` (same helper + its mint site). Operator 2026-09-06.

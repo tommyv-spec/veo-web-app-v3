@@ -276,6 +276,40 @@ def test_v962_4_login_proof_on_the_new_host_is_the_dom_not_the_cookie():
         assert "ServiceLogin" in body, tag
 
 
+def test_v962_5_model_menu_measured_on_the_new_host_resolves():
+    """v962.5 — measured 2026-09-06 (worker_fg_0906c.log): the menu lists
+    'Omni 1.1 Flash' / 'Veo 3.1 - Lite' / 'Veo 3.1 - Fast' / 'Veo 3.1 - Quality',
+    each with a Material icon label on its own first line, and no
+    '[Lower Priority]' entry. Every platform job value must resolve."""
+    menu = ["volume_up\nOmni 1.1 Flash", "volume_up\nVeo 3.1 - Lite",
+            "volume_up\nVeo 3.1 - Fast", "volume_up\nVeo 3.1 - Quality"]
+    expect = {"Omni Flash": "omni 1.1 flash",
+              "Veo 3.1 - Lite [Lower Priority]": "veo 3.1 - lite",
+              "Veo 3.1 - Lite": "veo 3.1 - lite",
+              "Veo 3.1 - Fast": "veo 3.1 - fast",
+              "Veo 3.1 - Quality": "veo 3.1 - quality"}
+    for path in WORKERS:
+        src = open(path, encoding="utf-8").read()
+        tree = ast.parse(src)
+        pieces = [ast.get_source_segment(src, n) for n in tree.body
+                  if (isinstance(n, ast.FunctionDef) and n.name in ("_v962_norm_model", "_v962_item_label"))
+                  or (isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "_V962_MODEL_ALIASES" for t in n.targets))]
+        assert len(pieces) == 3, os.path.basename(path)
+        ns = {"re": re}
+        exec("\n".join(pieces), ns)
+        labels = [ns["_v962_norm_model"](ns["_v962_item_label"](m)) for m in menu]
+        assert labels == ["omni 1.1 flash", "veo 3.1 - lite", "veo 3.1 - fast", "veo 3.1 - quality"], os.path.basename(path)
+        for target, want in expect.items():
+            t = ns["_v962_norm_model"](target)
+            wanted = ns["_V962_MODEL_ALIASES"].get(t, (t,))
+            pick = next((l for l in labels if l in wanted), None) or \
+                next((l for l in labels if any(w in l for w in wanted)), None)
+            assert pick == want, (os.path.basename(path), target, pick)
+        # and the picker itself uses the alias table + label stripper
+        body = _func_body(src, "_v962_pick_model")
+        assert "_V962_MODEL_ALIASES" in body and "_v962_item_label(" in body, os.path.basename(path)
+
+
 def test_v962_3_new_host_predicate_and_model_normaliser_run_without_a_browser():
     for path in WORKERS:
         src = open(path, encoding="utf-8").read()

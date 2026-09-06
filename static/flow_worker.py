@@ -1470,6 +1470,36 @@ def _fa_spa_navigate_to_project(page, pid, context=""):
     return None
 
 
+def _v962_project_id_from_dom(page):
+    """v962.6 — the project id of the project page currently rendered, or None.
+
+    Measured 2026-09-06 on the worker's own profile: clicking "New project" on
+    flow.google.com creates the project and renders it in place — Back button,
+    "More options for the project", "Add media menu", the settings chip, "Start
+    generation" and a Tools link `/project/<uuid>/tools` — while page.url stays
+    https://flow.google.com/. The Tools link is the id; the generation controls
+    are the proof that a PROJECT page (not the home list) is on screen, so a
+    tile on the home list can never be mistaken for a new project."""
+    try:
+        if not page.locator("button[aria-label='Start generation'], "
+                            "button[aria-label='Settings trigger'], "
+                            "button.settings-trigger-button").first.is_visible(timeout=500):
+            return None
+        hrefs = page.eval_on_selector_all(
+            "a[href*='/project/']", "els => els.map(e => e.getAttribute('href') || '')")
+    except Exception:
+        return None
+    for h in hrefs or []:
+        m = re.search(r"/project/([0-9a-f-]{36})(?:/tools)?", h)
+        if m and h.rstrip("/").endswith("/tools"):
+            return m.group(1)
+    for h in hrefs or []:
+        m = re.search(r"/project/([0-9a-f-]{36})", h)
+        if m:
+            return m.group(1)
+    return None
+
+
 def _fa_or_dom_new_project_click(page, dom_label="New project button", context=""):
     """Try API project-create; on success returns True (page is now on /project/{pid}).
     On failure performs the existing DOM 'New project' click + returns False.
@@ -1503,11 +1533,34 @@ def _fa_or_dom_new_project_click(page, dom_label="New project button", context="
                 pass
             page.locator(_btn).first.wait_for(state="visible", timeout=15000)
         human_click_element(page, _btn, dom_label)
-        try:
-            page.wait_for_url(re.compile(r"/project/[0-9a-f-]{36}"), timeout=30000)
-        except Exception:
-            print(f"[{context}] [flow_api] [v962.2] clicked New project but no /project/<uuid> URL within 30s "
-                  f"(url={(page.url or '')[:80]})", flush=True)
+        # v962.6 — the URL is not the proof; the DOM is (see
+        # _v962_project_id_from_dom). Accept either, then put the browser on the
+        # canonical /project/<id> so every URL-based check downstream
+        # (is_flow_project, cache resume, the caller's own poll) sees it.
+        _pid = None
+        _deadline = time.time() + 30
+        while time.time() < _deadline:
+            _m = re.search(r"/project/([0-9a-f-]{36})", page.url or "")
+            if _m:
+                _pid = _m.group(1)
+                break
+            _pid = _v962_project_id_from_dom(page)
+            if _pid:
+                break
+            time.sleep(1.0)
+        if _pid and "/project/" not in (page.url or ""):
+            print(f"[{context}] [flow_api] [v962.6] project {_pid} rendered in place "
+                  f"(url stayed {(page.url or '')[:40]}) — navigating to its canonical URL", flush=True)
+            try:
+                page.goto(f"{FLOW_ORIGIN}/project/{_pid}", wait_until="domcontentloaded", timeout=60000)
+                page.locator("button[aria-label='Settings trigger'], button.settings-trigger-button"
+                             ).first.wait_for(state="visible", timeout=30000)
+                print(f"[{context}] [flow_api] [v962.6] on {page.url[:80]}", flush=True)
+            except Exception as _e:
+                print(f"[{context}] [flow_api] [v962.6] canonical project navigation: {str(_e)[:100]}", flush=True)
+        elif not _pid:
+            print(f"[{context}] [flow_api] [v962.2] clicked New project but no /project/<uuid> URL and no "
+                  f"project page in the DOM within 30s (url={(page.url or '')[:80]})", flush=True)
         return False
     # Fallback: existing DOM click
     try:
@@ -8431,6 +8484,22 @@ def _v962_norm_model(s):
     return re.sub(r"\s+", " ", (s or "").replace("[Lower Priority]", "")).strip().lower()
 
 
+def _v962_item_label(s):
+    """The human label of a Material menu item / chip: its LAST non-empty line.
+    Items render as "volume_up\nOmni 1.1 Flash" (icon name first)."""
+    lines = [l.strip() for l in (s or "").splitlines() if l.strip()]
+    return lines[-1] if lines else ""
+
+
+# platform job value (normalised) -> labels the menu may use for it, best first
+_V962_MODEL_ALIASES = {
+    "omni flash": ("omni 1.1 flash", "omni flash"),
+    "veo 3.1 - lite": ("veo 3.1 - lite",),
+    "veo 3.1 - fast": ("veo 3.1 - fast",),
+    "veo 3.1 - quality": ("veo 3.1 - quality",),
+}
+
+
 def _v962_pick_model(page, target, prefix=""):
     """Choose `target` in the 'Select model family' menu. The item names on the
     new host are not yet measured, so the match is exact-first then contains,
@@ -8446,7 +8515,18 @@ def _v962_pick_model(page, target, prefix=""):
     except Exception:
         cur = ""
     tnorm = _v962_norm_model(target)
-    if tnorm and tnorm in _v962_norm_model(cur):
+    # v962.5 — measured 2026-09-06 on the new host: the menu lists
+    # 'Omni 1.1 Flash', 'Veo 3.1 - Lite', 'Veo 3.1 - Fast', 'Veo 3.1 - Quality',
+    # each prefixed by a Material icon label on its own line ("volume_up\n…"),
+    # and no "[Lower Priority]" entry. The platform keeps 'Omni Flash' as the
+    # job value; the worker maps it to whatever the menu calls it today.
+    wanted = _V962_MODEL_ALIASES.get(tnorm, (tnorm,))
+
+    def _hit(text):
+        lab = _v962_norm_model(_v962_item_label(text))
+        return bool(lab) and any(w == lab or w in lab for w in wanted)
+
+    if _hit(cur):
         print(f"{prefix}✓ [v962.3] model already {cur!r}", flush=True)
         return True
     try:
@@ -8468,15 +8548,15 @@ def _v962_pick_model(page, target, prefix=""):
             names.append((items.nth(i).inner_text(timeout=500) or "").strip())
         except Exception:
             names.append("")
+    labels = [_v962_norm_model(_v962_item_label(nm)) for nm in names]
     pick = None
-    for i, nm in enumerate(names):
-        if _v962_norm_model(nm) == tnorm:
+    for i, lab in enumerate(labels):
+        if lab and lab in wanted:
             pick = i
             break
     if pick is None:
-        for i, nm in enumerate(names):
-            nn = _v962_norm_model(nm)
-            if nn and tnorm and (tnorm in nn or nn in tnorm):
+        for i, lab in enumerate(labels):
+            if lab and any(w in lab for w in wanted):
                 pick = i
                 break
     if pick is None:
@@ -8497,7 +8577,7 @@ def _v962_pick_model(page, target, prefix=""):
         cur = (btn.inner_text(timeout=1000) or "").strip()
     except Exception:
         cur = ""
-    ok = (_v962_norm_model(names[pick]) in _v962_norm_model(cur)) or (tnorm in _v962_norm_model(cur))
+    ok = _hit(cur) or (labels[pick] and labels[pick] in _v962_norm_model(cur))
     print(f"{prefix}{'✓' if ok else '⚠'} [v962.3] model {names[pick]!r} -> chip now {cur!r}", flush=True)
     return ok
 
