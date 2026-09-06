@@ -1740,32 +1740,38 @@ def _flow_app_rendered(page):
     """True when Flow home is showing the APP (a New-project control exists),
     False when it is showing the marketing page or a bare shell."""
     try:
-        found = bool(page.evaluate("""() => {
+        # ONE evaluate, as before. v962 DIAG (temporary, 2026-09-06): this
+        # detector was written for the labs.google app and had never seen
+        # flow.google.com; when it says "no", the same call now also carries
+        # what the page DOES hold, so the next run tells us what to match
+        # instead of "marketing page" 204 times. It is the SAME single call on
+        # purpose — a second page.evaluate consumed a scripted state in
+        # tests/test_v917_flow_app_entry.py's FakePage and made the mint route
+        # look already-rendered (a7's report, 2026-09-06 05:1x).
+        result = page.evaluate("""() => {
             const ctrls = Array.from(document.querySelectorAll('button,[role=button]'));
-            return ctrls.some(b => {
-              const t = (b.innerText || b.getAttribute('aria-label') || '');
+            const txt = el => (el.innerText || el.getAttribute('aria-label') || '');
+            const found = ctrls.some(b => {
+              const t = txt(b);
               return /new project|nuovo progetto|nuevo proyecto|nouveau projet|neues projekt/i.test(t)
                      || /\\badd_2\\b/.test(t);
             });
-        }"""))
-        if not found:
-            # v962 DIAG (temporary, 2026-09-06): this detector was written for
-            # the labs.google app and has never seen flow.google.com. When it
-            # says "no", print what the page DOES hold, so the next run tells
-            # us what to match instead of "marketing page" 204 times.
-            try:
-                diag = page.evaluate("""() => {
-                    const txt = el => (el.innerText || el.getAttribute('aria-label') || '')
-                                      .trim().replace(/\\s+/g, ' ').slice(0, 40);
-                    const b = Array.from(document.querySelectorAll('button,[role=button]')).map(txt).filter(Boolean);
-                    return {url: location.href, title: document.title,
-                            buttons: [...new Set(b)].slice(0, 30)};
-                }""")
-                print(f"[IMAGE] [v962-diag] app not detected on {diag.get('url')} "
-                      f"title={diag.get('title')!r} buttons={diag.get('buttons')}", flush=True)
-            except Exception as e:
-                print(f"[IMAGE] [v962-diag] could not read the page: {e}", flush=True)
-        return found
+            if (found) return {found: true};
+            // The account button carries the signed-in address; never log it.
+            const labels = ctrls.map(b => txt(b).trim().replace(/\\s+/g, ' ')
+                                           .replace(/[\\w.+-]+@[\\w-]+\\.[\\w.]+/g, '[email]')
+                                           .slice(0, 40)).filter(Boolean);
+            return {found: false, url: location.href, title: document.title,
+                    buttons: [...new Set(labels)].slice(0, 30)};
+        }""")
+        if isinstance(result, dict):
+            found = bool(result.get("found"))
+            if not found:
+                print(f"[IMAGE] [v962-diag] app not detected on {result.get('url')} "
+                      f"title={result.get('title')!r} buttons={result.get('buttons')}", flush=True)
+            return found
+        # A stub page (tests) answers with a bare bool; honour it as before.
+        return bool(result)
     except Exception:
         return False
 
