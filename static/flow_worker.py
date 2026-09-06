@@ -3510,10 +3510,10 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
         
         # On Flow URL (handles locale: /fx/es-419/tools/flow, /fx/tools/flow, etc.)
         if is_flow_url(url):
-            # On a project page = definitely logged in
-            if is_flow_project(url):
-                return 'flow_logged_in'
-            
+            # A project URL is navigation state, not authentication proof. A
+            # signed-out/stale SPA can keep /project/<id> in the address bar.
+            # Only visible app/account controls prove that this private browser
+            # is signed in.
             # Check DOM for login state — multiple indicators
             # New project button text varies by locale: "New project", "Nuevo proyecto", "Dự án mới", etc.
             # So we check multiple selectors, not just English text
@@ -3813,6 +3813,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
                 pass
 
         if state == 'flow_logged_in':
+            print(f"[{label}] FLOW_AUTHENTICATED_DOM", flush=True)
             if attempt == 0:
                 print(f"[{label}] ✓ Already logged in on Flow", flush=True)
             check_and_dismiss_popup(page)
@@ -5058,8 +5059,7 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
                 import sys as _sys
                 _sys.modules.pop("firefox_profile_pull", None)
                 from firefox_profile_pull import (build_firefox_golden_from_profile,
-                                                  hold_flow_backed_lanes,
-                                                  worker_profile_needs_seed)
+                                                  hold_flow_backed_lanes)
                 from worker_profile_pull import load_laptop_email as _lle_ff
 
                 _acct_num, _ff_acct = None, None
@@ -5071,8 +5071,14 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
                     print(f"[{label}] firefox pull: session {session_folder} not in "
                           f"ACCOUNTS - skip", flush=True)
                     return
-                if not worker_profile_needs_seed(session_folder, golden_folder):
-                    print(f"[{label}] firefox pull: private profile already seeded — reusing",
+                # One fresh source snapshot per process. Existing private state
+                # may be the signed-out golden from the previous run; treating
+                # "folder exists" as "authenticated" is what made the 01:21
+                # worker restore eight stale Google rows instead of the active
+                # operator profile. Later calls in this process reuse the one
+                # published snapshot so retries cannot rotate the source session.
+                if golden_folder in _LAPTOP_COPIED_GOLDENS:
+                    print(f"[{label}] firefox pull: golden already snapshotted this process — reusing",
                           flush=True)
                     return
                 # Same rule as the Chrome path below: the slot's own laptop_email

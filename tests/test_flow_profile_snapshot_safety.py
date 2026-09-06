@@ -42,6 +42,20 @@ def _cookie_db(path: Path) -> None:
 
 
 class ProfileSnapshotSafety(unittest.TestCase):
+    def test_flow_project_url_alone_is_not_login_proof(self):
+        body = _function_source("ensure_logged_into_flow")
+        self.assertNotIn(
+            "if is_flow_project(url):\n                return 'flow_logged_in'",
+            body,
+        )
+
+    def test_flow_refreshes_private_golden_once_per_process(self):
+        body = _function_source("_maybe_pull_laptop_profile")
+        firefox_branch = body.split("if _bd.is_firefox_mode(BROWSER_MODE):", 1)[1]
+        self.assertNotIn("worker_profile_needs_seed", firefox_branch)
+        self.assertIn("if golden_folder in _LAPTOP_COPIED_GOLDENS", firefox_branch)
+        self.assertIn("build_firefox_golden_from_profile", firefox_branch)
+
     def test_login_wall_never_copies_the_operator_profile_automatically(self):
         body = _function_source("ensure_logged_into_flow")
         self.assertNotIn("refresh_firefox_session_from_profile(", body)
@@ -138,15 +152,14 @@ class ProfileSnapshotSafety(unittest.TestCase):
         self.assertNotIn("shutil.copy", body)
         self.assertIn('choices=["swap", "image", "flow"]', PROFILE_TOOL_SOURCE)
 
-    def test_disabled_automatic_pull_still_allows_one_empty_profile_seed(self):
-        for source in (FLOW_SOURCE, IMAGE_SOURCE):
-            tree = ast.parse(source)
-            node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
-                        and n.name == "_maybe_pull_laptop_profile")
-            body = ast.get_source_segment(source, node)
-            disabled = body.index("LAPTOP_PULL_DISABLED")
-            empty_check = body.index("worker_profile_needs_seed")
-            self.assertLess(empty_check, disabled)
+    def test_disabled_image_pull_still_allows_one_empty_profile_seed(self):
+        tree = ast.parse(IMAGE_SOURCE)
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                    and n.name == "_maybe_pull_laptop_profile")
+        body = ast.get_source_segment(IMAGE_SOURCE, node)
+        disabled = body.index("LAPTOP_PULL_DISABLED")
+        empty_check = body.index("worker_profile_needs_seed")
+        self.assertLess(empty_check, disabled)
 
     def test_explicit_live_refresh_obeys_pull_disable(self):
         body = _function_source("refresh_firefox_session_from_profile")

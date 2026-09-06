@@ -419,6 +419,10 @@ def create_launch_scripts():
             # start_autoedit_worker.bat, whose log has always worked.
             # (measured 2026-09-06 by session b7)
             f'set LOG=%USERPROFILE%\\.kaveno\\flow_worker.log\n'
+            # worker_lifecycle scopes auth evidence after the latest launch.
+            # Put that boundary in the SAME file as Python's login output.
+            f'echo.>> "%LOG%"\n'
+            f'echo ===== launch_workers.py started flow at %date% %time% =====>> "%LOG%"\n'
             f'"{sys.executable}" flow_worker.py --single >> "%LOG%" 2>&1\n'
             f'pause\n'
         )
