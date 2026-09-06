@@ -20279,3 +20279,90 @@ why v961's first proof must be a SMALL mixed build, never the 80-clip one.
 `.claude/skills/build-video/audit_build.py`. Plan:
 `docs/superpowers/plans/2026-09-04-per-clip-veo-model.md`. Codex review (2 passes, 5 findings, all
 applied): `docs/audits/codex-loop/2026-09-04-per-clip-veo-model.md`. Operator 2026-09-04.
+
+---
+
+## v962 — FLOW MOVED TO flow.google.com; both workers must know both hosts (2026-09-06)
+
+**Where it came from**: peer sessions on 2026-09-05 (HANDOFF rev 776) root-caused a day of failures
+across both lanes: Google moved Flow from `labs.google/fx/tools/flow` to **`flow.google.com`**, and
+every URL predicate in both workers sat on the old host. They deliberately left it unpatched. On
+2026-09-06 the operator asked this session to render job `0d456c24` (80 clips), which could not
+happen on the old-domain code, so the fix shipped as `code` `520e0e8`.
+
+**What it looked like** (video lane, `worker_fg_0906.log`): the page-state classifier called a
+signed-in project page `'other'` → `[STARTUP] Not on Flow — navigating...` in a loop → eventually
+`Login verified` → then `ULTRA badge not seen yet` → **`worker_error: not_ultra`** on an account the
+operator confirms is Ultra and that had been verified `ULTRA` on the old host the same morning.
+82 clips owed, none submitted. Image lane, same root: 122 `flow.google.com` hits, 204 *"Flow home is
+serving the marketing page"*, 54 *"Could not create Flow project"*, and one line showing it had
+reached a REAL project at `flow.google.com/project/<uuid>` and still failed its own check.
+
+**The rule**: the workers recognise **both** hosts, and nothing they navigate to is built on the old
+one.
+
+| surface | before | after |
+|---|---|---|
+| `is_flow_url` (both workers) | `labs.google/fx` AND `/tools/flow` | that, OR `flow.google.com` |
+| `FLOW_HOME_URL` | `https://labs.google/fx/tools/flow` | `https://flow.google.com/` (+ `FLOW_HOME_URL_LEGACY`, `FLOW_ORIGIN`) |
+| project-URL builders (2 per worker) | `labs.google/fx/tools/flow/project/{id}` | `{FLOW_ORIGIN}/project/{id}` |
+| `check_ultra_account` (video worker) | missing badge = kill + `not_ultra` | on `flow.google.com`: WARN and continue; kill stays for the legacy host |
+| unusual-activity cookie/storage clear (video worker) | gated on `labs.google` in the URL, one origin | both hosts, both origins |
+
+`is_flow_url` is the **single root predicate** — `is_flow_home`, `is_flow_project` and
+`is_on_flow_not_login` all call it, so the login/startup loop and the page-state classifier follow
+from that one change. The legacy host stays legal because the 09-05 rollout was partial (6 of 7
+images went through on `labs.google` the same afternoon) and redirect chains pass through it.
+
+**Why the ULTRA gate had to soften on the new host.** The probe is `div/span` with text exactly
+`ULTRA` and no children. On `flow.google.com` the diag returned **no plan-like text at all** — not
+a different badge, nothing. A probe that cannot see the badge is not evidence about the plan. The
+two carve-outs already beside it (`_ULTRA_VERIFIED`, injected-cookie sessions) rest on the same
+sentence — *"Flow itself gates generation if truly non-ULTRA"* — so the new-host case joins them.
+The hard kill is kept for the legacy host, where the badge is known to render.
+
+**NOT fixed, on purpose — `image_worker._flow_app_rendered`.** That DOM detector (a `new project`
+button, or `add_2`) emitted the 204 marketing-page lines *independently of any URL logic* and has
+never seen the new app. It appears **5 times in `image_worker.py` and 0 times in
+`static/flow_worker.py`** (peer b7's count), so for the VIDEO lane the URL predicate is the whole
+path — and for the IMAGE lane it is not. **A green video lane is not proof the image lane is fixed.**
+Until someone looks at the new page, the image lane stays partly broken; its work went through the
+ChatGPT lane on 09-05 (worker-launch rule 6).
+
+**The relaunch trap (v948.2 shape, called out by peer b7).** The lane runs a **separate local copy**,
+`~/veo-worker/flow_worker.py`, and only `start_worker.bat` refreshes it (fetch from
+`/api/user-worker/download/flow_worker.py`, then prints `Updated worker`). A bare
+`python flow_worker.py --single` runs whatever is on disk. The 04:17 foreground worker on 09-06 was
+started that way and sat on stale code all night. **After a worker deploy, relaunch through the bat
+(`tools/launch_workers.py --start` does), wait for `Updated worker`, and check the local file's
+size/mtime moved** — otherwise a deploy-confirmed fix keeps failing and reads like a job error.
+
+**Proof standard.** Old-domain code cannot render at all on the new host, so the render subsystem's
+coarse checker — *the next job completes with no failed clips* — is exactly right here: one clip
+completing on `flow.google.com` IS the proof.
+
+**Tests**: `code/tests/test_v962_flow_host.py` execs the predicates out of each worker's source
+(they are standalone scripts) and checks both hosts, the login page, the builders, and that the
+new-host carve-out precedes the kill.
+
+**Touched:** `code/static/flow_worker.py`, `code/image_worker.py`,
+`code/tests/test_v962_flow_host.py` (new). Peer analysis: HANDOFF rev 776 (2026-09-05).
+Operator 2026-09-06.
+
+### v962.1 — decide the host BEFORE the ULTRA badge poll (2026-09-06)
+
+**Where it came from**: the first v962 worker (bat-launched, pid 39816) took **~14 minutes from
+launch to first claim** on `flow.google.com`, sitting inside `check_ultra_account`'s two poll rounds
+(2 × up to 12 `page.evaluate` + a `page.reload`) at normal CPU with `current_job=None` — the
+signature peer session 08942e91 measured on the pre-v962 build, where it ran ~14 min and died with
+*"ULTRA badge not seen yet — reloading + re-polling..."* as the last line and DIAG never printed.
+Slow, not hung, on v962 — but the v962 warn-and-continue branch sat AFTER those rounds, so it was
+reachable only once the poll gave up.
+
+**The rule**: on the new host there is no badge to poll for, so the poll is pure exposure. The
+decision now comes FIRST — read `page.url`, and on `flow.google.com` mark the label verified and
+return before a single evaluate or reload. The later branch stays for the case where the host is
+only known after a reload. Nothing changes on the legacy host.
+`test_v962_flow_host.py` asserts the early return precedes `for _round in range(2)`.
+
+**Touched:** `code/static/flow_worker.py`, `code/tests/test_v962_flow_host.py`. Code `1d44ca4`.
