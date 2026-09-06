@@ -1320,6 +1320,23 @@ def _fa_try_create_new_project_api(page, context=""):
     except Exception:
         title = "Auto Project"
 
+    # v962.2 — on flow.google.com the whole labs.google/fx/api/trpc layer is
+    # gone (it was the OLD frontend's own Next.js API; the new app creates a
+    # project through a boq `batchexecute` RPC — measured by session 9e4b16cc
+    # on 2026-09-06, POST /_/AiSandboxAngularFrontend/data/batchexecute
+    # rpcids=jHPbke, then navigates to /project/<uuid>). createProject returns
+    # a JSON 404 there, and the 4 pre + 17 post HAR-replay calls do too. Skip
+    # all of it and let the DOM click — the route the app itself uses — mint
+    # the project. Replicating batchexecute (at token, f.sid, bl) is fragile.
+    try:
+        _cur = (page.url or "").lower()
+    except Exception:
+        _cur = ""
+    if "flow.google.com" in _cur:
+        print(f"[{context}] [flow_api] [v962.2] on flow.google.com — tRPC createProject does not exist "
+              f"here; going straight to the DOM 'New project' click", flush=True)
+        return None
+
     # Pre-create telemetry replay (HAR steps 1-4): fetchMigrationStatus x2 +
     # PINHOLE_CREATE_NEW_PROJECT batchLog + submitBatchLog. Best-effort.
     try:
@@ -1399,7 +1416,7 @@ def _fa_spa_navigate_to_project(page, pid, context=""):
     Tries Next.js router.push() first, then history.pushState + popstate.
     """
     pfx = f"[{context}] " if context else ""
-    target_path = f"/fx/tools/flow/project/{pid}"
+    target_path = flow_project_path(page, pid)  # v962.2 — host-aware
 
     # Approach 1: Next.js router.push (preserves all SPA state).
     try:
@@ -1462,6 +1479,36 @@ def _fa_or_dom_new_project_click(page, dom_label="New project button", context="
     """
     if _fa_try_create_new_project_api(page, context=context):
         return True
+    # v962.2 — on the new host the button renders only once the app has
+    # rendered the projects list (measured ~12 s after a full load; a SPA push
+    # of the OLD home path renders the 404 page and it never appears). Wait for
+    # it explicitly, dismiss the promo banner that overlays the list, and after
+    # the click insist on a real /project/<uuid> URL — never /404.
+    try:
+        _cur = (page.url or "").lower()
+    except Exception:
+        _cur = ""
+    if "flow.google.com" in _cur:
+        _btn = "button:has-text('New project'), button:has(i:text('add_2'))"
+        try:
+            page.locator(_btn).first.wait_for(state="visible", timeout=30000)
+        except Exception:
+            # the banner's `close` sits over the list; clear it and look once more
+            try:
+                _close = page.locator("button:has-text('close'), [aria-label='close'], button:has(i:text('close'))").first
+                if _close.count() and _close.is_visible(timeout=1500):
+                    _close.click(force=True, timeout=3000)
+                    time.sleep(1)
+            except Exception:
+                pass
+            page.locator(_btn).first.wait_for(state="visible", timeout=15000)
+        human_click_element(page, _btn, dom_label)
+        try:
+            page.wait_for_url(re.compile(r"/project/[0-9a-f-]{36}"), timeout=30000)
+        except Exception:
+            print(f"[{context}] [flow_api] [v962.2] clicked New project but no /project/<uuid> URL within 30s "
+                  f"(url={(page.url or '')[:80]})", flush=True)
+        return False
     # Fallback: existing DOM click
     try:
         human_click_element(
@@ -3887,8 +3934,10 @@ def check_ultra_account(page, label="", timeout=5):
     """
     prefix = f"[{label}] " if label else ""
 
-    # v962.1 — on flow.google.com there is NO badge to poll for (measured
-    # 2026-09-05: the diag found no plan-like text at all), so the two poll
+    # v962.1 — on flow.google.com the badge renders only once the app has
+    # (session 9e4b16cc measured an exact 'ULTRA' control on home and in the
+    # project, 2026-09-06); the earlier diag saw none because the page had not
+    # rendered the app. Either way the poll is slow/flaky here, so the two poll
     # rounds below are pure exposure: on the pre-v962 build the process sat
     # INSIDE them for ~14 minutes — "ULTRA badge not seen yet — reloading +
     # re-polling..." was the last line, DIAG never printed — with a normal
@@ -3901,8 +3950,9 @@ def check_ultra_account(page, label="", timeout=5):
     except Exception:
         _early_url = ""
     if "flow.google.com" in _early_url:
-        print(f"{prefix}[v962] on flow.google.com — skipping the ULTRA badge poll (no badge renders "
-              f"on this host; operator-confirmed Ultra; Flow gates generation itself).", flush=True)
+        print(f"{prefix}[v962] on flow.google.com — skipping the ULTRA badge poll (the badge renders "
+              f"only once the app has, and the poll was measured slow/flaky here; operator-confirmed "
+              f"Ultra; Flow gates generation itself).", flush=True)
         _ULTRA_VERIFIED.add(label)
         return True
     
@@ -4110,8 +4160,11 @@ def spa_navigate_to_flow_home(page, label=""):
     # === Approach 2: Click the Flow logo/title link (human click, no evaluate) ===
     try:
         logo_selectors = [
-            "a[href*='/tools/flow']:not([href*='/project/'])",  # Matches any locale
-            "a[href='/fx/tools/flow']",                          # No locale (exact)
+            "a[href*='/tools/flow']:not([href*='/project/'])",  # Matches any locale (legacy host)
+            "a[href='/fx/tools/flow']",                          # No locale (exact, legacy host)
+            "header a[href='/']",                                # v962.2 — new host: home is `/`
+            "nav a[href='/']",
+            "a[href='https://flow.google.com/']",
             "header a[href*='flow']",
             "nav a[href*='flow']",
             ".logo a",
@@ -4133,18 +4186,21 @@ def spa_navigate_to_flow_home(page, label=""):
     
     # === Approach 3: Next.js router push (single evaluate — only as fallback) ===
     try:
-        result = page.evaluate(r"""() => {
+        # v962.2 — the path depends on the host the page is on; the old
+        # literal rendered the new SPA's 404 page (see flow_home_path).
+        _home_path = flow_home_path(page)
+        result = page.evaluate(r"""(target) => {
             if (window.next && window.next.router) {
-                window.next.router.push('/fx/tools/flow');
+                window.next.router.push(target);
                 return 'next_router';
             }
             if (window.history && window.history.pushState) {
-                window.history.pushState({}, '', '/fx/tools/flow');
+                window.history.pushState({}, '', target);
                 window.dispatchEvent(new PopStateEvent('popstate', {state: {}}));
                 return 'history_push';
             }
             return null;
-        }""")
+        }""", _home_path)
         if result:
             time.sleep(2)
             if "/project/" not in page.url:
@@ -5326,8 +5382,33 @@ def is_flow_url(url):
 
 
 def is_flow_home(url):
-    """Check if URL is Flow homepage (not a project page)."""
-    return is_flow_url(url) and "/project/" not in url.lower()
+    """Check if URL is Flow homepage (not a project page, and not the app's
+    client-side 404 page — v962.2: a worker once read flow.google.com/404 as
+    a project URL and waited politely on it)."""
+    u = url.lower()
+    if u.rstrip("/").endswith("/404"):
+        return False
+    return is_flow_url(url) and "/project/" not in u
+
+
+def flow_home_path(page_or_url):
+    """v962.2 — the SPA route for Flow home ON THE HOST THE PAGE IS ON.
+
+    The new app routes home at `/`; the old one at `/fx/tools/flow`. Pushing the
+    old path into the new SPA renders its client-side 404 page — no "New
+    project" button, so the DOM click times out and the worker reads
+    `flow.google.com/404` as the project URL. Measured 2026-09-06 on martha
+    8b800f8b; the anchor-click branch worked and the pushState branch 404'd,
+    which is why project creation looked flaky.
+    """
+    url = page_or_url if isinstance(page_or_url, str) else (getattr(page_or_url, "url", "") or "")
+    return "/" if "flow.google.com" in url.lower() else "/fx/tools/flow"
+
+
+def flow_project_path(page_or_url, pid):
+    """v962.2 — the SPA route for a project ON THE HOST THE PAGE IS ON."""
+    url = page_or_url if isinstance(page_or_url, str) else (getattr(page_or_url, "url", "") or "")
+    return f"/project/{pid}" if "flow.google.com" in url.lower() else f"/fx/tools/flow/project/{pid}"
 
 
 def is_flow_project(url):

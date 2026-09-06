@@ -10,6 +10,11 @@ labs.google/fx/tools/flow#capabilities (operator, 2026-08-07).
 Live verification of these exact functions from a fresh golden copy:
 marketing start -> app entered -> New project clicked -> real project created.
 """
+# v962.2 (2026-09-06): the /project mint route is a client-side 404 on the new
+# host (measured by session 9e4b16cc), so ensure_flow_app_entered no longer
+# visits FLOW_APP_MINT_URL when FLOW_HOME_URL is flow.google.com — each attempt
+# is one clean load of home. The expected goto sequences below changed from
+# [MINT, HOME] to [HOME] for that reason, not because the entry logic did.
 import image_worker as iw
 
 
@@ -69,7 +74,7 @@ def test_mint_route_runs_when_the_cta_leaves_an_empty_shell(monkeypatch):
     # not rendered -> CTA -> still not rendered -> mint + home -> rendered
     page = FakePage([False, False, True])
     assert iw.ensure_flow_app_entered(page, "T") is True
-    assert page.gotos == [iw.FLOW_APP_MINT_URL, iw.FLOW_HOME_URL]
+    assert page.gotos == [iw.FLOW_HOME_URL]
 
 
 def test_gives_up_after_the_attempt_budget(monkeypatch):
@@ -79,7 +84,7 @@ def test_gives_up_after_the_attempt_budget(monkeypatch):
     page = FakePage([False] * 12)
     assert iw.ensure_flow_app_entered(page, "T", attempts=2) is False
     # two full rounds, each: mint route + home
-    assert page.gotos == [iw.FLOW_APP_MINT_URL, iw.FLOW_HOME_URL] * 2
+    assert page.gotos == [iw.FLOW_HOME_URL] * 2
 
 
 def test_a_broken_cta_does_not_abort_the_entry(monkeypatch):
@@ -92,7 +97,7 @@ def test_a_broken_cta_does_not_abort_the_entry(monkeypatch):
     monkeypatch.setattr(iw, "_dismiss_flow_banner", lambda *a, **k: False)
     page = FakePage([False, False, True])
     assert iw.ensure_flow_app_entered(page, "T") is True
-    assert page.gotos == [iw.FLOW_APP_MINT_URL, iw.FLOW_HOME_URL]
+    assert page.gotos == [iw.FLOW_HOME_URL]
 
 
 def test_app_detection_survives_a_dead_page():

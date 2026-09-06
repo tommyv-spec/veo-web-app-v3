@@ -1331,7 +1331,25 @@ def is_flow_url(url):
     return "labs.google/fx" in url and "/tools/flow" in url
 
 def is_flow_home(url):
-    return is_flow_url(url) and "/project/" not in url.lower()
+    # v962.2 — the app's client-side 404 page is never "home"
+    u = url.lower()
+    if u.rstrip("/").endswith("/404"):
+        return False
+    return is_flow_url(url) and "/project/" not in u
+
+
+def flow_home_path(page_or_url):
+    """v962.2 — SPA home route for the host the page is on ('/' on flow.google.com,
+    '/fx/tools/flow' on the legacy host). Pushing the old path into the new SPA
+    renders its client-side 404 page; see static/flow_worker.py."""
+    url = page_or_url if isinstance(page_or_url, str) else (getattr(page_or_url, "url", "") or "")
+    return "/" if "flow.google.com" in url.lower() else "/fx/tools/flow"
+
+
+def flow_project_path(page_or_url, pid):
+    """v962.2 — SPA project route for the host the page is on."""
+    url = page_or_url if isinstance(page_or_url, str) else (getattr(page_or_url, "url", "") or "")
+    return f"/project/{pid}" if "flow.google.com" in url.lower() else f"/fx/tools/flow/project/{pid}"
 
 def is_flow_project(url):
     return is_flow_url(url) and "/project/" in url.lower()
@@ -1816,11 +1834,17 @@ def ensure_flow_app_entered(page, label="IMAGE", attempts=2):
             print(f"{prefix}✓ Flow app rendered — New project is available", flush=True)
             return True
         # Step 2 — load an app route so the Flow session is minted.
-        try:
-            page.goto(FLOW_APP_MINT_URL, wait_until="domcontentloaded", timeout=45000)
-        except Exception as e:
-            print(f"{prefix}⚠ mint route unreachable: {e}", flush=True)
-        time.sleep(8)
+        # v962.2 — NOT on flow.google.com: there `/project` (no id) is a 404
+        # page (measured 2026-09-06). The New-project click IS the mint on the
+        # new host; a clean load of FLOW_HOME_URL (step 3) renders the list.
+        if "flow.google.com" in (page.url or "").lower() or "flow.google.com" in FLOW_HOME_URL:
+            print(f"{prefix}[v962.2] skipping the /project mint route on flow.google.com (it is a 404 there)", flush=True)
+        else:
+            try:
+                page.goto(FLOW_APP_MINT_URL, wait_until="domcontentloaded", timeout=45000)
+            except Exception as e:
+                print(f"{prefix}⚠ mint route unreachable: {e}", flush=True)
+            time.sleep(8)
         # Step 3 — home now serves the app.
         try:
             page.goto(FLOW_HOME_URL, wait_until="domcontentloaded", timeout=45000)
@@ -1857,6 +1881,9 @@ def spa_navigate_to_flow_home(page, label=""):
     # Try logo click
     for selector in [
         "a[href*='/tools/flow']:not([href*='/project/'])",
+        "header a[href='/']",                                # v962.2 — new host: home is `/`
+        "nav a[href='/']",
+        "a[href='https://flow.google.com/']",
         "a:has-text('Flow')",
     ]:
         try:
@@ -5051,6 +5078,19 @@ def _fa_try_create_new_project_api(page, context=""):
     except Exception:
         title = "Auto Project"
 
+    # v962.2 — on flow.google.com the labs.google/fx/api/trpc layer is gone
+    # (project creation there is a boq batchexecute RPC — session 9e4b16cc,
+    # 2026-09-06); createProject and the HAR replay return JSON 404. Skip
+    # straight to the DOM click, which is the route the app itself uses.
+    try:
+        _cur = (page.url or "").lower()
+    except Exception:
+        _cur = ""
+    if "flow.google.com" in _cur:
+        print(f"[{context}] [flow_api] [v962.2] on flow.google.com — tRPC createProject does not exist "
+              f"here; falling back to the DOM 'New project' click", flush=True)
+        return None
+
     # Pre-create telemetry replay (HAR steps 1-4)
     try:
         _fa_replay_har_pre_create(page, context=context)
@@ -5142,7 +5182,7 @@ def _fa_spa_navigate_to_project(page, pid, context=""):
     Tries Next.js router.push() first, then history.pushState + popstate.
     """
     pfx = f"[{context}] " if context else ""
-    target_path = f"/fx/tools/flow/project/{pid}"
+    target_path = flow_project_path(page, pid)  # v962.2 — host-aware
 
     # Approach 1: Next.js router.push (preserves all SPA state).
     try:

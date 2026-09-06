@@ -127,3 +127,52 @@ def test_v962_video_worker_does_not_kill_on_missing_badge_on_new_host():
     early = body.index('"flow.google.com" in _early_url')
     poll = body.index("for _round in range(2)")
     assert early < poll, "the new-host decision must come BEFORE the badge poll, not after it"
+
+
+def test_v962_2_spa_navigation_never_pushes_the_old_home_path():
+    """v962.2 — the SPA home navigation must not push '/fx/tools/flow' as a
+    literal. On flow.google.com that route is the app's client-side 404 page,
+    which has no "New project" button, so the DOM click times out and the worker
+    reads flow.google.com/404 as the project URL (martha 8b800f8b, 2026-09-06)."""
+    for path in WORKERS:
+        src = open(path, encoding="utf-8").read()
+        i = src.index("def spa_navigate_to_flow_home(")
+        j = src.find("\ndef ", i + 10)
+        body = src[i:j if j != -1 else len(src)]
+        assert "router.push('/fx/tools/flow')" not in body, os.path.basename(path)
+        assert "pushState({}, '', '/fx/tools/flow')" not in body, os.path.basename(path)
+        # only a home nav that PUSHES a path must derive it from the host; the
+        # image worker's home nav clicks anchors and gotos FLOW_HOME_URL only
+        if "pushState(" in body or "router.push(" in body:
+            assert "flow_home_path(" in body, \
+                f"{os.path.basename(path)}: spa_navigate_to_flow_home pushes a path but does not derive it from the host"
+        # 27's addition: pin the literal's absence anywhere in the function
+        assert "/fx/tools/flow" not in body.replace("a[href*='/tools/flow']", "").replace("a[href='/fx/tools/flow']", ""), \
+            f"{os.path.basename(path)}: a '/fx/tools/flow' path literal survives outside the legacy anchor selectors"
+
+
+def test_v962_2_project_path_is_host_aware():
+    for path in WORKERS:
+        src = open(path, encoding="utf-8").read()
+        i = src.index("def _fa_spa_navigate_to_project(")
+        j = src.find("\ndef ", i + 10)
+        body = src[i:j if j != -1 else len(src)]
+        assert 'f"/fx/tools/flow/project/{pid}"' not in body, \
+            f"{os.path.basename(path)}: project SPA path is still the legacy literal"
+        assert "flow_project_path(" in body, os.path.basename(path)
+
+
+def test_v962_2_path_helpers_answer_per_host():
+    ns_all = []
+    for path in WORKERS:
+        src = open(path, encoding="utf-8").read()
+        tree = ast.parse(src)
+        pieces = [ast.get_source_segment(src, n) for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name in ("flow_home_path", "flow_project_path")]
+        assert len(pieces) == 2, os.path.basename(path)
+        ns = {}
+        exec("\n".join(pieces), ns)
+        assert ns["flow_home_path"](NEW_PROJECT) == "/"
+        assert ns["flow_home_path"](OLD_PROJECT) == "/fx/tools/flow"
+        assert ns["flow_project_path"](NEW_HOME, "abc") == "/project/abc"
+        assert ns["flow_project_path"](OLD_HOME, "abc") == "/fx/tools/flow/project/abc"
