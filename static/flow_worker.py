@@ -11310,12 +11310,12 @@ def click_generate_button(page, context_name="", max_retries=3):
 
             # Click Generate — use human_click for natural mouse movement + real click events
             # This is THE click that triggers the API call with reCAPTCHA token
-            if _v962_on_new_host(page):  # v962.7
-                human_click_locator(page, page.locator(_V962_GENERATE_BTN).first, f"{prefix}Start generation")
-                print(f"{prefix}✓ [v962.7] clicked Start generation", flush=True)
-                time.sleep(1)
-                return True
-            arrow_btn = page.locator("button:has(i:text('arrow_forward')), i:text('arrow_forward')").first
+            # v962.7 — the host only decides WHICH button; the click itself, and
+            # its distance from the v700j stamp, stay exactly as before (v918).
+            if _v962_on_new_host(page):
+                arrow_btn = page.locator(_V962_GENERATE_BTN).first
+            else:
+                arrow_btn = page.locator("button:has(i:text('arrow_forward')), i:text('arrow_forward')").first
             human_click_element(page, arrow_btn, "", timeout=30000)
 
             if prefix:
