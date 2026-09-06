@@ -1077,7 +1077,7 @@ def _fa_init_project_best_effort(page, project_id, context=""):
     # End state matches HAR: chatPanelOpen=false + agentToggleState=DISABLED.
     sess_id = _fa_session_id()
     now_iso = _fa_now_iso()
-    project_url = f"https://labs.google/fx/tools/flow/project/{project_id}"
+    project_url = f"{FLOW_ORIGIN}/project/{project_id}"  # v962 host
     AISBX = "https://aisandbox-pa.googleapis.com"
     TRPC = "https://labs.google/fx/api/trpc"
 
@@ -1359,7 +1359,7 @@ def _fa_try_create_new_project_api(page, context=""):
     project_url = _fa_spa_navigate_to_project(page, pid, context=context)
     if not project_url:
         # SPA-nav failed — fall back to full page.goto.
-        project_url = f"https://labs.google/fx/tools/flow/project/{pid}"
+        project_url = f"{FLOW_ORIGIN}/project/{pid}"  # v962 host
         try:
             page.goto(project_url, wait_until="domcontentloaded", timeout=30000)
             try:
@@ -3942,6 +3942,25 @@ def check_ultra_account(page, label="", timeout=5):
             print(f"{prefix}⚠ ULTRA badge still not visible — continuing anyway (account previously verified this session).", flush=True)
             return True
 
+        # v962 — on the NEW host the strict text==='ULTRA' probe finds nothing
+        # at all (measured 2026-09-05: `DIAG ultra/plan-like texts: []` on an
+        # account the operator confirms is Ultra, and it had been verified
+        # ULTRA on the old host the same morning). A probe that cannot see the
+        # badge is not evidence about the plan. Same reasoning as the two
+        # carve-outs around it: warn, continue, and let Flow itself gate a
+        # truly non-Ultra account at generation. The kill stays for the OLD
+        # host, where the badge is known to render.
+        try:
+            _cur_url = (page.url or "").lower()
+        except Exception:
+            _cur_url = ""
+        if "flow.google.com" in _cur_url:
+            print(f"{prefix}[v962] ULTRA badge not found on flow.google.com — the probe was written "
+                  f"for the labs.google nav; NOT killing the account (operator-confirmed Ultra). "
+                  f"Flow gates generation itself if the plan is really missing.", flush=True)
+            _ULTRA_VERIFIED.add(label)
+            return True
+
         # Laptop-login (injected-cookie) mode: the account was logged in via
         # captured cookies. The ULTRA badge render is flaky in that session, so
         # do NOT hard-kill — the account may well be ULTRA (operator-confirmed).
@@ -5253,18 +5272,37 @@ def validate_selected_accounts(selected_accounts):
     
     return valid, errors
 
-FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
+# v962 (2026-09-06) — Google moved Flow from labs.google/fx/tools/flow to
+# flow.google.com. Measured in the image worker's own log on 2026-09-05: 122
+# hits on flow.google.com, the login-state check returning
+# https://flow.google.com/, and a real project reached at
+# flow.google.com/project/<uuid> that the worker then refused to recognise.
+# Every URL predicate below sat on the old host, so on the new one the worker
+# classified a signed-in project page as 'other', looped "Not on Flow —
+# navigating...", and then failed the ULTRA badge probe. 82 clips owed and
+# not one submitted. Rev 776 in HANDOFF has the full trace.
+#
+# The OLD host is kept as legal: the rollout was partial on 09-05 (6 of 7
+# images went through on labs.google the same afternoon), and a redirect
+# chain passes through it.
+FLOW_ORIGIN = "https://flow.google.com"
+FLOW_HOME_URL = "https://flow.google.com/"
+FLOW_HOME_URL_LEGACY = "https://labs.google/fx/tools/flow"
 
 
 def is_flow_url(url):
-    """Check if URL is any Flow page (with or without locale segment).
-    
+    """Check if URL is any Flow page, on EITHER host (with or without locale).
+
     Matches:
-      https://labs.google/fx/tools/flow
+      https://flow.google.com/                          (v962, current host)
+      https://flow.google.com/project/abc-123
+      https://labs.google/fx/tools/flow                 (legacy host)
       https://labs.google/fx/es-419/tools/flow
       https://labs.google/fx/en/tools/flow/project/abc-123
     """
     url = url.lower()
+    if "flow.google.com" in url:
+        return True
     return "labs.google/fx" in url and "/tools/flow" in url
 
 
@@ -6216,7 +6254,7 @@ def clear_flow_site_data(page, label=""):
     # 2) Site storage for labs.google — runs in-page, only while on a
     #    labs.google origin (localStorage / sessionStorage / caches / IndexedDB).
     try:
-        if "labs.google" in (page.url or ""):
+        if "labs.google" in (page.url or "") or "flow.google.com" in (page.url or ""):  # v962 both hosts
             # v758.23 — clear ONLY the Cache-Storage layer here. Do NOT clear
             # localStorage / sessionStorage / IndexedDB: those hold Flow's app +
             # route state, and wiping them drops the SPA back to the marketing
@@ -6246,10 +6284,11 @@ def clear_flow_site_data(page, label=""):
     #    Only the cache / service-worker / code-cache layers are cleared here.
     try:
         cdp = page.context.new_cdp_session(page)
-        cdp.send("Storage.clearDataForOrigin", {
-            "origin": "https://labs.google",
-            "storageTypes": "cache_storage,service_workers,file_systems,shader_cache",
-        })
+        for _origin in ("https://labs.google", FLOW_ORIGIN):  # v962 both hosts
+            cdp.send("Storage.clearDataForOrigin", {
+                "origin": _origin,
+                "storageTypes": "cache_storage,service_workers,file_systems,shader_cache",
+            })
         try:
             cdp.detach()
         except Exception:

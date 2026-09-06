@@ -237,7 +237,11 @@ else:
 # ============================================================
 
 WORKER_VERSION = "img-v591"  # account-routed Firefox sessions + strict API-only benchmark mode
-FLOW_HOME_URL = "https://labs.google/fx/tools/flow"
+# v962 (2026-09-06) — Flow moved to flow.google.com; see the same note in
+# static/flow_worker.py. The old host stays legal (partial rollout, redirects).
+FLOW_ORIGIN = "https://flow.google.com"
+FLOW_HOME_URL = "https://flow.google.com/"
+FLOW_HOME_URL_LEGACY = "https://labs.google/fx/tools/flow"
 
 # v891d — truthful heartbeat. The heartbeat threads beat every 5s no matter
 # what the main loop does, so a wedged/hung main loop kept the platform's
@@ -1320,7 +1324,10 @@ def chrome_warmup(page):
 # ============================================================
 
 def is_flow_url(url):
+    # v962 — either host. flow.google.com is current; labs.google is legacy.
     url = url.lower()
+    if "flow.google.com" in url:
+        return True
     return "labs.google/fx" in url and "/tools/flow" in url
 
 def is_flow_home(url):
@@ -5064,7 +5071,7 @@ def _fa_try_create_new_project_api(page, context=""):
     project_url = _fa_spa_navigate_to_project(page, pid, context=context)
     if not project_url:
         # SPA-nav failed — full page.goto fallback.
-        project_url = f"https://labs.google/fx/tools/flow/project/{pid}"
+        project_url = f"{FLOW_ORIGIN}/project/{pid}"  # v962 host
         try:
             page.goto(project_url, wait_until="domcontentloaded", timeout=30000)
             try:
@@ -5270,7 +5277,7 @@ def _fa_init_project_best_effort(page, project_id, context=""):
 
     sess_id = _fa_session_id()
     now_iso = _fa_now_iso()
-    project_url = f"https://labs.google/fx/tools/flow/project/{project_id}"
+    project_url = f"{FLOW_ORIGIN}/project/{project_id}"  # v962 host
     AISBX = "https://aisandbox-pa.googleapis.com"
     TRPC = "https://labs.google/fx/api/trpc"
 
