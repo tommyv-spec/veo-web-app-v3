@@ -189,13 +189,38 @@ def pull_session(email, golden_folder):
         log=log, allow_channel_close=True)
 
 
-def use_account(email):
+def _private_profile_seeded(path):
+    """True when the worker-private Chromium profile has durable login state."""
+    candidates = (
+        os.path.join(path, "Local State"),
+        os.path.join(path, "Default", "Cookies"),
+        os.path.join(path, "Default", "Network", "Cookies"),
+    )
+    return any(os.path.isfile(p) and os.path.getsize(p) > 0 for p in candidates)
+
+
+def _hold_emergency(reason):
+    """Stop unattended retries until the operator fixes the Gemini source."""
+    hold_dir = os.path.join(os.path.expanduser("~"), ".kaveno", "hold")
+    os.makedirs(hold_dir, exist_ok=True)
+    path = os.path.join(hold_dir, "emergency")
+    try:
+        with open(path, "x", encoding="utf-8") as handle:
+            handle.write(reason.rstrip() + "\n")
+    except FileExistsError:
+        pass
+
+
+def use_account(email, seed_only=False):
     """Point the worker at a clean per-account profile and fill it by copying the
     live session. Sets PROFILE_DIR + CHROME_CHANNEL for this run."""
     global PROFILE_DIR, CHROME_CHANNEL
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", email.strip().lower())
     PROFILE_DIR = os.path.join(BASE_DIR, f".gemini_profile_{safe}")
     log(f"using per-account profile: {os.path.basename(PROFILE_DIR)}")
+    if seed_only and _private_profile_seeded(PROFILE_DIR):
+        log("private Gemini profile already seeded — reusing it")
+        return False
     channel = pull_session(email, PROFILE_DIR)
     if channel:
         CHROME_CHANNEL = channel
@@ -2078,11 +2103,17 @@ def main():
     ap.add_argument("--max-clips", type=int, default=None,
                     help="--serve: render at most N clips, then return the job to "
                          "the queue for the main worker (test guard)")
-    ap.add_argument("--email", help="Google account to run as. Its live session is "
+    ap.add_argument("--email", default=os.environ.get("GEMINI_WORKER_EMAIL"),
+                    help="Google account to run as. Its live session is "
                     "COPIED from a non-stable Chrome channel (Beta/Dev/Canary) into "
                     "a clean per-account profile — no manual login. Your daily "
                     "stable Chrome is never touched.")
     args = ap.parse_args()
+
+    if args.serve and os.environ.get("KAVENO_LIFECYCLE_LAUNCH") != "1":
+        log("DEPRECATED direct emergency start refused. Use: python "
+            "tools/worker_lifecycle.py ensure emergency --purpose <job>")
+        return
 
     if args.login:
         login_flow(args.email)
@@ -2090,7 +2121,13 @@ def main():
 
     session_copied = False
     if args.email:
-        session_copied = use_account(args.email)
+        session_copied = use_account(args.email, seed_only=args.serve)
+
+    if args.serve and not session_copied and not _private_profile_seeded(PROFILE_DIR):
+        reason = "Gemini emergency worker has no usable private login snapshot"
+        _hold_emergency(reason)
+        log(reason + "; emergency lane held before browser launch")
+        return
 
     if args.serve and not args.token:
         log("ERROR: --serve needs a worker token (--token or USER_WORKER_TOKEN). "
@@ -2109,9 +2146,12 @@ def main():
         jobs = [{"prompt": args.prompt, "ref": args.ref, "out": args.out}]
 
     with _import_playwright()() as p:
-        ctx, page = launch(p)
+        ctx, page = launch(p, headless=args.serve)
         try:
-            if not ensure_logged_in(page, session_copied=session_copied):
+            if not ensure_logged_in(page, timeout_s=(60 if args.serve else 600),
+                                    session_copied=session_copied):
+                if args.serve:
+                    _hold_emergency("Gemini emergency worker private session is signed out")
                 return
             _install(page)
             q = quota(page)
