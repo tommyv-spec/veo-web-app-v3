@@ -3456,6 +3456,10 @@ def _flow_entry_login_click(page, label="Flow"):
     return False
 
 
+class FlowLoginRequired(RuntimeError):
+    """The private worker profile has no verified Flow login."""
+
+
 def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
     """Ensure the page is on Flow and the user is logged in.
     
@@ -3631,7 +3635,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
                     minimize_chrome_window(p, label=label)
                 except Exception:
                     pass
-                return
+                return True
             
             if state == 'flow_not_logged_in':
                 # Landed on Flow landing page — try to click through to the logged-in app.
@@ -3696,7 +3700,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             elapsed = time.time() - start_time
             if elapsed > max_wait:
                 print(f"⚠️ [{label}] Login timeout after {timeout_minutes} minutes!", flush=True)
-                return
+                raise FlowLoginRequired(f"{label}: Google login was not completed")
             if int(elapsed) % 30 == 0 and int(elapsed) > 0:
                 print(f"[{label}] Still waiting for login... ({int(elapsed)}s)", flush=True)
     
@@ -3704,7 +3708,8 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
     max_attempts = 8
     _consecutive_no_buttons = 0
     _sso_attempts = 0
-    _session_rebuilt = False  # rebuild the golden from the real profile at most once
+    _login_completed = False
+    _session_reported = False
     for attempt in range(max_attempts):
         state = _get_page_state(page)
 
@@ -3778,16 +3783,9 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
                 _wait_for_page_settle(page, max_seconds=40)
                 time.sleep(3)
                 continue
-        # SESSION GENUINELY DEAD -> rebuild the golden from the real profile.
-        #
-        # This automates by hand what the operator did on 2026-08-11: re-pass the
-        # email in the UI so the golden is REBUILT from the still-signed-in local
-        # Firefox profile. Restoring the EXISTING golden cannot work — it holds
-        # the very cookies that just stopped working, which is why the worker span
-        # on the account chooser for ~5 minutes and then died on createProject.
-        #
-        # Fires once per login call, after SSO has been spent or we are parked on
-        # a Google login page with nothing clickable.
+        # A dead private session is never repaired by silently cloning the
+        # operator's live Firefox here. That source is read-only and is seeded
+        # only by the explicit snapshot path before a private profile starts.
         _stuck_on_google = ("accounts.google.com" in _cur_url
                             or "accountchooser" in _cur_url
                             or "/api/auth/signin" in _cur_url)
@@ -3799,27 +3797,15 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
         # fired, and both accounts burned ~5 min of retries then failed
         # createProject with the challenge URL as the project URL.
         _wants_credentials = "/signin/challenge/" in _cur_url
-        if (not _session_rebuilt and state != 'flow_logged_in'
-                and _stuck_on_google
+        if (not _session_reported and state != 'flow_logged_in' and _stuck_on_google
                 and (_wants_credentials or _sso_attempts >= 2)):
-            _session_rebuilt = True
-            if refresh_firefox_session_from_profile(SESSION_FOLDER, label=label, page=page):
-                _sso_attempts = 0  # fresh cookies deserve a fresh SSO budget
-                try:
-                    page.goto(FLOW_HOME_URL, timeout=60000)
-                except Exception:
-                    pass
-                _wait_for_page_settle(page, max_seconds=30)
-                continue
-            # Rebuild failed (no local profile signed into this email, or the
-            # pull broke) — only NOW is this something the operator must fix.
+            _session_reported = True
             try:
                 api_request("POST", "/worker-error", {
                     "error_type": "session_lost",
-                    "message": (f"{label}: the Flow session is gone and it could not "
-                                f"be rebuilt from the local Firefox profile. Sign in "
-                                f"to Google in Firefox as the worker account, then "
-                                f"restart the worker."),
+                    "message": (f"{label}: the private Flow session is signed out. "
+                                f"Refresh it through the controlled Firefox snapshot "
+                                f"path, then restart the worker."),
                     "account_name": label,
                 })
                 print(f"[{label}] reported session_lost to the dashboard", flush=True)
@@ -3837,7 +3823,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
                 context.storage_state(path=storage_file)
             except Exception:
                 pass
-            return False
+            return _login_completed
         
         elif state == 'flow_not_logged_in':
             # Before clicking anything: wait 3s and recheck — the avatar may just be slow to render.
@@ -3941,6 +3927,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             state = _wait_for_page_settle(page, max_seconds=15)
             if state == 'google_login':
                 _wait_for_user_login(page)
+                _login_completed = True
             elif state == 'flow_logged_in':
                 continue  # Will be caught at top of loop
             # Loop back to re-check state
@@ -3948,6 +3935,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
         
         elif state == 'google_login':
             _wait_for_user_login(page)
+            _login_completed = True
             # After login, Google redirects to Flow — wait for settle
             _wait_for_page_settle(page, max_seconds=15)
             continue
@@ -3961,15 +3949,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             state = _navigate_to_flow(page)
             continue
     
-    # Final check
-    check_and_dismiss_popup(page)
-    try:
-        context = page.context
-        storage_file = os.path.join(BASE_DIR, ".submit_storage_state.json")
-        context.storage_state(path=storage_file)
-    except Exception:
-        pass
-    return True
+    raise FlowLoginRequired(f"{label}: Flow login could not be verified")
 
 
 class NotUltraError(Exception):
@@ -4935,6 +4915,10 @@ ACCOUNTS = [
 _LAPTOP_COPIED_GOLDENS = set()  # golden paths copied this process (copy once)
 
 
+class FirefoxProfileSourceUnavailable(RuntimeError):
+    """An empty private Firefox profile has no safe operator snapshot source."""
+
+
 def refresh_firefox_session_from_profile(session_folder=None, label="", page=None):
     """Rebuild EVERY enabled Firefox slot's golden from the operator's real
     Firefox profile, then recover the live session.
@@ -4957,6 +4941,10 @@ def refresh_firefox_session_from_profile(session_folder=None, label="", page=Non
     Returns True if at least one golden was rebuilt. Never raises.
     """
     try:
+        if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
+            print(f"[{label}] session refresh disabled; use the controlled profile rebuild",
+                  flush=True)
+            return False
         if not _bd.is_firefox_mode(BROWSER_MODE):
             return False
         import sys as _sys
@@ -5043,7 +5031,8 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
     Replaces the retired net-log capture+inject (Flow rejected the reconstituted
     session for some accounts AND repeatedly driving the real profile signed it
     out). Fail-safe: any error logged, never raises; on failure the worker falls
-    back to a manual login that run. Set LAPTOP_PULL_DISABLED=1 to turn off.
+    back to a manual login that run. Automated refresh stays disabled after the
+    one safe seed of an empty private profile.
 
     v805 diagnostic: prints "copy-mode v805" + the build outcome so the next
     operator-side run confirms the copy path is live (remove after evidence)."""
@@ -5056,8 +5045,6 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
                 os.remove(cookie_marker)
         except Exception:
             pass
-        if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
-            return
         # Firefox mode uses its OWN pull. The Chrome path below copies a real
         # CHROME profile, which is unreadable by Firefox — dropping it into
         # firefox-golden breaks the login on every restore (observed 2026-08-07
@@ -5070,7 +5057,9 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
             try:
                 import sys as _sys
                 _sys.modules.pop("firefox_profile_pull", None)
-                from firefox_profile_pull import build_firefox_golden_from_profile
+                from firefox_profile_pull import (build_firefox_golden_from_profile,
+                                                  hold_flow_backed_lanes,
+                                                  worker_profile_needs_seed)
                 from worker_profile_pull import load_laptop_email as _lle_ff
 
                 _acct_num, _ff_acct = None, None
@@ -5082,6 +5071,10 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
                     print(f"[{label}] firefox pull: session {session_folder} not in "
                           f"ACCOUNTS - skip", flush=True)
                     return
+                if not worker_profile_needs_seed(session_folder, golden_folder):
+                    print(f"[{label}] firefox pull: private profile already seeded — reusing",
+                          flush=True)
+                    return
                 # Same rule as the Chrome path below: the slot's own laptop_email
                 # if set, else Account1's. The operator runs the SAME Google
                 # account across slots, so every slot seeds from one profile.
@@ -5089,16 +5082,29 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
                              or ACCOUNTS[0].get("laptop_email", "")
                              or _lle_ff(os.path.join(_BASE, "worker_settings.json")))
                 if not _ff_email:
-                    print(f"[{label}] firefox pull: no laptop_email configured - "
-                          f"manual sign-in", flush=True)
-                    return
-                if build_firefox_golden_from_profile(
+                    hold_flow_backed_lanes("operator Firefox source is not configured")
+                    raise FirefoxProfileSourceUnavailable(
+                        "operator Firefox source is not configured; Flow-backed lanes held")
+                if not build_firefox_golden_from_profile(
                         _ff_email, golden_folder, label=label,
                         account_num=_acct_num, log=lambda m: print(m, flush=True)):
-                    _LAPTOP_COPIED_GOLDENS.add(golden_folder)
+                    hold_flow_backed_lanes(
+                        "operator Firefox source is signed out or could not be verified")
+                    raise FirefoxProfileSourceUnavailable(
+                        "safe Firefox snapshot unavailable; Flow-backed lanes held")
+                _LAPTOP_COPIED_GOLDENS.add(golden_folder)
+            except FirefoxProfileSourceUnavailable:
+                raise
             except Exception as _fe:
-                print(f"[{label}] firefox pull unavailable ({_fe}) - manual sign-in",
-                      flush=True)
+                print(f"[{label}] firefox pull unavailable ({_fe})", flush=True)
+                try:
+                    hold_flow_backed_lanes("Firefox snapshot broker is unavailable")
+                except Exception:
+                    pass
+                raise FirefoxProfileSourceUnavailable(
+                    "Firefox snapshot broker unavailable; refusing browser launch") from _fe
+            return
+        if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             return
         # Fresh-load the synced companion (updater writes it after import).
         import sys as _sys
@@ -5158,6 +5164,8 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
             print(f"[{label}] laptop copy: ✓ lean golden ready (channel={ch})", flush=True)
         else:
             print(f"[{label}] laptop copy: build skipped/failed — manual login needed this run", flush=True)
+    except FirefoxProfileSourceUnavailable:
+        raise
     except Exception as _pe:
         print(f"[{label}] laptop copy error (continuing): {_pe}", flush=True)
 
@@ -26785,7 +26793,7 @@ class AccountWorker(threading.Thread):
                                                         ignore=_shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
                                         print(f"[{self.name}] ✓ Golden created: {golden_folder}", flush=True)
                                     else:
-                                        print(f"[{self.name}] Golden already exists — keeping original (write-once).", flush=True)
+                                        print(f"[{self.name}] Golden already exists — leaving it unchanged.", flush=True)
                                     # Restore session from golden
                                     restore_from_golden(self.session_folder, self.name, restore_session=True)
                                     # Relaunch from clean session (v778 — via the retrying
@@ -28228,36 +28236,14 @@ def main(account_session=None, account_download=None, account_label=None):
                 
                 relaunch_login_required = ensure_logged_into_flow(page, "SYNC-RELAUNCH", timeout_minutes=10)
                 if relaunch_login_required:
-                    print("[Sync] Login was required after relaunch — golden session was expired.", flush=True)
-                    print(f"[CLOSE_T9] [main] browser.close() reason=main_path_c", flush=True)
-                    browser.close()
-                    time.sleep(2)
-                    if not os.path.exists(golden_folder):
-                        try:
-                            shutil.copytree(submit_folder, golden_folder,
-                                           ignore_dangling_symlinks=True,
-                                           ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
-                            print(f"[Sync] ✓ Golden created with fresh login: {golden_folder}")
-                        except Exception as e:
-                            print(f"[Sync] ⚠ Could not create golden: {e}")
-                    else:
-                        print(f"[Sync] Golden already exists — keeping original (write-once).", flush=True)
-                    if os.path.exists(golden_folder):
-                        shutil.rmtree(submit_folder, ignore_errors=True)
-                        try:
-                            shutil.copytree(golden_folder, submit_folder,
-                                           ignore_dangling_symlinks=True,
-                                           ignore=shutil.ignore_patterns('SingletonLock', 'SingletonSocket', 'SingletonCookie'))
-                            print(f"[Sync] ✓ Session copied from golden")
-                        except Exception as e:
-                            print(f"[Sync] ⚠ Could not copy session: {e}")
-                    browser = _bd.launch_context(p, BROWSER_MODE, **relaunch_kwargs)
-                    page = browser.pages[0] if browser.pages else browser.new_page()
-                    _stash_profile_on_page(page, SESSION_FOLDER, account_label=label)  # v900 — new page = new listener
-                    chrome_warmup(page)
-                    page.goto(FLOW_HOME_URL)
-                    human_delay(1, 2)
-                    check_and_dismiss_popup(page)
+                    # The newly saved golden did not survive a relaunch. Never
+                    # replay it. Keep the now-verified private browser session
+                    # and quarantine the failed baseline for the next start.
+                    rejected = golden_folder + ".login-rejected"
+                    shutil.rmtree(rejected, ignore_errors=True)
+                    if os.path.isdir(golden_folder):
+                        os.replace(golden_folder, rejected)
+                    print("[Sync] Fresh sign-in stayed live; failed golden quarantined.", flush=True)
                 
                 check_and_dismiss_popup(page)
                 print("[Sync] ✓ Submit browser relaunched and ready!")

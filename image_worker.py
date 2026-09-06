@@ -499,6 +499,10 @@ def _sync_companion_modules(base_url):
 _LAPTOP_COPIED_GOLDENS = set()
 
 
+class FirefoxProfileSourceUnavailable(RuntimeError):
+    """An empty private Firefox profile has no safe operator snapshot source."""
+
+
 def _maybe_pull_laptop_profile(session_folder, golden_folder, label="IMAGE"):
     """Build the engine-native golden from the operator's matching profile.
 
@@ -510,7 +514,8 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label="IMAGE"):
     Chrome still requires App-Bound Encryption disabled for copy-mode. Firefox
     does not. Copy once per process.
     Fail-safe: any error logged, never raises; on failure the worker falls
-    back to a manual login that run. LAPTOP_PULL_DISABLED=1 turns it off."""
+    back to a manual login that run. Automated refresh stays disabled after the
+    one safe seed of an empty private profile."""
     try:
         # Drop any stale net-log cookie marker from the retired path so the old
         # injection block (kept as a no-op) never fires with dead cookies.
@@ -519,8 +524,6 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label="IMAGE"):
                 os.remove(_COOKIE_MARKER)
         except Exception:
             pass
-        if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
-            return
         for _p in (BASE_DIR, os.path.join(BASE_DIR, "static")):
             if os.path.isdir(_p) and _p not in sys.path:
                 sys.path.insert(0, _p)
@@ -532,6 +535,11 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label="IMAGE"):
         email = (os.environ.get("IMAGE_FLOW_ACCOUNT_EMAIL", "").strip()
                  or _lle(os.path.join(BASE_DIR, "worker_settings.json")))
         if not email:
+            if FIREFOX_MODE:
+                from firefox_profile_pull import hold_flow_backed_lanes
+                hold_flow_backed_lanes("operator Firefox source is not configured")
+                raise FirefoxProfileSourceUnavailable(
+                    "operator Firefox source is not configured; Flow-backed lanes held")
             return
         if golden_folder in _LAPTOP_COPIED_GOLDENS:
             print(f"[{label}] laptop copy: golden already built this session — reusing", flush=True)
@@ -542,17 +550,26 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label="IMAGE"):
             # Chrome cookie injection reaches Google's chooser, but it does not
             # reproduce Flow's complete Firefox session.
             sys.modules.pop("firefox_profile_pull", None)
-            from firefox_profile_pull import build_firefox_golden_from_profile
+            from firefox_profile_pull import (build_firefox_golden_from_profile,
+                                              hold_flow_backed_lanes,
+                                              worker_profile_needs_seed)
+            if not worker_profile_needs_seed(session_folder, golden_folder):
+                print(f"[{label}] firefox pull: private profile already seeded — reusing",
+                      flush=True)
+                return
             print(f"[{label}] firefox pull: looking for {email} in real Firefox profiles",
                   flush=True)
-            if build_firefox_golden_from_profile(
+            if not build_firefox_golden_from_profile(
                     email, golden_folder, label=label,
                     log=lambda m: print(m, flush=True)):
-                _LAPTOP_COPIED_GOLDENS.add(golden_folder)
-                print(f"[{label}] firefox pull: ✓ native Firefox golden ready", flush=True)
-            else:
-                print(f"[{label}] firefox pull: no matching signed-in Firefox profile — "
-                      f"visible one-time login required", flush=True)
+                hold_flow_backed_lanes(
+                    "operator Firefox source is signed out or could not be verified")
+                raise FirefoxProfileSourceUnavailable(
+                    "safe Firefox snapshot unavailable; Flow-backed lanes held")
+            _LAPTOP_COPIED_GOLDENS.add(golden_folder)
+            print(f"[{label}] firefox pull: ✓ native Firefox golden ready", flush=True)
+            return
+        if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
             return
         # v892 — check the account in Chrome BETA (non-stable channels) FIRST,
         # exactly like the chatgpt worker: a Beta copy never touches the
@@ -587,8 +604,29 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label="IMAGE"):
             print(f"[{label}] laptop copy: ✓ lean golden ready (channel={ch})", flush=True)
         else:
             print(f"[{label}] laptop copy: build skipped/failed — manual login needed this run", flush=True)
+    except FirefoxProfileSourceUnavailable:
+        raise
     except Exception as _pe:
         print(f"[{label}] laptop copy error (continuing): {_pe}", flush=True)
+        if FIREFOX_MODE:
+            reason = "Firefox snapshot broker is unavailable"
+            try:
+                from firefox_profile_pull import hold_flow_backed_lanes
+                hold_flow_backed_lanes(reason)
+            except Exception:
+                # The broker itself may be the failed import. Keep the worker
+                # fail-closed even then, and preserve any existing owner hold.
+                hold_dir = os.path.join(os.path.expanduser("~"), ".kaveno", "hold")
+                os.makedirs(hold_dir, exist_ok=True)
+                for lane in ("flow", "image"):
+                    hold_path = os.path.join(hold_dir, lane)
+                    try:
+                        with open(hold_path, "x", encoding="utf-8") as handle:
+                            handle.write(reason + "\n")
+                    except FileExistsError:
+                        pass
+            raise FirefoxProfileSourceUnavailable(
+                "Firefox snapshot broker unavailable; refusing browser launch") from _pe
 
 
 # Parity with flow_worker._IGNORE_DEFAULT_ARGS. Playwright/Patchright default

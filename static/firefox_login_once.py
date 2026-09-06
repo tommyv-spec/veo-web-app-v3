@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-time Google sign-in for the Firefox (Camoufox) worker profile.
+"""DEPRECATED: do not sign in inside a worker-private Firefox profile.
 
 WHY THIS EXISTS
 ---------------
@@ -29,7 +29,9 @@ USAGE
     python code/static/firefox_login_once.py            # Account1
     python code/static/firefox_login_once.py --account 2
 
-Then start the worker normally:  ~/veo-worker/start_worker.bat
+Use the operator's normal Firefox as the read-only source instead:
+    python tools/flow_profile.py rebuild --target flow
+Then acquire the held lane through tools/worker_lifecycle.py.
 """
 
 import argparse
@@ -53,6 +55,13 @@ def profile_dir(account):
 
 
 def main():
+    print("DEPRECATED: this helper would log into a worker-private profile.")
+    print("Sign in to Flow in normal Firefox, then run:")
+    print("  python tools/flow_profile.py rebuild --target flow")
+    print("Keep the lane held until its owner reviews the snapshot.")
+    return 2
+
+    # Kept below for source history only; unreachable by design.
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--account", type=int, default=1,

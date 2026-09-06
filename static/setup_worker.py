@@ -399,6 +399,7 @@ def create_launch_scripts():
         bat.write_text(
             f'@echo off\n'
             f'cd /d "{WORKER_DIR}"\n'
+            f'if not "%KAVENO_LIFECYCLE_LAUNCH%"=="1" (echo Use tools\\worker_lifecycle.py ensure flow & exit /b 3)\n'
             f'echo Loading config...\n'
             f'for /f "usebackq tokens=1,* delims==" %%a in (".env") do set "%%a=%%b"\n'
             f'echo Checking for updates...\n'
@@ -427,6 +428,7 @@ def create_launch_scripts():
         ps1 = WORKER_DIR / "start_worker.ps1"
         ps1.write_text(
             f'Set-Location "{WORKER_DIR}"\n'
+            f'if ($env:KAVENO_LIFECYCLE_LAUNCH -ne "1") {{ throw "Use tools/worker_lifecycle.py ensure flow" }}\n'
             f'Get-Content .env | ForEach-Object {{\n'
             f'    if ($_ -match "^([^=]+)=(.*)$") {{\n'
             f'        [Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")\n'
@@ -452,6 +454,7 @@ def create_launch_scripts():
         sh.write_text(
             f'#!/bin/bash\n'
             f'cd "{WORKER_DIR}"\n'
+            f'[ "$KAVENO_LIFECYCLE_LAUNCH" = "1" ] || {{ echo "Use tools/worker_lifecycle.py ensure flow"; exit 3; }}\n'
             f'set -a\n'
             f'source .env\n'
             f'set +a\n'
@@ -486,7 +489,7 @@ def main():
         WORKER_DIR.mkdir(exist_ok=True)
         download_worker()
         create_launch_scripts()
-        print("\nDone! Restart your worker using start_worker.ps1 (Windows) or start_worker.sh (Mac/Linux)")
+        print("\nDone. Start the lane through tools/worker_lifecycle.py ensure flow.")
         return
 
     # Step 1: Python check
@@ -565,13 +568,10 @@ def main():
     print("  Setup complete!")
     print("=" * 55)
 
-    if platform.system() == "Windows":
-        print(f"\n  To start your worker:")
-        print(f"    Double-click: {WORKER_DIR / 'start_worker.bat'}")
-        print(f"    Or run: cd {WORKER_DIR} && start_worker.bat")
-    else:
-        print(f"\n  To start your worker:")
-        print(f"    {WORKER_DIR / 'start_worker.sh'}")
+    print("\n  Start this lane from the project checkout:")
+    print("    python tools/worker_lifecycle.py ensure flow --purpose <job>")
+    print("  The generated start_worker files are lifecycle-owned low-level wrappers.")
+    return
 
     # Offer to start now
     print()

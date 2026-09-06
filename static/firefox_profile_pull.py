@@ -62,6 +62,122 @@ _DURABLE_FILES = (
 _EMAIL_CACHE = {}
 
 
+def worker_profile_needs_seed(session_folder, golden_folder):
+    """True only before a private worker profile has any durable state.
+
+    Normal starts reuse the private session/golden. Re-reading the operator's
+    live Firefox on every start rotates the same Google session across several
+    browsers. Recovery is an explicit snapshot action, never a retry loop.
+    """
+    if os.path.isdir(golden_folder):
+        return False
+    if os.path.isdir(session_folder):
+        try:
+            with os.scandir(session_folder) as entries:
+                if next(entries, None) is not None:
+                    return False
+        except OSError:
+            return False
+    return True
+
+
+def replace_golden_atomically(staged, golden_folder):
+    """Publish a staged private golden, restoring the prior one on failure."""
+    staged = os.fspath(staged)
+    golden_folder = os.fspath(golden_folder)
+    backup = golden_folder + ".ffpull-old"
+    shutil.rmtree(backup, ignore_errors=True)
+    moved_old = False
+    if os.path.isdir(golden_folder):
+        os.replace(golden_folder, backup)
+        moved_old = True
+    try:
+        os.replace(staged, golden_folder)
+    except Exception:
+        if moved_old and not os.path.exists(golden_folder) and os.path.isdir(backup):
+            os.replace(backup, golden_folder)
+        raise
+    shutil.rmtree(backup, ignore_errors=True)
+
+
+def snapshot_sqlite_database(source_db, destination_db):
+    """Copy a live SQLite database through its online-backup API.
+
+    The source is opened read-only. SQLite applies the source WAL while taking
+    the snapshot, so the result is one consistent database and never a raw
+    database/WAL/SHM mixture from different instants.
+    """
+    source_db = os.path.abspath(os.fspath(source_db))
+    destination_db = os.path.abspath(os.fspath(destination_db))
+    os.makedirs(os.path.dirname(destination_db), exist_ok=True)
+    try:
+        os.remove(destination_db)
+    except FileNotFoundError:
+        pass
+    src = sqlite3.connect(f"file:{source_db}?mode=ro", uri=True, timeout=10)
+    try:
+        dst = sqlite3.connect(destination_db)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+
+def snapshot_firefox_profile(source_profile, destination_profile, log=print):
+    """Publish one consistent, data-only snapshot into a private profile.
+
+    The operator profile is read only. A fresh staging directory is published
+    with rollback, so a failed snapshot leaves the prior private profile whole.
+    Returns the number of copied durable files, or zero on failure.
+    """
+    source_profile = os.path.abspath(os.fspath(source_profile))
+    destination_profile = os.path.abspath(os.fspath(destination_profile))
+    parent = os.path.dirname(destination_profile)
+    os.makedirs(parent, exist_ok=True)
+    staged = tempfile.mkdtemp(
+        prefix=os.path.basename(destination_profile) + ".ffpull-", dir=parent)
+    copied = []
+    try:
+        src_db = os.path.join(source_profile, "cookies.sqlite")
+        if not os.path.isfile(src_db):
+            raise FileNotFoundError("source has no cookies.sqlite")
+        snapshot_sqlite_database(src_db, os.path.join(staged, "cookies.sqlite"))
+        copied.append("cookies.sqlite")
+        for name in _DURABLE_FILES:
+            if name.startswith("cookies.sqlite"):
+                continue
+            src = os.path.join(source_profile, name)
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(staged, name))
+                copied.append(name)
+        replace_golden_atomically(staged, destination_profile)
+        staged = ""
+        return len(copied)
+    except Exception as exc:
+        log(f"[ff-pull] snapshot failed ({str(exc)[:100]}); destination unchanged")
+        return 0
+    finally:
+        if staged:
+            shutil.rmtree(staged, ignore_errors=True)
+
+
+def hold_flow_backed_lanes(reason, state_dir=None):
+    """Hold Flow and image starts without overwriting an owner's existing hold."""
+    state_dir = state_dir or os.path.join(os.path.expanduser("~"), ".kaveno", "hold")
+    os.makedirs(state_dir, exist_ok=True)
+    for lane in ("flow", "image"):
+        path = os.path.join(state_dir, lane)
+        if os.path.exists(path):
+            continue
+        try:
+            with open(path, "x", encoding="utf-8") as handle:
+                handle.write(reason.rstrip() + "\n")
+        except FileExistsError:
+            pass
+
+
 def firefox_profiles_root():
     """%APPDATA%\\Mozilla\\Firefox on Windows; the standard dirs elsewhere."""
     override = os.environ.get("FIREFOX_PROFILES_ROOT")
@@ -126,7 +242,7 @@ def google_cookie_count(profile_dir):
     tmp = os.path.join(tempfile.gettempdir(),
                        f"ffpull_probe_{abs(hash(profile_dir))}.sqlite")
     try:
-        shutil.copy2(src, tmp)
+        snapshot_sqlite_database(src, tmp)
         con = sqlite3.connect(tmp)
         try:
             n = con.execute(
@@ -197,10 +313,8 @@ def _probe_google_emails_inproc(profile_dir, log=print):
     emails = []
     work = tempfile.mkdtemp(prefix="ffpull_email_")
     try:
-        for name in ("cookies.sqlite", "cookies.sqlite-wal", "cookies.sqlite-shm"):
-            src = os.path.join(profile_dir, name)
-            if os.path.isfile(src):
-                shutil.copy2(src, os.path.join(work, name))
+        snapshot_sqlite_database(os.path.join(profile_dir, "cookies.sqlite"),
+                                 os.path.join(work, "cookies.sqlite"))
 
         from playwright.sync_api import sync_playwright
         from camoufox.sync_api import NewBrowser
@@ -338,18 +452,10 @@ def _read_cookies_wal_applied(profile_dir):
     tmp = os.path.join(tempfile.gettempdir(),
                        f"ffpull_live_{abs(hash(profile_dir))}.sqlite")
     try:
-        con = sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=10)
-        try:
-            dst = sqlite3.connect(tmp)
-            try:
-                con.backup(dst)
-            finally:
-                dst.close()
-        finally:
-            con.close()
+        snapshot_sqlite_database(src, tmp)
     except Exception:
-        # a degraded read must never crash a caller; fall back to the plain copy
-        return read_cookies_for_playwright(profile_dir, log=lambda m: None)
+        # A raw fallback can be torn while Firefox writes. Fail closed instead.
+        return []
     out = []
     try:
         c = sqlite3.connect(tmp)
@@ -407,12 +513,6 @@ def build_firefox_golden_from_profile(email, golden_folder, label="",
         # does not claim that Gemini can use the session. The Gemini worker's own
         # signed_in() check proves that after launch and retries safely if unsure.
 
-        staged = golden_folder + ".ffpull-tmp"
-        shutil.rmtree(staged, ignore_errors=True)
-        os.makedirs(staged, exist_ok=True)
-
-        copied = []
-
         # cookies.sqlite is copied with SQLite's BACKUP API, not shutil (2026-08-23).
         #
         # Why: when Firefox is RUNNING — the normal case, since the operator's own
@@ -427,61 +527,15 @@ def build_firefox_golden_from_profile(email, golden_folder, label="",
         #
         # con.backup() reads through the WAL and writes ONE consistent file, so the
         # session survives. -wal/-shm are deliberately NOT copied; SQLite rebuilds
-        # them. Falls back to the old copy if the backup path fails, because a
-        # degraded pull must never crash the worker.
-        src_db = os.path.join(src, "cookies.sqlite")
-        if os.path.isfile(src_db):
-            try:
-                con = sqlite3.connect(f"file:{src_db}?mode=ro", uri=True, timeout=10)
-                try:
-                    dst = sqlite3.connect(os.path.join(staged, "cookies.sqlite"))
-                    try:
-                        con.backup(dst)
-                    finally:
-                        dst.close()
-                finally:
-                    con.close()
-                copied.append("cookies.sqlite")
-                log(f"{tag}ff-pull: cookies.sqlite snapshotted via SQLite backup "
-                    f"(WAL applied; -wal/-shm intentionally not copied)")
-            except Exception as e:
-                log(f"{tag}ff-pull: SQLite backup failed ({str(e)[:80]}) - "
-                    f"falling back to a raw copy, session may not survive")
-                for name in ("cookies.sqlite", "cookies.sqlite-wal", "cookies.sqlite-shm"):
-                    s = os.path.join(src, name)
-                    if os.path.isfile(s):
-                        try:
-                            shutil.copy2(s, os.path.join(staged, name))
-                            copied.append(name)
-                        except Exception as e2:
-                            log(f"{tag}ff-pull: could not copy {name}: {str(e2)[:80]}")
-
-        for name in _DURABLE_FILES:
-            if name.startswith("cookies.sqlite"):
-                continue  # handled above
-            s = os.path.join(src, name)
-            if os.path.isfile(s):
-                try:
-                    shutil.copy2(s, os.path.join(staged, name))
-                    copied.append(name)
-                except Exception as e:
-                    log(f"{tag}ff-pull: could not copy {name}: {str(e)[:80]}")
-
-        if "cookies.sqlite" not in copied:
-            log(f"{tag}ff-pull: no cookie store copied - aborting, golden unchanged")
-            shutil.rmtree(staged, ignore_errors=True)
+        # them. Any backup error aborts and preserves the existing destination.
+        copied = snapshot_firefox_profile(src, golden_folder, log=log)
+        if not copied:
             return False
-
-        # Atomic-ish swap so a failure never leaves a half-built golden.
-        backup = golden_folder + ".ffpull-old"
-        shutil.rmtree(backup, ignore_errors=True)
-        if os.path.isdir(golden_folder):
-            os.rename(golden_folder, backup)
-        os.rename(staged, golden_folder)
-        shutil.rmtree(backup, ignore_errors=True)
+        log(f"{tag}ff-pull: cookies.sqlite snapshotted via SQLite backup "
+            f"(WAL applied; -wal/-shm intentionally not copied)")
 
         log(f"{tag}ff-pull: golden built from {os.path.basename(src)} "
-            f"({len(copied)} files: {', '.join(copied)})")
+            f"({copied} durable files)")
         return True
     except Exception as e:
         log(f"{tag}ff-pull: failed ({str(e)[:150]}) - falling back to manual sign-in")
