@@ -237,6 +237,45 @@ def test_v962_3_image_settings_functions_branch_on_the_new_host():
     assert "flow_tab_slider_trigger" in _func_body(src, "select_image_mode")
 
 
+def test_v962_4_only_the_root_path_is_home_on_the_new_host():
+    """v962.4 — flow.google.com/about (the marketing page) was read as home and
+    the worker waited there for a New-project button that page never has."""
+    for path in WORKERS:
+        ns = _load_predicates(path)
+        tag = os.path.basename(path)
+        assert ns["is_flow_home"](NEW_HOME), tag
+        assert ns["is_flow_home"]("https://flow.google.com"), tag
+        assert ns["is_flow_home"]("https://flow.google.com/?hl=en"), tag
+        assert not ns["is_flow_home"]("https://flow.google.com/about"), tag
+        assert not ns["is_flow_home"]("https://flow.google.com/404"), tag
+        assert not ns["is_flow_home"](NEW_PROJECT), tag
+        # legacy host unchanged
+        assert ns["is_flow_home"](OLD_HOME), tag
+        assert ns["is_flow_home"](OLD_HOME_LOCALE), tag
+
+
+def test_v962_4_login_proof_on_the_new_host_is_the_dom_not_the_cookie():
+    for path in WORKERS:
+        src = open(path, encoding="utf-8").read()
+        tag = os.path.basename(path)
+        assert "def _v962_enter_app(" in src, tag
+        assert "button[aria-label^='Google Account:']" in _func_body(src, "_get_page_state") \
+            or "button[aria-label^='Google Account:']" in src[src.index("logged_in_selectors = ["):src.index("logged_in_selectors = [") + 400], tag
+        # EVERY not-logged-in branch reaches the passive handoff BEFORE its CTA
+        # list — the video worker has two (ensure_logged_into_flow and the
+        # user-login wait inside it)
+        sites = [m.start() for m in re.finditer(r"entry_selectors = \[", src)]
+        assert sites, tag
+        for i in sites:
+            window = src[max(0, i - 900):i]
+            assert "_v962_enter_app(" in window, \
+                f"{tag}: a not-logged-in branch at offset {i} does not go through the passive handoff first"
+        # and the handoff helper never clicks the CTA
+        body = _func_body(src, "_v962_enter_app")
+        assert "Create with" not in body, tag
+        assert "ServiceLogin" in body, tag
+
+
 def test_v962_3_new_host_predicate_and_model_normaliser_run_without_a_browser():
     for path in WORKERS:
         src = open(path, encoding="utf-8").read()

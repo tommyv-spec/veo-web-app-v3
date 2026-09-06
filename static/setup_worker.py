@@ -410,7 +410,15 @@ def create_launch_scripts():
             # it cannot be overridden by a stale .env.
             f'set PYTHONUNBUFFERED=1\n'
             f'echo Starting KavenoBuilder Flow Worker...\n'
-            f'"{sys.executable}" flow_worker.py --single\n'
+            # The worker prints NOWHERE unless this line redirects it: under a
+            # detached launch (launch_workers.py, DETACHED_PROCESS) cmd's own
+            # echoes reach the inherited handle but python's do not survive the
+            # hop, so worker_console.log froze at the banner for every launch
+            # since 2026-09-04 while the worker drove a browser. Same shape as
+            # start_autoedit_worker.bat, whose log has always worked.
+            # (measured 2026-09-06 by session b7)
+            f'set LOG=%USERPROFILE%\\.kaveno\\flow_worker.log\n'
+            f'"{sys.executable}" flow_worker.py --single >> "%LOG%" 2>&1\n'
             f'pause\n'
         )
         print(f"  Launch script: {bat}")

@@ -20479,3 +20479,59 @@ branch; the predicate and model normaliser run without a browser.
 
 **Touched:** `code/static/flow_worker.py`, `code/image_worker.py`,
 `code/tests/test_v962_flow_host.py`. Measurement: session 9e4b16cc. Operator 2026-09-06.
+
+### v962.4 — entering the app on flow.google.com: DOM proof, passive handoff, never the CTA (2026-09-06)
+
+**Where it came from**: the first clip on v962.3 died BEFORE settings. Worker log (`worker_fg_0906b.log`,
+job `72804243`): cache resume landed on `https://flow.google.com/about` → `[SUBMIT] Already on Flow
+homepage` → `_get_page_state` = `flow_not_logged_in` → "Create with Google Flow" entry click ×8, each
+`DIAG post-click: cur=/about | tabs=2, tab[1]=about:blank` → `ensure_logged_into_flow` fell through with
+`✓ Login verified after sign-in` → v962.2's `New project` wait timed out on a page that has no such
+button → job failed → golden restore. Stopped by hand after ONE failure (worker-launch rule 3).
+
+**Three measured facts** (read-only probe of the worker's own `firefox-session`, headless, nothing typed):
+
+1. **The marketing page lives on the ROOT path too.** `https://flow.google.com/` served the marketing
+   page (title "Google Flow - AI Creative Studio…", 0 New-project, 0 settings chip, 0 ULTRA, 0 account
+   button) — `/about` is the same page under another path. So `is_flow_home` accepting "any
+   flow.google.com URL without /project/" was wrong twice over.
+2. **The CTA opens a blank NEW TAB, and the old proof can never fire there.** `_flow_entry_login_click`
+   (v896) judges a click by the `__Secure-next-auth.session-token` cookie on `labs.google` — the OLD
+   frontend's session, never minted on the new host. Every click therefore "did not mint a session",
+   and the tab it did open was never looked at.
+3. **The Google session in the profile was dead.** The profile held a full Google cookie set (SID,
+   HSID, SSID, __Secure-1PSID/3PSID, OSID, __Secure-OSID…), yet following the page's own passive link
+   `accounts.google.com/ServiceLogin?passive=1209600&osid=1&continue=https://flow.google.com/` landed on
+   the account chooser reading **"kaveno.biz@gmail.com — Signed out"**. Peer 62's image lane, whose
+   golden came from the operator's Firefox at 04:57 while it was signed in, rendered the app on `/`
+   directly with `button[aria-label^='Google Account:']` — so the state IS carried by ff-pull's five
+   files when the source Firefox is signed in and has opened flow.google.com once.
+
+**The rule** (both workers):
+- `is_flow_home` on `flow.google.com` is true for the ROOT path only (`/`, with or without a query);
+  `/about`, `/404` and anything else non-project are not home. Legacy host unchanged.
+- Login proof on the new host is the **DOM**: `button[aria-label^='Google Account:']`, the
+  `New project` button, or the settings chip — added to `logged_in_selectors`; the cookie is never
+  consulted there.
+- The `flow_not_logged_in` branch on the new host does NOT click the CTA. `_v962_enter_app` goes to
+  `/`, waits 15 s for the proof, and otherwise navigates THIS tab to the page's passive `ServiceLogin`
+  href (or the known one). If the app renders, done; if `accounts.google.com` shows a chooser or a
+  password page, that is a dead Google session — the existing chooser → `refresh_firefox_session_from_profile`
+  → `session_lost` worker-error path takes it (the video worker counts it as an SSO attempt so the
+  rebuild triggers on the second miss).
+
+**What unblocks a dead session is the operator, not code**: sign in to Google as the worker account in
+the local Firefox, open `flow.google.com` once (so the app session is minted into that profile), then
+relaunch — the worker's startup ff-pull copies it. Pushed to the operator at 06:17.
+
+**Still open, on purpose** — `ensure_logged_into_flow` returns True when its loop exits without a
+verified state ("Login verified after sign-in" after eight failed clicks). That is the log-and-continue
+shape of §v939.9 and is why the failure surfaced at project creation instead of at login. Not changed
+here: fixing it means choosing what a login timeout does to the job, which is a separate decision.
+
+**Tests**: `code/tests/test_v962_flow_host.py` — root-path-only home on the new host (both workers),
+the DOM proof in the state classifier, the passive handoff before the CTA list, and that the helper
+never references the CTA.
+
+**Touched:** `code/static/flow_worker.py`, `code/image_worker.py`, `code/tests/test_v962_flow_host.py`.
+Measurements: this session (probe), peer 62 (signed-in DOM). Operator 2026-09-06.

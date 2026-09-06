@@ -3461,6 +3461,8 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             # New project button text varies by locale: "New project", "Nuevo proyecto", "Dự án mới", etc.
             # So we check multiple selectors, not just English text
             logged_in_selectors = [
+                "button[aria-label^='Google Account:']",   # v962.4 new host
+                "button[aria-label='Settings trigger']",    # v962.4 new host
                 # Profile avatar — most reliable, locale-independent
                 "img[src*='googleusercontent.com']",
                 "img[src*='lh3.googleusercontent']",
@@ -3581,6 +3583,11 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             if state == 'flow_not_logged_in':
                 # Landed on Flow landing page — try to click through to the logged-in app.
                 # Button text has changed over time: "Create with Flow", "Get started", etc.
+                if _v962_on_new_host(p):  # v962.4 — passive handoff, never the new-tab CTA
+                    if _v962_enter_app(p, label) == 'app':
+                        continue
+                    time.sleep(3)
+                    continue
                 print(f"[{label}] On Flow landing page — looking for entry button...", flush=True)
                 entry_selectors = [
                     "button:text-matches('Create with.*Flow', 'i')",
@@ -3791,6 +3798,15 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
                 continue  # Caught at top of loop
 
             # Still not logged in — try entry buttons in order
+            # v962.4 — on flow.google.com the CTA opens a blank new tab and the
+            # cookie proof below never fires; go through the passive handoff.
+            if _v962_on_new_host(page):
+                _sso_attempts += 1
+                _v962_res = _v962_enter_app(page, label)
+                if _v962_res == 'app':
+                    continue
+                state = _wait_for_page_settle(page, max_seconds=20)
+                continue
             print(f"[{label}] Not logged in — looking for entry button...", flush=True)
             entry_selectors = [
                 "button:text-matches('Create with.*Flow', 'i')",
@@ -5384,11 +5400,96 @@ def is_flow_url(url):
 def is_flow_home(url):
     """Check if URL is Flow homepage (not a project page, and not the app's
     client-side 404 page — v962.2: a worker once read flow.google.com/404 as
-    a project URL and waited politely on it)."""
+    a project URL and waited politely on it).
+
+    v962.4: on flow.google.com ONLY the root path is home. /about is the
+    marketing page (no New-project button) and was read as home once, so the
+    worker waited there for a button that page never has."""
     u = url.lower()
     if u.rstrip("/").endswith("/404"):
         return False
+    if "flow.google.com" in u:
+        _path = u.split("flow.google.com", 1)[1].split("?", 1)[0].split("#", 1)[0]
+        return _path.rstrip("/") == ""
     return is_flow_url(url) and "/project/" not in u
+
+
+# ---------------------------------------------------------------------------
+# v962.4 — entering the app on flow.google.com (2026-09-06)
+#
+# Measured on the worker's own profile: with a full Google cookie set but no
+# live Google session, https://flow.google.com/ serves the MARKETING page (title
+# "Google Flow - AI Creative Studio…") on the root path itself, with a passive
+# `Sign in` link (accounts.google.com/ServiceLogin?passive=…&osid=1&continue=…)
+# and a "Create with Google Flow" button that opens a BLANK NEW TAB. The old
+# entry routine clicked that button eight times and judged every click by the
+# labs.google next-auth cookie — the OLD frontend's session, never minted here.
+# Following the passive link landed on Google's account chooser saying
+# "kaveno.biz@gmail.com — Signed out": the session was dead, and only a real
+# sign-in in the operator's Firefox (which ff-pull copies) can fix that.
+#
+# The rule on the new host: prove login by the DOM (the account button, the
+# New-project button, the settings chip), never by a cookie; never click the
+# CTA; go to the passive ServiceLogin href in the SAME tab and let the existing
+# chooser / rebuild / session_lost path take it from there.
+# ---------------------------------------------------------------------------
+_V962_APP_PROOF = ("button[aria-label^='Google Account:'], "
+                   "button:has-text('New project'), button:has(i:text('add_2')), "
+                   "button[aria-label='Settings trigger']")
+_V962_PASSIVE_SIGNIN = ("https://accounts.google.com/ServiceLogin?passive=1209600&osid=1"
+                        "&continue=https://flow.google.com/&followup=https://flow.google.com/")
+
+
+def _v962_app_entered(page, timeout_ms=15000):
+    """True when the Flow app itself (not the marketing page) is on screen."""
+    try:
+        page.locator(_V962_APP_PROOF).first.wait_for(state="visible", timeout=timeout_ms)
+        return True
+    except Exception:
+        return False
+
+
+def _v962_enter_app(page, label=""):
+    """On flow.google.com: reach the app or hand the tab to Google's passive
+    sign-in. Returns 'app' (proof visible), 'handoff' (now on accounts.google —
+    the caller's chooser/rebuild logic continues), or 'none'."""
+    prefix = f"[{label}] " if label else ""
+    try:
+        if not (page.url or "").rstrip("/").endswith("flow.google.com"):
+            page.goto(FLOW_HOME_URL, wait_until="domcontentloaded", timeout=60000)
+    except Exception:
+        pass
+    if _v962_app_entered(page, 15000):
+        print(f"{prefix}[v962.4] Flow app entered on flow.google.com (DOM proof)", flush=True)
+        return 'app'
+    href = None
+    try:
+        links = page.locator("a[href*='accounts.google.com/ServiceLogin']")
+        for i in range(min(links.count(), 6)):
+            h = links.nth(i).get_attribute("href") or ""
+            if "flow.google.com" in h:
+                href = h
+                break
+    except Exception:
+        pass
+    href = href or _V962_PASSIVE_SIGNIN
+    print(f"{prefix}[v962.4] marketing page on flow.google.com — following the passive "
+          f"ServiceLogin handoff in this tab (no CTA click, nothing typed)", flush=True)
+    try:
+        page.goto(href, wait_until="domcontentloaded", timeout=60000)
+    except Exception as e:
+        print(f"{prefix}[v962.4] handoff navigation failed: {str(e)[:100]}", flush=True)
+        return 'none'
+    time.sleep(3)
+    if _v962_app_entered(page, 20000):
+        print(f"{prefix}[v962.4] passive handoff minted the app session", flush=True)
+        return 'app'
+    if "accounts.google.com" in (page.url or ""):
+        print(f"{prefix}[v962.4] Google wants a real sign-in (url={page.url[:90]}) — the "
+              f"Google session in this profile is dead; the chooser/rebuild path takes over",
+              flush=True)
+        return 'handoff'
+    return 'none'
 
 
 def flow_home_path(page_or_url):
