@@ -20589,3 +20589,49 @@ worker dying that way must not trigger a golden rebuild or a relaunch loop.
 
 **Touched:** `code/static/flow_worker.py` (`_v962_project_id_from_dom`, `_fa_or_dom_new_project_click`),
 `code/image_worker.py` (same helper + its mint site). Operator 2026-09-06.
+
+### v962.7 — frames, prompt and Generate on flow.google.com: the composer, not the dialog (2026-09-06)
+
+**Where it came from**: the first clips with verified settings on the new site (v962.5/.6) died at
+the frame upload: `[Gallery] … opening dialog for gallery select` → `Locator.bounding_box: Timeout
+30000ms` on `div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]` — the legacy frame
+dialog, which does not exist there (11 more sites use the same selector). Each such death cost a
+golden restore, so the lane was held (`~/.kaveno/hold/flow`, session 08) while this was measured.
+
+**Measured on the worker's own profile** (scratch project `77c8d936`, headless, one PNG uploaded):
+
+| step | new host |
+|---|---|
+| input mode | a THIRD overlay radiogroup `flow-toggles[aria-label='Video type']`: `button[role=radio]` **Frames** (crop_free) / **Ingredients** (chrome_extension). It sat on Ingredients — which is why an uploaded image attached as an "Ingredient" chip and why v962.3's hold was the wrong shape |
+| frames composer | `flow-base-prompt-box` → `flow-ingredient-bar` with a `Start` button, `Swap first and last frames`, an `End` button |
+| picking a frame | `Start` opens the picker "Select a frame image": project assets as `[role=option]` (text = file name), `Upload media` = a real file chooser (`expect_file_chooser` works, multiple), `Add to prompt`; clicking an option fills the slot with `flow-image-ingredient-chip button[aria-label='Image ingredient']` (cancel icon removes it) |
+| prompt | `flow-rich-text-editor [contenteditable='true']` — no `div[role=textbox]`, no `textarea`; `keyboard.insert_text` lands the text |
+| Generate | `button[aria-label='Start generation']` with a `mat-icon` arrow_forward (no `<i>`), `disabled` until a frame AND a prompt are present |
+| project header | `Add media menu` → Upload / New collection / Create character / New scene (the media library and the Scene editor — not the frame path) |
+| ingredients composer | `Add ingredients to the prompt box` → panel (Upload media, Search assets, listbox); an attached image is an `Ingredient` chip; no per-chip role menu |
+
+**The rule** (video worker; the image worker's half is session 08's): on the new host the resolver
+picks the Video-type radio per clip (`Frames` unless `_omni_ingredients_mode`), the mode key is
+critical again (legacy parity), and `input_mode_only` calls set that radio instead of printing a
+hold. Frames ride `_v962_attach_frame` (clear the bar → slot → picker → existing option or `Upload
+media` → chip count check) from both `upload_both_frames_with_policy_check` and
+`click_frame_and_upload_with_policy_check`; the prompt goes through `_v962_type_prompt`; the
+Generate check and click use the aria-label button; `ensure_lower_priority_model` returns at once
+(the overlay pass already verified the model). **Ingredients stays a deliberate hold**: the
+charswap video-ingredient attach is unmeasured on the composer, so the resolver refuses with
+`[v962.7] Ingredients on flow.google.com is UNMEASURED … deliberate hold, not a bug; Frames works`
+stashed in `page._model_apply_debug`, which v945.15 prints as the clip's failure reason — the
+terminal refusal peers e8/35 asked for, instead of a 30 s locator timeout.
+
+**Still unmeasured after Generate**: how the started generation is detected and downloaded (the
+legacy watches `video:batchAsyncGenerate` through the flow_api capture and DOM cards). The first
+generated clip on the new site is that measurement; a Generate that starts but is not detected is
+the next rule, with real data.
+
+**Tests**: `test_v962_7_frames_prompt_and_generate_branch_on_the_new_host` — helpers and selectors
+present, the resolver picks the Video-type radio and keeps the mode critical, the hold sentence is
+stashed for v945.15, and every legacy site branches before its dialog work.
+
+**Touched:** `code/static/flow_worker.py`, `code/tests/test_v962_flow_host.py`. Measurements:
+this session (probes 1-8), sessions 08 / e8 / 35 (Video-type radiogroup recorded, hold file,
+DailyFinish launch path). Operator 2026-09-06.

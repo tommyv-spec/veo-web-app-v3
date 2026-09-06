@@ -217,10 +217,13 @@ def test_v962_3_video_settings_branch_precedes_the_legacy_retry_loop():
     assert "_v962_on_new_host(page)" in body
     # the resolver keeps the same criticality as the legacy pass (v945.15)
     res = _func_body(src, "_v962_material_video_settings")
-    assert "critical = ['Video', 'Portrait']" in res
+    # v962.7 — the input mode is critical again (Video type radio), Model for Omni
+    assert "critical = ['Video', mode_key, 'Portrait']" in res
     assert 'if target_model == "Omni Flash":' in res
-    # input mode is a DELIBERATE hold on the new host, said in the log line
-    assert "UNMEASURED on" in res and "deliberate hold" in res
+    # Ingredients is a DELIBERATE hold on the new host, said in the log line and
+    # stashed where v945.15 records it (the sentence lives in a module constant)
+    assert "UNMEASURED on" in src and "deliberate hold" in src
+    assert "_V962_INGREDIENTS_HOLD" in res
     # and the legacy path is still there, untouched in shape
     assert "button.flow_tab_slider_trigger" in body
     assert "button:has-text('x{n}')" in body
@@ -308,6 +311,61 @@ def test_v962_5_model_menu_measured_on_the_new_host_resolves():
         # and the picker itself uses the alias table + label stripper
         body = _func_body(src, "_v962_pick_model")
         assert "_V962_MODEL_ALIASES" in body and "_v962_item_label(" in body, os.path.basename(path)
+
+
+def test_v962_6_project_id_is_read_from_the_dom_when_the_url_does_not_move():
+    """v962.6 — on flow.google.com the New-project click renders the project in
+    place (Start generation / settings chip / Tools link /project/<uuid>/tools)
+    while page.url stays '/'. Both workers must carry the DOM reader, gated on a
+    generation control so a home-list tile is never mistaken for a new project."""
+    for path in WORKERS:
+        src = open(path, encoding="utf-8").read()
+        tag = os.path.basename(path)
+        body = _func_body(src, "_v962_project_id_from_dom")
+        assert "Start generation" in body and "Settings trigger" in body, tag
+        assert "/tools" in body, tag
+    fw = open(WORKERS[0], encoding="utf-8").read()
+    click = _func_body(fw, "_fa_or_dom_new_project_click")
+    assert "_v962_project_id_from_dom(page)" in click
+    assert 'f"{FLOW_ORIGIN}/project/{_pid}"' in click
+    iw = open(WORKERS[1], encoding="utf-8").read()
+    assert iw.count("_v962_project_id_from_dom(page)") >= 1
+    assert 'f"{FLOW_ORIGIN}/project/{_pid}"' in iw
+
+
+def test_v962_7_frames_prompt_and_generate_branch_on_the_new_host():
+    """v962.7 — measured 2026-09-06 on the worker's own profile: the overlay's
+    'Video type' radios (Frames / Ingredients), the composer's Start/End frame
+    slots + picker (asset options, 'Upload media' file chooser), the rich-text
+    prompt editor and button[aria-label='Start generation']. Every legacy site
+    that walked the dead aria-haspopup="dialog" path must branch on the host."""
+    src = open(WORKERS[0], encoding="utf-8").read()
+    for fn in ("_v962_attach_frame", "_v962_pick_asset_in_picker", "_v962_type_prompt", "_v962_generate_enabled"):
+        assert f"def {fn}(" in src, fn
+    assert "flow-ingredient-bar button:has-text('Start')" in src
+    assert "flow-rich-text-editor [contenteditable='true']" in src
+    assert "button[aria-label='Start generation']" in src
+    assert "expect_file_chooser(" in _func_body(src, "_v962_pick_asset_in_picker")
+    # the resolver picks the Video type radio and keeps the mode critical again
+    res = _func_body(src, "_v962_material_video_settings")
+    assert '_v962_pick_radio(page, "Frames", "Video type", prefix)' in res
+    assert "critical = ['Video', mode_key, 'Portrait']" in res
+    # Ingredients is still a deliberate hold, with its sentence where v945.15 reads it
+    assert "UNMEASURED on" in src and "deliberate hold" in src
+    assert "page._model_apply_debug = _V962_INGREDIENTS_HOLD" in res
+    # the four legacy sites branch BEFORE their Radix/dialog work
+    for fn, marker in (("upload_both_frames_with_policy_check", "_v962_attach_frame(page, start_image, 'start'"),
+                       ("click_frame_and_upload_with_policy_check", "_v962_attach_frame(page, image_path, which"),
+                       ("fill_prompt_textarea", "_v962_type_prompt(page, prompt)"),
+                       ("is_generate_button_enabled", "_v962_generate_enabled(page)"),
+                       ("click_generate_button", "_V962_GENERATE_BTN"),
+                       ("ensure_lower_priority_model", "_v962_on_new_host(page)")):
+        body = _func_body(src, fn)
+        assert marker in body, fn
+    both = _func_body(src, "upload_both_frames_with_policy_check")
+    assert both.index("_v962_attach_frame(") < both.index('aria-haspopup="dialog"\']') if 'aria-haspopup="dialog"\']' in both else True
+    single = _func_body(src, "click_frame_and_upload_with_policy_check")
+    assert single.index("_v962_on_new_host(page)") < single.index("frame_selector = ")
 
 
 def test_v962_3_new_host_predicate_and_model_normaliser_run_without_a_browser():

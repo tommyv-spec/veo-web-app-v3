@@ -8582,6 +8582,196 @@ def _v962_pick_model(page, target, prefix=""):
     return ok
 
 
+# ---------------------------------------------------------------------------
+# v962.7 — frames, prompt and Generate on flow.google.com (2026-09-06)
+#
+# Measured on the worker's own profile (scratch project 77c8d936):
+#   * the settings overlay has a THIRD radiogroup, flow-toggles[aria-label=
+#     'Video type'] with button[role=radio] "Frames" (crop_free) and
+#     "Ingredients" (chrome_extension). It sat on Ingredients, which is why an
+#     uploaded image attached as an "Ingredient" chip.
+#   * in Frames mode the composer (flow-base-prompt-box) shows a
+#     flow-ingredient-bar with a "Start" button, "Swap first and last frames"
+#     and an "End" button. Clicking Start opens the picker "Select a frame image"
+#     (project assets as [role=option], "Upload media" = a real file chooser,
+#     "Add to prompt"); clicking an option fills the slot with
+#     flow-image-ingredient-chip button[aria-label='Image ingredient'].
+#   * the prompt is flow-rich-text-editor [contenteditable='true'] (no
+#     div[role=textbox], no textarea); Generate is
+#     button[aria-label='Start generation'] with a mat-icon arrow_forward (no
+#     <i>), disabled until a frame AND a prompt are present.
+# The legacy dialog path (div/button[aria-haspopup="dialog"]) does not exist
+# there; every site below branches on the host and leaves the old path alone.
+# Ingredients (charswap's video ingredient) stays a deliberate hold.
+# ---------------------------------------------------------------------------
+_V962_FRAME_SLOT = {"start": "flow-ingredient-bar button:has-text('Start')",
+                    "end": "flow-ingredient-bar button:has-text('End')"}
+_V962_FRAME_CHIP = "flow-ingredient-bar flow-image-ingredient-chip"
+_V962_PROMPT_EDITOR = "flow-rich-text-editor [contenteditable='true']"
+_V962_GENERATE_BTN = "button[aria-label='Start generation']"
+_V962_PICKER = (".cdk-overlay-container [role='listbox'], .cdk-overlay-container [role='option'], "
+                ".cdk-overlay-container button:has-text('Upload media')")
+_V962_INGREDIENTS_HOLD = ("[v962.7] Ingredients on flow.google.com is UNMEASURED on the composer "
+                          "(video ingredient attach) — deliberate hold, not a bug; Frames works")
+
+
+def _v962_clear_frame_bar(page, prefix=""):
+    """Remove every chip left in the frames bar (a previous clip's frames)."""
+    try:
+        for _ in range(4):
+            chips = page.locator(_V962_FRAME_CHIP)
+            if chips.count() == 0:
+                return
+            cancel = chips.first.locator("mat-icon:text('cancel')").first
+            if cancel.count():
+                cancel.click(force=True, timeout=3000)
+            else:
+                chips.first.click(force=True, timeout=3000)
+            time.sleep(0.6)
+    except Exception as e:
+        print(f"{prefix}⚠ [v962.7] clearing the frames bar: {str(e)[:80]}", flush=True)
+
+
+def _v962_pick_asset_in_picker(page, image_path, prefix=""):
+    """Inside the open picker: click the option named like the file, or upload the
+    file through 'Upload media' (a real file chooser) and then click it."""
+    name = os.path.basename(image_path)
+    stem = os.path.splitext(name)[0]
+
+    def _find():
+        opts = page.locator(".cdk-overlay-container [role='option']")
+        try:
+            n = opts.count()
+        except Exception:
+            return None
+        for i in range(n):
+            try:
+                t = opts.nth(i).inner_text(timeout=500) or ""
+            except Exception:
+                continue
+            if name in t or stem in t:
+                return opts.nth(i)
+        return None
+
+    opt = _find()
+    if opt is None:
+        up = page.locator(".cdk-overlay-container button:has-text('Upload media'), "
+                          "button:has-text('Upload media')").first
+        try:
+            with page.expect_file_chooser(timeout=15000) as fc:
+                up.click(timeout=8000)
+            fc.value.set_files(image_path)
+            print(f"{prefix}[v962.7] uploaded {name} through the picker's file chooser", flush=True)
+        except Exception as e:
+            print(f"{prefix}⚠ [v962.7] picker upload of {name} failed: {str(e)[:100]}", flush=True)
+            return False
+        deadline = time.time() + 60
+        while time.time() < deadline and opt is None:
+            time.sleep(1.5)
+            opt = _find()
+        if opt is None:
+            print(f"{prefix}⚠ [v962.7] {name} uploaded but no asset option with that name in 60 s", flush=True)
+            return False
+    try:
+        opt.click(timeout=8000)
+    except Exception as e:
+        print(f"{prefix}⚠ [v962.7] asset option click failed: {str(e)[:80]}", flush=True)
+        return False
+    time.sleep(1.0)
+    try:
+        atp = page.locator(".cdk-overlay-container button:has-text('Add to prompt')").first
+        if atp.count() and atp.is_visible(timeout=800):
+            atp.click(timeout=5000)
+            time.sleep(0.8)
+    except Exception:
+        pass
+    return True
+
+
+def _v962_attach_frame(page, image_path, which="start", prefix=""):
+    """Frames mode: click the Start/End slot, pick or upload the image, and
+    confirm a chip now sits in the bar. True on success."""
+    want_chips = 1 if which == "start" else 2
+    if which == "start":
+        _v962_clear_frame_bar(page, prefix)
+    slot = page.locator(_V962_FRAME_SLOT[which]).first
+    try:
+        slot.wait_for(state="visible", timeout=15000)
+    except Exception:
+        print(f"{prefix}⚠ [v962.7] {which} frame slot not visible (Video type not Frames, or the bar "
+              f"still holds a chip)", flush=True)
+        return False
+    try:
+        human_click_locator(page, slot, f"{prefix}{which} frame slot")
+    except Exception:
+        try:
+            slot.click(force=True, timeout=5000)
+        except Exception:
+            pass
+    try:
+        page.locator(_V962_PICKER).first.wait_for(state="visible", timeout=15000)
+    except Exception:
+        print(f"{prefix}⚠ [v962.7] the frame picker did not open", flush=True)
+        return False
+    if not _v962_pick_asset_in_picker(page, image_path, prefix):
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        return False
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        try:
+            n = page.locator(_V962_FRAME_CHIP).count()
+        except Exception:
+            n = 0
+        if n >= want_chips:
+            print(f"{prefix}✓ [v962.7] {which} frame attached ({n} chip(s) in the bar)", flush=True)
+            try:
+                if page.locator(".cdk-overlay-container [role='option']").count():
+                    page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return True
+        time.sleep(1)
+    print(f"{prefix}⚠ [v962.7] {which} frame: picked, but no chip appeared in the bar", flush=True)
+    return False
+
+
+def _v962_type_prompt(page, prompt, prefix=""):
+    """Type the prompt into the rich-text editor. True when the text landed."""
+    ed = page.locator(_V962_PROMPT_EDITOR).first
+    ed.wait_for(state="visible", timeout=15000)
+    ed.click(timeout=5000)
+    time.sleep(0.3)
+    try:
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Delete")
+    except Exception:
+        pass
+    page.keyboard.insert_text(prompt or "")
+    time.sleep(0.6)
+    try:
+        got = (ed.inner_text(timeout=2000) or "").strip()
+    except Exception:
+        got = ""
+    ok = len(got) >= int(min(len((prompt or "").strip()), 60) * 0.8)
+    print(f"{prefix}{'✓' if ok else '⚠'} [v962.7] prompt in the editor: {len(got)} chars", flush=True)
+    return ok
+
+
+def _v962_generate_enabled(page):
+    try:
+        b = page.locator(_V962_GENERATE_BTN).first
+        if b.count() == 0 or not b.is_visible():
+            return False
+        if b.is_disabled() or b.get_attribute("aria-disabled") == "true":
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _v962_material_video_settings(page, prefix="", variants_count=2,
                                   duration_only=False, input_mode_only=False):
     """v962.3 — the whole video settings pass on flow.google.com. Same return
@@ -8594,14 +8784,39 @@ def _v962_material_video_settings(page, prefix="", variants_count=2,
     except Exception:
         _durn = 8
 
+    # v962.7 — the input mode IS a radio in this overlay ("Video type":
+    # Frames / Ingredients). Frames is measured end to end; Ingredients (the
+    # charswap video ingredient) stays a deliberate hold with its reason stashed
+    # where v945.15 reports it.
+    mode_key = 'Ingredients' if _omni_ingredients_mode(page) else 'Frames'
+
+    def _pick_video_type():
+        if mode_key == 'Ingredients':
+            print(f"{prefix}⚠ {_V962_INGREDIENTS_HOLD}", flush=True)
+            try:
+                page._model_apply_debug = _V962_INGREDIENTS_HOLD
+            except Exception:
+                pass
+            try:
+                page._input_mode_applied = None
+            except Exception:
+                pass
+            return False
+        ok = _v962_pick_radio(page, "Frames", "Video type", prefix)
+        try:
+            page._input_mode_applied = 'Frames' if ok else None
+            page._input_mode_observed = 'Frames' if ok else None
+        except Exception:
+            pass
+        return ok
+
     if input_mode_only:
-        # Deliberate hold, not a bug: Frames/Ingredients are not radios in this
-        # overlay on the new host — they moved to the composer ("Add media" /
-        # "Add ingredients to the prompt box") and nobody has measured them yet.
-        print(f"{prefix}⚠ [v962.3] input mode (Frames/Ingredients) is UNMEASURED on "
-              f"flow.google.com — deliberate hold, not a bug; the composer's "
-              f"'Add media' menu is what unblocks it", flush=True)
-        return False
+        chip = _v962_open_settings(page, prefix)
+        if chip is None:
+            return False
+        ok = _pick_video_type()
+        _v962_close_settings(page)
+        return ok
 
     chip = _v962_open_settings(page, prefix)
     if chip is None:
@@ -8615,6 +8830,7 @@ def _v962_material_video_settings(page, prefix="", variants_count=2,
 
     applied['Video'] = _v962_pick_radio(page, "Video", "Mode", prefix)
     time.sleep(0.5)  # the overlay re-renders its rows for video mode
+    applied[mode_key] = _pick_video_type()
     applied['Portrait'] = _v962_pick_radio(page, "9:16", "Aspect", prefix)
     applied['Variants'] = _v962_pick_radio(page, f"x{variants_count}", "Variants", prefix)
     _res = getattr(page, "_resolution", None)
@@ -8624,7 +8840,7 @@ def _v962_material_video_settings(page, prefix="", variants_count=2,
     applied['Model'] = _v962_pick_model(page, target_model, prefix)
     _v962_close_settings(page)
 
-    critical = ['Video', 'Portrait']
+    critical = ['Video', mode_key, 'Portrait']  # v962.7 — legacy parity: the input mode is critical again
     if target_model == "Omni Flash":
         critical.append('Model')  # v945.15 — an Omni job cannot ship on the default
     missing = [k for k in critical if not applied.get(k)]
@@ -10776,6 +10992,9 @@ def ensure_lower_priority_model(page, label=""):
     prefix = f"[{label}] " if label else ""
     target = getattr(page, "_veo_model", "Veo 3.1 - Lite [Lower Priority]") or "Veo 3.1 - Lite [Lower Priority]"
 
+    if _v962_on_new_host(page):  # v962.7 — the overlay pass set and verified the model
+        return True
+
     # Per-model dropdown selectors (primary then fallback). text-matches is a
     # Playwright regex; has-text is substring. Distinguish "Lite" from
     # "Lite [Lower Priority]" and avoid Quality/Fast cross-matches.
@@ -11091,6 +11310,11 @@ def click_generate_button(page, context_name="", max_retries=3):
 
             # Click Generate — use human_click for natural mouse movement + real click events
             # This is THE click that triggers the API call with reCAPTCHA token
+            if _v962_on_new_host(page):  # v962.7
+                human_click_locator(page, page.locator(_V962_GENERATE_BTN).first, f"{prefix}Start generation")
+                print(f"{prefix}✓ [v962.7] clicked Start generation", flush=True)
+                time.sleep(1)
+                return True
             arrow_btn = page.locator("button:has(i:text('arrow_forward')), i:text('arrow_forward')").first
             human_click_element(page, arrow_btn, "", timeout=30000)
 
@@ -11232,6 +11456,8 @@ def is_generate_button_enabled(page):
     Check if the Generate button (arrow_forward) is enabled/clickable.
     Uses pure Playwright locators — no page.evaluate() to avoid reCAPTCHA CDP detection.
     """
+    if _v962_on_new_host(page):  # v962.7 — mat-icon, no <i>; the button has an aria-label
+        return _v962_generate_enabled(page)
     try:
         # Check if the arrow_forward icon exists and is visible
         arrow_btn = page.locator("i:text('arrow_forward')").first
@@ -16076,6 +16302,9 @@ def click_frame_and_upload_with_policy_check(page, image_path, is_end_frame=Fals
     frame_name = "END frame" if is_end_frame else "START frame"
     which = 'end' if is_end_frame else 'start'
 
+    if _v962_on_new_host(page):  # v962.7 — composer slot, not the dialog
+        return (True, None) if _v962_attach_frame(page, image_path, which, prefix) else (False, 'no_buttons')
+
     check_and_dismiss_popup(page)
     
     frame_selector = 'div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]'
@@ -16911,6 +17140,15 @@ def upload_both_frames_with_policy_check(page, start_image, end_image, context="
     # upload path in the worker funnels through this function, so this is the
     # one place the per-clip mode has to be set.
     set_clip_input_mode(page, start_image, end_image, context=context)
+
+    # v962.7 — on flow.google.com the frames go through the composer's Start/End
+    # slots; the dialog path below does not exist there.
+    if _v962_on_new_host(page):
+        if not _v962_attach_frame(page, start_image, 'start', prefix):
+            return (False, 'start_glitch', None)
+        if end_image and not _v962_attach_frame(page, end_image, 'end', prefix):
+            return (False, 'end_glitch', None)
+        return (True, None, None)
 
     # ── Always clear previous prompt/frames before uploading ──
     # After generating, Flow keeps the old prompt + frames in the slots.
@@ -17831,6 +18069,9 @@ def fill_prompt_textarea(page, prompt):
     # New UI (Feb 2025+): contenteditable div with role="textbox" (Slate editor)
     # Old UI: textarea#PINHOLE_TEXT_AREA_ELEMENT_ID
     
+    if _v962_on_new_host(page):  # v962.7 — rich-text editor, no role=textbox
+        return _v962_type_prompt(page, prompt)
+
     textbox = page.locator('div[role="textbox"]').first
     if textbox.count() > 0 and textbox.is_visible(timeout=3000):
         # Scroll textbox into view (it may be off-screen after Reuse loads a long prompt)
