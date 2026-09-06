@@ -409,7 +409,11 @@ def run_job(page, job, idx, total):
     prompt = job["prompt"]
     out = job["out"]
     log(f"[{idx}/{total}] job -> out={out} ref={ref or '(none)'}")
-    ref_paths = [ref] if ref else []
+    # generate() has always taken a LIST of refs; only this caller flattened it to
+    # one. A job may now carry "ref": ["a.png", "b.jpg"] — needed the moment a
+    # prompt addresses two attachments by filename (composition + identity), which
+    # is how the movie-style prompts are written. A bare string still works.
+    ref_paths = list(ref) if isinstance(ref, (list, tuple)) else ([ref] if ref else [])
     generate(page, prompt, ref_paths, out)
     log(f"  ✓ saved {out}")
 
