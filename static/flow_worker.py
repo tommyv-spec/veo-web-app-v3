@@ -291,6 +291,80 @@ from queue import Queue
 from datetime import datetime, timedelta
 
 
+# A small, stable audit trail for cross-session worker checks. The ordinary
+# stdout log can be owned by a detached cmd wrapper on Windows, so a second
+# Codex/Claude session needs a direct source of truth for which clip/model made
+# it as far as Flow. This file contains no prompts, cookies, or response bodies.
+_FLOW_MODEL_EVENT_FILE = os.path.join(
+    os.path.expanduser("~"), ".kaveno", "flow_model_events.jsonl")
+_FLOW_MODEL_EVENT_LOCK = threading.Lock()
+
+
+def flow_model_event(event, *, job_id=None, clip_id=None, clip_index=None,
+                     requested_model=None, actual_model_key=None, **extra):
+    """Append one non-secret model-routing event. Never break generation."""
+    try:
+        row = {
+            "ts": time.time(),
+            "pid": os.getpid(),
+            "build": WORKER_BUILD,
+            "event": str(event),
+            "job_id": job_id,
+            "clip_id": clip_id,
+            "clip_index": clip_index,
+            "requested_model": requested_model,
+            "actual_model_key": actual_model_key,
+        }
+        row.update({k: v for k, v in extra.items() if v is not None})
+        folder = os.path.dirname(_FLOW_MODEL_EVENT_FILE)
+        os.makedirs(folder, exist_ok=True)
+        with _FLOW_MODEL_EVENT_LOCK:
+            with open(_FLOW_MODEL_EVENT_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, sort_keys=True) + "\n")
+    except Exception:
+        pass
+
+
+def interleave_redo_clips_by_model(clips):
+    """Keep job order, but round-robin model lanes inside each job.
+
+    A mixed 80-clip job used to run every Omni clip before its first Lite clip
+    because redo-pending is ordered by clip id. Alternating the model buckets
+    gives early proof that both routes work and prevents one model from
+    starving behind a long block of the other. Order inside each model stays
+    unchanged.
+    """
+    jobs = {}
+    job_order = []
+    for clip in clips or []:
+        job_id = clip.get("job_id") or ""
+        if job_id not in jobs:
+            jobs[job_id] = {"order": [], "models": {}}
+            job_order.append(job_id)
+        model = (clip.get("veo_model") or DEFAULT_VEO_MODEL).strip()
+        if model not in jobs[job_id]["models"]:
+            jobs[job_id]["models"][model] = []
+            jobs[job_id]["order"].append(model)
+        jobs[job_id]["models"][model].append(clip)
+
+    ordered = []
+    for job_id in job_order:
+        group = jobs[job_id]
+        positions = {model: 0 for model in group["order"]}
+        while True:
+            added = False
+            for model in group["order"]:
+                pos = positions[model]
+                bucket = group["models"][model]
+                if pos < len(bucket):
+                    ordered.append(bucket[pos])
+                    positions[model] = pos + 1
+                    added = True
+            if not added:
+                break
+    return ordered
+
+
 # ============================================================
 # v681d — UUID-DEDUP HTTP-DL QUEUE
 # ============================================================
@@ -1762,6 +1836,16 @@ def _install_flow_api_capture(page):
                     page._flow_api_last_generate = _cap
                 except Exception:
                     pass
+                flow_model_event(
+                    "flow_generate_request",
+                    job_id=getattr(page, "_active_job_id", None),
+                    clip_id=getattr(page, "_active_clip_id", None),
+                    clip_index=getattr(page, "_active_clip_index", None),
+                    requested_model=getattr(page, "_veo_model", None),
+                    actual_model_key=model_key or None,
+                    shape=ingredient_shape or None,
+                    endpoint=endpoint.rsplit('/', 1)[-1],
+                )
             try:
                 with open(out_path, 'a', encoding='utf-8') as f:
                     f.write(json.dumps({
@@ -9880,7 +9964,7 @@ def get_redo_clips():
         "GET", f"/clips/redo-pending?worker_id={WORKER_ID}&{_worker_arms_q()}")
     if result and result.get("clips"):
         clips = result["clips"]
-        return clips
+        return interleave_redo_clips_by_model(clips)
     return []
 
 
@@ -18757,6 +18841,17 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
     # use the swapped model for the redo (Omni <-> Veo, both on Frames).
     _policy_swap_model = _POLICY_SWAP_DONE.get(clip_id)
     page._veo_model = _policy_swap_model or clip.get('veo_model') or getattr(page, '_veo_model', None) or "Veo 3.1 - Lite [Lower Priority]"
+    page._active_job_id = job_id
+    page._active_clip_id = clip_id
+    page._active_clip_index = clip_index
+    flow_model_event(
+        "redo_model_target",
+        job_id=job_id,
+        clip_id=clip_id,
+        clip_index=clip_index,
+        requested_model=page._veo_model,
+        policy_swap=bool(_policy_swap_model),
+    )
     if _policy_swap_model:
         print(f"[REDO] 🔀 policy-swap active — using {_policy_swap_model} (was {clip.get('veo_model')}) for clip {clip_id}", flush=True)
 
@@ -18989,7 +19084,22 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
     # We never hunt for a specific tile's state (failed/completed/generating).
     # This works for both manual redos (from platform UI) and auto-redos (detected failure).
     pre_generate_tile_count = get_tile_count_at_index0(page)
+    flow_model_event(
+        "redo_submit_start",
+        job_id=job_id,
+        clip_id=clip_id,
+        clip_index=clip_index,
+        requested_model=page._veo_model,
+        project_url=project_url,
+    )
     if not rebuild_clip(page, start_frame_local, end_frame_local, prompt, is_first_clip=_need_new_project):
+        flow_model_event(
+            "redo_submit_failed",
+            job_id=job_id,
+            clip_id=clip_id,
+            clip_index=clip_index,
+            requested_model=page._veo_model,
+        )
         # v787 — image REJECTED (policy or persistent uploadImage 400): show
         # the replace-image card and stop. Re-queuing would resubmit the same
         # blocked image forever (clip 10609, 2026-06-11: 2 accounts + redo
@@ -19024,6 +19134,13 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
 
     # Record submission time
     submit_time = datetime.now()
+    flow_model_event(
+        "redo_generate_clicked",
+        job_id=job_id,
+        clip_id=clip_id,
+        clip_index=clip_index,
+        requested_model=page._veo_model,
+    )
     print(f"[REDO] ✓ Clip {clip_index+1} resubmitted at {submit_time.strftime('%H:%M:%S')}", flush=True)
     # v776 — resubmit landed; reset the glitch cap so a later unrelated glitch
     # (or any cycles carried over from the main-gen path) starts fresh.
@@ -19912,8 +20029,18 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         # and ensure_lower_priority_model (which drives the dropdown). NULL
         # veo_model on the clip = the job's model, i.e. every pre-v961 job is
         # byte-identical here.
-        apply_clip_veo_model(page, clip, veo_model,
-                             context=f"clip {clip_index + 1}: ")
+        _clip_model = apply_clip_veo_model(
+            page, clip, veo_model, context=f"clip {clip_index + 1}: ")
+        page._active_job_id = job_id
+        page._active_clip_id = clip.get('id')
+        page._active_clip_index = clip_index
+        flow_model_event(
+            "main_model_target",
+            job_id=job_id,
+            clip_id=clip.get('id'),
+            clip_index=clip_index,
+            requested_model=_clip_model,
+        )
 
         # v765 — never auto-resubmit a clip the DB already marks 'failed' (see
         # the matching guard in the resume loop): terminal failures await a
@@ -23053,8 +23180,18 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # movie-section arms call set_clip_input_mode further down, and that
         # reads page._veo_model to choose the Frames/Ingredients tab — so this
         # assignment has to happen here, above every one of them.
-        apply_clip_veo_model(page, clip, veo_model,
-                             context=f"clip {clip_index + 1}: ")
+        _clip_model = apply_clip_veo_model(
+            page, clip, veo_model, context=f"clip {clip_index + 1}: ")
+        page._active_job_id = job_id
+        page._active_clip_id = clip.get('id')
+        page._active_clip_index = clip_index
+        flow_model_event(
+            "main_model_target",
+            job_id=job_id,
+            clip_id=clip.get('id'),
+            clip_index=clip_index,
+            requested_model=_clip_model,
+        )
 
         # v765 — never auto-resubmit a clip the DB already marks 'failed'. A
         # terminal failure (policy give-up, auto-redo cap, unusual-activity

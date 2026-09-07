@@ -8,6 +8,7 @@ renders on a model nobody chose, with nothing failing.
 import os
 import re
 import sys
+import ast
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -136,3 +137,51 @@ def test_v961_linter_accepts_a_legal_model(tmp_path):
     offending = [ln for ln in buf.getvalue().splitlines()
                  if "v961:" in ln and ("FAIL" in ln or "WARN" in ln)]
     assert not offending, offending
+
+
+def _load_worker_function(name):
+    """Load one pure helper without importing the browser worker."""
+    path = os.path.join(HERE, "static", "flow_worker.py")
+    src = open(path, encoding="utf-8").read()
+    tree = ast.parse(src)
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+    module = ast.Module(body=[fn], type_ignores=[])
+    ns = {"DEFAULT_VEO_MODEL": veo_models.DEFAULT_VEO_MODEL}
+    exec(compile(module, path, "exec"), ns)
+    return ns[name]
+
+
+def test_v961_redo_order_interleaves_models_inside_one_job():
+    order = _load_worker_function("interleave_redo_clips_by_model")
+    clips = [
+        {"id": 1, "job_id": "paint", "veo_model": "Omni Flash"},
+        {"id": 2, "job_id": "paint", "veo_model": "Omni Flash"},
+        {"id": 3, "job_id": "paint", "veo_model": "Omni Flash"},
+        {"id": 4, "job_id": "paint", "veo_model": "Veo 3.1 - Lite [Lower Priority]"},
+        {"id": 5, "job_id": "paint", "veo_model": "Veo 3.1 - Lite [Lower Priority]"},
+    ]
+    assert [c["id"] for c in order(clips)] == [1, 4, 2, 5, 3]
+
+
+def test_v961_redo_order_keeps_jobs_and_per_model_order_stable():
+    order = _load_worker_function("interleave_redo_clips_by_model")
+    clips = [
+        {"id": 10, "job_id": "a", "veo_model": "Omni Flash"},
+        {"id": 11, "job_id": "b", "veo_model": "Omni Flash"},
+        {"id": 12, "job_id": "a", "veo_model": "Omni Flash"},
+        {"id": 13, "job_id": "a", "veo_model": "Veo 3.1 - Lite [Lower Priority]"},
+        {"id": 14, "job_id": "b", "veo_model": "Veo 3.1 - Lite [Lower Priority]"},
+    ]
+    assert [c["id"] for c in order(clips)] == [10, 13, 12, 11, 14]
+
+
+def test_v961_model_audit_file_excludes_prompts_and_secrets():
+    fw = open(os.path.join(HERE, "static", "flow_worker.py"), encoding="utf-8").read()
+    assert "flow_model_events.jsonl" in fw
+    fn_start = fw.index("def flow_model_event(")
+    fn_end = fw.index("\ndef interleave_redo_clips_by_model", fn_start)
+    body = fw[fn_start:fn_end]
+    for forbidden in ("prompt", "cookie", "body_raw", "USER_WORKER_TOKEN"):
+        assert forbidden not in body
+    assert '"flow_generate_request"' in fw
+    assert "actual_model_key=model_key or None" in fw
