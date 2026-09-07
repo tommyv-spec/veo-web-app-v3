@@ -9119,6 +9119,90 @@ def _v962_clear_frame_bar(page, prefix=""):
         print(f"{prefix}⚠ [v962.7] clearing the frames bar: {str(e)[:80]}", flush=True)
 
 
+def _v962_upload_into_picker(page, image_path, prefix=""):
+    """Get `image_path` into the open Flow asset picker. True if a route ran.
+
+    Route 1 — a real file input. Preferred, and the one the legacy Ingredients
+    path proved: `set_input_files` works in these dialogs even where the
+    file-chooser EVENT times out. Inputs here are hidden, so the locator must not
+    wait for visibility.
+
+    Route 2 — a synthesised drop. The picker on flow.google.com exposes no input
+    and no upload button (measured: one button, labelled Close), so the bytes are
+    handed to the drop target as a DataTransfer, which is how an uploader with no
+    input takes a file. The image is passed as base64 and rebuilt in the page.
+
+    Returns False only when NEITHER route could run, so the caller can fall
+    through to the old button path rather than treating this as a hard failure.
+    """
+    name = os.path.basename(image_path)
+    try:
+        if not (image_path and os.path.isfile(image_path)):
+            print(f"{prefix}⚠ [v962.9] no file to upload at {image_path}", flush=True)
+            return False
+
+        inputs = page.locator("input[type='file']")
+        if inputs.count():
+            inputs.first.set_input_files(image_path, timeout=15000)
+            print(f"{prefix}✓ [v962.9] {name} set on a file input "
+                  f"({inputs.count()} present)", flush=True)
+            return True
+
+        # Target order matters and is MEASURED. Dropping on the asset popover was
+        # tried first and Flow ignored it — that panel only BROWSES assets, it
+        # does not receive them (one button, labelled Close). Flow's own upload
+        # goes to `aisandbox-pa.googleapis.com/v1/flow/uploadImage`, which the app
+        # fires when a file lands on the COMPOSER. So the composer and the frames
+        # bar come first, and each target is checked for an effect rather than
+        # assumed to have worked.
+        import base64
+        blob = base64.b64encode(open(image_path, "rb").read()).decode("ascii")
+        targets = [
+            "flow-ingredient-bar",
+            "flow-composer",
+            "main",
+            ".cdk-overlay-container .add-menu-popover-container",
+            "body",
+        ]
+        for sel in targets:
+            hit = page.evaluate(
+                """([b64, fname, sel]) => {
+                    const target = document.querySelector(sel);
+                    if (!target) return 'missing';
+                    const bin = atob(b64);
+                    const buf = new Uint8Array(bin.length);
+                    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+                    const file = new File([buf], fname, {type: 'image/png'});
+                    const dt = new DataTransfer();
+                    dt.items.add(file);
+                    for (const type of ['dragenter', 'dragover', 'drop']) {
+                        target.dispatchEvent(new DragEvent(type, {
+                            bubbles: true, cancelable: true, composed: true,
+                            dataTransfer: dt}));
+                    }
+                    return 'ok';
+                }""",
+                [blob, name, sel])
+            if hit == "missing":
+                continue
+            # Did anything actually happen? A chip in the frames bar means the
+            # drop both uploaded AND attached, and the caller can stop entirely.
+            time.sleep(3)
+            try:
+                if page.locator(_V962_FRAME_CHIP).count():
+                    print(f"{prefix}✓ [v962.9] drop on {sel} attached a frame directly",
+                          flush=True)
+                    return True
+            except Exception:
+                pass
+            print(f"{prefix}[v962.9] dropped on {sel}, no chip yet", flush=True)
+        return True
+    except Exception as exc:
+        print(f"{prefix}⚠ [v962.9] upload route failed: {type(exc).__name__}: "
+              f"{str(exc)[:110]}", flush=True)
+        return False
+
+
 def _v962_pick_asset_in_picker(page, image_path, prefix=""):
     """Inside the open picker: click the option named like the file, or upload the
     file through 'Upload media' (a real file chooser) and then click it."""
@@ -9203,6 +9287,39 @@ def _v962_pick_asset_in_picker(page, image_path, prefix=""):
                   flush=True)
         except Exception as _pe:
             print(f"{prefix}[v962.8-diag] pane probe failed: {type(_pe).__name__}", flush=True)
+        # v962.9 (2026-09-07) — MEASURED, not guessed. The popover that opens on
+        # flow.google.com is an ASSET BROWSER, not an uploader. Its full contents:
+        #   labels : Close · Select project · Search assets · Sort assets
+        #   icons  : close · search      roles: img · combobox
+        #   buttons: exactly ONE, and it is Close
+        # There is no "Upload media" button, and `file_inputs` is 0 for the WHOLE
+        # document. So clicking an upload button could only ever time out, which
+        # is precisely the failure ("picker upload ... Locator.click: Timeout").
+        # A fresh project's asset list is empty, so there is also nothing to pick.
+        #
+        # Two deterministic routes, neither depending on a label or a button:
+        #   1. a real <input type=file> anywhere, driven with set_input_files —
+        #      the legacy Ingredients path already records that the file-chooser
+        #      EVENT times out in these dialogs while the input itself works;
+        #   2. failing that, hand the bytes to the drop target as a DataTransfer,
+        #      which is how an uploader with no input accepts a file.
+        if _v962_upload_into_picker(page, image_path, prefix):
+            deadline = time.time() + 60
+            while time.time() < deadline and opt is None:
+                time.sleep(1.5)
+                opt = _find()
+            if opt is not None:
+                try:
+                    opt.click(timeout=8000)
+                    return True
+                except Exception as exc:
+                    print(f"{prefix}⚠ [v962.9] uploaded but could not click it: "
+                          f"{str(exc)[:80]}", flush=True)
+            else:
+                print(f"{prefix}⚠ [v962.9] upload reported OK but {name} never "
+                      f"appeared in the browser", flush=True)
+            return False
+
         up = page.locator(".cdk-overlay-container button:has-text('Upload media'), "
                           "button:has-text('Upload media')").first
         try:
@@ -10302,6 +10419,21 @@ def _flow_only_clip_ids_q():
     return ",".join(map(str, FLOW_ONLY_CLIP_IDS))
 
 
+def _scoped_flow_work_is_terminal():
+    """True only when every exact clip-scope row reached a final state."""
+    if not FLOW_ONLY_CLIP_IDS:
+        return False
+    terminal = {"completed", "approved", "failed", "skipped", "cancelled"}
+    for clip_id in FLOW_ONLY_CLIP_IDS:
+        state = api_request("GET", f"/clips/{clip_id}/approval-status")
+        if not state:
+            return False
+        status = str(state.get("status") or "").strip().lower()
+        if not state.get("has_video") and status not in terminal:
+            return False
+    return True
+
+
 def get_pending_job(exclude_ids=None):
     """Get next pending job from API and claim it for this worker.
 
@@ -10485,6 +10617,10 @@ def get_redo_clips():
                 print(f"[Scope] dropped {before - len(clips)} redo clip(s) outside "
                       f"the job allowlist", flush=True)
         return interleave_redo_clips_by_model(clips)
+    if FLOW_ONLY_CLIP_IDS and _scoped_flow_work_is_terminal():
+        print(f"[Scope] Exact clip run finished: {_flow_only_clip_ids_q()}; "
+              "exiting cleanly", flush=True)
+        raise SystemExit(0)
     return []
 
 
