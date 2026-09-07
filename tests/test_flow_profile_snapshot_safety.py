@@ -55,13 +55,21 @@ class ProfileSnapshotSafety(unittest.TestCase):
         self.assertIn("button[aria-label='Add media menu']", body)
         self.assertIn("a[href*='/project/'][href$='/tools']", body)
 
+    def test_project_api_fallback_requires_real_authenticated_response(self):
+        body = _function_source("ensure_logged_into_flow")
+        self.assertIn('if "/project/" in url:', body)
+        self.assertIn('_auth_token = _FA_TOKEN_STORE.token or ""', body)
+        self.assertIn("if _auth_token:", body)
+        self.assertIn("if not _fa_is_error(_probe):", body)
+        self.assertIn('p._flow_auth_proof = "authenticated Flow account API"', body)
+
     def test_flow_dom_auth_publishes_a_pid_bound_ready_marker(self):
         login = _function_source("ensure_logged_into_flow")
         publish = _function_source("_publish_flow_auth_ready")
         self.assertIn("_publish_flow_auth_ready(page, label)", login)
         self.assertIn('"pid": os.getpid()', publish)
         self.assertIn('"authenticated_at": time.time()', publish)
-        self.assertIn('"proof": "visible signed-in Flow DOM"', publish)
+        self.assertIn('getattr(\n                    page, "_flow_auth_proof"', publish)
 
     def test_login_wall_revokes_this_process_ready_marker(self):
         login = _function_source("ensure_logged_into_flow")

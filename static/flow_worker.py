@@ -3561,7 +3561,8 @@ def _publish_flow_auth_ready(page, label):
                 "label": label,
                 "url": url,
                 "build": WORKER_BUILD,
-                "proof": "visible signed-in Flow DOM",
+                "proof": getattr(
+                    page, "_flow_auth_proof", "verified signed-in Flow state"),
             }, f)
         os.replace(tmp, _FLOW_AUTH_READY_FILE)
         return True
@@ -3670,6 +3671,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             for selector in logged_in_selectors:
                 try:
                     if p.locator(selector).first.is_visible(timeout=1500):
+                        p._flow_auth_proof = "visible signed-in Flow DOM"
                         return 'flow_logged_in'
                 except Exception:
                     pass
@@ -3688,6 +3690,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             for selector in logged_in_selectors:
                 try:
                     if p.locator(selector).first.is_visible(timeout=1500):
+                        p._flow_auth_proof = "visible signed-in Flow DOM"
                         return 'flow_logged_in'
                 except Exception:
                     pass
@@ -3698,6 +3701,33 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
                     return 'flow_not_logged_in'
             except Exception:
                 pass
+
+            # The current project editor can render with none of the stable
+            # account/control selectors above. In that state, use a real
+            # authenticated account request as the fallback proof. This is
+            # deliberately limited to /project/<id>, requires a captured
+            # Google bearer token, and rejects every HTTP/API error. The URL
+            # by itself is still never accepted as login proof.
+            if "/project/" in url:
+                try:
+                    _auth_token = _FA_TOKEN_STORE.token or ""
+                    if _auth_token:
+                        _probe = _fa_api_fetch(
+                            p,
+                            f"https://aisandbox-pa.googleapis.com/v1/credits?key={_FA_GOOGLE_API_KEY}",
+                            "GET",
+                            _auth_token,
+                        )
+                        if not _fa_is_error(_probe):
+                            p._flow_auth_proof = "authenticated Flow account API"
+                            flow_model_event(
+                                "flow_auth_api_proof",
+                                status=_probe.get("status"),
+                                page_kind="project",
+                            )
+                            return 'flow_logged_in'
+                except Exception:
+                    pass
             
             # Still nothing — page is on the Flow URL but login state is unclear.
             # Returning 'other' causes infinite re-navigation (page is already here).
