@@ -3655,6 +3655,26 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             # signed-out/stale SPA can keep /project/<id> in the address bar.
             # Only visible app/account controls prove that this private browser
             # is signed in.
+            if "/project/" in url:
+                try:
+                    _editor_ready = bool(p.evaluate("""() => {
+                        const raw = (document.body && document.body.innerText) || '';
+                        const txt = raw.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase();
+                        const editor = ['videos', 'scenes', 'escenas'].some(s => txt.includes(s));
+                        const signedOut = txt.includes('create with flow') || txt.includes('create with google flow');
+                        const broken = txt.includes('something went wrong') || txt.includes('se produjo un error');
+                        return editor && !signedOut && !broken;
+                    }"""))
+                    if _editor_ready:
+                        p._flow_auth_proof = "visible signed-in Flow project editor DOM"
+                        flow_model_event(
+                            "flow_auth_project_dom_proof",
+                            page_kind="project",
+                        )
+                        return 'flow_logged_in'
+                except Exception:
+                    pass
+
             _api_proof = getattr(p, "_flow_authenticated_api_proof", "")
             if "/project/" in url and _api_proof:
                 p._flow_auth_proof = f"authenticated Flow account API ({_api_proof})"
@@ -19049,6 +19069,7 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                 _need_new_project = True
                 break
             if _state == 'ok':
+                page._flow_auth_proof = "visible signed-in Flow project editor DOM"
                 _project_ready = True
                 break
         if not _need_new_project and not _project_ready:

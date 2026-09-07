@@ -74,6 +74,13 @@ class ProfileSnapshotSafety(unittest.TestCase):
         self.assertIn('if "/project/" in url and _api_proof:', login)
         self.assertIn('authenticated Flow account API ({_api_proof})', login)
 
+    def test_project_editor_text_is_visible_dom_login_proof(self):
+        body = _function_source("ensure_logged_into_flow")
+        self.assertIn('if "/project/" in url:', body)
+        self.assertIn("['videos', 'scenes', 'escenas']", body)
+        self.assertIn("editor && !signedOut && !broken", body)
+        self.assertIn('visible signed-in Flow project editor DOM', body)
+
     def test_flow_dom_auth_publishes_a_pid_bound_ready_marker(self):
         login = _function_source("ensure_logged_into_flow")
         publish = _function_source("_publish_flow_auth_ready")
