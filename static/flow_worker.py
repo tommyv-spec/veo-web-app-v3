@@ -1439,14 +1439,30 @@ def _fa_init_project_best_effort(page, project_id, context=""):
             return {"denied": n_denied, "confirmed": True}
 
         if denials:
-            # Record the FIRST denial: it is the one closest to the cause.
+            # v963.3 — REPORT ONLY. This used to clear the auth proof, write
+            # _flow_auth_denied and call _clear_flow_auth_ready(), i.e. declare
+            # the session dead from the replay's own failures.
+            #
+            # It is wrong for the same reason the bearer gate was wrong. These
+            # calls go out with `_bearer()`, which is empty until the request
+            # listener has captured a token, and on a freshly created project it
+            # usually is. So a perfectly healthy worker prints
+            # "SESSION DEAD: 12 authenticated call(s) denied" — measured on
+            # worker-b at 2026-09-08 00:3x with a signed-in ULTRA session and a
+            # screenshot of the working app to prove it.
+            #
+            # Worse, _clear_flow_auth_ready() erased the readiness marker
+            # worker_lifecycle waits on, so `ensure flow` reported "Flow process
+            # exists but authentication is not proven — no lease" for a worker
+            # that was signed in and submitting.
+            #
+            # The count is still worth printing: 13 real denials is how the
+            # 2026-09-07 failure was diagnosed. It just does not get to decide.
             label, reason = denials[0]
-            page._flow_authenticated_api_proof = ""
-            page._flow_auth_denied = {"label": label, "reason": str(reason)[:160],
-                                      "at": time.time()}
-            _clear_flow_auth_ready()
-            print(f"{pfx}[flow_api] SESSION DEAD: {n_denied} authenticated call(s) "
-                  f"denied, credits not confirmed", flush=True)
+            print(f"{pfx}[flow_api] {n_denied} authenticated call(s) denied "
+                  f"(first: '{label}'). Reported, not acted on — the replay runs "
+                  f"before a bearer exists, so this does not mean signed out.",
+                  flush=True)
             return {"denied": n_denied, "confirmed": False}
 
         # Only transport noise. That is not evidence in either direction, so the

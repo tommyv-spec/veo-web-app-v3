@@ -245,14 +245,26 @@ def test_error_reason_shows_status_zero_text():
 
 # ------------------------------------------------- 3-5b: the verdict is atomic
 
-def test_replay_denial_clears_api_proof_and_reports_dead():
+def test_replay_denials_are_reported_but_never_act(self=None):
+    """v963.3 — the replay COUNTS denials; it does not get to decide.
+
+    These calls go out with `_bearer()`, which is empty until the request
+    listener has captured a token, and on a freshly created project it usually
+    is. Acting on them printed "SESSION DEAD: 12 authenticated call(s) denied"
+    for a signed-in ULTRA session (worker-b, 2026-09-08 00:3x, screenshot of the
+    working app to prove it) and — worse — cleared the readiness marker
+    worker_lifecycle waits on, so `ensure flow` refused to lease a worker that
+    was signed in and submitting.
+    """
     page = RecordingPage(_flow_authenticated_api_proof="credits")
     result, page, cleared = _replay(lambda url: _denial(), page=page)
+    assert result["denied"] > 0, "the count is still worth having"
     assert result["confirmed"] is False
-    assert result["denied"] > 0
-    assert page._flow_authenticated_api_proof == ""
-    assert page._flow_auth_denied is not None
-    assert len(cleared) == 1, "a dead session must clear the ready flag exactly once"
+    # but nothing was acted on
+    assert page._flow_authenticated_api_proof == "credits", (
+        "the replay must not revoke a proof it cannot properly test")
+    assert cleared == [], (
+        "clearing the readiness marker here blocks the lane for a healthy worker")
 
 
 def test_credits_200_confirms_even_with_a_denied_sibling():
@@ -286,17 +298,17 @@ def test_credits_200_survives_denials_that_come_AFTER_it():
     assert cleared == [], "a confirmed session must never be marked dead"
 
 
-def test_first_denial_is_the_one_recorded():
+def test_the_denial_count_survives_even_though_the_verdict_does_not():
+    """13 real denials is how 2026-09-07 was diagnosed - keep the number."""
     seen = []
 
     def api(url):
         seen.append(url)
         return _denial(text=f"{GOOGLE_DENIAL} [{len(seen)}]")
 
-    _result, page, _cleared = _replay(api)
-    assert page._flow_auth_denied is not None
-    assert "[1]" in page._flow_auth_denied.get("reason", ""), (
-        "the FIRST denial should be recorded, not the last")
+    result, page, cleared = _replay(api)
+    assert result["denied"] >= 10
+    assert cleared == []
 
 
 def test_transport_failures_are_not_denials():
