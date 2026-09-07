@@ -3912,6 +3912,11 @@ class FlowLoginRequired(RuntimeError):
 
 _FLOW_CREDITS_URL = "https://aisandbox-pa.googleapis.com/v1/credits"
 
+# How long to let the Flow app prove itself by making an authenticated
+# request. A signed-in app mints a bearer within a couple of seconds of the
+# editor loading; a signed-out one never does, however long you wait.
+_FLOW_AUTH_BEARER_WAIT_S = 20
+
 
 def _flow_page_state(p, label="Flow"):
     """What state is this page in? Returns one of:
@@ -3992,109 +3997,105 @@ def _flow_page_state(p, label="Flow"):
         p._flow_auth_proof = f"authenticated Flow account API ({_api_proof})"
         return 'flow_logged_in'
 
-    # ── 4. Ask Google. The only thing allowed to say "logged in". ──
-    # The /project/ gate is gone: it meant a home-URL page could never be
-    # confirmed at all, which is exactly when the old code fell back to page text.
+    # ── 4. Let the app authenticate itself, and watch it do so. ──
     #
-    # The BEARER gate is back, and removing it was a mistake worth recording.
-    # /v1/credits is called as `?key=<api key>` + Authorization: Bearer <token>.
-    # With no bearer, Google answers "API keys are not supported by this API" —
-    # it is refusing the auth METHOD, and the reply carries no information about
-    # the session at all. Measured 2026-09-07 against a profile whose golden had
-    # just been rebuilt from the operator's signed-in Firefox: sixteen
-    # FLOW_AUTH_DENIED lines in a row for a session that had never been asked a
-    # answerable question. A cookie-only Firefox session exposes no bearer until
-    # the app loads and the request listener captures one.
+    # The worker already had the only signal that matters, and the first version
+    # of this function built a worse one beside it.
+    # `_fa_attach_token_listener` sniffs `Bearer ya29.*` off the page's OWN
+    # requests, which means:
     #
-    # So: no bearer means the probe cannot run, and "cannot run" is NOT "denied".
+    #     a signed-in Flow app makes authenticated calls and mints a bearer.
+    #     a signed-out one never does.
+    #
+    # That IS the authentication check. It needs no page text and no probe of our
+    # own invention, and it cannot be fooled by a cached shell, because a cached
+    # shell has nothing to authenticate WITH.
+    #
+    # What was here before called /v1/credits as `?key=<api key>` plus whatever
+    # bearer happened to exist. With none, Google answers "API keys are not
+    # supported by this API" — refusing the auth METHOD — and that was scored as a
+    # refusal: sixteen FLOW_AUTH_DENIED lines against a profile whose golden had
+    # just been rebuilt from the operator's signed-in Firefox, not one of which
+    # had asked a question the session could answer.
+    try:
+        _fa_attach_token_listener(p)
+    except Exception:
+        pass
     try:
         p.wait_for_load_state("domcontentloaded", timeout=15000)
     except Exception:
         pass
 
-    _bearer_token = getattr(_FA_TOKEN_STORE, "token", "") or ""
-    if not _bearer_token:
-        # Nothing to authenticate with yet. Do not call, do not deny, do not
-        # confirm. The caller treats 'unknown' as "keep going and let the app
-        # prove itself" rather than as a login wall.
-        print(f"[{label}] credits probe skipped — no bearer captured yet "
-              f"(cookie-only session). NOT a denial: unproven, so not trusted.",
-              flush=True)
-        flow_model_event("flow_auth_probe_skipped", reason="no_bearer",
+    _deadline = time.time() + _FLOW_AUTH_BEARER_WAIT_S
+    _bearer = getattr(_FA_TOKEN_STORE, "token", "") or ""
+    while not _bearer and time.time() < _deadline:
+        time.sleep(1)
+        _bearer = getattr(_FA_TOKEN_STORE, "token", "") or ""
+
+    if not _bearer:
+        # The app had its window and never made a single authenticated request.
+        # That is a signed-out session, stated by the app's own behaviour.
+        p._flow_authenticated_api_proof = ""
+        p._flow_auth_denied = {"label": "no-bearer",
+                               "reason": (f"the Flow app made no authenticated "
+                                          f"request in {_FLOW_AUTH_BEARER_WAIT_S}s"),
+                               "at": time.time()}
+        print(f"[{label}] FLOW_AUTH_DENIED: the app never minted a bearer in "
+              f"{_FLOW_AUTH_BEARER_WAIT_S}s — this session is signed out", flush=True)
+        try:
+            _clear_flow_auth_ready()
+        except Exception:
+            pass
+        flow_model_event("flow_auth_no_bearer",
                          page_kind="project" if "/project/" in url else "home")
-        # Deliberately the SAME return as a real refusal, and deliberately NOT
-        # the same recorded state. The verdict is "unproven", and unproven must
-        # not be trusted — a worker that stops costs nothing, a worker that
-        # proceeds on an unproven session is what burned 2026-09-07.
-        #
-        # What it must NOT do is write _flow_auth_denied. That field is a
-        # REMEMBERED refusal: once set, step 2 short-circuits every later check
-        # until something confirms. Poisoning it here would make one bearer-less
-        # moment stick to the page for the rest of the run.
-        #
-        # Not a new state value on purpose: ensure_logged_into_flow dispatches on
-        # an exact set of strings and sends anything unrecognised down the
-        # re-navigate path, which loops.
         return 'flow_not_logged_in'
 
-    for _attempt in (1, 2):
-        try:
-            _probe = _fa_api_fetch(
-                p, f"{_FLOW_CREDITS_URL}?key={_FA_GOOGLE_API_KEY}", "GET",
-                getattr(_FA_TOKEN_STORE, "token", "") or "",
-            )
-            if isinstance(_probe, dict) and not _fa_is_error(_probe):
-                p._flow_authenticated_api_proof = "credits"
-                p._flow_auth_confirmed_at = time.time()
-                p._flow_auth_denied = None
-                p._flow_auth_proof = "authenticated Flow account API (credits)"
-                flow_model_event("flow_auth_api_proof",
-                                 status=_probe.get("status"),
-                                 page_kind="project" if "/project/" in url else "home",
-                                 endpoint="credits")
-                return 'flow_logged_in'
-            if _fa_is_auth_method_error(_probe):
-                # We sent a bearer and Google still says the METHOD is wrong.
-                # That is our request shape being wrong, not the user being
-                # signed out — never a denial.
-                print(f"[{label}] credits probe inconclusive (auth method "
-                      f"refused): {_fa_error_reason(_probe)[:120]}", flush=True)
-                # Same reasoning as the no-bearer case above: unproven, so not
-                # trusted, but never recorded as a denial.
-                return 'flow_not_logged_in'
-            if _fa_is_auth_denial(_probe):
-                p._flow_authenticated_api_proof = ""
-                p._flow_auth_denied = {"label": "credits",
-                                       "reason": _fa_error_reason(_probe)[:160],
-                                       "at": time.time()}
-                print(f"[{label}] FLOW_AUTH_DENIED by 'credits': "
-                      f"{_fa_error_reason(_probe)}", flush=True)
-                try:
-                    _clear_flow_auth_ready()
-                except Exception:
-                    pass
-                return 'flow_not_logged_in'
-        except Exception as _probe_err:
-            # NEVER swallow this silently. It is the one call allowed to confirm
-            # the session, so an error here is the difference between "Google said
-            # no" and "we never managed to ask" — and a silent pass makes a live
-            # session look dead forever. (Caught during development: a missing
-            # global was absorbed here and surfaced only as "credits never
-            # answered".) Log-and-continue is failing open; say what broke.
-            print(f"[{label}] credits probe error "
-                  f"({type(_probe_err).__name__}: {_probe_err})", flush=True)
-        if _attempt == 1:
-            time.sleep(2)  # one retry: the page may still be hydrating
+    # A bearer exists, so the app authenticated. Confirm on that, then let credits
+    # either harden it or overturn it — and NOW the call is answerable, because it
+    # carries a real credential.
+    p._flow_authenticated_api_proof = "bearer"
+    p._flow_auth_confirmed_at = time.time()
+    p._flow_auth_denied = None
+    p._flow_auth_proof = "the Flow app minted an authenticated bearer"
 
-    # Neither confirmed nor denied — transport trouble, or a page that never
-    # settled. Unknown is NOT logged in; the caller routes to the login path.
     try:
-        flow_ui_probe(p, "flow_auth_dom_unclear")
-    except Exception:
-        pass
-    print(f"[{label}] ⚠ On Flow URL but credits never answered — "
-          f"treating as not logged in", flush=True)
-    return 'flow_not_logged_in'
+        _probe = _fa_api_fetch(
+            p, f"{_FLOW_CREDITS_URL}?key={_FA_GOOGLE_API_KEY}", "GET", _bearer)
+        if isinstance(_probe, dict) and not _fa_is_error(_probe):
+            p._flow_authenticated_api_proof = "credits"
+            p._flow_auth_proof = "authenticated Flow account API (credits)"
+            flow_model_event("flow_auth_api_proof", status=_probe.get("status"),
+                             page_kind="project" if "/project/" in url else "home",
+                             endpoint="credits")
+        elif _fa_is_auth_denial(_probe):
+            # A real credential was presented and rejected. That outranks the
+            # bearer's existence: the token is stale.
+            p._flow_authenticated_api_proof = ""
+            p._flow_auth_denied = {"label": "credits",
+                                   "reason": _fa_error_reason(_probe)[:160],
+                                   "at": time.time()}
+            print(f"[{label}] FLOW_AUTH_DENIED by 'credits': "
+                  f"{_fa_error_reason(_probe)}", flush=True)
+            try:
+                _clear_flow_auth_ready()
+            except Exception:
+                pass
+            return 'flow_not_logged_in'
+        else:
+            # Method error, transport, 5xx — no information. The bearer stands.
+            print(f"[{label}] credits inconclusive "
+                  f"({_fa_error_reason(_probe)[:90]}); the minted bearer is the "
+                  f"proof", flush=True)
+    except Exception as _probe_err:
+        # Never silent: the difference between "Google said no" and "we never
+        # managed to ask" is the whole point of this function.
+        print(f"[{label}] credits probe error "
+              f"({type(_probe_err).__name__}: {_probe_err}) — the minted bearer "
+              f"is the proof", flush=True)
+
+    print(f"[{label}] FLOW_AUTH_CONFIRMED endpoint="
+          f"{p._flow_authenticated_api_proof} bearer=yes", flush=True)
+    return 'flow_logged_in'
 
 
 # v963 — the project-state probe, bounded. Returns null (not 'wait') while

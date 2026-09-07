@@ -119,6 +119,9 @@ def _module_globals():
         "_FA_AUTH_METHOD_ERROR_PHRASES": _const("_FA_AUTH_METHOD_ERROR_PHRASES") or (),
         "_FLOW_CREDITS_URL": _const("_FLOW_CREDITS_URL")
         or "https://aisandbox-pa.googleapis.com/v1/credits",
+        # v963.2 — the verdict now waits for the app to mint a bearer.
+        "_FLOW_AUTH_BEARER_WAIT_S": _const("_FLOW_AUTH_BEARER_WAIT_S") or 20,
+        "_fa_attach_token_listener": lambda *a, **k: None,
     }
     # _fa_is_auth_denial calls _fa_is_auth_method_error, so it needs it in scope.
     base["_fa_is_auth_method_error"] = _function("_fa_is_auth_method_error", dict(base))
@@ -472,13 +475,31 @@ def test_a_real_denial_still_denies_after_the_carve_out():
     assert is_denial({"status": 403}) is True
 
 
-def test_the_probe_refuses_to_ask_without_a_bearer():
-    """No bearer means the question cannot be answered - do not ask it."""
+def test_the_verdict_waits_for_the_app_to_mint_a_bearer():
+    """v963.2 — the app authenticating IS the check.
+
+    `_fa_attach_token_listener` sniffs `Bearer ya29.*` off the page's own
+    requests. A signed-in Flow app makes authenticated calls and mints one; a
+    signed-out one never does, and a cached shell has nothing to authenticate
+    with. So the worker watches for that instead of asking a question of its own
+    invention - which is how it came to score "API keys are not supported"
+    (an api key sent with no bearer) as a refusal, sixteen times, against a
+    freshly-rebuilt profile.
+    """
     state = _source_of("_flow_page_state")
-    assert "_bearer_token" in state
-    assert "credits probe skipped" in state
-    # and the skip must not write the remembered-denial field, or one
-    # bearer-less moment sticks to the page for the whole run
-    head = state.split("credits probe skipped", 1)[1].split("return", 1)[0]
-    assert "_flow_auth_denied" not in head, (
-        "the no-bearer path must never record a denial")
+    assert "_fa_attach_token_listener(p)" in state
+    assert "_FLOW_AUTH_BEARER_WAIT_S" in state
+    # credits is still called, but only WITH the bearer - never as the opener
+    assert "_fa_api_fetch(" in state
+    body = state.split("_FLOW_AUTH_BEARER_WAIT_S", 1)[1]
+    assert body.index("_bearer") < body.index("_fa_api_fetch("), (
+        "credits must be asked only after a bearer exists to ask it with")
+
+
+def test_no_bearer_is_a_refusal_stated_by_the_app_itself():
+    state = _source_of("_flow_page_state")
+    seg = state.split("if not _bearer:", 1)[1].split("return", 1)[0]
+    assert "_flow_auth_denied" in seg, (
+        "an app that never authenticated in the whole window IS signed out, and "
+        "that verdict must be recorded so later checks short-circuit")
+    assert "never minted a bearer" in seg
