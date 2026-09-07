@@ -209,3 +209,16 @@ def test_retry_stuck_can_atomically_set_one_flow_variant():
     assert "job_config[\"flow_variants_count\"] = requested_variants" in block
     assert '"flow_variants_count": flow_variants_count' in block
     assert "requested_variants < 1 or requested_variants > 4" in block
+
+
+def test_v962_picker_failure_probe_is_structure_only():
+    fw = open(os.path.join(HERE, "static", "flow_worker.py"), encoding="utf-8").read()
+    start = fw.index("# TEMPORARY DIAGNOSTIC (2026-09-07)")
+    end = fw.index("\n        return False", start)
+    block = fw[start:end]
+    for expected in ("overlay_roots", "by_role", "file_inputs", "frames_bar"):
+        assert expected in block
+    for forbidden in ("flow_ui_probe", "innerText", "aria-label", "href",
+                      "location.href", "document.title", "screenshot",
+                      "prompt", "cookie", "request body", ".value"):
+        assert forbidden not in block

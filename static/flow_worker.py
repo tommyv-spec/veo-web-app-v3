@@ -8997,6 +8997,43 @@ def _v962_attach_frame(page, image_path, which="start", prefix=""):
         page.locator(_V962_PICKER).first.wait_for(state="visible", timeout=15000)
     except Exception:
         print(f"{prefix}⚠ [v962.7] the frame picker did not open", flush=True)
+        # TEMPORARY DIAGNOSTIC (2026-09-07) — remove once the picker selector is
+        # settled. Three sessions have now read "the frame picker did not open"
+        # and none could say WHAT opened instead, because _V962_PICKER only ever
+        # looks inside .cdk-overlay-container. This reports the SHAPE of the page
+        # after the slot click: overlay roots and their child counts, every
+        # listbox/option/dialog/menu/file-input anywhere in the document, and the
+        # frames bar itself. Structure only — no text, no values, no URLs.
+        try:
+            shape = page.evaluate("""() => {
+                const vis = el => { const r = el.getBoundingClientRect();
+                    const s = getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden'
+                           && s.display !== 'none'; };
+                const roots = [...document.querySelectorAll(
+                    '.cdk-overlay-container, [class*=overlay], [class*=cdk-overlay], dialog')]
+                    .slice(0, 8).map(el => ({
+                        cls: (el.className || '').toString().slice(0, 60),
+                        kids: el.children.length, visible: vis(el)}));
+                const byRole = {};
+                for (const r of ['listbox','option','dialog','menu','menuitem','grid','gridcell']) {
+                    const all = [...document.querySelectorAll(`[role="${r}"]`)];
+                    if (all.length) byRole[r] = {total: all.length,
+                                                visible: all.filter(vis).length};
+                }
+                const files = [...document.querySelectorAll('input[type=file]')];
+                const bar = document.querySelector('flow-ingredient-bar');
+                return {overlay_roots: roots, by_role: byRole,
+                        file_inputs: {total: files.length, visible: files.filter(vis).length},
+                        frames_bar: bar ? {kids: bar.children.length,
+                                           tags: [...bar.querySelectorAll('*')].slice(0, 12)
+                                                  .map(e => e.tagName.toLowerCase())} : null};
+            }""")
+            print(f"{prefix}[v962.7-diag] page shape after the slot click: "
+                  f"{json.dumps(shape)[:900]}", flush=True)
+            flow_model_event("v962_picker_did_not_open", shape=shape)
+        except Exception as _de:
+            print(f"{prefix}[v962.7-diag] shape probe failed: {type(_de).__name__}", flush=True)
         return False
     if not _v962_pick_asset_in_picker(page, image_path, prefix):
         try:
