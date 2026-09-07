@@ -8,10 +8,12 @@
 # others are perfectly usable. These tests guard the column, the endpoint and
 # the two places a stale verdict could survive.
 #
-# The hard rule the whole feature rests on (v886.3): this is DATA CAPTURE
-# ONLY. Nothing here may select, render, or promote anything.
+# v886.3's verdict tags remain data capture only. v963 adds a separate,
+# explicit qc_auto choice path, guarded again by the server; tagging a verdict
+# still may not select, render, or promote anything.
 
 import inspect
+import json
 import types
 
 import pytest
@@ -20,6 +22,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 import image_platform as ip
+from image_qc_contract import build_input_snapshot, snapshot_digest, RUBRIC_VERSION
 
 
 def _session():
@@ -66,6 +69,13 @@ def test_variant_has_verdict_columns():
     cols = ip.ImageVariant.__table__.c
     assert "operator_verdict" in cols
     assert "verdict_at" in cols
+
+
+def test_image_node_exposes_choice_source():
+    cols = ip.ImageNode.__table__.c
+    assert "choice_source" in cols
+    node = ip.ImageNode(kind="generated", status="ready")
+    assert node.to_dict()["choice_source"] is None
 
 
 def test_untagged_variant_is_null_not_empty_string():
@@ -269,6 +279,93 @@ def test_choosing_a_variant_clears_its_verdict():
     assert v.verdict_at is None
 
 
+def test_operator_choose_defaults_choice_source_to_operator():
+    db = _session()
+    _node(db)
+    ip.choose_variant(
+        1, ip.ChooseVariantRequest(variant_id=101),
+        db=db, current_user=_user(),
+    )
+    assert _node_from_id(db, 1).choice_source == "operator"
+
+
+def _node_from_id(db, node_id):
+    return db.query(ip.ImageNode).filter(ip.ImageNode.id == node_id).one()
+
+
+def test_qc_auto_refuses_a_missing_or_invalid_report():
+    db = _session()
+    _node(db)
+    with pytest.raises(HTTPException) as exc:
+        ip.choose_variant(
+            1, ip.ChooseVariantRequest(variant_id=101, source="qc_auto"),
+            db=db, current_user=_user(),
+        )
+    assert exc.value.status_code == 422
+    assert _node_from_id(db, 1).chosen_variant_id is None
+
+
+def test_qc_auto_refuses_an_already_chosen_node():
+    db = _session()
+    node = _node(db)
+    node.chosen_variant_id = 101
+    db.commit()
+    with pytest.raises(HTTPException) as exc:
+        ip.choose_variant(
+            1, ip.ChooseVariantRequest(variant_id=102, source="qc_auto"),
+            db=db, current_user=_user(),
+        )
+    assert exc.value.status_code == 422
+
+
+def test_qc_auto_refuses_legacy_report_even_if_legacy_decider_would_choose(monkeypatch):
+    import image_qc
+    db = _session()
+    node = _node(db)
+    node.qc_json = '{"version": 1}'
+    db.commit()
+    monkeypatch.setattr(
+        image_qc, "decide_auto_choice",
+        lambda current, report: {"decision": "choose", "variant_id": 102},
+    )
+    with pytest.raises(HTTPException) as exc:
+        ip.choose_variant(
+            1, ip.ChooseVariantRequest(variant_id=102, source="qc_auto"),
+            db=db, current_user=_user(),
+        )
+    assert exc.value.status_code == 422
+    assert _node_from_id(db, 1).chosen_variant_id is None
+
+
+def test_update_node_noop_keeps_qc_but_prompt_edit_clears_it():
+    db = _session()
+    node = _node(db)
+    node.qc_json = '{"version": 1}'
+    db.commit()
+    ip.update_node(1, ip.UpdateNodeRequest(prompt="a prompt"),
+                   db=db, current_user=_user())
+    assert _node_from_id(db, 1).qc_json == '{"version": 1}'
+    ip.update_node(1, ip.UpdateNodeRequest(prompt="a changed prompt"),
+                   db=db, current_user=_user())
+    assert _node_from_id(db, 1).qc_json is None
+
+
+def test_update_node_parent_edit_clears_qc():
+    db = _session()
+    node = _node(db)
+    parent = ip.ImageNode(id=50, user_id="u1", kind="upload", status="ready")
+    db.add(parent)
+    node.qc_json = '{"version": 1}'
+    db.commit()
+    ip.update_node(
+        1,
+        ip.UpdateNodeRequest(parents=[ip.ParentRef(
+            parent_node_id=50, kind="character")]),
+        db=db, current_user=_user(),
+    )
+    assert _node_from_id(db, 1).qc_json is None
+
+
 def test_choosing_leaves_the_other_variants_verdicts_alone():
     # Only the newly chosen row is contradicted. The siblings' verdicts are
     # exactly the data this feature exists to collect — losing them on every
@@ -312,7 +409,235 @@ def test_verdict_columns_are_in_the_sqlite_migration_list(col):
     assert f"ALTER TABLE image_variants ADD COLUMN {col}" in sqlite_half
 
 
+def test_choice_source_is_in_both_migration_lists():
+    sqlite_half, postgres_half = _migration_halves()
+    assert "ALTER TABLE image_nodes ADD COLUMN choice_source" in sqlite_half
+    assert "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS choice_source" in postgres_half
+
+
 @pytest.mark.parametrize("col", ["operator_verdict", "verdict_at"])
 def test_verdict_columns_are_in_the_postgres_migration_list(col):
     _, postgres_half = _migration_halves()
     assert f"ALTER TABLE image_variants ADD COLUMN IF NOT EXISTS {col}" in postgres_half
+
+
+def test_qc_auto_strict_snapshot_accepts_then_rejects_changed_parent_bytes(
+        monkeypatch, tmp_path):
+    """The server rechecks the actual product parent before committing."""
+    db = _session()
+    root = tmp_path / "images"
+    (root / "nodes" / "1").mkdir(parents=True)
+    (root / "nodes" / "50").mkdir(parents=True)
+    candidate_a = root / "nodes" / "1" / "variant_1.png"
+    candidate_b = root / "nodes" / "1" / "variant_2.png"
+    parent_path = root / "nodes" / "50" / "variant_1.png"
+    candidate_a.write_bytes(b"candidate-a")
+    candidate_b.write_bytes(b"candidate-b")
+    parent_path.write_bytes(b"product-parent-v1")
+    monkeypatch.setattr(ip, "images_root", lambda: root)
+
+    parent = ip.ImageNode(id=50, user_id="u1", kind="upload", status="ready",
+                          origin="manual", chosen_variant_id=501)
+    parent_variant = ip.ImageVariant(id=501, node_id=50, variant_index=1,
+                                     image_path="nodes/50/variant_1.png",
+                                     source="manual")
+    child = ip.ImageNode(id=1, user_id="u1", kind="generated", status="ready",
+                         prompt="a product jar on a counter", n_variants=2)
+    child_a = ip.ImageVariant(id=101, node_id=1, variant_index=1,
+                              image_path="nodes/1/variant_1.png", source="ai")
+    child_b = ip.ImageVariant(id=102, node_id=1, variant_index=2,
+                              image_path="nodes/1/variant_2.png", source="ai")
+    edge = ip.ImageEdge(id=700, parent_node_id=50, child_node_id=1,
+                        role="product", kind="product", slot_order=0,
+                        origin="manual")
+    db.add_all([parent, parent_variant, child, child_a, child_b, edge])
+    db.commit()
+    db.refresh(child)
+
+    node_payload = child.to_dict()
+    edge_payload = node_payload["parents"]
+    parent_payload = parent.to_dict(include_variants=False)
+    candidates = [child_a.to_dict(), child_b.to_dict()]
+    snap = build_input_snapshot(
+        node_payload, candidates=candidates, edges=edge_payload,
+        parents=[parent_payload],
+        candidate_bytes={101: b"candidate-a", 102: b"candidate-b"},
+        parent_bytes={501: b"product-parent-v1"},
+    )
+    digest = snapshot_digest(snap)
+
+    def read(variant_id, status):
+        return {
+            "variant_id": variant_id, "person_count": "one",
+            "prompt_status": status,
+            "required_elements_visible": True,
+            "element_misses": [], "warnings": [], "hard_fail_codes": [],
+            "references": [{
+                "edge_id": 700, "parent_variant_id": 501,
+                "status": "pass", "observable": True, "fail_codes": [],
+                "observed_hero_text": "KORELLA",
+            }],
+        }
+
+    report = {
+        "version": 1, "auto_contract_version": 1,
+        "rubric_version": RUBRIC_VERSION, "input_snapshot": snap,
+        "snapshot_digest": digest,
+        "variants": {"101": {"integrity": {"ok": True}},
+                     "102": {"integrity": {"ok": True}}},
+        "reads": [{"read_id": 1, "snapshot_digest": digest,
+                   "candidates": [read(101, "pass"), read(102, "fail")]},
+                  {"read_id": 2, "snapshot_digest": digest,
+                   "candidates": [read(101, "pass"), read(102, "fail")]}],
+    }
+    child.qc_json = json.dumps(report)
+    db.commit()
+
+    out = ip.choose_variant(
+        1, ip.ChooseVariantRequest(variant_id=101, source="qc_auto"),
+        db=db, current_user=_user(),
+    )
+    assert out["chosen_variant_id"] == 101
+
+    # Re-open the child for a second auto attempt, then alter only the actual
+    # parent bytes. The stale report must not be allowed to choose again.
+    child = _node_from_id(db, 1)
+    child.chosen_variant_id = None
+    child.choice_source = None
+    db.commit()
+    parent_path.write_bytes(b"product-parent-v2")
+    with pytest.raises(HTTPException) as exc:
+        ip.choose_variant(
+            1, ip.ChooseVariantRequest(variant_id=101, source="qc_auto"),
+            db=db, current_user=_user(),
+        )
+    assert exc.value.status_code == 422
+    assert _node_from_id(db, 1).chosen_variant_id is None
+
+
+# --- shared generation/choice locking ------------------------------------
+
+def _add_parent_edges(db, child, parent_ids=(20, 50)):
+    """Attach deliberately out-of-order parent ids for lock-order tests."""
+    for parent_id in parent_ids:
+        parent = ip.ImageNode(
+            id=parent_id, user_id=child.user_id, kind="upload", status="ready",
+            name=f"parent {parent_id}",
+        )
+        db.add(parent)
+        db.add(ip.ImageEdge(
+            parent_node_id=parent_id, child_node_id=child.id,
+            role="product", kind="product", slot_order=0,
+        ))
+    db.commit()
+    db.refresh(child)
+
+
+def test_shared_lock_helper_returns_target_and_parents_in_global_id_order():
+    # This suite uses SQLite :memory:, where FOR UPDATE is not enforced.  It
+    # proves the exact row set and ordering; Postgres contention must still be
+    # covered by the production integration environment when a test database
+    # URL is available.
+    db = _session()
+    child = _node(db, node_id=100, status="draft")
+    _add_parent_edges(db, child, parent_ids=(50, 20))
+
+    locked, locked_by_id = ip._lock_node_and_parents(db, 100, "u1")
+
+    assert locked.id == 100
+    assert list(locked_by_id) == [20, 50, 100]
+
+
+@pytest.mark.parametrize("endpoint_name", ["generate_node", "regenerate_node"])
+def test_generation_endpoints_lock_before_deleting_or_resetting(
+        endpoint_name, monkeypatch):
+    """The shared lock must precede every destructive generation step."""
+    db = _session()
+    node = _node(db, status="ready")
+    events = []
+    original_lock = ip._lock_node_and_parents
+    original_clear = ip._clear_choice
+
+    def lock(*args, **kwargs):
+        events.append("lock")
+        return original_lock(*args, **kwargs)
+
+    def clear(*args, **kwargs):
+        events.append("clear_choice")
+        return original_clear(*args, **kwargs)
+
+    monkeypatch.setattr(ip, "_lock_node_and_parents", lock)
+    monkeypatch.setattr(ip, "_clear_choice", clear)
+    monkeypatch.setattr(ip, "_resolve_parent_image_paths", lambda *a: [])
+    monkeypatch.setattr(
+        ip, "_delete_variant_files", lambda *a, **k: events.append("delete"))
+    monkeypatch.setattr(ip, "_seed_chatgpt_lane", lambda *a: None)
+    monkeypatch.setattr(
+        ip, "write_generation_job", lambda *a: events.append("queue"))
+
+    getattr(ip, endpoint_name)(1, db=db, current_user=_user())
+
+    assert events.index("lock") < events.index("delete")
+    assert events.index("lock") < events.index("clear_choice")
+    assert events.index("lock") < events.index("queue")
+
+
+def test_choose_endpoint_uses_shared_lock_before_choice_mutation(monkeypatch):
+    db = _session()
+    node = _node(db, status="ready")
+    events = []
+    original_lock = ip._lock_node_and_parents
+    original_commit = db.commit
+
+    def lock(*args, **kwargs):
+        events.append("lock")
+        return original_lock(*args, **kwargs)
+
+    def commit(*args, **kwargs):
+        events.append("commit")
+        return original_commit(*args, **kwargs)
+
+    monkeypatch.setattr(ip, "_lock_node_and_parents", lock)
+    monkeypatch.setattr(db, "commit", commit)
+    ip.choose_variant(
+        1, ip.ChooseVariantRequest(variant_id=101),
+        db=db, current_user=_user(),
+    )
+    assert events[0] == "lock"
+    assert events.index("lock") < events.index("commit")
+
+
+# --- canonical QC serialization vs renderer-only chain jobs ---------------
+
+def test_qc_serialization_keeps_generic_chain_role_and_explicit_chain_continuity():
+    db = _session()
+    generic_parent = ip.ImageNode(
+        id=10, user_id="u1", kind="generated", status="ready",
+        chosen_variant_id=1001,
+    )
+    explicit_parent = ip.ImageNode(
+        id=11, user_id="u1", kind="generated", status="ready",
+        chosen_variant_id=1101,
+    )
+    child = ip.ImageNode(
+        id=1, user_id="u1", kind="generated", status="ready",
+        prompt="one adult in a kitchen",
+    )
+    db.add_all([
+        generic_parent, explicit_parent, child,
+        ip.ImageEdge(id=1, parent_node_id=10, child_node_id=1,
+                     role="reference", slot_order=0),
+        ip.ImageEdge(id=2, parent_node_id=11, child_node_id=1,
+                     role="chain_from_image_2", slot_order=1),
+    ])
+    db.commit()
+    rows = {row["id"]: row for row in child.to_dict()["parents"]}
+
+    assert rows[1]["reference_intent"] == "role"
+    assert rows[2]["reference_intent"] == "continuity"
+
+
+def test_renderer_chain_mapping_remains_positional_for_generation_only():
+    assert ip._reference_intent_for_class("chain", 0) == "continuity"
+    assert ip._reference_intent_for_class("chain", 1) == "body"
+    assert ip._reference_intent_for_class("chain", 2) == "support"

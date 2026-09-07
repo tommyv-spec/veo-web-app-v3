@@ -20,6 +20,7 @@ from image_qc import (analyze_integrity, build_judge_prompt, parse_judge_reply,
                       CONF_CONTINUITY, CONF_LEGACY_CONFIRMED,
                       face_similarity, load_embedder, InsightFaceEmbedder,
                       rank_variants, compose_report, RANK_FACE_SIM_FLOOR,
+                      decide_auto_choice,
                       agreement_stats, fit_report, pick_scorable_nodes,
                       apply_pairwise, _RefFaceCache, FIT_REPORT_BUDGET,
                       classify_post, batch_exit_code, summary_dict, _url,
@@ -2267,6 +2268,201 @@ def test_score_node_never_calls_the_retired_pairwise_stage(monkeypatch):
     monkeypatch.setattr(image_qc, "pairwise_top2", _boom)
     client = _ScriptedClient([_reply(9), _reply(8), _reply(7), _reply(6)])
     assert _score(client, n=2)["confidence"] == CONF_REPEAT_STABLE
+
+
+# ---- conservative auto-choice -------------------------------------------
+
+_AUTO_PARENTS_UNSET = object()
+
+
+def _auto_choice_node(ids=(10, 20), parents=_AUTO_PARENTS_UNSET, **extra):
+    node = {"kind": "generated", "chosen_variant_id": None,
+            "prompt": "one adult alone in the frame",
+            "parents": parents if parents is not _AUTO_PARENTS_UNSET else
+            [{"kind": "character", "parent_node_id": 77}],
+            "variants": [{"id": value} for value in ids]}
+    node.update(extra)
+    return node
+
+
+def _auto_choice_report(rows, ids=(10, 20), **extra):
+    report = {"version": 1, "variant_ids": list(ids), "skipped_checks": [],
+              "variants": {str(k): v for k, v in rows.items()}}
+    report.update(extra)
+    return report
+
+
+def _auto_row(face=0.8, judge="pass", verify="pass", integrity=True):
+    return {"integrity": {"ok": integrity, "reasons": []},
+            "judge": {"verdict": judge}, "verify": {"verdict": verify},
+            "face_sim": face}
+
+
+def test_auto_choice_can_choose_a_non_first_variant():
+    result = decide_auto_choice(
+        _auto_choice_node(),
+        _auto_choice_report({10: _auto_row(face=.2), 20: _auto_row(face=.8)}))
+    assert result["decision"] == "choose"
+    assert result["variant_id"] == 20
+
+
+@pytest.mark.parametrize("face, expected", [(.349, "review"), (.350, "choose")])
+def test_auto_choice_identity_floor_boundary(face, expected):
+    result = decide_auto_choice(
+        _auto_choice_node(ids=(10,)),
+        _auto_choice_report({10: _auto_row(face=face)}, ids=(10,)))
+    assert result["decision"] == expected
+
+
+@pytest.mark.parametrize("parents", [None, [],
+                                     [{"kind": "product", "parent_node_id": 3}],
+                                     [{"kind": "chain", "parent_node_id": 4}],
+                                     [{"kind": "other", "parent_node_id": 5}],
+                                     [{"kind": "character", "parent_node_id": 7},
+                                      {"kind": "character", "parent_node_id": 8}]])
+def test_auto_choice_abstains_on_unsupported_reference_shapes(parents):
+    node = _auto_choice_node(ids=(10,), parents=parents)
+    report = _auto_choice_report({10: _auto_row()}, ids=(10,))
+    assert decide_auto_choice(node, report)["decision"] == "review"
+
+
+def test_auto_choice_allows_cast_shells_when_prompt_says_one_adult():
+    node = _auto_choice_node(ids=(10,), cast=["Nuri", "kitchen counter", "spice jar"])
+    report = _auto_choice_report({10: _auto_row()}, ids=(10,))
+    assert decide_auto_choice(node, report)["decision"] == "choose"
+
+
+def test_auto_choice_requires_an_explicit_single_person_signal():
+    node = _auto_choice_node(ids=(10,), prompt="a person in a kitchen")
+    report = _auto_choice_report({10: _auto_row()}, ids=(10,))
+    result = decide_auto_choice(node, report)
+    assert result["decision"] == "review"
+    assert "single-person" in result["reason"]
+
+
+@pytest.mark.parametrize("prompt", [
+    "one adult with her husband",
+    "one adult beside a couple",
+    "one adult in a group photo",
+    "one adult in a crowd",
+    "one adult with another person",
+])
+def test_auto_choice_rejects_second_person_or_group_wording(prompt):
+    node = _auto_choice_node(ids=(10,), prompt=prompt)
+    report = _auto_choice_report({10: _auto_row()}, ids=(10,))
+    assert decide_auto_choice(node, report)["decision"] == "review"
+
+
+def test_auto_choice_rejects_auto_origin_character_reference():
+    node = _auto_choice_node(ids=(10,), parents=[
+        {"kind": "character", "parent_node_id": 77, "origin": "auto"}])
+    report = _auto_choice_report({10: _auto_row()}, ids=(10,))
+    assert decide_auto_choice(node, report)["decision"] == "review"
+
+
+def test_auto_choice_rejects_auto_origin_parent_upload():
+    node = _auto_choice_node(ids=(10,), parents=[
+        {"kind": "character", "parent_node_id": 77,
+         "origin": "manual", "parent_origin": "auto"}])
+    report = _auto_choice_report({10: _auto_row()}, ids=(10,))
+    assert decide_auto_choice(node, report)["decision"] == "review"
+
+
+def test_auto_choice_rejects_special_reference_instruction():
+    node = _auto_choice_node(ids=(10,), parents=[
+        {"kind": "character", "parent_node_id": 77,
+         "reference_instruction": "preserve only the face"}])
+    report = _auto_choice_report({10: _auto_row()}, ids=(10,))
+    assert decide_auto_choice(node, report)["decision"] == "review"
+
+
+@pytest.mark.parametrize("field", ["judge", "verify", "face_sim", "integrity"])
+def test_auto_choice_abstains_on_missing_qc_evidence(field):
+    row = _auto_row()
+    row[field] = None
+    result = decide_auto_choice(
+        _auto_choice_node(ids=(10,)),
+        _auto_choice_report({10: row}, ids=(10,)))
+    assert result["decision"] == "review"
+
+
+def test_auto_choice_abstains_on_stale_or_multiple_survivors():
+    node = _auto_choice_node()
+    rows = {10: _auto_row(), 20: _auto_row()}
+    assert decide_auto_choice(node, _auto_choice_report(rows))["decision"] == "review"
+    stale = _auto_choice_report({10: _auto_row()}, ids=(10,))
+    assert decide_auto_choice(node, stale)["decision"] == "review"
+
+
+def test_compose_report_emits_exact_variant_ids():
+    ranked = [{"variant_id": 20, "rank": 1}, {"variant_id": 10, "rank": 2}]
+    report = image_qc.compose_report(ranked, skipped=[])
+    assert report["variant_ids"] == [10, 20]
+
+
+class _AutoChoiceClient:
+    base = "https://example.test"
+
+    def __init__(self, qc=None):
+        self.posts = []
+        self.chosen = None
+        self.qc = qc if qc is not None else {"version": 1,
+                                             "auto_contract_version": 1}
+
+    def get(self, path, params=None):
+        return {"nodes": [{"id": 1, "kind": "generated", "status": "ready",
+                            "variants": [{"id": 10}, {"id": 20}],
+                            "chosen_variant_id": self.chosen,
+                            "prompt": "one adult alone in the frame",
+                            "parents": [{"kind": "character",
+                                         "parent_node_id": 77}],
+                            "qc": self.qc}]}
+
+    def post(self, path, payload):
+        self.posts.append((path, payload))
+        if path.endswith("/choose"):
+            self.chosen = payload["variant_id"]
+        return {}
+
+
+def test_send_auto_choice_stops_when_scorer_fails(monkeypatch):
+    stp = _stp()
+    monkeypatch.setitem(__import__("sys").modules, "image_qc",
+                        _module_with_main(lambda argv: EXIT_FAILED))
+    client = _AutoChoiceClient()
+    args = _qc_args(auto_choose=True, review=False, timeout_min=1,
+                    stall_min=1, poll_interval=1)
+    assert stp.poll_images(client, "batch-42", args, {}) is False
+    assert client.posts == []
+
+
+def test_send_auto_choice_posts_only_the_non_first_qc_survivor(monkeypatch):
+    stp = _stp()
+    qc = _module_with_main(lambda argv: EXIT_OK)
+    qc.decide_auto_choice = lambda node, report: {
+        "decision": "choose", "variant_id": 20,
+        "reason": "exactly one QC survivor"}
+    monkeypatch.setitem(__import__("sys").modules, "image_qc", qc)
+    client = _AutoChoiceClient()
+    args = _qc_args(auto_choose=True, review=False, timeout_min=1,
+                    stall_min=1, poll_interval=1)
+    assert stp.poll_images(client, "batch-42", args, {}) is True
+    assert client.posts == [("/api/images/nodes/1/choose",
+                             {"variant_id": 20, "source": "qc_auto"})]
+
+
+def test_send_auto_choice_refuses_legacy_report_before_post(monkeypatch):
+    stp = _stp()
+    qc = _module_with_main(lambda argv: EXIT_OK)
+    qc.decide_auto_choice = lambda node, report: {
+        "decision": "choose", "variant_id": 20,
+        "reason": "legacy decider must be unreachable"}
+    monkeypatch.setitem(__import__("sys").modules, "image_qc", qc)
+    client = _AutoChoiceClient(qc={"version": 1})
+    args = _qc_args(auto_choose=True, review=False, timeout_min=1,
+                    stall_min=1, poll_interval=1)
+    assert stp.poll_images(client, "batch-42", args, {}) is False
+    assert client.posts == []
 
 
 # ---- _run_batch counter + exit-code mapping (stub session) ----------------

@@ -72,6 +72,14 @@ from chatgpt_extension_pairing import (
 )
 from chatgpt_extension_bundle import build_extension_zip
 from image_prompt_contract import build_image_prompt_contract
+from image_qc_contract import (
+    AUTO_CONTRACT_VERSION,
+    build_input_snapshot,
+    snapshot_digest,
+    canonical_reference_class,
+    canonical_reference_intent,
+    validate_auto_decision,
+)
 
 
 log = logging.getLogger("image_platform")
@@ -319,6 +327,9 @@ def run_image_platform_migrations():
         # v936: image-QC shadow-mode report (written by code/image_qc.py)
         ("image_nodes", "qc_json",
          "ALTER TABLE image_nodes ADD COLUMN qc_json TEXT"),
+        # v963: provenance for the current pick. NULL means unchosen or legacy.
+        ("image_nodes", "choice_source",
+         "ALTER TABLE image_nodes ADD COLUMN choice_source VARCHAR(16)"),
         # v940: the operator's THREE-WAY review split. Choosing a variant says
         # which one is best; it says nothing about the ones left behind, and
         # every picking experiment so far read "not chosen" as "bad" and
@@ -549,6 +560,9 @@ def run_image_platform_migrations():
         # v936: image-QC shadow-mode report — see SQLite migration above.
         ("image_nodes", "qc_json",
          "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS qc_json TEXT"),
+        # v963: see the SQLite migration above.
+        ("image_nodes", "choice_source",
+         "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS choice_source VARCHAR(16)"),
         # v940: per-variant operator verdict — see SQLite migration above for
         # the rationale. Listed here too because production is Postgres: a
         # SQLite-only migration entry means the column never exists live and
@@ -959,12 +973,12 @@ def cleanup_orphan_nodes():
                     # but reset state
                     if n.status == "ready":
                         n.status = "draft"
-                        n.chosen_variant_id = None
+                        _clear_choice(n)
                         _clear_qc(n)  # v936: scored variants are gone
                         log.info(f"[image_platform] Cleanup: generated node {n.id} lost its variants — reset to draft")
                 elif n.chosen_variant_id and not any(v.id == n.chosen_variant_id for v in remaining):
                     # Chosen variant was among the deleted
-                    n.chosen_variant_id = None
+                    _clear_choice(n)
                     _clear_qc(n)  # v936: the report scored a now-deleted variant
                     if n.status == "ready":
                         n.status = "draft"
@@ -1214,6 +1228,12 @@ def _clear_qc(node):
     node.qc_json = None
 
 
+def _clear_choice(node):
+    """Clear the chosen variant and its provenance together."""
+    node.chosen_variant_id = None
+    node.choice_source = None
+
+
 # v940 — the only two verdicts a NON-chosen variant can carry. The pick itself
 # is not in this list on purpose: choosing is already recorded by
 # ImageNode.chosen_variant_id, and duplicating it here would let the two
@@ -1265,6 +1285,8 @@ class ImageNode(Base):
 
     status = Column(String(20), default="draft", nullable=False)
     chosen_variant_id = Column(Integer, ForeignKey("image_variants.id", use_alter=True, name="fk_chosen_variant"), nullable=True)
+    # v963: operator (default) or qc_auto provenance for the current choice.
+    choice_source = Column(String(16), nullable=True)
     error_message = Column(Text, nullable=True)
 
     # Worker claim (HTTP-pull mode). When a remote worker picks up a job it
@@ -1444,6 +1466,7 @@ class ImageNode(Base):
             "n_variants": self.n_variants,
             "status": self.status,
             "chosen_variant_id": self.chosen_variant_id,
+            "choice_source": self.choice_source,
             "chosen_variant": chosen,
             "error_message": self.error_message,
             "blocked_children_count": blocked_children_count,
@@ -1484,7 +1507,13 @@ class ImageNode(Base):
         }
         if include_variants:
             data["variants"] = [v.to_dict() for v in sorted(self.variants, key=lambda x: x.variant_index or 0)]
-            data["parents"] = [e.to_dict() for e in sorted(self.parent_edges, key=lambda x: x.slot_order or 0)]
+            # QC serialization keeps canonical edge meaning. Generation
+            # resolves renderer-only positional chain jobs separately.
+            parent_rows = []
+            for edge in sorted(self.parent_edges or [],
+                               key=lambda x: x.slot_order or 0):
+                parent_rows.append(edge.to_dict())
+            data["parents"] = parent_rows
         return data
 
 
@@ -1593,7 +1622,13 @@ class ImageEdge(Base):
     parent = relationship("ImageNode", back_populates="child_edges", foreign_keys=[parent_node_id])
     child = relationship("ImageNode", back_populates="parent_edges", foreign_keys=[child_node_id])
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self, chain_sequence: Optional[int] = None) -> Dict[str, Any]:
+        parent = getattr(self, "parent", None)
+        reference_class = canonical_reference_class(self)
+        # QC serialization carries canonical explicit intent only. The
+        # optional sequence remains accepted for old callers, but renderer
+        # positional chain jobs are resolved only by generation helpers.
+        reference_intent = canonical_reference_intent(self)
         return {
             "id": self.id,
             "parent_node_id": self.parent_node_id,
@@ -1602,9 +1637,23 @@ class ImageEdge(Base):
             "slot_order": self.slot_order,
             "kind": self.kind,
             "reference_instruction": self.reference_instruction,
+            # v964 — one server-owned reference vocabulary is shared by the
+            # renderer, the QC scorer, and the auto-choice freshness check.
+            "reference_class": reference_class,
+            "reference_intent": reference_intent,
+            "parent_status": getattr(parent, "status", None),
+            "parent_chosen_variant_id": getattr(parent, "chosen_variant_id", None),
             # v912: 'auto' = scraped third-party image, 'manual' = the operator's
             # own. NULL reads as manual (see the column comment).
             "origin": self.origin or "manual",
+            # The edge origin describes how this binding was added. The parent
+            # origin describes where the referenced image itself came from.
+            # Both matter to conservative auto-choice: a manual edge must not
+            # make a scraped upload look operator-approved.
+            "parent_origin": (
+                (getattr(parent, "origin", None) or "manual")
+                if parent is not None else None
+            ),
         }
 
 
@@ -2000,6 +2049,7 @@ class UpdateNodeRequest(BaseModel):
 
 class ChooseVariantRequest(BaseModel):
     variant_id: int
+    source: Optional[str] = None
 
 
 class NodeQCRequest(BaseModel):
@@ -2104,6 +2154,10 @@ def _resolve_parent_image_inputs(db: Session, node: ImageNode) -> List[Dict[str,
             chain_sequence += 1
         inputs.append({
             "path": str(abs_path),
+            "parent_node_id": parent.id,
+            "parent_variant_id": chosen.id,
+            "parent_status": parent.status,
+            "parent_origin": parent.origin or "manual",
             "role": edge.role or "",
             "slot_order": edge.slot_order or 0,
             "reference_class": reference_class,
@@ -3461,6 +3515,34 @@ def update_node(
     if node.status in ("queued", "generating"):
         raise HTTPException(409, f"Cannot edit while {node.status}")
 
+    # v963: QC is tied to the complete generation contract, not just the
+    # rendered bytes. Compare before mutating so a no-op PATCH keeps a valid
+    # report and a real contract edit invalidates it.
+    def _parent_contract(edge):
+        return (
+            int(edge.parent_node_id), edge.role or "", int(edge.slot_order or 0),
+            (edge.kind or "").strip().lower(),
+            (edge.reference_instruction or "").strip(),
+            (edge.origin or "manual").strip().lower(),
+        )
+
+    contract_changed = False
+    for field in ("prompt", "aspect_ratio", "resolution", "model", "n_variants"):
+        value = getattr(req, field)
+        if value is not None and value != getattr(node, field):
+            contract_changed = True
+    requested_parent_contract = None
+    if req.parents is not None:
+        requested_parent_contract = sorted((
+            int(parent.parent_node_id), parent.role or "",
+            int(parent.slot_order or 0), (parent.kind or "").strip().lower(),
+            (parent.reference_instruction or "").strip(), "manual",
+        ) for parent in req.parents)
+        current_parent_contract = sorted(
+            _parent_contract(edge) for edge in (node.parent_edges or []))
+        contract_changed = contract_changed or (
+            requested_parent_contract != current_parent_contract)
+
     for field in ("name", "prompt", "aspect_ratio", "resolution", "model", "n_variants"):
         v = getattr(req, field)
         if v is not None:
@@ -3468,7 +3550,9 @@ def update_node(
 
     if req.parents is not None:
         _validate_parents(db, req.parents, req.model or node.model)
-        _replace_parents(db, node, req.parents)
+        if requested_parent_contract != sorted(
+                _parent_contract(edge) for edge in (node.parent_edges or [])):
+            _replace_parents(db, node, req.parents)
     elif req.model is not None:
         max_parents = _max_parents(req.model)
         if len(node.parent_edges or []) > max_parents:
@@ -3478,6 +3562,8 @@ def update_node(
                 f"images; this node already has {len(node.parent_edges or [])}",
             )
 
+    if contract_changed:
+        _clear_qc(node)
     node.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(node)
@@ -3664,7 +3750,7 @@ def delete_node(
             db.flush()
 
         # Break the FK reference to chosen_variant_id so variants can be deleted
-        node.chosen_variant_id = None
+        _clear_choice(node)
         db.flush()
 
         # Delete files (local + R2)
@@ -3731,7 +3817,7 @@ def delete_batch(
         node_id = node.id
         try:
             # Break chosen_variant_id FK so variants can be deleted
-            node.chosen_variant_id = None
+            _clear_choice(node)
             db.flush()
 
             # Delete associated scene assignments (if any) — these have an
@@ -3792,18 +3878,51 @@ def delete_batch(
 
 # ---- generate / regenerate / choose --------------------------------------
 
+
+def _lock_node_and_parents(
+    db: Session, node_id: int, user_id: Any,
+    node: Optional[ImageNode] = None,
+) -> Tuple[ImageNode, Dict[int, ImageNode]]:
+    """Lock a target and its actual parents in one global ID order.
+
+    All operations that can replace image bytes use this helper before any
+    file deletion or state reset. Keeping the order identical across generate,
+    regenerate, and choose prevents a child/parent race from producing a QC
+    snapshot for a different parent choice.
+    """
+    node = node or db.query(ImageNode).filter(
+        ImageNode.id == node_id,
+        ImageNode.user_id == user_id,
+    ).first()
+    if not node:
+        raise HTTPException(404, "Node not found")
+    parent_ids = [row[0] for row in db.query(ImageEdge.parent_node_id).filter(
+        ImageEdge.child_node_id == node_id).all()]
+    lock_ids = sorted({int(node_id), *(int(pid) for pid in parent_ids)})
+    lock_query = db.query(ImageNode).filter(ImageNode.id.in_(lock_ids))
+    if hasattr(lock_query, "with_for_update"):
+        lock_query = lock_query.with_for_update()
+    # A session may already have loaded the node during the ownership check.
+    # Refresh every locked row from the database so a concurrent committed
+    # parent choice cannot remain as a stale identity-map value after the lock
+    # is acquired.  This is a no-op for the lightweight query doubles used by
+    # unit tests and for SQLAlchemy versions without this query helper.
+    if hasattr(lock_query, "populate_existing"):
+        lock_query = lock_query.populate_existing()
+    locked = lock_query.order_by(ImageNode.id.asc()).all()
+    locked_by_id = {locked_node.id: locked_node for locked_node in locked}
+    locked_node = locked_by_id.get(node_id)
+    if locked_node is None:
+        raise HTTPException(404, "Node not found")
+    return locked_node, locked_by_id
+
 @router.post("/nodes/{node_id}/generate")
 def generate_node(
     node_id: int,
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    node = db.query(ImageNode).filter(
-        ImageNode.id == node_id,
-        ImageNode.user_id == current_user.id,
-    ).first()
-    if not node:
-        raise HTTPException(404, "Node not found")
+    node, _ = _lock_node_and_parents(db, node_id, current_user.id)
     if node.kind == "upload":
         raise HTTPException(400, "Upload nodes can't be generated")
     if node.status in ("queued", "generating"):
@@ -3819,7 +3938,7 @@ def generate_node(
         if (getattr(v, "backend", "banana") or "banana") != "banana":
             continue
         db.delete(v)
-    node.chosen_variant_id = None
+    _clear_choice(node)
     # v936: report describes deleted variants — rescore after render.
     _clear_qc(node)
     node.error_message = None
@@ -3847,12 +3966,7 @@ def regenerate_node(
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    node = db.query(ImageNode).filter(
-        ImageNode.id == node_id,
-        ImageNode.user_id == current_user.id,
-    ).first()
-    if not node:
-        raise HTTPException(404, "Node not found")
+    node, _ = _lock_node_and_parents(db, node_id, current_user.id)
     if node.kind == "upload":
         raise HTTPException(400, "Upload nodes can't be regenerated")
     if node.status in ("queued", "generating"):
@@ -3875,7 +3989,7 @@ def regenerate_node(
         if (getattr(v, "backend", "banana") or "banana") != "banana":
             continue
         db.delete(v)
-    node.chosen_variant_id = None
+    _clear_choice(node)
     # v936: report describes deleted variants — rescore after render.
     _clear_qc(node)
     node.error_message = None
@@ -3997,19 +4111,73 @@ def choose_variant(
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    node = db.query(ImageNode).filter(
-        ImageNode.id == node_id,
-        ImageNode.user_id == current_user.id,
-    ).first()
-    if not node:
-        raise HTTPException(404, "Node not found")
+    source = (req.source or "operator").strip().lower()
+    if source not in ("operator", "qc_auto"):
+        raise HTTPException(422, "source must be operator or qc_auto")
+    # v964: use the same global lock order as generation and regeneration.
+    node, locked_by_id = _lock_node_and_parents(db, node_id, current_user.id)
+    lock_ids = sorted(locked_by_id)
     variant = db.query(ImageVariant).filter(
         ImageVariant.id == req.variant_id,
         ImageVariant.node_id == node_id,
     ).first()
     if not variant:
         raise HTTPException(404, "Variant not found on this node")
+    if source == "qc_auto":
+        if node.status != "ready":
+            raise HTTPException(422, "qc_auto requires a ready node")
+        if node.chosen_variant_id is not None:
+            raise HTTPException(422, "qc_auto requires an unchosen node")
+        try:
+            qc_report = _safe_qc(node.qc_json, node_id=node.id)
+            if not isinstance(qc_report, dict) or qc_report.get("auto_contract_version") != AUTO_CONTRACT_VERSION:
+                # Legacy reports are useful shadow telemetry only.  They do
+                # not carry the complete two-read, byte-bound snapshot needed
+                # for a server-side automatic choice.
+                raise HTTPException(422, "qc_auto requires auto contract version 1")
+            candidate_bytes = {}
+            for current in node.variants or []:
+                path = images_root() / current.image_path
+                try:
+                    candidate_bytes[current.id] = path.read_bytes()
+                except OSError:
+                    candidate_bytes[current.id] = None
+            parent_bytes = {}
+            parent_payloads = []
+            for parent_id in lock_ids:
+                if parent_id == node.id:
+                    continue
+                parent = locked_by_id.get(parent_id)
+                if parent is None:
+                    continue
+                parent_payloads.append(parent.to_dict(include_variants=False))
+                chosen = next((v for v in (parent.variants or [])
+                               if v.id == parent.chosen_variant_id), None)
+                if chosen is not None:
+                    try:
+                        parent_bytes[chosen.id] = (images_root() / chosen.image_path).read_bytes()
+                    except OSError:
+                        parent_bytes[chosen.id] = None
+            current_snapshot = build_input_snapshot(
+                node.to_dict(),
+                candidates=[v.to_dict() for v in (node.variants or [])],
+                edges=node.to_dict().get("parents") or [],
+                parents=parent_payloads,
+                candidate_bytes=candidate_bytes,
+                parent_bytes=parent_bytes,
+            )
+            decision = validate_auto_decision(
+                node.to_dict(), qc_report, current_snapshot=current_snapshot)
+        except Exception as exc:
+            log.warning(f"[image_platform] qc_auto validation failed for node "
+                        f"{node_id}: {exc}")
+            raise HTTPException(422, "qc_auto requires a valid QC decision")
+        if (not isinstance(decision, dict)
+                or decision.get("decision") != "choose"
+                or decision.get("variant_id") != variant.id):
+            raise HTTPException(422, "qc_auto variant is not the current eligible QC survivor")
     node.chosen_variant_id = variant.id
+    node.choice_source = source
     # v940: picking this variant supersedes any 'still good' / 'rejected' tag
     # on it — the pick is the strongest statement the operator can make, and a
     # chosen-and-'rejected' row is a contradiction the ledger cannot read.
@@ -4030,10 +4198,12 @@ def choose_variant(
     # recommended? Read via: python code/render_logs.py --text qc-shadow
     # Logged after the commit so it records a stored fact, not an intent. This
     # line IS the feature's output — it is not removable scaffolding.
-    if _qc and _qc.get("recommended_variant_id"):
+    if source == "operator" and _qc and _qc.get("recommended_variant_id"):
         agree = (_qc["recommended_variant_id"] == _picked)
         log.info(f"[image_platform] [qc-shadow] node {node_id} operator={_picked} "
                  f"qc={_qc['recommended_variant_id']} agree={agree}")
+    elif source == "qc_auto":
+        log.info(f"[image_platform] [qc-auto] node {node_id} variant={_picked}")
 
     # Auto-promote any draft children that were waiting on this node
     try:
@@ -4090,9 +4260,13 @@ def set_node_qc(
             ImageVariant.id == rec, ImageVariant.node_id == node_id).first()
         if not owned:
             raise HTTPException(422, "recommended_variant_id not on this node")
-    blob = json.dumps(rep)
-    if len(blob) > 64_000:
-        raise HTTPException(413, f"qc report too large ({len(blob)} bytes, cap 64000)")
+    try:
+        blob = json.dumps(rep, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):
+        raise HTTPException(422, "qc report contains non-JSON values")
+    blob_size = len(blob.encode("utf-8"))
+    if blob_size > 64_000:
+        raise HTTPException(413, f"qc report too large ({blob_size} bytes, cap 64000)")
     node.qc_json = blob
     node.updated_at = datetime.utcnow()
     db.commit()
@@ -4224,6 +4398,7 @@ async def upload_reference(
     # — the operator picked those themselves, nothing changes for them.
     if node.origin != "auto":
         node.chosen_variant_id = variant.id
+        node.choice_source = "operator"
     db.commit()
     db.refresh(node)
     return node.to_dict()
@@ -4326,7 +4501,7 @@ async def upload_manual_variant(
         for v in existing_manual:
             # Break chosen_variant_id FK if it points at this row
             if node.chosen_variant_id == v.id:
-                node.chosen_variant_id = None
+                _clear_choice(node)
                 db.flush()
             # Delete the local file too — the variant is gone
             try:
@@ -4377,6 +4552,7 @@ async def upload_manual_variant(
 
     # --- Auto-select (Q3 answer) ---
     node.chosen_variant_id = variant.id
+    node.choice_source = "operator"
     # v754 — a manual upload onto a 'queued' or 'generating' node TAKES OVER
     # that node. Clear the worker claim so a late worker variant-upload /
     # status-post for the in-flight render is treated as superseded (see
@@ -4652,7 +4828,7 @@ def serve_image_file(
                                     # on any owner losing a scored variant.
                                     _clear_qc(owner)
                                     if owner.chosen_variant_id == v_now.id:
-                                        owner.chosen_variant_id = None
+                                        _clear_choice(owner)
                             db2.delete(v_now)
                             db2.commit()
                 except Exception as e:
@@ -8457,7 +8633,7 @@ def _import_scene_table_impl(
             # 14:30 variant made from the old text). Clearing it is the whole
             # point of sending the node back to draft for regeneration.
             _v891_stale_pick = existing.chosen_variant_id
-            existing.chosen_variant_id = None
+            _clear_choice(existing)
             # v936: the report scored the OLD renders against the OLD prompt.
             # Both die here, so the rubric it was judged under no longer
             # exists — keeping it would badge dead ids in the review UI.
@@ -15496,7 +15672,7 @@ def worker_get_pending_job(
     # scenes can look it up by name and skip re-upload.
     import hashlib
     base_url = str(request.base_url).rstrip("/")
-    input_images: List[Dict[str, str]] = []
+    input_images: List[Dict[str, Any]] = []
 
     # Re-walk the parent edges (sorted by slot) so we have both the file path
     # and the variant metadata together
@@ -15525,6 +15701,10 @@ def worker_get_pending_job(
         input_images.append({
             "url": f"{base_url}/api/images/worker/files/{tok}",
             "filename": stable_name,
+            "parent_node_id": parent.id,
+            "parent_variant_id": chosen.id,
+            "parent_status": parent.status,
+            "parent_origin": parent.origin or "manual",
             "role": edge.role or "",
             "slot_order": edge.slot_order or 0,
             "reference_class": reference_class,

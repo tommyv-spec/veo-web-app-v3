@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """send_to_platform.py — trigger the platform pipeline from the CLI (v886).
 
-Pipeline: pre-flight (local parse) -> import -> poll image gen (auto-choose
-variants) -> promote to video job -> poll clips -> classified report.
+Pipeline: pre-flight (local parse) -> import -> poll image gen (operator review
+by default) -> promote to video job -> poll clips -> classified report.
 
 Auth: Authorization: Bearer <UserWorkerToken>  (env KAVENO_API_TOKEN or --token).
 Mint a token in the UI or POST /api/user-worker/tokens/generate.
@@ -51,7 +51,8 @@ after ~60s so a silent worker never looks like a silent hang.
 Variant approval: the operator picks variants in the UI (default). The run
 stops when images are ready and prints the resume command; continue with
 --resume-batch <id> after choosing. Pass --auto-choose to let the CLI take
-variant 1 of every image unattended.
+only an image with exactly one conservative QC survivor. Any missing evidence,
+unsupported reference, zero survivors or tie stops for operator review.
 
 Promotion: also operator-triggered. Even with all variants chosen the run
 STOPS before creating the video job; promote in the UI or rerun with
@@ -936,10 +937,17 @@ def cmd_list_uploads(client, as_json):
 
 
 def _run_shadow_qc(batch_id, args):
-    """v936 shadow-mode QC: score the batch's variants so the review UI shows
-    ranked candidates with badges. NEVER chooses a variant (v886.3) — purely
-    additive; the operator still picks. Degrades to a skip message on any
-    missing dependency or scorer failure: QC must never block sending."""
+    """Score the batch and return a small status object.
+
+    QC still never chooses, regenerates or promotes.  The caller may use the
+    returned status to decide whether an explicit conservative auto-choice
+    must stop for review.
+    """
+    def _status(**values):
+        # Keep the old review-only caller contract (None) while exposing a
+        # useful status to the explicit auto-choice path.
+        return values if getattr(args, "auto_choose", False) else None
+
     # Messages stay ASCII on purpose: this runs BEFORE the resume-command
     # print, so a UnicodeEncodeError here would cost the operator that line.
     try:
@@ -950,11 +958,11 @@ def _run_shadow_qc(batch_id, args):
     except ImportError as e:
         print(f"qc: scoring skipped (missing dependency: {e.name or e}) - "
               f"review continues without scores", flush=True)
-        return
+        return _status(ok=False, exit_code=None, reason="missing dependency")
     except Exception as e:
         print(f"qc: scoring skipped ({e.__class__.__name__}) - "
               f"review continues without scores", flush=True)
-        return
+        return _status(ok=False, exit_code=None, reason=e.__class__.__name__)
     # Everything past the import lives inside the try: this function must be
     # total, and building qc_args reads attributes off `args`.
     try:
@@ -962,9 +970,13 @@ def _run_shadow_qc(batch_id, args):
         # synchronous step in a send: scoring, plus a possible first-run
         # buffalo_l model download. Without this the operator watches an
         # unexplained pause and reasonably reaches for Ctrl-C.
-        print(f"qc: scoring batch {batch_id} variants (shadow only - nothing is "
-              f"chosen; scores appear as badges in the review UI). "
-              f"Skip with --no-qc.", flush=True)
+        if getattr(args, "auto_choose", False):
+            print(f"qc: scoring batch {batch_id} variants for conservative "
+                  f"auto-choice (scoring itself makes no changes).", flush=True)
+        else:
+            print(f"qc: scoring batch {batch_id} variants (shadow only - nothing is "
+                  f"chosen; scores appear as badges in the review UI). "
+                  f"Skip with --no-qc.", flush=True)
         if getattr(args, "resume_batch", None) and not args.subject:
             # Deliberately only a warning: resolving the avatar here would be
             # v888.1 scope, and a report without the face gate still beats no
@@ -972,6 +984,11 @@ def _run_shadow_qc(batch_id, args):
             print("qc: resume without --avatar: face gate skipped; pass "
                   "--avatar to keep face-gated reports", flush=True)
         qc_args = ["--batch", str(batch_id), "--json", "--base-url", args.url]
+        if getattr(args, "auto_choose", False):
+            # Automatic choice must score the exact current render set, even
+            # when an older shadow report is already stored on the node.
+            qc_args.append("--rescore")
+            qc_args.append("--for-auto-choice")
         if args.subject:
             qc_args += ["--avatar-node", str(args.subject)]
         if getattr(args, "token", ""):
@@ -990,6 +1007,7 @@ def _run_shadow_qc(batch_id, args):
         elif rc != image_qc.EXIT_OK:
             print(f"qc: scoring finished with failures (exit {rc}) - "
                   f"scores may be partial; review continues", flush=True)
+        return _status(ok=rc == image_qc.EXIT_OK, exit_code=rc)
     except (KeyboardInterrupt, SystemExit) as e:
         # BOTH are BaseException, so the broad `except Exception` below does
         # NOT catch them. QC is the only multi-minute synchronous step in a
@@ -998,15 +1016,18 @@ def _run_shadow_qc(batch_id, args):
         # swallow the --resume-batch line they need. Stopping QC stops QC.
         print(f"qc: scoring stopped ({e.__class__.__name__}) - review continues",
               flush=True)
+        return _status(ok=False, exit_code=None, reason=e.__class__.__name__)
     except Exception as e:
         print(f"qc: scoring skipped ({e.__class__.__name__}) - "
               f"review continues without scores", flush=True)
+        return _status(ok=False, exit_code=None, reason=e.__class__.__name__)
 
 
 def poll_images(client, batch_id, args, report):
     """Poll batch nodes until every generated node is ready+chosen.
-    Auto-chooses variant 1 of each ready node (server then auto-queues draft
-    children). --review stops before choosing so the operator picks in the UI."""
+    Manual review remains the default. Explicit --auto-choose scores the
+    current variants, then chooses only nodes with exactly one conservative QC
+    survivor. It never regenerates or promotes on an abstention."""
     deadline = time.time() + args.timeout_min * 60
     last_change = time.time()
     last_sig = None
@@ -1046,15 +1067,73 @@ def poll_images(client, batch_id, args, report):
                 print(f"  --review: {len(ready_unchosen)} nodes ready — pick variants in the UI, "
                       f"then rerun with --resume-batch {batch_id}")
                 return False
-            for n in ready_unchosen:
-                variants = n.get("variants") or []
-                first_variant_id = variants[0].get("id") if variants else None
-                if not first_variant_id:
-                    raise PlatformError(EXIT_IMAGE_FAIL,
-                                        f"IMAGE_GEN_FAIL: node {n['id']} ready but has no usable variants")
-                client.post(f"/api/images/nodes/{n['id']}/choose",
-                            {"variant_id": first_variant_id})
-            continue  # re-poll immediately: choosing may queue draft children
+            if getattr(args, "auto_choose", False):
+                qc_status = _run_shadow_qc(batch_id, args)
+                if not isinstance(qc_status, dict) or not qc_status.get("ok"):
+                    report["awaiting_review"] = [n["id"] for n in ready_unchosen]
+                    report["review_reasons"] = {
+                        str(n["id"]): "QC did not complete" for n in ready_unchosen}
+                    print("  --auto-choose: QC did not complete — review variants in the UI, "
+                          f"then rerun with --resume-batch {batch_id}", flush=True)
+                    return False
+                # QC writes reports through a separate request. Fetch again so
+                # the decision uses the server's fresh node and exact report,
+                # not the pre-score snapshot.
+                fresh = client.get("/api/images/nodes",
+                                   params={"batch_id": batch_id, "since_days": 30})
+                fresh_nodes = _as_list(fresh, "nodes")
+                by_id = {n.get("id"): n for n in fresh_nodes
+                         if isinstance(n, dict)}
+                try:
+                    import image_qc
+                except Exception:
+                    image_qc = None
+                decisions = []
+                for old_node in ready_unchosen:
+                    current = by_id.get(old_node.get("id"))
+                    if image_qc is None or current is None:
+                        decisions.append((old_node, {"decision": "review",
+                                                      "reason": "fresh QC node unavailable"}))
+                    else:
+                        qc_report = current.get("qc")
+                        if (not isinstance(qc_report, dict) or
+                                qc_report.get("auto_contract_version") != 1):
+                            # Legacy shadow reports are not safe to promote:
+                            # --auto-choose requires the complete v1 snapshot
+                            # and two-read contract before it can POST a pick.
+                            decisions.append((current, {
+                                "decision": "review",
+                                "reason": "missing auto contract version",
+                            }))
+                        else:
+                            decisions.append((current, image_qc.decide_auto_choice(
+                                current, qc_report)))
+                abstentions = [(n, d) for n, d in decisions
+                               if d.get("decision") != "choose"]
+                if abstentions:
+                    report["awaiting_review"] = [n["id"] for n, _ in decisions]
+                    report["review_reasons"] = {
+                        str(n["id"]): d.get("reason", "QC review required")
+                        for n, d in abstentions}
+                    for n, d in abstentions:
+                        print(f"  --auto-choose: node {n['id']} sent to review — "
+                              f"{d.get('reason', 'QC review required')}", flush=True)
+                    print(f"  review variants in the UI, then rerun with --resume-batch {batch_id}",
+                          flush=True)
+                    return False
+                for n, decision in decisions:
+                    client.post(f"/api/images/nodes/{n['id']}/choose",
+                                {"variant_id": decision["variant_id"],
+                                 "source": "qc_auto"})
+                    print(f"  qc auto-choice: node {n['id']} variant "
+                          f"{decision['variant_id']}", flush=True)
+                continue
+            # A caller that bypasses main() must still get the safe default;
+            # no code path silently picks the first returned variant.
+            report["awaiting_review"] = [n["id"] for n in ready_unchosen]
+            print(f"  image choices require review — pick variants in the UI, "
+                  f"then rerun with --resume-batch {batch_id}", flush=True)
+            return False
 
         if gen and len(done) == len(gen):
             return True
@@ -1630,7 +1709,7 @@ def main(argv=None):
     p.add_argument("--no-qc", action="store_true",
                    help="skip the v936 shadow-mode QC scoring at the --review stop")
     p.add_argument("--auto-choose", action="store_true", dest="auto_choose",
-                   help="pick variant 1 automatically (default is STOP and let the operator choose in the UI)")
+                   help="conservatively auto-choose only a single QC-approved survivor")
     p.add_argument("--promote", action="store_true",
                    help="promote the batch to a video job once all variants are chosen "
                         "(default is STOP — the operator triggers promotion). REQUIRES a "
@@ -1705,6 +1784,8 @@ def main(argv=None):
 
     if args.external_refs_plan and not args.external_refs:
         p.error("--external-refs-plan requires --external-refs")
+    if args.no_qc and args.auto_choose:
+        p.error("--no-qc cannot be used with --auto-choose (QC is required)")
 
     if args.md_file == "set-token":
         return cmd_set_token(args.token_value)
