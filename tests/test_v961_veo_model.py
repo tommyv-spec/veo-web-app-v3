@@ -222,3 +222,23 @@ def test_v962_picker_failure_probe_is_structure_only():
                       "location.href", "document.title", "screenshot",
                       "prompt", "cookie", "request body", ".value"):
         assert forbidden not in block
+
+
+def test_redo_stage_audit_names_each_pre_submit_boundary_without_content():
+    fw = open(os.path.join(HERE, "static", "flow_worker.py"), encoding="utf-8").read()
+    start = fw.index('def _process_redo_clip_impl(')
+    end = fw.index('\ndef ', start + 10)
+    block = fw[start:end]
+    for stage in (
+        "temp_dir_created", "frames_downloaded", "project_navigation_start",
+        "project_dom_loaded", "project_state_checked", "fresh_project_start",
+        "fresh_project_ready", "pre_submit_auth_check", "pre_submit_auth_ready",
+        "settings_start", "settings_ready", "videos_tab_start", "videos_tab_ready",
+    ):
+        assert f'stage="{stage}"' in block
+    audit_lines = [line for line in block.splitlines()
+                   if 'stage=' in line or 'variants_count=variants' in line]
+    joined = "\n".join(audit_lines)
+    for forbidden in ("prompt=", "cookie", "request_body", "start_frame_url",
+                      "end_frame_url", "project_url="):
+        assert forbidden not in joined

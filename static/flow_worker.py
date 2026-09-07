@@ -19081,6 +19081,9 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
         print(f"[REDO] v895: no project URL for job {job_id[:8]} — will create a FRESH project for this redo", flush=True)
 
     temp_dir = tempfile.mkdtemp(prefix=f"flow_redo_{clip_id}_", dir=SHM_DIR)
+    flow_model_event(
+        "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+        requested_model=page._veo_model, stage="temp_dir_created")
     
     start_frame_local = None
     end_frame_local = None
@@ -19094,6 +19097,12 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
         end_fname = _canonical_frame_name(clip, 'end')
         end_frame_local = download_frame(end_frame_url, os.path.join(temp_dir, end_fname))
         print(f"[REDO] {'✓' if end_frame_local else '✗'} End frame ({end_fname})", flush=True)
+
+    flow_model_event(
+        "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+        requested_model=page._veo_model, stage="frames_downloaded",
+        start_frame_ready=bool(start_frame_local),
+        end_frame_ready=bool(end_frame_local) if end_frame_url else None)
     
     # Navigate to the existing project
     print(f"[REDO] Navigating to existing project...", flush=True)
@@ -19108,8 +19117,14 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
             # v895 — nothing to navigate to; the except branch below routes
             # straight to fresh-project creation.
             raise RuntimeError("no project URL for this job (v895)")
+        flow_model_event(
+            "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+            requested_model=page._veo_model, stage="project_navigation_start")
         page.goto(project_url, timeout=60000)
         page.wait_for_load_state("domcontentloaded", timeout=30000)
+        flow_model_event(
+            "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+            requested_model=page._veo_model, stage="project_dom_loaded")
 
         # Re-run the post-create init sequence so the existing project lands
         # in the correct state (Agent OFF + toolbar visible). Without this,
@@ -19194,6 +19209,12 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
             # a wasteful new-project creation.
             print(f"[REDO] ⚠ Project state unclear after 10s — proceeding optimistically", flush=True)
 
+        flow_model_event(
+            "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+            requested_model=page._veo_model, stage="project_state_checked",
+            project_ready=bool(_project_ready),
+            needs_new_project=bool(_need_new_project))
+
     except Exception as e:
         # v895.1 — the no-URL sentinel raise is the EXPECTED route here, not a
         # navigation failure; its intent line already printed above, so don't
@@ -19205,6 +19226,9 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
     if _need_new_project:
         # Create a fresh project for this redo
         try:
+            flow_model_event(
+                "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+                requested_model=page._veo_model, stage="fresh_project_start")
             spa_navigate_to_flow_home(page, "REDO")
             human_delay(1, 2)
             ensure_logged_into_flow(page, "REDO")
@@ -19222,6 +19246,9 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
             time.sleep(2)
             project_url = page.url
             print(f"[REDO] ✓ Created new project: {project_url}", flush=True)
+            flow_model_event(
+                "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+                requested_model=page._veo_model, stage="fresh_project_ready")
             # v895 — remember this project so the job's OTHER queued redo clips
             # reuse it instead of each creating another fresh project (a
             # new-project burst per clip is exactly the automated signal that
@@ -19254,9 +19281,15 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
             shutil.rmtree(temp_dir, ignore_errors=True)
             return False
     
+    flow_model_event(
+        "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+        requested_model=page._veo_model, stage="pre_submit_auth_check")
     ensure_logged_into_flow(page, "REDO")
     check_and_dismiss_popup(page)
     human_delay(1, 2)
+    flow_model_event(
+        "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+        requested_model=page._veo_model, stage="pre_submit_auth_ready")
     
     # Apply settings on new project (existing projects already have settings from original job)
     if _need_new_project:
@@ -19265,11 +19298,25 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
             # v861 — page._duration for this redo clip was set unconditionally at
             # the top of process_redo_clip (covers project-reuse too, where this
             # block does not run). select_frames_to_video_mode reads it here.
+            flow_model_event(
+                "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+                requested_model=page._veo_model, stage="settings_start",
+                variants_count=variants)
             select_frames_to_video_mode(page, context="REDO", variants_count=variants)
+            flow_model_event(
+                "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+                requested_model=page._veo_model, stage="settings_ready",
+                variants_count=variants)
         except Exception as _se:
             print(f"[REDO] ⚠ Settings setup failed on new project: {_se}", flush=True)
     
+    flow_model_event(
+        "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+        requested_model=page._veo_model, stage="videos_tab_start")
     ensure_videos_tab_selected(page)
+    flow_model_event(
+        "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+        requested_model=page._veo_model, stage="videos_tab_ready")
 
     # Submit a fresh generation using rebuild_clip — same as any normal clip.
     # We never hunt for a specific tile's state (failed/completed/generating).
