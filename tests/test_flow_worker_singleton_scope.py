@@ -1,11 +1,14 @@
 """Every Flow task shares one singleton because every worker shares one profile."""
 
+import hashlib
 import importlib.util
 import os
+import re
 import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 WORKER = Path(__file__).resolve().parents[1] / "static" / "flow_worker.py"
 SOURCE = WORKER.read_text(encoding="utf-8")
@@ -17,6 +20,12 @@ def _load_scope_fn():
     end = SOURCE.index("def _flow_worker_hold_path")
     mod = types.ModuleType("_scope_probe")
     mod.__dict__["os"] = os
+    # v963.4 — the helper keys the lock on the profile path, so it needs the
+    # same globals the real module gives it. Without these the existing tests
+    # still pass (they return early before touching them), which would have
+    # hidden a NameError on the branch that actually runs in production.
+    mod.__dict__["re"] = re
+    mod.__dict__["_hashlib"] = hashlib
     exec(compile(SOURCE[start:end], "<scope>", "exec"), mod.__dict__)
     return mod.__dict__["_flow_worker_singleton_path"]
 
@@ -77,3 +86,55 @@ class SingletonScopeWiringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# v963.4 — the lock is per PROFILE, not per machine.
+#
+# The flat machine-wide lock is right whenever there is one Firefox profile and
+# wrong the moment there are two. ~/veo-worker-b exists to be a second worker
+# with its OWN session folder, golden and cache; it shares no file with the
+# primary. Under the flat lock the primary died instantly and silently every
+# time worker-b was up:
+#
+#   [Init] Flow worker singleton is already owned; exiting cleanly.
+#          (general worker) lock=flow_worker.singleton.lock
+#
+# An 80-clip job sat untouched for an hour behind that, while the log the
+# operator was shown said two workers were running.
+#
+# What must NOT change: two workers on the SAME profile still collide, whatever
+# their scope. That is the hazard the flat lock was written for and every test
+# above still proves it.
+# ---------------------------------------------------------------------------
+
+class SingletonIsPerProfile(unittest.TestCase):
+    def _path(self, session_folder):
+        env = dict(os.environ)
+        if session_folder is None:
+            env.pop("SESSION_FOLDER", None)
+        else:
+            env["SESSION_FOLDER"] = session_folder
+        with mock.patch.dict(os.environ, env, clear=True):
+            return path_for()
+
+    def test_two_different_profiles_get_two_different_locks(self):
+        a = self._path(r"C:\Users\tomma\veo-worker\firefox-session")
+        b = self._path(r"C:\Users\tomma\veo-worker-b\firefox-session-2")
+        self.assertNotEqual(a, b)
+
+    def test_the_same_profile_still_gives_one_lock(self):
+        a = self._path(r"C:\Users\tomma\veo-worker-b\firefox-session-2")
+        b = self._path(r"c:\users\tomma\veo-worker-b\firefox-session-2\\")
+        self.assertEqual(a, b, "case and a trailing slash are the same profile")
+
+    def test_the_default_profile_keeps_the_original_lock_name(self):
+        for default in (None, r"C:\Users\tomma\veo-worker\chrome-session"):
+            self.assertTrue(
+                self._path(default).endswith("flow_worker.singleton.lock"),
+                f"{default!r} must keep the historic name")
+
+    def test_same_named_folders_under_different_parents_do_not_collide(self):
+        a = self._path(r"C:\a\firefox-session-2")
+        b = self._path(r"C:\b\firefox-session-2")
+        self.assertNotEqual(a, b)

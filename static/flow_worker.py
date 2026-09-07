@@ -52,15 +52,47 @@ _FLOW_WORKER_SINGLETON_HANDLE = None
 
 
 def _flow_worker_singleton_path(scope_raw=None):
-    """One lock for the one shared Flow profile, in every task and scope.
+    """One lock per Flow PROFILE, in every task and scope.
 
     API claims stop two workers from rendering the same clip, but they do not
     protect the Firefox profile on disk. A general worker and a clip-scoped
-    worker still open the same profile, so they must share this same lock.
-    `scope_raw` is accepted only so probes can prove scope never changes it.
+    worker pointed at the SAME profile still open the same files, so they must
+    share this lock. `scope_raw` is accepted only so probes can prove scope
+    never changes it — and it does not.
+
+    v963.4 — but the key is the PROFILE, not the machine. This was a flat
+    machine-wide lock, which is correct whenever there is one profile and wrong
+    the moment there are two. `~/veo-worker-b` exists precisely to be a second
+    worker with its OWN session folder (firefox-session-2), its own golden and
+    its own cache; it shares no file with the primary. Under the flat lock the
+    primary died instantly and silently every time worker-b was up:
+
+        [Init] Flow worker singleton is already owned; exiting cleanly.
+               (general worker) lock=flow_worker.singleton.lock
+
+    which is why an 80-clip job sat untouched for an hour while the operator was
+    told two workers were running.
+
+    Same profile -> same lock, so the protection that motivated the flat version
+    is intact. Different profile -> different lock, so the second worker can do
+    the job it was built for. The default profile keeps the original file name,
+    so nothing about the primary's behaviour changes.
     """
-    return os.path.join(
-        os.path.expanduser("~"), ".kaveno", "flow_worker.singleton.lock")
+    base = os.path.join(os.path.expanduser("~"), ".kaveno")
+    profile = (os.environ.get("SESSION_FOLDER") or "").strip()
+    if not profile:
+        return os.path.join(base, "flow_worker.singleton.lock")
+    # Normalise so C:\x and c:\x\ are one profile, then keep the folder name in
+    # the lock for readability and a hash so two same-named folders in different
+    # parents cannot collide.
+    norm = os.path.normcase(os.path.abspath(profile)).rstrip("\\/")
+    leaf = re.sub(r"[^A-Za-z0-9_.-]", "-", os.path.basename(norm))[:40]
+    digest = _hashlib.md5(norm.encode("utf-8", "replace")).hexdigest()[:8]
+    if leaf in ("chrome-session", "flow_session_chrome"):
+        # the primary's default — unchanged name, so its lock file, any external
+        # tooling that looks for it, and the existing tests all stay as they were
+        return os.path.join(base, "flow_worker.singleton.lock")
+    return os.path.join(base, f"flow_worker.singleton.profile-{leaf}-{digest}.lock")
 
 
 def _flow_worker_hold_path():
