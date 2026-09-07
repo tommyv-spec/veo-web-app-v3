@@ -1090,15 +1090,20 @@ def _fa_attach_token_listener(page):
         pass
 
 
-# v963 — these two run through page.evaluate, which takes no timeout, so the
+# v963 — both of these run through page.evaluate, which takes no timeout, so the
 # PYTHON side cannot be bounded. The browser side therefore has to settle itself
-# or the worker hangs on a request that never answers. AbortSignal.timeout turns
-# that into the ordinary catch below, which returns status 0 — and status 0 is
-# never a denial and never a confirm, so an aborted call cannot move the auth
-# verdict in either direction. Guarded because an older engine has no
-# AbortSignal.timeout and would throw on the property access itself.
-_FA_FETCH_ABORT_JS = ("  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) "
-                      "opts.signal = AbortSignal.timeout(15000);\n")
+# or the worker hangs on a request that never answers. The AbortSignal.timeout
+# line inside each turns that into the ordinary catch below, which returns
+# status 0 — and status 0 is never a denial and never a confirm, so an aborted
+# call cannot move the auth verdict in either direction. It is guarded because
+# an older engine has no AbortSignal.timeout and would throw on the property
+# access itself.
+#
+# The guard is written out in both strings rather than shared through a
+# constant. A constant was tried and left unused, because these are JS source
+# text, not code: splicing a Python string into the middle of them buys nothing
+# and makes the JS unreadable in place. Two identical lines are the cheaper
+# thing to keep honest.
 
 _FA_TRPC_FETCH_JS = """
 async ([url, method, bodyStr]) => {
