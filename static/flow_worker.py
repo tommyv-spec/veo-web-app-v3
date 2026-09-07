@@ -3456,6 +3456,49 @@ def _flow_entry_login_click(page, label="Flow"):
     return False
 
 
+_FLOW_AUTH_READY_FILE = os.path.join(
+    os.path.expanduser("~"), ".kaveno", "flow_auth_ready.json")
+
+
+def _publish_flow_auth_ready(page, label):
+    """Publish PID-bound DOM auth proof without depending on redirected stdout."""
+    try:
+        folder = os.path.dirname(_FLOW_AUTH_READY_FILE)
+        os.makedirs(folder, exist_ok=True)
+        tmp = _FLOW_AUTH_READY_FILE + f".{os.getpid()}.tmp"
+        try:
+            url = str(page.url or "")
+        except Exception:
+            url = ""
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({
+                "pid": os.getpid(),
+                "authenticated_at": time.time(),
+                "label": label,
+                "url": url,
+                "build": WORKER_BUILD,
+                "proof": "visible signed-in Flow DOM",
+            }, f)
+        os.replace(tmp, _FLOW_AUTH_READY_FILE)
+        return True
+    except Exception as exc:
+        print(f"[{label}] could not publish Flow auth proof: {exc}", flush=True)
+        return False
+
+
+def _clear_flow_auth_ready():
+    """A login wall must revoke this process's earlier ready proof."""
+    try:
+        if not os.path.isfile(_FLOW_AUTH_READY_FILE):
+            return
+        with open(_FLOW_AUTH_READY_FILE, "r", encoding="utf-8") as f:
+            row = json.load(f)
+        if int(row.get("pid") or 0) == os.getpid():
+            os.remove(_FLOW_AUTH_READY_FILE)
+    except Exception:
+        pass
+
+
 class FlowLoginRequired(RuntimeError):
     """The private worker profile has no verified Flow login."""
 
@@ -3597,6 +3640,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
     
     def _wait_for_user_login(p):
         """Wait for user to complete Google login."""
+        _clear_flow_auth_ready()
         print(f"\n{'='*50}", flush=True)
         print(f"[{label}] GOOGLE LOGIN REQUIRED", flush=True)
         print(f"Please complete login in the browser...", flush=True)
@@ -3813,6 +3857,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
                 pass
 
         if state == 'flow_logged_in':
+            _publish_flow_auth_ready(page, label)
             print(f"[{label}] FLOW_AUTHENTICATED_DOM", flush=True)
             if attempt == 0:
                 print(f"[{label}] ✓ Already logged in on Flow", flush=True)
@@ -3950,6 +3995,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             state = _navigate_to_flow(page)
             continue
     
+    _clear_flow_auth_ready()
     raise FlowLoginRequired(f"{label}: Flow login could not be verified")
 
 

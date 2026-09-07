@@ -49,6 +49,18 @@ class ProfileSnapshotSafety(unittest.TestCase):
             body,
         )
 
+    def test_flow_dom_auth_publishes_a_pid_bound_ready_marker(self):
+        login = _function_source("ensure_logged_into_flow")
+        publish = _function_source("_publish_flow_auth_ready")
+        self.assertIn("_publish_flow_auth_ready(page, label)", login)
+        self.assertIn('"pid": os.getpid()', publish)
+        self.assertIn('"authenticated_at": time.time()', publish)
+        self.assertIn('"proof": "visible signed-in Flow DOM"', publish)
+
+    def test_login_wall_revokes_this_process_ready_marker(self):
+        login = _function_source("ensure_logged_into_flow")
+        self.assertIn("_clear_flow_auth_ready()", login)
+
     def test_flow_refreshes_private_golden_once_per_process(self):
         body = _function_source("_maybe_pull_laptop_profile")
         firefox_branch = body.split("if _bd.is_firefox_mode(BROWSER_MODE):", 1)[1]
