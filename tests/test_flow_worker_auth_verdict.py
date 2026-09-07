@@ -112,13 +112,17 @@ def _module_globals():
     That is precisely how the credits probe hid a NameError during development.
     """
     reason = _function("_fa_error_reason")
-    return {
+    base = {
         "_fa_error_reason": reason,
         "_fa_is_error": _function("_fa_is_error"),
         "_FA_AUTH_DENIAL_PHRASES": _const("_FA_AUTH_DENIAL_PHRASES") or (),
+        "_FA_AUTH_METHOD_ERROR_PHRASES": _const("_FA_AUTH_METHOD_ERROR_PHRASES") or (),
         "_FLOW_CREDITS_URL": _const("_FLOW_CREDITS_URL")
         or "https://aisandbox-pa.googleapis.com/v1/credits",
     }
+    # _fa_is_auth_denial calls _fa_is_auth_method_error, so it needs it in scope.
+    base["_fa_is_auth_method_error"] = _function("_fa_is_auth_method_error", dict(base))
+    return base
 
 
 def _auth_denial_fn():
@@ -209,9 +213,19 @@ def test_is_auth_denial_matches_google_texts_and_401_403():
     is_denial = _auth_denial_fn()
     assert is_denial({"status": 401}) is True
     assert is_denial({"status": 403}) is True
-    for text in (GOOGLE_DENIAL, GOOGLE_APIKEY_DENIAL,
+    for text in (GOOGLE_DENIAL,
                  "Expected OAuth2 access token or other authentication credentials"):
         assert is_denial({"status": 401, "data": {"error": {"message": text}}}) is True
+
+    # CORRECTED v963.1. GOOGLE_APIKEY_DENIAL used to be in the list above, and
+    # putting it there was wrong: "API keys are not supported by this API" is
+    # Google refusing the auth METHOD (api key, no bearer), not rejecting the
+    # session. It ran 16 times against a freshly-rebuilt, plausibly-live profile
+    # before anyone noticed. Note it arrives WITH a 401/403 and still must not
+    # count - which is why _fa_is_auth_denial checks the method error first.
+    assert is_denial({"status": 401,
+                      "data": {"error": {"message": GOOGLE_APIKEY_DENIAL}}}) is False
+
     # Not denials: transport, server error, success.
     assert is_denial(_transport()) is False
     assert is_denial({"status": 500, "text": "boom"}) is False
@@ -403,3 +417,68 @@ def test_headless_login_wait_is_zero():
     assert "FIREFOX_HEADLESS" in head and "timeout_minutes = 0" in head, (
         "nobody can complete a Google sign-in on a headless worker, so waiting "
         "ten minutes for one just hides the wall")
+
+
+# ---------------------------------------------------------------------------
+# v963.1 — "API keys are not supported" is NOT a denial.
+#
+# Measured 2026-09-07 on the primary worker, whose golden had JUST been rebuilt
+# from the operator's signed-in Firefox ("ff-pull: v914 stripped 6 labs.google
+# cookie(s)", "golden built from tocgh2wh.default-release"):
+#
+#   [STARTUP] FLOW_AUTH_DENIED by 'credits': API keys are not supported by this
+#   API. Expected OAuth2 access token or other authentication credentials...
+#
+# sixteen times in a row. Google was refusing the auth METHOD - /v1/credits was
+# called as `?key=<api key>` with no bearer, because a cookie-only Firefox
+# session exposes none until the app loads and the listener captures one. The
+# reply says nothing about whether anyone is signed in.
+#
+# Counting it as a denial made every bearer-less session read as DEAD. That is
+# the same "healthy session read as dead" failure the review already caught
+# once, arriving through a different door: there, sibling denials erased a real
+# confirmation; here, an unanswerable question was scored as a refusal.
+#
+# The rule that survives both: A DENIAL MEANS A CREDENTIAL WAS PRESENTED AND
+# REJECTED.
+# ---------------------------------------------------------------------------
+
+METHOD_ERR = ("API keys are not supported by this API. Expected OAuth2 access "
+              "token or other authentication credentials that assert a principal.")
+
+
+def test_api_keys_not_supported_is_not_a_denial():
+    is_denial = _auth_denial_fn()
+    for status in (400, 401, 403):
+        res = {"status": status, "data": {"error": {"message": METHOD_ERR}}}
+        assert is_denial(res) is False, (
+            f"HTTP {status} carrying the method error was scored as a denial; a "
+            f"bearer-less session would be declared dead")
+
+
+def test_api_keys_not_supported_is_recognised_as_a_method_error():
+    fn = _function("_fa_is_auth_method_error", _module_globals())
+    assert fn({"status": 403, "data": {"error": {"message": METHOD_ERR}}}) is True
+    assert fn(_denial()) is False
+    assert fn(_ok()) is False
+    assert fn(_transport()) is False
+
+
+def test_a_real_denial_still_denies_after_the_carve_out():
+    """The carve-out must not blunt the thing it sits next to."""
+    is_denial = _auth_denial_fn()
+    assert is_denial(_denial()) is True
+    assert is_denial({"status": 401}) is True
+    assert is_denial({"status": 403}) is True
+
+
+def test_the_probe_refuses_to_ask_without_a_bearer():
+    """No bearer means the question cannot be answered - do not ask it."""
+    state = _source_of("_flow_page_state")
+    assert "_bearer_token" in state
+    assert "credits probe skipped" in state
+    # and the skip must not write the remembered-denial field, or one
+    # bearer-less moment sticks to the page for the whole run
+    head = state.split("credits probe skipped", 1)[1].split("return", 1)[0]
+    assert "_flow_auth_denied" not in head, (
+        "the no-bearer path must never record a denial")

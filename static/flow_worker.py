@@ -1209,15 +1209,48 @@ def _fa_error_reason(result):
     return ""
 
 
-# Google's three ways of saying "this session has no credential". Matched on the
-# reason text so a denial is recognised even when it arrives inside a 200-shaped
-# tRPC envelope rather than as a 401.
+# Google saying "this session has no credential". Matched on the reason text so a
+# denial is recognised even when it arrives inside a 200-shaped tRPC envelope
+# rather than as a 401.
 _FA_AUTH_DENIAL_PHRASES = (
     "missing required authentication credential",
     "expected oauth 2 access token",
     "expected oauth2 access token",
+)
+
+# NOT a denial, and the distinction cost a live worker (2026-09-07, measured):
+#
+#   FLOW_AUTH_DENIED by 'credits': API keys are not supported by this API.
+#   Expected OAuth2 access token or other authentication credentials...
+#
+# printed sixteen times against a profile whose golden had JUST been rebuilt from
+# the operator's signed-in Firefox. "API keys are not supported" is Google
+# rejecting the auth METHOD — the call went with `?key=<api key>` and no bearer —
+# not rejecting the session. A cookie-only Firefox session exposes no bearer until
+# the app loads and the request listener captures one, so this reply says nothing
+# at all about whether the user is signed in.
+#
+# Treating it as a denial made every bearer-less session read as DEAD, which is
+# the same "healthy session read as dead" failure the review caught once already,
+# arriving through a different door. The rule that survives: a denial requires a
+# credential to have been PRESENTED and REJECTED.
+_FA_AUTH_METHOD_ERROR_PHRASES = (
     "api keys are not supported",
 )
+
+
+def _fa_is_auth_method_error(result):
+    """True when Google refused the auth METHOD, not the session.
+
+    Inconclusive by design: it must never confirm and must never deny.
+    """
+    if not isinstance(result, dict):
+        return False
+    try:
+        reason = _fa_error_reason(result).lower()
+    except Exception:
+        return False
+    return any(p in reason for p in _FA_AUTH_METHOD_ERROR_PHRASES)
 
 
 def _fa_is_auth_denial(result):
@@ -1231,10 +1264,17 @@ def _fa_is_auth_denial(result):
         them would let a cross-origin blip kill a healthy worker.
       * 5xx - Google broke, not us.
       * a non-credits 200 - carries no auth information either way.
+      * "API keys are not supported" - the auth METHOD was refused because the
+        call went with an api key and no bearer. Says nothing about the session;
+        see _fa_is_auth_method_error. This one is checked FIRST and explicitly,
+        because a 403 can carry it and the status test below would otherwise
+        call it a denial.
 
-    Only 401/403, or one of Google's own denial phrases, is a refusal.
+    A denial means a credential was PRESENTED and REJECTED.
     """
     if not isinstance(result, dict):
+        return False
+    if _fa_is_auth_method_error(result):
         return False
     s = result.get("status")
     if isinstance(s, int) and s in (401, 403):
@@ -3953,13 +3993,50 @@ def _flow_page_state(p, label="Flow"):
         return 'flow_logged_in'
 
     # ── 4. Ask Google. The only thing allowed to say "logged in". ──
-    # No /project/ gate and no bearer gate: the in-page fetch carries the
-    # session's cookies, and the old gates meant a home-URL page could never be
-    # confirmed at all — which is exactly when the worker fell back to page text.
+    # The /project/ gate is gone: it meant a home-URL page could never be
+    # confirmed at all, which is exactly when the old code fell back to page text.
+    #
+    # The BEARER gate is back, and removing it was a mistake worth recording.
+    # /v1/credits is called as `?key=<api key>` + Authorization: Bearer <token>.
+    # With no bearer, Google answers "API keys are not supported by this API" —
+    # it is refusing the auth METHOD, and the reply carries no information about
+    # the session at all. Measured 2026-09-07 against a profile whose golden had
+    # just been rebuilt from the operator's signed-in Firefox: sixteen
+    # FLOW_AUTH_DENIED lines in a row for a session that had never been asked a
+    # answerable question. A cookie-only Firefox session exposes no bearer until
+    # the app loads and the request listener captures one.
+    #
+    # So: no bearer means the probe cannot run, and "cannot run" is NOT "denied".
     try:
         p.wait_for_load_state("domcontentloaded", timeout=15000)
     except Exception:
         pass
+
+    _bearer_token = getattr(_FA_TOKEN_STORE, "token", "") or ""
+    if not _bearer_token:
+        # Nothing to authenticate with yet. Do not call, do not deny, do not
+        # confirm. The caller treats 'unknown' as "keep going and let the app
+        # prove itself" rather than as a login wall.
+        print(f"[{label}] credits probe skipped — no bearer captured yet "
+              f"(cookie-only session). NOT a denial: unproven, so not trusted.",
+              flush=True)
+        flow_model_event("flow_auth_probe_skipped", reason="no_bearer",
+                         page_kind="project" if "/project/" in url else "home")
+        # Deliberately the SAME return as a real refusal, and deliberately NOT
+        # the same recorded state. The verdict is "unproven", and unproven must
+        # not be trusted — a worker that stops costs nothing, a worker that
+        # proceeds on an unproven session is what burned 2026-09-07.
+        #
+        # What it must NOT do is write _flow_auth_denied. That field is a
+        # REMEMBERED refusal: once set, step 2 short-circuits every later check
+        # until something confirms. Poisoning it here would make one bearer-less
+        # moment stick to the page for the rest of the run.
+        #
+        # Not a new state value on purpose: ensure_logged_into_flow dispatches on
+        # an exact set of strings and sends anything unrecognised down the
+        # re-navigate path, which loops.
+        return 'flow_not_logged_in'
+
     for _attempt in (1, 2):
         try:
             _probe = _fa_api_fetch(
@@ -3976,6 +4053,15 @@ def _flow_page_state(p, label="Flow"):
                                  page_kind="project" if "/project/" in url else "home",
                                  endpoint="credits")
                 return 'flow_logged_in'
+            if _fa_is_auth_method_error(_probe):
+                # We sent a bearer and Google still says the METHOD is wrong.
+                # That is our request shape being wrong, not the user being
+                # signed out — never a denial.
+                print(f"[{label}] credits probe inconclusive (auth method "
+                      f"refused): {_fa_error_reason(_probe)[:120]}", flush=True)
+                # Same reasoning as the no-bearer case above: unproven, so not
+                # trusted, but never recorded as a denial.
+                return 'flow_not_logged_in'
             if _fa_is_auth_denial(_probe):
                 p._flow_authenticated_api_proof = ""
                 p._flow_auth_denied = {"label": "credits",
