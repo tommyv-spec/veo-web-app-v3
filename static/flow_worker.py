@@ -70,7 +70,17 @@ def _flow_worker_hold_path():
 def _flow_worker_hold_blocks_start(hold_path=None, scope_raw=None):
     """A shared hold blocks direct general starts; an exact scope may proceed."""
     path = hold_path or _flow_worker_hold_path()
-    raw = os.environ.get("FLOW_ONLY_CLIP_IDS") if scope_raw is None else scope_raw
+    if scope_raw is None:
+        # EITHER scope counts as "exact". FLOW_ONLY_CLIP_IDS is the proof-run
+        # scope (redo endpoint only); FLOW_ONLY_JOB_IDS is the production one
+        # (named jobs, first generation included). A hold exists to stop a
+        # GENERAL worker wandering into someone else's queue — a worker that can
+        # only ever touch named work is not that worker, and refusing it was
+        # blocking the day's two short videos while an 80-clip job held the lane.
+        raw = (os.environ.get("FLOW_ONLY_CLIP_IDS")
+               or os.environ.get("FLOW_ONLY_JOB_IDS"))
+    else:
+        raw = scope_raw
     return os.path.isfile(path) and not str(raw or "").strip()
 
 
@@ -4701,6 +4711,31 @@ def _parse_flow_only_clip_ids(raw):
 # A proof/debug run may be pinned to exact clip rows. This is deliberately more
 # restrictive than a job pin: no normal job is polled, and the redo API filters
 # before it claims rows. An invalid value stops startup instead of opening scope.
+def _parse_flow_only_job_ids(raw):
+    """Job-id allowlist for a scoped PRODUCTION worker. Fails closed.
+
+    Job ids are UUIDs, so unlike the clip parser there is no numeric check to
+    make; anything non-empty after splitting is kept, and a value that yields no
+    ids at all raises rather than quietly becoming "no scope" — a typo must never
+    buy an unscoped worker that claims the oldest job in the queue.
+    """
+    if raw is None:
+        return frozenset()
+    ids = {part.strip() for part in str(raw).replace(";", ",").split(",")}
+    ids = {i for i in ids if i}
+    if str(raw).strip() and not ids:
+        raise RuntimeError("FLOW_ONLY_JOB_IDS was set but contained no job IDs")
+    return frozenset(ids)
+
+
+FLOW_ONLY_JOB_IDS = _parse_flow_only_job_ids(os.environ.get("FLOW_ONLY_JOB_IDS"))
+if FLOW_ONLY_JOB_IDS:
+    print(
+        f"[Scope] Flow JOB allowlist active: {','.join(sorted(FLOW_ONLY_JOB_IDS))}; "
+        "this worker claims only these jobs, first generation included",
+        flush=True,
+    )
+
 FLOW_ONLY_CLIP_IDS = _parse_flow_only_clip_ids(os.environ.get("FLOW_ONLY_CLIP_IDS"))
 if FLOW_ONLY_CLIP_IDS:
     print(
@@ -10278,10 +10313,56 @@ def get_pending_job(exclude_ids=None):
     if FLOW_ONLY_CLIP_IDS:
         return None
 
+    # FLOW_ONLY_JOB_IDS — the PRODUCTION job scope (2026-09-07).
+    #
+    # Distinct from FLOW_ONLY_CLIP_IDS above, and deliberately so. That one is a
+    # proof-run guard: redo-endpoint only, so it can never render a clip that has
+    # never generated ("Clip is pending initial generation"), which makes it
+    # unusable for delivering a new video. This one is the opposite job: let a
+    # second worker take NAMED jobs, first generation included, and nothing else.
+    #
+    # Why it exists: an 80-clip job must not park the day's two short ones. The
+    # claim endpoint hands out the OLDEST unclaimed job in the 7-day window, so an
+    # unscoped second worker grabs whatever is at the head — on 2026-09-03 that was
+    # three stale jobs inside 90 seconds. Scoped, it walks the queue READ-ONLY (no
+    # worker_id = the server's look-without-claiming branch) until one of OUR jobs
+    # is at the head, then claims it with everything ahead excluded.
+    #
+    # Fails closed twice: an empty/unparseable value is no scope at all, and if a
+    # race still hands back a job we did not ask for, it is released untouched
+    # rather than worked on.
+    if FLOW_ONLY_JOB_IDS:
+        ahead = set(exclude_ids or [])
+        for _ in range(80):
+            peek_url = "/jobs/pending?" + _worker_arms_q()
+            if ahead:
+                peek_url += f"&exclude={','.join(sorted(ahead))}"
+            peek = api_request("GET", peek_url)          # no worker_id -> claims nothing
+            head = (peek or {}).get("job") or None
+            if not head:
+                return None                             # none of ours is claimable now
+            if head.get("id") in FLOW_ONLY_JOB_IDS:
+                break
+            ahead.add(head["id"])
+        else:
+            return None
+        exclude_ids = ahead
+
     url = f"/jobs/pending?worker_id={WORKER_ID}&{_worker_arms_q()}"
     if exclude_ids:
         url += f"&exclude={','.join(exclude_ids)}"
     result = api_request("GET", url)
+
+    if FLOW_ONLY_JOB_IDS and result and result.get("job"):
+        got = result["job"].get("id")
+        if got not in FLOW_ONLY_JOB_IDS:
+            print(f"[Scope] BLOCKED job {str(got)[:8]} — not in FLOW_ONLY_JOB_IDS; "
+                  f"releasing it untouched", flush=True)
+            try:
+                update_job_status(got, "pending")
+            except Exception as exc:
+                print(f"[Scope] release failed: {exc}", flush=True)
+            return None
 
     # v455: process abort signals piggybacked on the poll response. Any
     # job ID in aborted_jobs was claimed by us AND is marked for deletion.
@@ -10391,6 +10472,18 @@ def get_redo_clips():
                     flush=True,
                 )
             clips = [clip for clip in clips if clip.get("id") in allowed]
+        if FLOW_ONLY_JOB_IDS:
+            # Same guarantee on the redo side as on the claim side: a job-scoped
+            # worker finishes ITS OWN retries and never another job's. Filtering
+            # rather than returning [] matters — a worker that refuses its own
+            # redo clip idles beside its own work, which is exactly what happened
+            # on 2026-09-07 when a frame attach glitched and the clip went to
+            # flow_redo_queued with nothing willing to pick it up.
+            before = len(clips)
+            clips = [c for c in clips if str(c.get("job_id") or "") in FLOW_ONLY_JOB_IDS]
+            if before != len(clips):
+                print(f"[Scope] dropped {before - len(clips)} redo clip(s) outside "
+                      f"the job allowlist", flush=True)
         return interleave_redo_clips_by_model(clips)
     return []
 
