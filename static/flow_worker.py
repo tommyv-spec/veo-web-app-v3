@@ -51,9 +51,27 @@ import subprocess, sys, shutil
 _FLOW_WORKER_SINGLETON_HANDLE = None
 
 
-def _flow_worker_singleton_path():
+def _flow_worker_singleton_path(scope_raw=None):
+    """One lock for the one shared Flow profile, in every task and scope.
+
+    API claims stop two workers from rendering the same clip, but they do not
+    protect the Firefox profile on disk. A general worker and a clip-scoped
+    worker still open the same profile, so they must share this same lock.
+    `scope_raw` is accepted only so probes can prove scope never changes it.
+    """
     return os.path.join(
         os.path.expanduser("~"), ".kaveno", "flow_worker.singleton.lock")
+
+
+def _flow_worker_hold_path():
+    return os.path.join(os.path.expanduser("~"), ".kaveno", "hold", "flow")
+
+
+def _flow_worker_hold_blocks_start(hold_path=None, scope_raw=None):
+    """A shared hold blocks direct general starts; an exact scope may proceed."""
+    path = hold_path or _flow_worker_hold_path()
+    raw = os.environ.get("FLOW_ONLY_CLIP_IDS") if scope_raw is None else scope_raw
+    return os.path.isfile(path) and not str(raw or "").strip()
 
 
 def _acquire_flow_worker_singleton(lock_path=None):
@@ -116,8 +134,20 @@ def _release_flow_worker_singleton():
 
 
 if __name__ == "__main__":
+    if _flow_worker_hold_blocks_start():
+        print(
+            f"[Init] Flow worker hold is active at {_flow_worker_hold_path()}; "
+            "unscoped direct start refused.",
+            flush=True,
+        )
+        raise SystemExit(0)
     if not _acquire_flow_worker_singleton():
-        print("[Init] Flow worker singleton is already owned; exiting cleanly.",
+        _scope = (os.environ.get("FLOW_ONLY_CLIP_IDS") or "").strip()
+        # Keep this literal contiguous — code/tests/test_flow_worker_singleton.py
+        # asserts the exact substring against the SOURCE, not against runtime output.
+        print("[Init] Flow worker singleton is already owned; exiting cleanly."
+              + (f" scope={_scope}" if _scope else " (general worker)")
+              + f" lock={os.path.basename(_flow_worker_singleton_path())}",
               flush=True)
         raise SystemExit(0)
 

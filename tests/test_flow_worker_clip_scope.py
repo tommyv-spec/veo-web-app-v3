@@ -1,6 +1,7 @@
 """A scoped Flow proof run must be unable to touch any unlisted clip."""
 
 import ast
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -24,6 +25,29 @@ def _function(path: Path, name: str, globals_dict=None):
 def test_worker_scope_parser_accepts_unique_numeric_ids():
     parse = _function(WORKER, "_parse_flow_only_clip_ids")
     assert parse("14907, 14935,14907") == (14907, 14935)
+
+
+def test_shared_hold_blocks_general_start_but_allows_exact_scope(tmp_path):
+    hold = tmp_path / "flow"
+    hold.write_text("paused", encoding="utf-8")
+    blocks = _function(
+        WORKER,
+        "_flow_worker_hold_blocks_start",
+        {"os": os, "_flow_worker_hold_path": lambda: str(hold)},
+    )
+    assert blocks(str(hold), "") is True
+    assert blocks(str(hold), "14907,14935") is False
+    assert blocks(str(tmp_path / "missing"), "") is False
+
+
+def test_hold_guard_runs_before_singleton_and_browser_start():
+    source = WORKER.read_text(encoding="utf-8")
+    early_main = source.split('if __name__ == "__main__":', 1)[1].split(
+        "# Pin the console encoding", 1
+    )[0]
+    assert early_main.index("_flow_worker_hold_blocks_start()") < early_main.index(
+        "_acquire_flow_worker_singleton()"
+    )
 
 
 @pytest.mark.parametrize("raw", ["14907,nope", "0", "-4", ",,,"])
