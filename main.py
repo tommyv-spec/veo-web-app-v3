@@ -18244,11 +18244,30 @@ async def local_worker_get_pending_job(
     }
 
 
+def _parse_worker_clip_ids(raw: Optional[str]):
+    """Parse an exact worker clip allowlist without ever widening bad input."""
+    if raw is None or not str(raw).strip():
+        return None
+    values = []
+    for token in str(raw).split(","):
+        token = token.strip()
+        if not token.isdigit() or int(token) <= 0:
+            raise HTTPException(
+                status_code=422,
+                detail="clip_ids must be a comma-separated list of positive clip IDs",
+            )
+        values.append(int(token))
+    if not values:
+        raise HTTPException(status_code=422, detail="clip_ids contained no clip IDs")
+    return sorted(set(values))
+
+
 @app.get("/api/local-worker/clips/redo-pending")
 async def local_worker_get_redo_clips(
     request: Request,
     worker_id: Optional[str] = Query(None, description="Worker ID for claiming"),
     arms: Optional[str] = Query(None, description="v959: comma-separated render arms this worker build carries"),
+    clip_ids: Optional[str] = Query(None, description="Exact comma-separated clip allowlist for a scoped worker run"),
     db: DBSession = Depends(get_db_session),
     authorized: bool = Depends(verify_local_worker_key)
 ):
@@ -18265,12 +18284,16 @@ async def local_worker_get_redo_clips(
     # Release stale claims (claimed > 10 minutes ago)
     # NOTE: Now filtering for flow_redo_queued instead of redo_queued
     claim_timeout = datetime.utcnow() - timedelta(minutes=10)
-    stale_clips = db.query(Clip).join(Job).filter(
+    allowed_clip_ids = _parse_worker_clip_ids(clip_ids)
+    _stale_q = db.query(Clip).join(Job).filter(
         Job.backend == 'flow',
         Clip.status == ClipStatus.FLOW_REDO_QUEUED.value,  # Changed from 'redo_queued'
         Clip.claimed_by_worker.isnot(None),
         Clip.claimed_at < claim_timeout
-    ).all()
+    )
+    if allowed_clip_ids is not None:
+        _stale_q = _stale_q.filter(Clip.id.in_(allowed_clip_ids))
+    stale_clips = _stale_q.all()
     
     for stale_clip in stale_clips:
         # v468: zombie-loop prevention. If this clip has been sitting in
@@ -18344,6 +18367,8 @@ async def local_worker_get_redo_clips(
         )
         if _age_cutoff is not None:
             _q = _q.filter(Job.created_at >= _age_cutoff)
+        if allowed_clip_ids is not None:
+            _q = _q.filter(Clip.id.in_(allowed_clip_ids))
         redo_clips = _q.order_by(Clip.id.asc()).all()
     else:
         # No worker_id - get unclaimed only (legacy behavior)
@@ -18364,7 +18389,17 @@ async def local_worker_get_redo_clips(
         )
         if _age_cutoff is not None:
             _q = _q.filter(Job.created_at >= _age_cutoff)
+        if allowed_clip_ids is not None:
+            _q = _q.filter(Clip.id.in_(allowed_clip_ids))
         redo_clips = _q.order_by(Clip.id.asc()).all()
+
+    if allowed_clip_ids is not None:
+        # TEMP DIAG: keep until operator-side proof confirms the scoped claim.
+        print(
+            f"[LocalWorker][Scope] worker={worker_id or 'read-only'} requested={allowed_clip_ids} "
+            f"matched={[clip.id for clip in redo_clips]}",
+            flush=True,
+        )
 
     if _age_cutoff is not None:
         _skipped = db.query(Clip).join(Job).filter(
@@ -20547,6 +20582,7 @@ async def user_worker_get_redo_clips(
     request: Request,
     worker_id: Optional[str] = Query(None),
     arms: Optional[str] = Query(None, description="v959: comma-separated render arms this worker build carries"),
+    clip_ids: Optional[str] = Query(None, description="Exact comma-separated clip allowlist for a scoped worker run"),
     db: DBSession = Depends(get_db_session),
     user_id: str = Depends(verify_user_worker_token)
 ):
@@ -20554,13 +20590,17 @@ async def user_worker_get_redo_clips(
     from sqlalchemy import or_, and_
     
     claim_timeout = datetime.utcnow() - timedelta(minutes=10)
-    stale_clips = db.query(Clip).join(Job).filter(
+    allowed_clip_ids = _parse_worker_clip_ids(clip_ids)
+    _stale_q = db.query(Clip).join(Job).filter(
         Job.user_id == user_id,
         Job.backend == 'flow',
         Clip.status == ClipStatus.FLOW_REDO_QUEUED.value,
         Clip.claimed_by_worker.isnot(None),
         Clip.claimed_at < claim_timeout
-    ).all()
+    )
+    if allowed_clip_ids is not None:
+        _stale_q = _stale_q.filter(Clip.id.in_(allowed_clip_ids))
+    stale_clips = _stale_q.all()
     
     # v468: zombie-loop prevention (mirror of local-worker endpoint).
     # Clips stuck in flow_redo_queued for >30min have been re-claimed
@@ -20627,6 +20667,8 @@ async def user_worker_get_redo_clips(
             _q = _q.filter(or_(Job.created_at >= _age_cutoff,
                                Clip.redo_reason.like('v932 recreate%'),
                                Clip.redo_reason.like('v933 modify%')))
+        if allowed_clip_ids is not None:
+            _q = _q.filter(Clip.id.in_(allowed_clip_ids))
         redo_clips = _q.order_by(Clip.id.asc()).all()
     else:
         redo_cutoff = datetime.utcnow() - timedelta(hours=24)
@@ -20648,7 +20690,17 @@ async def user_worker_get_redo_clips(
             _q = _q.filter(or_(Job.created_at >= _age_cutoff,
                                Clip.redo_reason.like('v932 recreate%'),
                                Clip.redo_reason.like('v933 modify%')))
+        if allowed_clip_ids is not None:
+            _q = _q.filter(Clip.id.in_(allowed_clip_ids))
         redo_clips = _q.order_by(Clip.id.asc()).all()
+
+    if allowed_clip_ids is not None:
+        # TEMP DIAG: keep until operator-side proof confirms the scoped claim.
+        print(
+            f"[UserWorker][Scope] worker={worker_id or 'read-only'} requested={allowed_clip_ids} "
+            f"matched={[clip.id for clip in redo_clips]}",
+            flush=True,
+        )
 
     # v945.14 — a charswap clip must never leave through this door.
     redo_clips = _v945_14_reject_charswap_redos(db, redo_clips, "user-worker")

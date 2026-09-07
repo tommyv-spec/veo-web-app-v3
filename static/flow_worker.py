@@ -4650,6 +4650,35 @@ import socket
 DEFAULT_WORKER_ID = f"worker-{socket.gethostname()}-{os.getpid()}"
 WORKER_ID = os.environ.get("WORKER_ID", DEFAULT_WORKER_ID)
 
+
+def _parse_flow_only_clip_ids(raw):
+    """Parse the optional exact clip allowlist, failing closed on mistakes."""
+    if raw is None or not str(raw).strip():
+        return ()
+    values = []
+    for token in str(raw).split(","):
+        token = token.strip()
+        if not token.isdigit() or int(token) <= 0:
+            raise RuntimeError(
+                "FLOW_ONLY_CLIP_IDS must be a comma-separated list of positive clip IDs"
+            )
+        values.append(int(token))
+    if not values:
+        raise RuntimeError("FLOW_ONLY_CLIP_IDS was set but contained no clip IDs")
+    return tuple(sorted(set(values)))
+
+
+# A proof/debug run may be pinned to exact clip rows. This is deliberately more
+# restrictive than a job pin: no normal job is polled, and the redo API filters
+# before it claims rows. An invalid value stops startup instead of opening scope.
+FLOW_ONLY_CLIP_IDS = _parse_flow_only_clip_ids(os.environ.get("FLOW_ONLY_CLIP_IDS"))
+if FLOW_ONLY_CLIP_IDS:
+    print(
+        f"[Scope] Exact Flow clip allowlist active: {','.join(map(str, FLOW_ONLY_CLIP_IDS))}; "
+        "normal job polling disabled",
+        flush=True,
+    )
+
 # Base directory for the worker
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -9090,10 +9119,20 @@ def _v962_pick_asset_in_picker(page, image_path, prefix=""):
                 ['alt', 'title', 'aria-label', 'data-testid', 'role'].forEach(a => {
                     attrs[a] = pane.querySelectorAll('[' + a + ']').length;
                 });
+                // The CONTROL LABELS, so the next reader knows which control to
+                // drive instead of guessing. These are interface labels and
+                // material icon ligatures (e.g. "upload", "close") — UI chrome,
+                // never user content, file names or values.
+                const labels = [...pane.querySelectorAll('[aria-label]')]
+                    .map(el => el.getAttribute('aria-label')).filter(Boolean).slice(0, 12);
+                const icons = [...pane.querySelectorAll('mat-icon')]
+                    .map(el => (el.textContent || '').trim()).filter(Boolean).slice(0, 12);
+                const roles = [...new Set([...pane.querySelectorAll('[role]')]
+                    .map(el => el.getAttribute('role')))].slice(0, 12);
                 return {pane: true, total: pane.querySelectorAll('*').length,
                         shapes: Object.fromEntries(Object.entries(seen)
                             .sort((x, y) => y[1] - x[1]).slice(0, 25)),
-                        with_attr: attrs};
+                        with_attr: attrs, labels: labels, icons: icons, roles: roles};
             }""")
             print(f"{prefix}[v962.8-diag] picker pane contents: {json.dumps(inner)[:1200]}",
                   flush=True)
@@ -10194,12 +10233,21 @@ def _worker_arms_q():
     return f"arms={_url_quote(','.join(WORKER_ARMS))}"
 
 
+def _flow_only_clip_ids_q():
+    return ",".join(map(str, FLOW_ONLY_CLIP_IDS))
+
+
 def get_pending_job(exclude_ids=None):
     """Get next pending job from API and claim it for this worker.
 
     Args:
         exclude_ids: Set of job IDs to exclude (already being processed)
     """
+    # A clip-scoped proof run must never claim a regular job. Its only input is
+    # the server-filtered redo endpoint below.
+    if FLOW_ONLY_CLIP_IDS:
+        return None
+
     url = f"/jobs/pending?worker_id={WORKER_ID}&{_worker_arms_q()}"
     if exclude_ids:
         url += f"&exclude={','.join(exclude_ids)}"
@@ -10297,10 +10345,22 @@ def get_redo_clips():
     Advertises the same arms as the pending poll (see WORKER_ARMS): a worker
     that cannot render a method must not be handed a clip that needs it.
     """
-    result = api_request(
-        "GET", f"/clips/redo-pending?worker_id={WORKER_ID}&{_worker_arms_q()}")
+    url = f"/clips/redo-pending?worker_id={WORKER_ID}&{_worker_arms_q()}"
+    if FLOW_ONLY_CLIP_IDS:
+        url += f"&clip_ids={_url_quote(_flow_only_clip_ids_q())}"
+    result = api_request("GET", url)
     if result and result.get("clips"):
         clips = result["clips"]
+        if FLOW_ONLY_CLIP_IDS:
+            allowed = set(FLOW_ONLY_CLIP_IDS)
+            unexpected = [clip.get("id") for clip in clips if clip.get("id") not in allowed]
+            if unexpected:
+                print(
+                    f"[Scope] BLOCKED {len(unexpected)} unlisted clip(s) returned by server: "
+                    f"{unexpected}",
+                    flush=True,
+                )
+            clips = [clip for clip in clips if clip.get("id") in allowed]
         return interleave_redo_clips_by_model(clips)
     return []
 
@@ -20414,8 +20474,8 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
         # and ensure_lower_priority_model (which drives the dropdown). NULL
         # veo_model on the clip = the job's model, i.e. every pre-v961 job is
         # byte-identical here.
-        _clip_model = apply_clip_veo_model(
-            page, clip, veo_model, context=f"clip {clip_index + 1}: ")
+        _clip_model = apply_clip_veo_model(page, clip, veo_model,
+                                           context=f"clip {clip_index + 1}: ")
         page._active_job_id = job_id
         page._active_clip_id = clip.get('id')
         page._active_clip_index = clip_index
@@ -23565,8 +23625,8 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # movie-section arms call set_clip_input_mode further down, and that
         # reads page._veo_model to choose the Frames/Ingredients tab — so this
         # assignment has to happen here, above every one of them.
-        _clip_model = apply_clip_veo_model(
-            page, clip, veo_model, context=f"clip {clip_index + 1}: ")
+        _clip_model = apply_clip_veo_model(page, clip, veo_model,
+                                           context=f"clip {clip_index + 1}: ")
         page._active_job_id = job_id
         page._active_clip_id = clip.get('id')
         page._active_clip_index = clip_index
@@ -29992,6 +30052,9 @@ def _kling_drain_loop():
     Kling variants happen automatically — no separate command. If the CLI is
     absent/unauthed it logs once and disables itself (Flow keeps working)."""
     import json as _json, re as _re, subprocess as _sub, tempfile as _tf, time as _t
+    if FLOW_ONLY_CLIP_IDS:
+        print("[Scope] Kling/Higgsfield drain disabled for exact Flow clip run", flush=True)
+        return
     if not API_KEY:
         return
     hf_cli = os.environ.get("HF_CLI", "higgsfield")
