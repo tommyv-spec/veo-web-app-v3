@@ -95,6 +95,87 @@ def test_worker_disables_kling_drain_during_scoped_flow_run():
     assert "return" in kling.split("if FLOW_ONLY_CLIP_IDS:", 1)[1].split("if not API_KEY:", 1)[0]
 
 
+def test_scoped_worker_stops_only_after_every_clip_is_terminal():
+    states = {
+        14907: {"status": "completed", "has_video": True},
+        14935: {"status": "failed", "has_video": False},
+    }
+
+    def api_request(_method, url):
+        clip_id = int(url.split("/clips/", 1)[1].split("/", 1)[0])
+        return states.get(clip_id)
+
+    check = _function(
+        WORKER,
+        "_scoped_flow_work_is_terminal",
+        {"os": os, "FLOW_ONLY_CLIP_IDS": (14907, 14935), "api_request": api_request},
+    )
+    assert check() is True
+    states[14935] = {"status": "generating", "has_video": False}
+    assert check() is False
+    states.pop(14935)
+    assert check() is False
+
+
+def test_scoped_worker_auto_exit_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("FLOW_SCOPE_AUTO_EXIT", "0")
+
+    def api_request(_method, _url):
+        raise AssertionError("terminal API must not run when auto-exit is disabled")
+
+    check = _function(
+        WORKER,
+        "_scoped_flow_work_is_terminal",
+        {"os": os, "FLOW_ONLY_CLIP_IDS": (14907, 14935), "api_request": api_request},
+    )
+    assert check() is False
+
+
+def test_project_replay_does_not_wait_for_impossible_network_idle():
+    source = WORKER.read_text(encoding="utf-8")
+    replay = source.split("def _fa_init_project_best_effort(", 1)[1].split(
+        "\ndef force_agent_off", 1
+    )[0]
+    assert 'wait_for_load_state("networkidle"' not in replay
+    assert "time.sleep(2)" in replay
+
+
+def test_redo_project_state_probe_is_bounded_not_skippable():
+    """v963 — replaces test_redo_project_state_probe_can_be_skipped_for_bounded_proof_run.
+
+    That test was added the same day the probe was seen hanging, and it pinned
+    an env flag that SKIPPED the probe so a proof run could get past it. The
+    goal was right and the flag did unblock that run, but skipping a check does
+    not bound the call underneath it: `page.evaluate` takes no timeout, so the
+    hang was still there, just no longer looked at. Both lines fired in the
+    2026-09-07 failure and the worker went silent immediately afterwards.
+
+    The probe is now `_flow_project_state()`, one `wait_for_function` with the
+    same 10-second budget enforced by the driver. Nothing needs skipping, so
+    there is no flag to assert. Announced to the original author in HANDOFF
+    rev 811 §4 before this landed.
+    """
+    source = WORKER.read_text(encoding="utf-8")
+    redo = source.split("def process_redo_clip(", 1)[1].split(
+        "\ndef process_job_submission_with_failover", 1
+    )[0]
+    assert "_flow_project_state(page, timeout_s=10.0)" in redo
+    assert "FLOW_SKIP_PROJECT_STATE_PROBE" not in source
+    assert "_skip_project_state_probe" not in redo
+
+
+def test_empty_scoped_queue_exits_only_after_terminal_check():
+    source = WORKER.read_text(encoding="utf-8")
+    redo = source.split("def get_redo_clips(", 1)[1].split(
+        "\ndef clip_done_in_platform", 1
+    )[0]
+    assert "_scoped_flow_work_is_terminal()" in redo
+    assert "raise SystemExit(0)" in redo
+    assert redo.index("if result and result.get(\"clips\")") < redo.index(
+        "_scoped_flow_work_is_terminal()"
+    )
+
+
 def test_both_redo_endpoints_filter_before_claiming():
     source = MAIN.read_text(encoding="utf-8")
     local = source.split("async def local_worker_get_redo_clips(", 1)[1].split(

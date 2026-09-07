@@ -1090,10 +1090,21 @@ def _fa_attach_token_listener(page):
         pass
 
 
+# v963 — these two run through page.evaluate, which takes no timeout, so the
+# PYTHON side cannot be bounded. The browser side therefore has to settle itself
+# or the worker hangs on a request that never answers. AbortSignal.timeout turns
+# that into the ordinary catch below, which returns status 0 — and status 0 is
+# never a denial and never a confirm, so an aborted call cannot move the auth
+# verdict in either direction. Guarded because an older engine has no
+# AbortSignal.timeout and would throw on the property access itself.
+_FA_FETCH_ABORT_JS = ("  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) "
+                      "opts.signal = AbortSignal.timeout(15000);\n")
+
 _FA_TRPC_FETCH_JS = """
 async ([url, method, bodyStr]) => {
   const opts = { method, headers: {'content-type': 'application/json', 'accept': '*/*'}, credentials: 'include' };
   if (bodyStr !== null) opts.body = bodyStr;
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) opts.signal = AbortSignal.timeout(15000);
   let status = 0, ok = false, text = '';
   try {
     const r = await fetch(url, opts);
@@ -1112,6 +1123,7 @@ _FA_API_FETCH_JS = """
 async ([url, method, headers, bodyStr]) => {
   const opts = { method, headers, credentials: 'include' };
   if (bodyStr !== null) opts.body = bodyStr;
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) opts.signal = AbortSignal.timeout(15000);
   let status = 0, ok = false, text = '';
   try {
     const r = await fetch(url, opts);
@@ -3992,6 +4004,175 @@ def _flow_page_state(p, label="Flow"):
     print(f"[{label}] ⚠ On Flow URL but credits never answered — "
           f"treating as not logged in", flush=True)
     return 'flow_not_logged_in'
+
+
+# v963 — the project-state probe, bounded. Returns null (not 'wait') while
+# undecided so wait_for_function keeps polling to ITS deadline instead of us
+# hand-rolling a sleep loop around an unbounded evaluate.
+#
+# v834 locale coverage is carried over verbatim and must stay: the es-419 UI
+# shows "Se produjo un error" / "Volver a los proyectos" / "Vídeos" / "Escenas",
+# and an English-only match once let the worker run against a broken project
+# (operator 2026-07-08). Accent-strip + lowercase, then match en + es.
+_FLOW_PROJECT_STATE_JS = r"""
+() => {
+  const raw = (document.body && document.body.innerText) || '';
+  const txt = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  const okMarkers = ['videos', 'scenes', 'escenas'];
+  const hasOk = okMarkers.some(s => txt.includes(s));
+  if (txt.includes('something went wrong') || txt.includes('se produjo un error')) return 'err-text';
+  if ((txt.includes('back to projects') || txt.includes('volver a los proyectos')) && !hasOk) return 'err-link';
+  if (hasOk) return 'ok';
+  return null;
+}
+"""
+
+
+def _flow_project_state(page, timeout_s=10.0):
+    """Is the project editor up? 'ok' | 'err-text' | 'err-link' | 'wait' | 'gone'.
+
+    This replaces a sleep loop wrapped around `page.evaluate`, which has no
+    timeout and hung the worker right after `page.reload()` — the moment the JS
+    context is being replaced. The previous fix added an env flag to SKIP the
+    probe, which left the unbounded call exactly where it was and only stopped
+    looking at it.
+
+    The 10-second budget is unchanged. What moved is who enforces it: the
+    Playwright driver instead of a Python loop that could not interrupt the call
+    it was timing. Measured at 3.01-3.02s for a 3s budget across a
+    context-destroying reload (tools/flow_probe_bound_smoke.py).
+
+    'wait' means undecided, never "broken" — the caller proceeds, as before.
+    """
+    try:
+        if "/project/" not in (page.url or ""):
+            return 'gone'
+    except Exception:
+        return 'gone'
+    try:
+        handle = page.wait_for_function(_FLOW_PROJECT_STATE_JS,
+                                        timeout=int(timeout_s * 1000))
+        value = handle.json_value()
+        return value if value in ('ok', 'err-text', 'err-link') else 'wait'
+    except Exception as e:
+        name = type(e).__name__
+        if "Timeout" in name or "timeout" in str(e).lower():
+            return 'wait'
+        # Not a timeout: say so. A silent 'wait' here would look identical to a
+        # slow page and hide a real breakage for as long as it lasted.
+        print(f"[REDO] project-state probe error ({name}: {e})", flush=True)
+        return 'wait'
+
+
+# v963 — the redo tile scan, bounded. It runs AFTER a paid submit, so a
+# silent hang here is the expensive one: the render is paid for and nobody
+# is watching it land. wait_for_function returns as soon as the expression is
+# truthy, and this one always returns an object, so behaviour is unchanged on
+# a healthy page — it simply cannot wait forever on a dead one.
+#
+# JS copied verbatim from the old inline evaluate; the string is deliberately
+# NOT raw so /\\d+%/ still reaches the browser as /\\d+%/.
+_REDO_TILE_SCAN_JS = """() => {
+                    const c = document.querySelector("div[data-index='0']");
+                    if (!c) return {exists: false};
+                    
+                    // Deduplicate tiles by data-tile-id
+                    const allTileEls = c.querySelectorAll("[data-tile-id]");
+                    const seen = new Set();
+                    const tiles = [];
+                    allTileEls.forEach(t => {
+                        const id = t.getAttribute("data-tile-id");
+                        if (id && !seen.has(id)) { seen.add(id); tiles.push(t); }
+                    });
+                    
+                    const text = c.innerText || c.textContent || '';
+                    let hasVideo = false;
+                    let hasGenerating = false;
+                    let hasFailed = false;
+                    let videoCount = 0;      // v817 — per-tile counts so Python
+                    let generatingCount = 0; // can tell a settled batch from a
+                    let failedCount = 0;     // partially-rendered one
+                    const videoUrls = [];
+                    const failedUuids = [];  // v816
+
+                    tiles.forEach(t => {
+                        if (t.querySelector("video")) {
+                            hasVideo = true;
+                            videoCount++;
+                            const videos = t.querySelectorAll("video");
+                            for (const v of videos) {
+                                let url = v.src || '';
+                                if (!url) { const s = v.querySelector('source'); if (s) url = s.src || ''; }
+                                if (url && !url.startsWith('blob:')) videoUrls.push(url);
+                            }
+                            return;
+                        }
+                        const tText = t.textContent || '';
+                        if (tText.includes('videocam') || /\\d+%/.test(tText)) {
+                            hasGenerating = true;
+                            generatingCount++;
+                            return;
+                        }
+                        const hasRefresh = t.querySelector("i") &&
+                            Array.from(t.querySelectorAll("i")).some(i => i.textContent.trim() === 'refresh');
+                        if (hasRefresh) {
+                            hasFailed = true;
+                            failedCount++;
+                            // v816 — collect the failed tile's OWN media uuid so
+                            // Python can match it to the API terminal record
+                            // (SEXUAL/PROMINENT/...) — same as FailCheck v802.
+                            for (const el of t.querySelectorAll('img,video,source')) {
+                                const s = el.getAttribute('src') || el.src || '';
+                                const m = s.match(/[?&]name=([0-9a-fA-F-]{36})/);
+                                if (m) failedUuids.push(m[1].toLowerCase());
+                            }
+                        }
+                    });
+                    
+                    // Fallback: if no data-tile-id children, scan container directly
+                    if (tiles.length === 0) {
+                        hasVideo = c.querySelector('video') !== null;
+                        hasGenerating = text.includes('videocam') || /\\d+%/.test(text);
+                        hasFailed = text.includes('Failed');
+                        if (hasVideo) {
+                            for (const v of c.querySelectorAll('video')) {
+                                let url = v.src || '';
+                                if (!url) { const s = v.querySelector('source'); if (s) url = s.src || ''; }
+                                if (url && !url.startsWith('blob:')) videoUrls.push(url);
+                            }
+                        }
+                    }
+                    
+                    // Check for blob-only videos
+                    let blobOnly = false;
+                    if (hasVideo && videoUrls.length === 0) {
+                        blobOnly = true;
+                    }
+                    
+                    return {
+                        exists: true, tiles: tiles.length || 1,
+                        hasVideo: hasVideo, hasGenerating: hasGenerating, hasFailed: hasFailed,
+                        blobOnly: blobOnly, videoUrls: videoUrls,
+                        failedUuids: failedUuids,
+                        videoCount: videoCount, generatingCount: generatingCount,
+                        failedCount: failedCount
+                    };
+                }"""
+
+
+def _redo_tile_info(page):
+    """Read the data-index=0 tile. {"exists": False} when it cannot be read.
+
+    Returning the not-found shape on timeout (rather than raising) keeps the
+    caller's existing loop behaviour: it waits 15s and scans again, which is
+    the right answer for a render that is merely slow.
+    """
+    try:
+        return page.wait_for_function(_REDO_TILE_SCAN_JS, timeout=8000).json_value()
+    except Exception as e:
+        print(f"[REDO] tile scan unavailable ({type(e).__name__}) — treating as empty",
+              flush=True)
+        return {"exists": False}
 
 
 def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
@@ -11618,11 +11799,33 @@ def ensure_videos_tab_selected(page):
         videos_sidebar = page.locator("button:has(i:text('videocam')):not(.flow_tab_slider_trigger), button:has-text('View videos')").first
         try:
             videos_sidebar.wait_for(state="visible", timeout=5000)
-            # Only click if not already selected (aria-selected or aria-pressed = true)
-            already_selected = page.evaluate("""() => {
-                const btn = document.querySelector("button[aria-selected='true'] i, button[aria-pressed='true'] i");
-                return btn && btn.textContent.trim() === 'videocam';
-            }""")
+            # Only click if not already selected (aria-selected or aria-pressed = true).
+            #
+            # v963 — this was a bare page.evaluate, and page.evaluate takes no
+            # timeout. On 2026-09-07 the worker's last log line was the redo
+            # path's "proceeding optimistically", and THIS is the next browser
+            # call on the existing-project branch (select_frames_to_video_mode
+            # sits in the new-project-only block above and did not run). So it
+            # is the most likely place the process went silent. Bounded now.
+            #
+            # The JS returns null while the sidebar has not rendered its
+            # selection state, so wait_for_function keeps polling to its own
+            # deadline rather than us deciding from a half-built DOM.
+            try:
+                already_selected = page.wait_for_function(
+                    """() => {
+                        const sel = document.querySelector("button[aria-selected='true'] i, button[aria-pressed='true'] i");
+                        if (!sel) return null;
+                        return sel.textContent.trim() === 'videocam';
+                    }""",
+                    timeout=5000,
+                ).json_value()
+            except Exception:
+                # Timed out or the page is gone: treat as "not selected" and fall
+                # through to the click, which is locator-based and bounded. A
+                # healthy page is unaffected; only a dead one changes behaviour,
+                # and it now raises there instead of hanging here.
+                already_selected = False
             if not already_selected:
                 videos_sidebar.click(timeout=5000)
                 human_delay(0.5, 1)
@@ -19716,70 +19919,43 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
         # (catches the error regardless of which DOM tag wraps it),
         # exit early on the OK signal (Videos / Scenes text), log
         # exceptions instead of swallowing them silently.
-        _skip_project_state_probe = (
-            os.environ.get("FLOW_SKIP_PROJECT_STATE_PROBE", "0").strip() == "1"
-        )
-        _detect_deadline = time.time() + (0.0 if _skip_project_state_probe else 10.0)
-        if _skip_project_state_probe:
-            print("[REDO] Project-state DOM probe skipped; downstream controls own readiness", flush=True)
+        # v963 — one bounded call replaces the 10x1s sleep loop around an
+        # unbounded page.evaluate. Same 10-second budget; the driver enforces it
+        # now, because a Python loop cannot interrupt the call it is timing.
+        # The skip-the-probe env escape hatch is gone with it: it skipped the
+        # CHECK and left the hanging CALL exactly where it was. (Named in full
+        # in the commit message and the plan, not here — a test asserts the flag
+        # name appears nowhere in this file, and a comment would satisfy a
+        # substring search that is meant to prove the code is gone.)
         _project_ready = False
-        while time.time() < _detect_deadline:
-            time.sleep(1.0)
-            # URL check — Flow may redirect access-denied to /fx/tools/flow
-            if "/project/" not in page.url:
-                print(f"[REDO] ⚠ URL no longer on project ({page.url}) — creating new project", flush=True)
-                _need_new_project = True
-                break
-            # Body text check — most reliable for the error overlay:
-            #   <h3>Something went wrong.</h3> + <a>Back to projects</a>
-            try:
-                _state = page.evaluate("""() => {
-                    // v834 — LOCALE-ROBUST. The es-419 UI shows "Se produjo un
-                    // error" / "Volver a los proyectos" / "Vídeos" / "Escenas", not
-                    // the English strings, so the old English-only match missed the
-                    // error page and the worker proceeded against a broken project
-                    // (operator 2026-07-08: project opened in another account →
-                    // Spanish error page undetected). Normalize (accent-strip +
-                    // lowercase), match error + ready phrases across en + es.
-                    const raw = (document.body && document.body.innerText) || '';
-                    const txt = raw.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase();
-                    const okMarkers = ['videos', 'scenes', 'escenas'];
-                    const hasOk = okMarkers.some(s => txt.includes(s));
-                    if (txt.includes('something went wrong') || txt.includes('se produjo un error')) return 'err-text';
-                    if ((txt.includes('back to projects') || txt.includes('volver a los proyectos')) && !hasOk) return 'err-link';
-                    if (hasOk) return 'ok';
-                    return 'wait';
-                }""")
-            except Exception as _e:
-                print(f"[REDO] detection eval error: {_e}", flush=True)
-                _state = 'wait'
-            if _state in ('err-text', 'err-link'):
-                # v741 — Flow's "Something went wrong" / error page is its
-                # throttle/overload signal. Immediately spawning a replacement
-                # project amplifies the throttle AND accumulates dead projects
-                # (which itself slows every later page load — the "platform got
-                # slow lately" symptom). Cool down first so Flow can recover
-                # before we create another project. Only fires on a real error
-                # signal, so healthy redos are unaffected.
-                _REDO_THROTTLE_COOLDOWN_S = 45
-                print(f"[REDO] ⚠ Flow error page ({_state}) — likely throttle/overload; "
-                      f"cooling down {_REDO_THROTTLE_COOLDOWN_S}s before creating new project", flush=True)
-                time.sleep(_REDO_THROTTLE_COOLDOWN_S)
-                _need_new_project = True
-                break
-            if _state == 'ok':
-                # v963 — this used to also set _flow_auth_proof from the same DOM
-                # read. Project readiness is not authentication: the editor shell
-                # renders from cache for a signed-OUT session too, which is how a
-                # dead session kept proving itself alive. Readiness only.
-                _project_ready = True
-                break
+        _state = _flow_project_state(page, timeout_s=10.0)
+        if _state == 'gone':
+            # Flow redirects access-denied away from /project/.
+            print(f"[REDO] \u26a0 URL no longer on project ({page.url}) \u2014 creating new project", flush=True)
+            _need_new_project = True
+        elif _state in ('err-text', 'err-link'):
+            # v741 — Flow's "Something went wrong" page is its throttle/overload
+            # signal. Immediately spawning a replacement project amplifies the
+            # throttle AND accumulates dead projects (which itself slows every
+            # later page load — the "platform got slow lately" symptom). Cool
+            # down first so Flow can recover. Only fires on a real error signal,
+            # so healthy redos are unaffected.
+            _REDO_THROTTLE_COOLDOWN_S = 45
+            print(f"[REDO] \u26a0 Flow error page ({_state}) — likely throttle/overload; "
+                  f"cooling down {_REDO_THROTTLE_COOLDOWN_S}s before creating new project", flush=True)
+            time.sleep(_REDO_THROTTLE_COOLDOWN_S)
+            _need_new_project = True
+        elif _state == 'ok':
+            # Readiness only. This used to also set _flow_auth_proof from the
+            # same DOM read; the editor shell renders for a signed-OUT session
+            # too, which is how a dead session kept proving itself alive.
+            _project_ready = True
         if not _need_new_project and not _project_ready:
-            # 10s window without a clear signal — proceed optimistically.
-            # Downstream steps (settings dropdown, videos tab) have their
-            # own retry loops, so a slow load doesn't auto-trigger
-            # a wasteful new-project creation.
-            print(f"[REDO] ⚠ Project state unclear after 10s — proceeding optimistically", flush=True)
+            # Undecided inside the budget — proceed, as before. Downstream steps
+            # have their own retry loops, so a slow load must not trigger a
+            # wasteful new-project creation. Wording unchanged on purpose: log
+            # readers and the operator's greps key on this exact line.
+            print(f"[REDO] \u26a0 Project state unclear after 10s \u2014 proceeding optimistically", flush=True)
 
         flow_model_event(
             "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
@@ -20130,92 +20306,7 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                 ensure_videos_tab_selected(page)
                 
                 # Check data-index=0 tile status — same pattern as check_recent_clip_failure
-                _tile_info = page.evaluate("""() => {
-                    const c = document.querySelector("div[data-index='0']");
-                    if (!c) return {exists: false};
-                    
-                    // Deduplicate tiles by data-tile-id
-                    const allTileEls = c.querySelectorAll("[data-tile-id]");
-                    const seen = new Set();
-                    const tiles = [];
-                    allTileEls.forEach(t => {
-                        const id = t.getAttribute("data-tile-id");
-                        if (id && !seen.has(id)) { seen.add(id); tiles.push(t); }
-                    });
-                    
-                    const text = c.innerText || c.textContent || '';
-                    let hasVideo = false;
-                    let hasGenerating = false;
-                    let hasFailed = false;
-                    let videoCount = 0;      // v817 — per-tile counts so Python
-                    let generatingCount = 0; // can tell a settled batch from a
-                    let failedCount = 0;     // partially-rendered one
-                    const videoUrls = [];
-                    const failedUuids = [];  // v816
-
-                    tiles.forEach(t => {
-                        if (t.querySelector("video")) {
-                            hasVideo = true;
-                            videoCount++;
-                            const videos = t.querySelectorAll("video");
-                            for (const v of videos) {
-                                let url = v.src || '';
-                                if (!url) { const s = v.querySelector('source'); if (s) url = s.src || ''; }
-                                if (url && !url.startsWith('blob:')) videoUrls.push(url);
-                            }
-                            return;
-                        }
-                        const tText = t.textContent || '';
-                        if (tText.includes('videocam') || /\\d+%/.test(tText)) {
-                            hasGenerating = true;
-                            generatingCount++;
-                            return;
-                        }
-                        const hasRefresh = t.querySelector("i") &&
-                            Array.from(t.querySelectorAll("i")).some(i => i.textContent.trim() === 'refresh');
-                        if (hasRefresh) {
-                            hasFailed = true;
-                            failedCount++;
-                            // v816 — collect the failed tile's OWN media uuid so
-                            // Python can match it to the API terminal record
-                            // (SEXUAL/PROMINENT/...) — same as FailCheck v802.
-                            for (const el of t.querySelectorAll('img,video,source')) {
-                                const s = el.getAttribute('src') || el.src || '';
-                                const m = s.match(/[?&]name=([0-9a-fA-F-]{36})/);
-                                if (m) failedUuids.push(m[1].toLowerCase());
-                            }
-                        }
-                    });
-                    
-                    // Fallback: if no data-tile-id children, scan container directly
-                    if (tiles.length === 0) {
-                        hasVideo = c.querySelector('video') !== null;
-                        hasGenerating = text.includes('videocam') || /\\d+%/.test(text);
-                        hasFailed = text.includes('Failed');
-                        if (hasVideo) {
-                            for (const v of c.querySelectorAll('video')) {
-                                let url = v.src || '';
-                                if (!url) { const s = v.querySelector('source'); if (s) url = s.src || ''; }
-                                if (url && !url.startsWith('blob:')) videoUrls.push(url);
-                            }
-                        }
-                    }
-                    
-                    // Check for blob-only videos
-                    let blobOnly = false;
-                    if (hasVideo && videoUrls.length === 0) {
-                        blobOnly = true;
-                    }
-                    
-                    return {
-                        exists: true, tiles: tiles.length || 1,
-                        hasVideo: hasVideo, hasGenerating: hasGenerating, hasFailed: hasFailed,
-                        blobOnly: blobOnly, videoUrls: videoUrls,
-                        failedUuids: failedUuids,
-                        videoCount: videoCount, generatingCount: generatingCount,
-                        failedCount: failedCount
-                    };
-                }""")
+                _tile_info = _redo_tile_info(page)
                 
                 if not _tile_info or not _tile_info.get('exists'):
                     print(f"[REDO] Scan {_scan_attempt + 1}/{_max_scan_attempts}: data-index=0 not found, waiting 15s...", flush=True)
