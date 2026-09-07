@@ -381,37 +381,7 @@ def _page_state(api_reply, url="https://flow.google.com/project/abc", **page_att
     return fn(page), page, calls
 
 
-def test_page_state_never_confirms_from_dom():
-    state, page, _calls = _page_state(lambda u: _denial())
-    assert state == "flow_not_logged_in"
-    assert getattr(page, "_flow_auth_denied", None) is not None
 
-    state, page, _calls = _page_state(lambda u: _ok())
-    assert state == "flow_logged_in"
-    assert page._flow_authenticated_api_proof == "credits"
-
-
-def test_page_state_remembers_a_denial_newer_than_the_confirm():
-    def api(u):
-        raise AssertionError("a remembered denial must short-circuit the probe")
-
-    state, _page, calls = _page_state(
-        api,
-        _flow_authenticated_api_proof="credits",
-        _flow_auth_confirmed_at=100.0,
-        _flow_auth_denied={"label": "agentInfo", "reason": GOOGLE_DENIAL, "at": 200.0},
-    )
-    assert state == "flow_not_logged_in"
-    assert calls == []
-
-
-# ------------------------------------------------------- 9-10: source contracts
-
-def test_dom_confirmation_strings_are_gone():
-    for dead in ("visible signed-in Flow project editor DOM",
-                 "visible signed-in Flow DOM"):
-        assert dead not in SOURCE, (
-            f"{dead!r} still sets an auth verdict from page text")
 
 
 def test_headless_login_wait_is_zero():
@@ -475,31 +445,22 @@ def test_a_real_denial_still_denies_after_the_carve_out():
     assert is_denial({"status": 403}) is True
 
 
-def test_the_verdict_waits_for_the_app_to_mint_a_bearer():
-    """v963.2 — the app authenticating IS the check.
-
-    `_fa_attach_token_listener` sniffs `Bearer ya29.*` off the page's own
-    requests. A signed-in Flow app makes authenticated calls and mints one; a
-    signed-out one never does, and a cached shell has nothing to authenticate
-    with. So the worker watches for that instead of asking a question of its own
-    invention - which is how it came to score "API keys are not supported"
-    (an api key sent with no bearer) as a refusal, sixteen times, against a
-    freshly-rebuilt profile.
-    """
-    state = _source_of("_flow_page_state")
-    assert "_fa_attach_token_listener(p)" in state
-    assert "_FLOW_AUTH_BEARER_WAIT_S" in state
-    # credits is still called, but only WITH the bearer - never as the opener
-    assert "_fa_api_fetch(" in state
-    body = state.split("_FLOW_AUTH_BEARER_WAIT_S", 1)[1]
-    assert body.index("_bearer") < body.index("_fa_api_fetch("), (
-        "credits must be asked only after a bearer exists to ask it with")
-
-
-def test_no_bearer_is_a_refusal_stated_by_the_app_itself():
-    state = _source_of("_flow_page_state")
-    seg = state.split("if not _bearer:", 1)[1].split("return", 1)[0]
-    assert "_flow_auth_denied" in seg, (
-        "an app that never authenticated in the whole window IS signed out, and "
-        "that verdict must be recorded so later checks short-circuit")
-    assert "never minted a bearer" in seg
+# ---------------------------------------------------------------------------
+# v963.3 — six tests were REMOVED here, and the removal is the point.
+#
+# They pinned a redesign in which only an authenticated reply could confirm a
+# login and page text could never do so. The diagnosis behind it was real: proof
+# could be switched ON by the DOM and never OFF by a refusal. The cure was worse.
+# It rejected cookie-only sessions that had no bearer yet, and it stopped a
+# worker whose golden had JUST been rebuilt from the operator's signed-in
+# Firefox — twice, on two different workers, in one night.
+#
+# The operator's call, and it is right: the main worker never needed a bearer
+# gate, worker-b must behave the same as the main worker, and worker-b's actual
+# problem was LAPTOP_PULL_DISABLED=1 stopping it from copying the Firefox
+# profile at all.
+#
+# What survives here is what was true independently of that design: the denial
+# CLASSIFICATION (a credential presented and rejected, never a refused method,
+# never transport noise) and the replay's ONE-verdict-at-the-end shape.
+# ---------------------------------------------------------------------------

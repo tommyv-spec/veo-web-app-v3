@@ -3912,191 +3912,184 @@ class FlowLoginRequired(RuntimeError):
 
 _FLOW_CREDITS_URL = "https://aisandbox-pa.googleapis.com/v1/credits"
 
-# How long to let the Flow app prove itself by making an authenticated
-# request. A signed-in app mints a bearer within a couple of seconds of the
-# editor loading; a signed-out one never does, however long you wait.
-_FLOW_AUTH_BEARER_WAIT_S = 20
 
-
+# v963.3 — RESTORED to the pre-2026-09-07 logic, on the operator's call.
+#
+# The redesign that sat here made only an authenticated reply able to confirm a
+# login. The diagnosis behind it was real (proof could be switched ON by page
+# text and never OFF by a refusal), but the cure was worse than the disease: it
+# rejected cookie-only sessions that had no bearer yet, and tonight it refused a
+# profile whose golden had JUST been rebuilt from the operator's signed-in
+# Firefox. Two workers stopped that would otherwise have rendered.
+#
+# The main worker never needed a bearer gate. worker-b must behave the same as
+# the main worker. Its actual problem was that LAPTOP_PULL_DISABLED=1 stopped it
+# copying the Firefox profile at all — fixed in its .env, and visible in the log
+# as `ff-pull: golden built from tocgh2wh.default-release`.
+#
+# Kept from the rewrite, because they cost nothing and are not this check:
+#   * module level, so tests can load it by AST (body otherwise identical)
+#   * a real denial is still RECORDED on the page for the log, but it does not
+#     gate this verdict any more.
+#
+# The hang fixes are untouched and remain the substantive result of tonight:
+# _flow_project_state, ensure_videos_tab_selected and _redo_tile_info are all
+# bounded, because page.evaluate has no timeout.
 def _flow_page_state(p, label="Flow"):
-    """What state is this page in? Returns one of:
+    """Determine current page state. Returns one of:
     'flow_logged_in', 'flow_not_logged_in', 'google_login', 'google_redirect', 'other'
-
-    THE RULE, and the reason this function was rewritten (2026-09-07):
-
-        Only an authenticated API reply may say "logged in".
-        The DOM may say "not logged in". The DOM may never say "logged in".
-
-    The old version asked the page first: if `document.body.innerText` contained
-    "videos" or "scenes", it returned 'flow_logged_in' and never looked further. A
-    signed-out Flow SPA still renders its cached shell, still says "Videos", still
-    keeps /project/<id> in the address bar — so it passed, and the worker walked
-    into the picker with dead cookies. The authenticated credits call that would
-    have caught it sat BELOW that check, reachable only when the DOM check failed.
-
-    So the order here is deliberate and is the fix. Cheap vetoes first (they can
-    only refuse), then the remembered verdict, then the one call that can confirm.
-
-    Module level, not nested inside ensure_logged_into_flow, so the tests can load
-    it by AST — see tests/test_flow_worker_auth_verdict.py.
     """
     try:
         url = p.url.lower()
     except Exception:
         return 'other'
-
-    # Chrome's account dialogs block interaction. Dismissing one is not a verdict.
+    
+    # Quick dismiss of Chrome browser dialogs that block interaction
     try:
         for btn_text in ["Use Chrome without an account", "No thanks", "Not now"]:
             btn = p.locator(f"button:has-text('{btn_text}')")
             if btn.count() > 0 and btn.first.is_visible(timeout=500):
                 btn.first.click(force=True)
-                print(f"[{label}] ✓ Dismissed Chrome dialog ({btn_text})", flush=True)
+                print(f"[Login] ✓ Dismissed Chrome dialog ({btn_text})", flush=True)
                 time.sleep(1)
                 break
-    except Exception:
+    except:
         pass
-
+    
+    # Google redirect in progress (SetSID, OAuth consent, etc.)
     if "accounts.google" in url and ("setsid" in url or "consent" in url):
         return 'google_redirect'
+    
+    # Google login/signin page
     if "accounts.google" in url:
         return 'google_login'
+    
+    # On Flow URL (handles locale: /fx/es-419/tools/flow, /fx/tools/flow, etc.)
+    if is_flow_url(url):
+        # A project URL is navigation state, not authentication proof. A
+        # signed-out/stale SPA can keep /project/<id> in the address bar.
+        # Only visible app/account controls prove that this private browser
+        # is signed in.
+        if "/project/" in url:
+            try:
+                _editor_ready = bool(p.evaluate("""() => {
+                    const raw = (document.body && document.body.innerText) || '';
+                    const txt = raw.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase();
+                    const editor = ['videos', 'scenes', 'escenas'].some(s => txt.includes(s));
+                    const signedOut = txt.includes('create with flow') || txt.includes('create with google flow');
+                    const broken = txt.includes('something went wrong') || txt.includes('se produjo un error');
+                    return editor && !signedOut && !broken;
+                }"""))
+                if _editor_ready:
+                    p._flow_auth_proof = "visible signed-in Flow project editor DOM"
+                    flow_model_event(
+                        "flow_auth_project_dom_proof",
+                        page_kind="project",
+                    )
+                    return 'flow_logged_in'
+            except Exception:
+                pass
 
-    if not is_flow_url(url):
-        return 'other'
+        _api_proof = getattr(p, "_flow_authenticated_api_proof", "")
+        if "/project/" in url and _api_proof:
+            p._flow_auth_proof = f"authenticated Flow account API ({_api_proof})"
+            return 'flow_logged_in'
 
-    # ── 1. VETOES. These may only REFUSE, never confirm. Bounded locators. ──
-    for sel, why in (
-        ("button:text-matches('Create with.*Flow', 'i')", "signed-out splash"),
-        ("text=Something went wrong", "error page"),
-        ("text=Se produjo un error", "error page (es)"),
-    ):
+        # Check DOM for login state — multiple indicators
+        # New project button text varies by locale: "New project", "Nuevo proyecto", "Dự án mới", etc.
+        # So we check multiple selectors, not just English text
+        logged_in_selectors = [
+            "button[aria-label^='Google Account:']",   # v962.4 new host
+            "button[aria-label='Settings trigger']",    # v962.4 new host
+            # Signed-in project editor controls. A resumed project can hide
+            # the account button and settings trigger while Agent mode is
+            # settling, but these controls still prove the authenticated
+            # app rendered. The URL alone remains insufficient.
+            "button[aria-label='Start generation']",
+            "button[aria-label='Add media menu']",
+            "a[href*='/project/'][href$='/tools']",
+            # Profile avatar — most reliable, locale-independent
+            "img[src*='googleusercontent.com']",
+            "img[src*='lh3.googleusercontent']",
+            # New project button — locale variants (new UI: no add_2 icon)
+            "button:has-text('New project')",          # English
+            "button:has-text('Nuovo progetto')",       # Italian
+            "button:has-text('Nuevo proyecto')",       # Spanish
+            "button:has-text('Nouveau projet')",       # French
+            "button:has-text('Neues Projekt')",        # German
+            # Icon-based fallback (old UI)
+            "button:has(i:text('add_2'))",
+        ]
+        
+        for selector in logged_in_selectors:
+            try:
+                if p.locator(selector).first.is_visible(timeout=1500):
+                    p._flow_auth_proof = "visible signed-in Flow DOM"
+                    return 'flow_logged_in'
+            except Exception:
+                pass
+        
+        # Check for "Create with Flow" (old splash, means NOT logged in)
         try:
-            if p.locator(sel).first.is_visible(timeout=800):
-                print(f"[{label}] not signed in — {why}", flush=True)
+            # Regex matches both old "Create with Flow" and new "Create with Google Flow"
+            if p.locator("button:text-matches('Create with.*Flow', 'i')").is_visible(timeout=1500):
+                return 'flow_not_logged_in'
+        except Exception:
+            pass
+        
+        # Neither found — page might still be loading. Wait and retry once.
+        time.sleep(2)
+        
+        for selector in logged_in_selectors:
+            try:
+                if p.locator(selector).first.is_visible(timeout=1500):
+                    p._flow_auth_proof = "visible signed-in Flow DOM"
+                    return 'flow_logged_in'
+            except Exception:
+                pass
+        
+        try:
+            # Regex matches both old "Create with Flow" and new "Create with Google Flow"
+            if p.locator("button:text-matches('Create with.*Flow', 'i')").is_visible(timeout=1500):
                 return 'flow_not_logged_in'
         except Exception:
             pass
 
-    # ── 2. A denial newer than the last confirm means the session died. ──
-    # This is the "no" direction the old code did not have at all.
-    _denied = getattr(p, "_flow_auth_denied", None)
-    _confirmed_at = getattr(p, "_flow_auth_confirmed_at", 0) or 0
-    if isinstance(_denied, dict) and (_denied.get("at") or 0) > _confirmed_at:
-        print(f"[{label}] FLOW_AUTH_DENIED by '{_denied.get('label')}': "
-              f"{_denied.get('reason')}", flush=True)
-        try:
-            _clear_flow_auth_ready()
-        except Exception:
-            pass
-        return 'flow_not_logged_in'
-
-    # ── 3. A standing confirm from this page's own replay. ──
-    _api_proof = getattr(p, "_flow_authenticated_api_proof", "")
-    if _api_proof:
-        p._flow_auth_proof = f"authenticated Flow account API ({_api_proof})"
-        return 'flow_logged_in'
-
-    # ── 4. Let the app authenticate itself, and watch it do so. ──
-    #
-    # The worker already had the only signal that matters, and the first version
-    # of this function built a worse one beside it.
-    # `_fa_attach_token_listener` sniffs `Bearer ya29.*` off the page's OWN
-    # requests, which means:
-    #
-    #     a signed-in Flow app makes authenticated calls and mints a bearer.
-    #     a signed-out one never does.
-    #
-    # That IS the authentication check. It needs no page text and no probe of our
-    # own invention, and it cannot be fooled by a cached shell, because a cached
-    # shell has nothing to authenticate WITH.
-    #
-    # What was here before called /v1/credits as `?key=<api key>` plus whatever
-    # bearer happened to exist. With none, Google answers "API keys are not
-    # supported by this API" — refusing the auth METHOD — and that was scored as a
-    # refusal: sixteen FLOW_AUTH_DENIED lines against a profile whose golden had
-    # just been rebuilt from the operator's signed-in Firefox, not one of which
-    # had asked a question the session could answer.
-    try:
-        _fa_attach_token_listener(p)
-    except Exception:
-        pass
-    try:
-        p.wait_for_load_state("domcontentloaded", timeout=15000)
-    except Exception:
-        pass
-
-    _deadline = time.time() + _FLOW_AUTH_BEARER_WAIT_S
-    _bearer = getattr(_FA_TOKEN_STORE, "token", "") or ""
-    while not _bearer and time.time() < _deadline:
-        time.sleep(1)
-        _bearer = getattr(_FA_TOKEN_STORE, "token", "") or ""
-
-    if not _bearer:
-        # The app had its window and never made a single authenticated request.
-        # That is a signed-out session, stated by the app's own behaviour.
-        p._flow_authenticated_api_proof = ""
-        p._flow_auth_denied = {"label": "no-bearer",
-                               "reason": (f"the Flow app made no authenticated "
-                                          f"request in {_FLOW_AUTH_BEARER_WAIT_S}s"),
-                               "at": time.time()}
-        print(f"[{label}] FLOW_AUTH_DENIED: the app never minted a bearer in "
-              f"{_FLOW_AUTH_BEARER_WAIT_S}s — this session is signed out", flush=True)
-        try:
-            _clear_flow_auth_ready()
-        except Exception:
-            pass
-        flow_model_event("flow_auth_no_bearer",
-                         page_kind="project" if "/project/" in url else "home")
-        return 'flow_not_logged_in'
-
-    # A bearer exists, so the app authenticated. Confirm on that, then let credits
-    # either harden it or overturn it — and NOW the call is answerable, because it
-    # carries a real credential.
-    p._flow_authenticated_api_proof = "bearer"
-    p._flow_auth_confirmed_at = time.time()
-    p._flow_auth_denied = None
-    p._flow_auth_proof = "the Flow app minted an authenticated bearer"
-
-    try:
-        _probe = _fa_api_fetch(
-            p, f"{_FLOW_CREDITS_URL}?key={_FA_GOOGLE_API_KEY}", "GET", _bearer)
-        if isinstance(_probe, dict) and not _fa_is_error(_probe):
-            p._flow_authenticated_api_proof = "credits"
-            p._flow_auth_proof = "authenticated Flow account API (credits)"
-            flow_model_event("flow_auth_api_proof", status=_probe.get("status"),
-                             page_kind="project" if "/project/" in url else "home",
-                             endpoint="credits")
-        elif _fa_is_auth_denial(_probe):
-            # A real credential was presented and rejected. That outranks the
-            # bearer's existence: the token is stale.
-            p._flow_authenticated_api_proof = ""
-            p._flow_auth_denied = {"label": "credits",
-                                   "reason": _fa_error_reason(_probe)[:160],
-                                   "at": time.time()}
-            print(f"[{label}] FLOW_AUTH_DENIED by 'credits': "
-                  f"{_fa_error_reason(_probe)}", flush=True)
+        # The current project editor can render with none of the stable
+        # account/control selectors above. In that state, use a real
+        # authenticated account request as the fallback proof. This is
+        # deliberately limited to /project/<id>, requires a captured
+        # Google bearer token, and rejects every HTTP/API error. The URL
+        # by itself is still never accepted as login proof.
+        if "/project/" in url:
             try:
-                _clear_flow_auth_ready()
+                _auth_token = _FA_TOKEN_STORE.token or ""
+                if _auth_token:
+                    _probe = _fa_api_fetch(
+                        p,
+                        f"https://aisandbox-pa.googleapis.com/v1/credits?key={_FA_GOOGLE_API_KEY}",
+                        "GET",
+                        _auth_token,
+                    )
+                    if not _fa_is_error(_probe):
+                        p._flow_auth_proof = "authenticated Flow account API"
+                        flow_model_event(
+                            "flow_auth_api_proof",
+                            status=_probe.get("status"),
+                            page_kind="project",
+                        )
+                        return 'flow_logged_in'
             except Exception:
                 pass
-            return 'flow_not_logged_in'
-        else:
-            # Method error, transport, 5xx — no information. The bearer stands.
-            print(f"[{label}] credits inconclusive "
-                  f"({_fa_error_reason(_probe)[:90]}); the minted bearer is the "
-                  f"proof", flush=True)
-    except Exception as _probe_err:
-        # Never silent: the difference between "Google said no" and "we never
-        # managed to ask" is the whole point of this function.
-        print(f"[{label}] credits probe error "
-              f"({type(_probe_err).__name__}: {_probe_err}) — the minted bearer "
-              f"is the proof", flush=True)
-
-    print(f"[{label}] FLOW_AUTH_CONFIRMED endpoint="
-          f"{p._flow_authenticated_api_proof} bearer=yes", flush=True)
-    return 'flow_logged_in'
-
+        
+        # Still nothing — page is on the Flow URL but login state is unclear.
+        # Returning 'other' causes infinite re-navigation (page is already here).
+        # Treat as flow_not_logged_in to trigger the click-through/login path instead.
+        flow_ui_probe(p, "flow_auth_dom_unclear")
+        print(f"[Login] ⚠ On Flow URL but no login indicators found — treating as not logged in", flush=True)
+        return 'flow_not_logged_in'
+    
+    return 'other'
 
 # v963 — the project-state probe, bounded. Returns null (not 'wait') while
 # undecided so wait_for_function keeps polling to ITS deadline instead of us

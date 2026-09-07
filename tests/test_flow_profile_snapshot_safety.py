@@ -49,66 +49,35 @@ class ProfileSnapshotSafety(unittest.TestCase):
             body,
         )
 
-    # ── v963 (2026-09-07) ────────────────────────────────────────────────────
-    # Four tests here used to assert the OPPOSITE of what follows: that the
-    # project-editor text and the signed-in control selectors WERE login proof.
-    # Each was written for a real incident and each was right about the incident
-    # it caught (a bare URL must never count as authentication). But they fixed it
-    # by promoting the next-cheapest signal instead of the authoritative one.
-    #
-    # On 2026-09-07 that cost a night. A signed-out SPA rendered its cached shell —
-    # "Videos" still on screen, /project/<id> still in the address bar — so the DOM
-    # check confirmed the login, while thirteen authenticated calls in the same
-    # session came back "missing required authentication credential". The worker
-    # believed the page.
-    #
-    # The protection those tests wanted survives below in a stronger form:
-    # the URL is not proof, and neither is anything else the page draws.
-    # See docs/flow-worker-root-cause-2026-09-07.md.
+    # v963.3 — these are the ORIGINAL assertions, re-pointed at
+    # _flow_page_state. The login logic is byte-identical to what shipped before
+    # 2026-09-07; it only moved to module level so tests can load it by AST.
+    # A rewrite that made page text unable to confirm a login was reverted on the
+    # operator's call after it stopped two workers with live profiles.
 
-    def test_the_dom_may_veto_a_login_but_never_confirm_one(self):
-        state = _function_source("_flow_page_state")
-        # It may still REFUSE from what it sees — that direction is safe.
-        self.assertIn("Create with.*Flow", state)
-        self.assertIn("'flow_not_logged_in'", state)
-        # It may not CONFIRM from what it sees.
-        for dom_claim in (
-            "visible signed-in Flow project editor DOM",
-            "visible signed-in Flow DOM",
-            "['videos', 'scenes', 'escenas']",
-            "editor && !signedOut && !broken",
-        ):
-            self.assertNotIn(
-                dom_claim, state,
-                f"{dom_claim!r} lets page text confirm a login again")
+    def test_signed_in_project_controls_are_login_proof(self):
+        body = _function_source("_flow_page_state")
+        self.assertIn("button[aria-label='Start generation']", body)
+        self.assertIn("button[aria-label='Add media menu']", body)
+        self.assertIn("a[href*='/project/'][href$='/tools']", body)
 
-    def test_no_dom_login_confirmation_survives_anywhere_in_the_worker(self):
-        # Not just in the state function: the redo path had its own copy.
-        self.assertNotIn("visible signed-in Flow", FLOW_SOURCE)
+    def test_project_api_fallback_requires_real_authenticated_response(self):
+        body = _function_source("_flow_page_state")
+        self.assertIn('if "/project/" in url:', body)
+        self.assertIn('_auth_token = _FA_TOKEN_STORE.token or ""', body)
+        self.assertIn("if _auth_token:", body)
+        self.assertIn("if not _fa_is_error(_probe):", body)
 
-    def test_the_credits_probe_rejects_anything_that_is_not_a_real_200(self):
-        state = _function_source("_flow_page_state")
-        self.assertIn("_fa_api_fetch(", state)
-        self.assertIn("not _fa_is_error(_probe)", state)
-        self.assertIn("_fa_is_auth_denial(_probe)", state)
-        # The /project/ and bearer-token gates were removed deliberately. They
-        # made a home-URL page impossible to confirm, and that gap is precisely
-        # where the old code reached for page text instead. The probe has to be
-        # reachable on any Flow URL or the DOM fallback grows back.
-        self.assertNotIn('_auth_token = _FA_TOKEN_STORE.token or ""', state)
-        self.assertNotIn("if _auth_token:", state)
-
-    def test_the_credits_proof_is_bound_to_this_page_and_can_be_revoked(self):
+    def test_cookie_authenticated_init_response_is_bound_to_exact_page(self):
         init = _function_source("_fa_init_project_best_effort")
-        state = _function_source("_flow_page_state")
-        # Still bound to this exact page object, never a module global.
+        login = _function_source("_flow_page_state")
         self.assertIn('page._flow_authenticated_api_proof = "credits"', init)
-        self.assertIn(
-            '_api_proof = getattr(p, "_flow_authenticated_api_proof", "")', state)
-        # And now revocable — the half that did not exist. A confirmation nothing
-        # can withdraw is not a check; it is a latch.
-        self.assertIn('page._flow_authenticated_api_proof = ""', init)
-        self.assertIn("page._flow_auth_denied = {", init)
+        self.assertIn('if "/project/" in url and _api_proof:', login)
+
+    def test_project_editor_text_is_visible_dom_login_proof(self):
+        body = _function_source("_flow_page_state")
+        self.assertIn("['videos', 'scenes', 'escenas']", body)
+        self.assertIn("editor && !signedOut && !broken", body)
 
     def test_flow_dom_auth_publishes_a_pid_bound_ready_marker(self):
         login = _function_source("ensure_logged_into_flow")

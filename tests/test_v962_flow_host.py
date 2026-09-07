@@ -276,17 +276,10 @@ def test_v962_4_login_proof_on_the_new_host_is_not_the_cookie():
         src = open(path, encoding="utf-8").read()
         tag = os.path.basename(path)
         assert "def _v962_enter_app(" in src, tag
-        if "def _flow_page_state(" in src:
-            # v963 worker: only an authenticated API reply may confirm.
-            body = _func_body(src, "_flow_page_state")
-            assert "_fa_api_fetch(" in body, tag
-            assert 'p._flow_authenticated_api_proof = "credits"' in body, tag
-            assert "visible signed-in Flow" not in src, tag
-        else:
-            marker = "logged_in_selectors = ["
-            assert marker in src, tag
-            i = src.index(marker)
-            assert "button[aria-label^='Google Account:']" in src[i:i + 400], tag
+        marker = "logged_in_selectors = ["
+        assert marker in src, tag
+        i = src.index(marker)
+        assert "button[aria-label^='Google Account:']" in src[i:i + 400], tag
         # EVERY not-logged-in branch reaches the passive handoff BEFORE its CTA
         # list — the video worker has two (ensure_logged_into_flow and the
         # user-login wait inside it)
