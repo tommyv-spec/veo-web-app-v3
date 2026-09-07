@@ -562,6 +562,10 @@ class RedoRequest(BaseModel):
     new_dialogue: Optional[str] = None  # Optional new dialogue text for the clip
 
 
+class RetryStuckRequest(BaseModel):
+    flow_variants_count: Optional[int] = None
+
+
 class ApprovalResponse(BaseModel):
     clip_id: int
     status: str
@@ -9317,6 +9321,7 @@ async def request_clip_redo(
 @app.post("/api/jobs/{job_id}/retry-stuck")
 async def retry_stuck_clips(
     job_id: str,
+    body: Optional[RetryStuckRequest] = None,
     db: DBSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -9350,6 +9355,33 @@ async def retry_stuck_clips(
     these reset clips on its next poll.
     """
     job = get_user_job(db, job_id, current_user)
+
+    # v961 — let an operator set the Flow output count at the same moment the
+    # job is re-queued. This is job config only: clip count/order/model choices
+    # are unchanged. The old no-body request remains fully compatible.
+    try:
+        job_config = json.loads(job.config_json or "{}")
+    except (TypeError, ValueError):
+        job_config = {}
+    if not isinstance(job_config, dict):
+        job_config = {}
+    old_variants = int(job_config.get("flow_variants_count", 2) or 2)
+    requested_variants = body.flow_variants_count if body else None
+    if requested_variants is not None:
+        if requested_variants < 1 or requested_variants > 4:
+            raise HTTPException(
+                status_code=400,
+                detail="flow_variants_count must be between 1 and 4",
+            )
+        job_config["flow_variants_count"] = requested_variants
+        job.config_json = json.dumps(job_config)
+    flow_variants_count = int(job_config.get("flow_variants_count", 2) or 2)
+    # Temporary production proof line for the 80-clip mixed-model run.
+    print(
+        f"[retry-stuck v961 variants] job={job_id} "
+        f"old={old_variants} requested={requested_variants} saved={flow_variants_count}",
+        flush=True,
+    )
     is_flow = job.backend == 'flow'
     target_status = ClipStatus.FLOW_REDO_QUEUED.value if is_flow else ClipStatus.REDO_QUEUED.value
 
@@ -9410,6 +9442,7 @@ async def retry_stuck_clips(
         db.commit()
         return {
             "job_id": job_id,
+            "flow_variants_count": flow_variants_count,
             "reset_count": 0,
             "pending": 0,
             "stale_generating": 0,
@@ -9442,6 +9475,7 @@ async def retry_stuck_clips(
 
     return {
         "job_id": job_id,
+        "flow_variants_count": flow_variants_count,
         "reset_count": len(all_to_reset),
         "pending": len(reset_pending),
         "stale_generating": len(reset_stale_generating),

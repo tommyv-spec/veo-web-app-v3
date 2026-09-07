@@ -179,9 +179,33 @@ def test_v961_model_audit_file_excludes_prompts_and_secrets():
     fw = open(os.path.join(HERE, "static", "flow_worker.py"), encoding="utf-8").read()
     assert "flow_model_events.jsonl" in fw
     fn_start = fw.index("def flow_model_event(")
-    fn_end = fw.index("\ndef interleave_redo_clips_by_model", fn_start)
+    fn_end = fw.index("\ndef flow_ui_probe", fn_start)
     body = fw[fn_start:fn_end]
     for forbidden in ("prompt", "cookie", "body_raw", "USER_WORKER_TOKEN"):
         assert forbidden not in body
     assert '"flow_generate_request"' in fw
     assert "actual_model_key=model_key or None" in fw
+
+
+def test_flow_ui_probe_is_opt_in_local_and_avoids_form_values():
+    fw = open(os.path.join(HERE, "static", "flow_worker.py"), encoding="utf-8").read()
+    fn_start = fw.index("def flow_ui_probe(")
+    fn_end = fw.index("\ndef interleave_redo_clips_by_model", fn_start)
+    body = fw[fn_start:fn_end]
+    assert "FLOW_UI_DIAGNOSTIC" in body
+    assert "querySelectorAll('button,a,[role=\"button\"]')" in body
+    for forbidden in ("querySelectorAll('input", "querySelectorAll('textarea",
+                      "innerHTML", "document.cookie", "_FA_TOKEN_STORE",
+                      "body_raw", ".value"):
+        assert forbidden not in body
+
+
+def test_retry_stuck_can_atomically_set_one_flow_variant():
+    main = open(os.path.join(HERE, "main.py"), encoding="utf-8").read()
+    start = main.index('class RetryStuckRequest(BaseModel):')
+    end = main.index('\n\n@app.get("/api/clips/{clip_id}")', start)
+    block = main[start:end]
+    assert "flow_variants_count: Optional[int] = None" in block
+    assert "job_config[\"flow_variants_count\"] = requested_variants" in block
+    assert '"flow_variants_count": flow_variants_count' in block
+    assert "requested_variants < 1 or requested_variants > 4" in block

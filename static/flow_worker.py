@@ -325,6 +325,44 @@ def flow_model_event(event, *, job_id=None, clip_id=None, clip_index=None,
         pass
 
 
+def flow_ui_probe(page, event):
+    """Optional local-only capture of visible Flow controls for UI drift.
+
+    Enabled only with FLOW_UI_DIAGNOSTIC=1. It never reads form fields, page
+    HTML, cookies, tokens, prompts, or request bodies. One screenshot and a
+    short control list stay on this PC under ~/.kaveno.
+    """
+    if (os.environ.get("FLOW_UI_DIAGNOSTIC") or "").strip() != "1":
+        return
+    try:
+        controls = page.evaluate("""() => [...document.querySelectorAll('button,a,[role="button"]')]
+            .filter(el => {
+                const r = el.getBoundingClientRect();
+                const s = getComputedStyle(el);
+                return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+            })
+            .slice(0, 40)
+            .map(el => ({
+                tag: el.tagName.toLowerCase(),
+                text: (el.innerText || '').trim().slice(0, 100),
+                aria: (el.getAttribute('aria-label') || '').slice(0, 100),
+                href: (el.getAttribute('href') || '').slice(0, 160),
+                role: (el.getAttribute('role') || '').slice(0, 40)
+            }))""")
+        folder = os.path.dirname(_FLOW_MODEL_EVENT_FILE)
+        os.makedirs(folder, exist_ok=True)
+        shot = os.path.join(folder, f"flow_ui_probe_{os.getpid()}.png")
+        page.screenshot(path=shot, full_page=False)
+        flow_model_event(
+            event,
+            page_url=str(page.url or "")[:240],
+            controls=controls,
+            screenshot=shot,
+        )
+    except Exception as exc:
+        flow_model_event(event + "_failed", error_type=type(exc).__name__)
+
+
 def interleave_redo_clips_by_model(clips):
     """Keep job order, but round-robin model lanes inside each job.
 
@@ -3770,6 +3808,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             # Still nothing — page is on the Flow URL but login state is unclear.
             # Returning 'other' causes infinite re-navigation (page is already here).
             # Treat as flow_not_logged_in to trigger the click-through/login path instead.
+            flow_ui_probe(p, "flow_auth_dom_unclear")
             print(f"[Login] ⚠ On Flow URL but no login indicators found — treating as not logged in", flush=True)
             return 'flow_not_logged_in'
         
@@ -5243,6 +5282,33 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
     v805 diagnostic: prints "copy-mode v805" + the build outcome so the next
     operator-side run confirms the copy path is live (remove after evidence)."""
     cookie_marker = os.path.join(_BASE, ".worker_injected_cookies.json")
+    # LAPTOP_PULL_DISABLED IS CHECKED FIRST, FOR EVERY BROWSER MODE.
+    #
+    # It used to be, and on 2026-09-06 session 08 made every automated launch
+    # route set it (worker_lifecycle ensure + sweep, launch_workers' default)
+    # because each copy of the operator's Firefox session is one more device
+    # rotating the same Google tokens, and when the copies diverge Google
+    # revokes them all — the operator's own browser included. It fired twice
+    # that day (05:41 and 18:56-19:43).
+    #
+    # Commit 3d3b28f (2026-09-07 00:58, "Make Firefox worker profiles fail
+    # closed") added the firefox branch below with its own `return`, ABOVE this
+    # check, so from 00:58 every flow launch copied that session again —
+    # including the 15-minute sweep's, i.e. a fresh copy four times an hour.
+    # Measured in worker_fg_0907a.log lines 40-46 by the 08:10 session
+    # (HANDOFF rev 806, Finding 1) and the reason `~/.kaveno/hold/flow` was
+    # written.
+    #
+    # The fail-closed verification that commit added is NOT reverted: it still
+    # runs whenever a pull is actually wanted (a human's `--allow-ff-pull`).
+    # This only restores the flag's meaning — an unattended worker runs on its
+    # profile's OWN session or hits its login wall and holds itself, which is
+    # exactly what rev 799 designed and what the memory
+    # `google-session-has-one-owner-copies-rotate-apart` requires.
+    if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
+        print(f"[{label}] LAPTOP_PULL_DISABLED=1 — no profile copy; this worker uses its "
+              f"own session or holds itself", flush=True)
+        return
     try:
         # Drop any stale net-log cookie marker from the retired path so the old
         # injection block (kept as a no-op) never fires with dead cookies.
