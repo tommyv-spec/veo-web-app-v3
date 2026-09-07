@@ -493,6 +493,34 @@ def _read_cookies_wal_applied(profile_dir):
 # gemini_decode_worker reports that. Let the browser do it.
 
 
+def _prune_labs_cookies_firefox(cookies_db, log=print):
+    """v914 for Firefox: drop every labs.google cookie, keep Google SSO.
+
+    Firefox stores cookies in `moz_cookies` keyed by `host`; the Chrome version
+    of this (worker_profile_pull._prune_labs_session_cookies) speaks
+    `cookies.host_key` and therefore never applied here. Operates on the
+    GOLDEN's copied database only, never on the real profile.
+
+    Returns the number of rows deleted, or -1 when there was nothing to do.
+    """
+    if not cookies_db or not os.path.isfile(cookies_db):
+        return -1
+    try:
+        con = sqlite3.connect(cookies_db, timeout=5)
+        try:
+            cur = con.execute("DELETE FROM moz_cookies WHERE host LIKE '%labs.google%'")
+            con.commit()
+            return cur.rowcount if cur.rowcount is not None else 0
+        finally:
+            con.close()
+    except Exception as exc:
+        try:
+            log(f"  prune labs.google cookies failed: {str(exc)[:120]}")
+        except Exception:
+            pass
+        return -1
+
+
 def build_firefox_golden_from_profile(email, golden_folder, label="",
                                       account_num=None, log=print):
     """Build `golden_folder` as a Firefox profile carrying `email`'s session.
@@ -533,6 +561,26 @@ def build_firefox_golden_from_profile(email, golden_folder, label="",
             return False
         log(f"{tag}ff-pull: cookies.sqlite snapshotted via SQLite backup "
             f"(WAL applied; -wal/-shm intentionally not copied)")
+
+        # v914 FOR FIREFOX (added 2026-09-07). The labs.google prune existed only
+        # on the CHROME path (`worker_profile_pull._prune_labs_session_cookies`,
+        # which speaks the Chrome schema `cookies.host_key`). Firefox is what the
+        # workers actually run now, and this builder never stripped anything, so
+        # every Firefox golden inherited whatever Flow session the source profile
+        # held. Per [[flow-golden-must-ship-sso-only]] that session arrives
+        # ALREADY FLAGGED and no golden restore can fix it — each restore
+        # faithfully restores the flagged session. Stripped, the first entry into
+        # Flow makes Google SSO mint a fresh one.
+        #
+        # Measured today: a second Flow worker seeded from a profile holding a
+        # live labs session landed straight on the account chooser, reporting
+        # "the Google session in this profile is dead", with all 66 Google
+        # cookies present. Firefox schema is `moz_cookies.host`, not Chrome's.
+        pruned = _prune_labs_cookies_firefox(
+            os.path.join(golden_folder, "cookies.sqlite"), log=log)
+        if pruned >= 0:
+            log(f"{tag}ff-pull: v914 stripped {pruned} labs.google cookie(s) "
+                f"— golden ships Google SSO only")
 
         log(f"{tag}ff-pull: golden built from {os.path.basename(src)} "
             f"({copied} durable files)")
