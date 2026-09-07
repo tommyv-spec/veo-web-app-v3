@@ -43,6 +43,84 @@ WORKER_VERSION = "v793+identity"
 
 import subprocess, sys, shutil
 
+
+# The lifecycle launcher serializes normal starts, but this file is also often
+# run directly while debugging. The worker must therefore own the final guard:
+# one OS lock, acquired before dependency bootstrap or any browser/profile use.
+# The open handle keeps the lock alive and the OS releases it after a crash.
+_FLOW_WORKER_SINGLETON_HANDLE = None
+
+
+def _flow_worker_singleton_path():
+    return os.path.join(
+        os.path.expanduser("~"), ".kaveno", "flow_worker.singleton.lock")
+
+
+def _acquire_flow_worker_singleton(lock_path=None):
+    """Take the one-per-machine-user Flow worker lock without waiting."""
+    global _FLOW_WORKER_SINGLETON_HANDLE
+    if _FLOW_WORKER_SINGLETON_HANDLE is not None:
+        return True
+
+    path = lock_path or _flow_worker_singleton_path()
+    handle = None
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        handle = open(path, "a+b")
+        handle.seek(0)
+        if not handle.read(1):
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        _FLOW_WORKER_SINGLETON_HANDLE = handle
+        return True
+    except (OSError, IOError):
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
+        return False
+
+
+def _release_flow_worker_singleton():
+    """Release only for the worker's deliberate self-update handoff."""
+    global _FLOW_WORKER_SINGLETON_HANDLE
+    handle = _FLOW_WORKER_SINGLETON_HANDLE
+    if handle is None:
+        return
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except (OSError, IOError):
+        pass
+    finally:
+        try:
+            handle.close()
+        except OSError:
+            pass
+        _FLOW_WORKER_SINGLETON_HANDLE = None
+
+
+if __name__ == "__main__":
+    if not _acquire_flow_worker_singleton():
+        print("[Init] Flow worker singleton is already owned; exiting cleanly.",
+              flush=True)
+        raise SystemExit(0)
+
 # Pin the console encoding INSIDE the program (CLAUDE.md §9.1.1), before the first
 # print. start_worker.bat launches this with stdout redirected to a log under cmd's
 # cp1252, and the "[Init] ✓ Patchright" line below raised UnicodeEncodeError at
@@ -8906,8 +8984,26 @@ _V962_FRAME_SLOT = {"start": "flow-ingredient-bar button:has-text('Start')",
 _V962_FRAME_CHIP = "flow-ingredient-bar flow-image-ingredient-chip"
 _V962_PROMPT_EDITOR = "flow-rich-text-editor [contenteditable='true']"
 _V962_GENERATE_BTN = "button[aria-label='Start generation']"
+# v962.8 (2026-09-07) — MEASURED, not guessed. The frame picker on
+# flow.google.com opens with NO ARIA ROLES AT ALL, so every role-based selector
+# below it waited 15 s and reported "the frame picker did not open" while the
+# picker was in fact open on screen. The diagnostic below this function finally
+# fired on worker-b and dumped the page shape after the Start-slot click:
+#
+#   overlay_roots : cdk-overlay-container(1 kid, visible), cdk-overlay-popover
+#                   (2 kids, visible), cdk-overlay-backdrop (visible),
+#                   cdk-overlay-pane (1 kid, visible)
+#   by_role       : {}          <- nothing with a listbox/option/dialog/menu role
+#   file_inputs   : 0 total     <- and no <input type=file> either
+#   frames_bar    : holds a <flow-add-menu>
+#
+# So the open test now also accepts the pane itself and the menu element. This
+# is the ONLY thing that reached the picker wall today; three sessions read the
+# same line without being able to say what had opened instead.
 _V962_PICKER = (".cdk-overlay-container [role='listbox'], .cdk-overlay-container [role='option'], "
-                ".cdk-overlay-container button:has-text('Upload media')")
+                ".cdk-overlay-container button:has-text('Upload media'), "
+                ".cdk-overlay-container flow-add-menu, "
+                ".cdk-overlay-container .cdk-overlay-pane")
 _V962_INGREDIENTS_HOLD = ("[v962.7] Ingredients on flow.google.com is UNMEASURED on the composer "
                           "(video ingredient attach) — deliberate hold, not a bug; Frames works")
 
@@ -8935,23 +9031,74 @@ def _v962_pick_asset_in_picker(page, image_path, prefix=""):
     name = os.path.basename(image_path)
     stem = os.path.splitext(name)[0]
 
+    # v962.8 — the picker carries no ARIA roles on flow.google.com (see the
+    # measurement above _V962_PICKER), so `[role='option']` alone found nothing
+    # and every pick fell through to the upload branch, which then also found no
+    # option and gave up. Widened to the clickable shapes a Material menu/grid
+    # actually uses, still matched BY FILE NAME so it can only ever click the
+    # asset we asked for. Ordered most specific first.
+    _OPTION_SHAPES = ("[role='option']", "mat-option", ".mat-mdc-menu-item",
+                      "[data-testid]", "button", "img[alt]", "li")
+
     def _find():
-        opts = page.locator(".cdk-overlay-container [role='option']")
-        try:
-            n = opts.count()
-        except Exception:
-            return None
-        for i in range(n):
+        for shape in _OPTION_SHAPES:
+            opts = page.locator(f".cdk-overlay-container {shape}")
             try:
-                t = opts.nth(i).inner_text(timeout=500) or ""
+                n = opts.count()
             except Exception:
                 continue
-            if name in t or stem in t:
-                return opts.nth(i)
+            for i in range(n):
+                node = opts.nth(i)
+                try:
+                    t = node.inner_text(timeout=500) or ""
+                except Exception:
+                    t = ""
+                if not (name in t or stem in t):
+                    # A thumbnail carries the file name in an attribute, never
+                    # as text. Checking those is what makes an image grid
+                    # findable at all.
+                    try:
+                        attrs = " ".join(
+                            (node.get_attribute(a, timeout=300) or "")
+                            for a in ("alt", "title", "aria-label", "data-testid", "src"))
+                    except Exception:
+                        attrs = ""
+                    if not (name in attrs or stem in attrs):
+                        continue
+                return node
         return None
 
     opt = _find()
     if opt is None:
+        # TEMPORARY DIAGNOSTIC (v962.8, 2026-09-07) — remove once the picker's
+        # option shape is settled. If the widened _OPTION_SHAPES still match
+        # nothing, say WHAT is inside the open pane instead of falling silently
+        # into the upload branch. Tag names, class names and which attributes
+        # exist — no text, no values, no URLs, no file names.
+        try:
+            inner = page.evaluate("""() => {
+                const pane = document.querySelector('.cdk-overlay-container .cdk-overlay-pane');
+                if (!pane) return {pane: false};
+                const seen = {};
+                pane.querySelectorAll('*').forEach(el => {
+                    const key = el.tagName.toLowerCase()
+                        + (el.className && typeof el.className === 'string'
+                           ? '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.') : '');
+                    seen[key] = (seen[key] || 0) + 1;
+                });
+                const attrs = {};
+                ['alt', 'title', 'aria-label', 'data-testid', 'role'].forEach(a => {
+                    attrs[a] = pane.querySelectorAll('[' + a + ']').length;
+                });
+                return {pane: true, total: pane.querySelectorAll('*').length,
+                        shapes: Object.fromEntries(Object.entries(seen)
+                            .sort((x, y) => y[1] - x[1]).slice(0, 25)),
+                        with_attr: attrs};
+            }""")
+            print(f"{prefix}[v962.8-diag] picker pane contents: {json.dumps(inner)[:1200]}",
+                  flush=True)
+        except Exception as _pe:
+            print(f"{prefix}[v962.8-diag] pane probe failed: {type(_pe).__name__}", flush=True)
         up = page.locator(".cdk-overlay-container button:has-text('Upload media'), "
                           "button:has-text('Upload media')").first
         try:
@@ -30160,13 +30307,25 @@ if __name__ == "__main__":
             
             print(f"⬆ Updated {WORKER_BUILD} → {latest_hash}. Restarting...", flush=True)
             
-            # Restart: on Linux os.execv replaces process; on Windows it doesn't so use sys.exit
-            if platform.system() == "Windows":
-                import subprocess
-                subprocess.Popen([sys.executable] + sys.argv)
-                sys.exit(0)
-            else:
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+            # The replacement must acquire the same singleton at its own entry.
+            # Release immediately before handoff; if spawning fails, reacquire
+            # before the outer fail-soft update handler lets this process run.
+            _release_flow_worker_singleton()
+            try:
+                # On Linux os.execv replaces this process; on Windows start a
+                # replacement and let this owner exit.
+                if platform.system() == "Windows":
+                    import subprocess
+                    subprocess.Popen([sys.executable] + sys.argv)
+                    sys.exit(0)
+                else:
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+            except Exception:
+                if not _acquire_flow_worker_singleton():
+                    print("[Init] Could not reclaim Flow worker singleton after "
+                          "update handoff failure; exiting.", flush=True)
+                    raise SystemExit(1)
+                raise
             
         except Exception as e:
             print(f"⚠ Update check failed ({e}) — continuing with current version", flush=True)
