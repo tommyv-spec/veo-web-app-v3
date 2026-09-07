@@ -5305,6 +5305,18 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
     # profile's OWN session or hits its login wall and holds itself, which is
     # exactly what rev 799 designed and what the memory
     # `google-session-has-one-owner-copies-rotate-apart` requires.
+    #
+    # WHAT HONOURING THE FLAG COSTS TODAY (2026-09-07, session 1f, measured).
+    # With the flag honoured the worker has no session of its own: launched
+    # pull-free (local-dev, log worker_fg_0907c.log) it lands on
+    # `accounts.google.com/v3/signin/challenge/pwd` and waits for a password.
+    # The copy was the only way it was getting into Flow. So this check being
+    # first is correct AND the lane stays down until the worker profile holds
+    # its OWN durable session — one human sign-in in a HEADED worker browser,
+    # which also has to clear a Google 2-Step Verification prompt. That is the
+    # open operator action; see HANDOFF revs 808 and 809. Do not "fix" the lane
+    # by moving this check back down — that trades the outage for the token
+    # rotation that revoked the operator's own browser twice on 09-06.
     if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() in ("1", "true", "yes"):
         print(f"[{label}] LAPTOP_PULL_DISABLED=1 — no profile copy; this worker uses its "
               f"own session or holds itself", flush=True)
