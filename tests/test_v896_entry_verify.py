@@ -25,13 +25,24 @@ def _source():
 def _load_helper():
     """Extract and exec just the _flow_entry_login_click function so the test
     avoids importing the whole worker (module import has runtime side effects).
-    human_click_element/time are injected fakes."""
+    human_click_element/time are injected fakes.
+
+    The regex runs to the NEXT top-level `def`, so it also sweeps up any
+    module-level statement that happens to sit between the two — today that is
+    `_FLOW_AUTH_READY_FILE = os.path.join(...)`, which needs `os` at exec time.
+    These five tests had been failing with `NameError: name 'os' is not defined`
+    since that constant was added; the stale `tools/pytest_baseline.txt`
+    (2026-08-28) predates it, so nothing flagged them. Injecting `os` is the
+    cheap fix; the real one is a regex that stops at the function, not at the
+    next `def`.
+    """
     src = _source()
     m = re.search(
         r"^def _flow_entry_login_click\(.*?(?=^def )", src, re.S | re.M
     )
     assert m, "_flow_entry_login_click not found in flow_worker.py"
     ns = {
+        "os": os,
         "time": types.SimpleNamespace(sleep=lambda *_: None, time=lambda: 0.0),
         "human_click_element": lambda *a, **k: True,
         "print": lambda *a, **k: None,

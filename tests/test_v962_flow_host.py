@@ -257,13 +257,36 @@ def test_v962_4_only_the_root_path_is_home_on_the_new_host():
         assert ns["is_flow_home"](OLD_HOME_LOCALE), tag
 
 
-def test_v962_4_login_proof_on_the_new_host_is_the_dom_not_the_cookie():
+def test_v962_4_login_proof_on_the_new_host_is_not_the_cookie():
+    """v962.4 kept the URL from counting as login proof. v963 goes further.
+
+    This test used to require the new host's account-button selector to appear in
+    the login check, i.e. "the proof is the DOM, not the cookie". For the FLOW
+    worker that is no longer true and must not be: on 2026-09-07 a signed-out SPA
+    rendered the whole signed-in shell while every authenticated call was refused,
+    so page controls proved nothing. Its proof is now an authenticated credits
+    reply (docs/flow-worker-root-cause-2026-09-07.md).
+
+    The image worker was not part of that change and keeps the DOM selector.
+    What both still share, and what the rest of this test checks, is the part
+    v962.4 was really about: the URL is never the proof, and every not-logged-in
+    branch goes through the passive handoff instead of clicking the CTA.
+    """
     for path in WORKERS:
         src = open(path, encoding="utf-8").read()
         tag = os.path.basename(path)
         assert "def _v962_enter_app(" in src, tag
-        assert "button[aria-label^='Google Account:']" in _func_body(src, "_get_page_state") \
-            or "button[aria-label^='Google Account:']" in src[src.index("logged_in_selectors = ["):src.index("logged_in_selectors = [") + 400], tag
+        if "def _flow_page_state(" in src:
+            # v963 worker: only an authenticated API reply may confirm.
+            body = _func_body(src, "_flow_page_state")
+            assert "_fa_api_fetch(" in body, tag
+            assert 'p._flow_authenticated_api_proof = "credits"' in body, tag
+            assert "visible signed-in Flow" not in src, tag
+        else:
+            marker = "logged_in_selectors = ["
+            assert marker in src, tag
+            i = src.index(marker)
+            assert "button[aria-label^='Google Account:']" in src[i:i + 400], tag
         # EVERY not-logged-in branch reaches the passive handoff BEFORE its CTA
         # list — the video worker has two (ensure_logged_into_flow and the
         # user-login wait inside it)
