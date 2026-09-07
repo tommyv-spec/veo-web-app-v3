@@ -49,6 +49,12 @@ class ProfileSnapshotSafety(unittest.TestCase):
             body,
         )
 
+    def test_signed_in_project_controls_are_login_proof(self):
+        body = _function_source("ensure_logged_into_flow")
+        self.assertIn("button[aria-label='Start generation']", body)
+        self.assertIn("button[aria-label='Add media menu']", body)
+        self.assertIn("a[href*='/project/'][href$='/tools']", body)
+
     def test_flow_dom_auth_publishes_a_pid_bound_ready_marker(self):
         login = _function_source("ensure_logged_into_flow")
         publish = _function_source("_publish_flow_auth_ready")

@@ -3647,6 +3647,13 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             logged_in_selectors = [
                 "button[aria-label^='Google Account:']",   # v962.4 new host
                 "button[aria-label='Settings trigger']",    # v962.4 new host
+                # Signed-in project editor controls. A resumed project can hide
+                # the account button and settings trigger while Agent mode is
+                # settling, but these controls still prove the authenticated
+                # app rendered. The URL alone remains insufficient.
+                "button[aria-label='Start generation']",
+                "button[aria-label='Add media menu']",
+                "a[href*='/project/'][href$='/tools']",
                 # Profile avatar — most reliable, locale-independent
                 "img[src*='googleusercontent.com']",
                 "img[src*='lh3.googleusercontent']",
