@@ -1140,6 +1140,19 @@ def _fa_init_project_best_effort(page, project_id, context=""):
             res = fn()
             if isinstance(res, dict) and _fa_is_error(res):
                 print(f"{pfx}[flow_api] init '{label}' non-blocking: {_fa_error_reason(res)}", flush=True)
+            elif label == "credits" and isinstance(res, dict) and not _fa_is_error(res):
+                # The credits endpoint is account-scoped. A successful reply
+                # is strict auth proof even when this Firefox session uses
+                # cookies and therefore exposes no bearer token to the request
+                # listener. Bind the proof to this exact page/process; a URL,
+                # a sent request, or an API error never sets it.
+                page._flow_authenticated_api_proof = "credits"
+                flow_model_event(
+                    "flow_auth_api_proof",
+                    status=res.get("status") if isinstance(res, dict) else None,
+                    page_kind="project",
+                    endpoint="credits",
+                )
         except Exception as e:
             print(f"{pfx}[flow_api] init '{label}' raised (non-blocking): {e}", flush=True)
 
@@ -3642,6 +3655,11 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             # signed-out/stale SPA can keep /project/<id> in the address bar.
             # Only visible app/account controls prove that this private browser
             # is signed in.
+            _api_proof = getattr(p, "_flow_authenticated_api_proof", "")
+            if "/project/" in url and _api_proof:
+                p._flow_auth_proof = f"authenticated Flow account API ({_api_proof})"
+                return 'flow_logged_in'
+
             # Check DOM for login state — multiple indicators
             # New project button text varies by locale: "New project", "Nuevo proyecto", "Dự án mới", etc.
             # So we check multiple selectors, not just English text

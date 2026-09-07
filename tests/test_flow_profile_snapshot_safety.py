@@ -63,6 +63,17 @@ class ProfileSnapshotSafety(unittest.TestCase):
         self.assertIn("if not _fa_is_error(_probe):", body)
         self.assertIn('p._flow_auth_proof = "authenticated Flow account API"', body)
 
+    def test_cookie_authenticated_init_response_is_bound_to_exact_page(self):
+        init = _function_source("_fa_init_project_best_effort")
+        login = _function_source("ensure_logged_into_flow")
+        self.assertIn(
+            'elif label == "credits" and isinstance(res, dict) and not _fa_is_error(res):',
+            init,
+        )
+        self.assertIn('page._flow_authenticated_api_proof = "credits"', init)
+        self.assertIn('if "/project/" in url and _api_proof:', login)
+        self.assertIn('authenticated Flow account API ({_api_proof})', login)
+
     def test_flow_dom_auth_publishes_a_pid_bound_ready_marker(self):
         login = _function_source("ensure_logged_into_flow")
         publish = _function_source("_publish_flow_auth_ready")
