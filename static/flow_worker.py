@@ -9554,10 +9554,16 @@ def _click_input_mode_tab(page, prefix=""):
 # button.flow_tab_slider_trigger, aria-selected) exist there.
 #
 # Everything below runs ONLY when the page is on flow.google.com; the legacy
-# host takes the old path byte for byte. The Frames/Ingredients input-mode
-# tabs are NOT in this overlay on the new host (they moved to the composer's
-# "Add media" menu) and are still unmeasured, so that step reports a
-# deliberate hold instead of pretending.
+# host takes the old path byte for byte.
+#
+# v963.20 — CORRECTION. This block used to say the Frames/Ingredients tabs
+# "are NOT in this overlay on the new host (they moved to the composer's Add
+# media menu) and are still unmeasured". Both halves are wrong, and believing
+# them cost a day: they ARE in this overlay, as a third radiogroup
+# [aria-label='Video type'] holding button[role='radio'] "Frames" (crop_free)
+# and "Ingredients" (chrome_extension), marked with aria-CHECKED. Measured
+# 2026-09-08 by opening the overlay and reading it. The hold is lifted and
+# both modes are set and read back here like every other row.
 # ---------------------------------------------------------------------------
 _V962_SETTINGS_CHIP = "button[aria-label='Settings trigger'], button.settings-trigger-button"
 _V962_OVERLAY_GROUP = ".cdk-overlay-container [role='radiogroup']"
@@ -21391,6 +21397,15 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
     try:
         page._veo_model = veo_model  # read by ensure_lower_priority_model at generate time
         page._duration = duration    # read by select_frames_to_video_mode to set the new-UI duration tab
+        # v963.20 — the job's resolution was read, printed in the header above
+        # ("Res: 720p"), and then dropped. _v962_material_video_settings does
+        # have a Resolution step, but it is guarded on page._resolution, and
+        # NOTHING in this file ever assigned that attribute — grep it: one read
+        # at the guard, zero writes. So the tab was never touched and every
+        # clip took whatever the composer happened to default to, whatever the
+        # job asked for. That is also why 'Resolution' never appears in the
+        # "settings: {...}" line the pass prints.
+        page._resolution = resolution
     except Exception:
         pass
 
@@ -24370,6 +24385,15 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
     try:
         page._veo_model = veo_model  # read by ensure_lower_priority_model at generate time
         page._duration = duration    # read by select_frames_to_video_mode to set the new-UI duration tab
+        # v963.20 — the job's resolution was read, printed in the header above
+        # ("Res: 720p"), and then dropped. _v962_material_video_settings does
+        # have a Resolution step, but it is guarded on page._resolution, and
+        # NOTHING in this file ever assigned that attribute — grep it: one read
+        # at the guard, zero writes. So the tab was never touched and every
+        # clip took whatever the composer happened to default to, whatever the
+        # job asked for. That is also why 'Resolution' never appears in the
+        # "settings: {...}" line the pass prints.
+        page._resolution = resolution
     except Exception:
         pass
     voice_profile = job.get('voice_profile', '')
