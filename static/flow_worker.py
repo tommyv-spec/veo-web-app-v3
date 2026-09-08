@@ -17665,9 +17665,24 @@ def click_frame_and_upload(page, image_path, is_end_frame=False, context=""):
 
 
 _V962_ADD_MENU_BTN = "button[aria-label='Add ingredients to the prompt box']"
-# Chips the COMPOSER holds. Scoped to the prompt box on purpose: a result tile
-# in the results grid carries a flow-image-ingredient-chip of its own, and an
-# unscoped count reads that as "already attached".
+# v963.12 — count ingredient chips DOCUMENT-WIDE and judge on the DELTA.
+#
+# The first cut scoped this to the prompt box, because a result tile in the
+# grid carries a flow-image-ingredient-chip of its own and an absolute count
+# would read that as "already attached". Scoping was the wrong cure: on a fresh
+# project the scoped count stayed 0 through a perfectly good attach, and every
+# clip failed with "no new chip after 'Add to prompt' (still 0)".
+#
+# Measured on the same page, uploading one image through the add menu:
+#
+#   before  flow-ingredient-chip 1, flow-image-ingredient-chip 1   (the tile)
+#   after   flow-ingredient-chip 2, flow-image-ingredient-chip 2
+#
+# A delta answers the tile problem on its own - the tile does not move - and
+# does not depend on which element the chip is parented to, which is what the
+# scoped version got wrong. flow-agent-mode-toggle-chip and flow-user-tier-chip
+# are different tags and never counted.
+_V962_ANY_CHIP = "flow-image-ingredient-chip, flow-ingredient-chip"
 _V962_COMPOSER_CHIP = ("flow-prompt-box flow-image-ingredient-chip, "
                        "flow-prompt-box flow-ingredient-chip, "
                        "flow-base-prompt-box flow-image-ingredient-chip, "
@@ -17675,10 +17690,19 @@ _V962_COMPOSER_CHIP = ("flow-prompt-box flow-image-ingredient-chip, "
 
 
 def _v962_composer_chips(page):
+    """Ingredient chips on the page. Callers compare two readings, never one."""
+    try:
+        return page.locator(_V962_ANY_CHIP).count()
+    except Exception:
+        return 0
+
+
+def _v962_chips_in_box(page):
+    """Diagnostic only — chips parented under the prompt box."""
     try:
         return page.locator(_V962_COMPOSER_CHIP).count()
     except Exception:
-        return 0
+        return -1
 
 
 def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
@@ -17809,10 +17833,11 @@ def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
         time.sleep(1.5)
         now = _v962_composer_chips(page)
         if now > chips_before:
-            print(f"{prefix}✓ [v963.11] {name} attached ({chips_before} → {now})", flush=True)
+            print(f"{prefix}✓ [v963.11] {name} attached ({chips_before} → {now}, "
+                  f"{_v962_chips_in_box(page)} in the box)", flush=True)
             return (True, None)
     print(f"{prefix}⚠ [v963.11] {name}: no new chip after 'Add to prompt' "
-          f"(still {chips_before})", flush=True)
+          f"(chips {chips_before}, in-box {_v962_chips_in_box(page)})", flush=True)
     return (False, 'no_buttons')
 
 
