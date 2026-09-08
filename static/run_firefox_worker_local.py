@@ -105,6 +105,16 @@ class _FirefoxShim:
             except ValueError:
                 print(f"[harness] bad FIREFOX_WINDOW={win!r} — keeping worker default", flush=True)
 
+        # This harness launches the worker's OWN profile, so it needs the same
+        # orphan-lock sweep launch_context does; without it a local run walks
+        # into the "Camoufox is already running" modal like every other route.
+        if kwargs.get("user_data_dir"):
+            try:
+                import browser_driver as _bd
+                _bd.ensure_profile_unlocked(kwargs["user_data_dir"])
+            except ImportError:
+                pass
+
         try:
             return NewBrowser(self._pw, persistent_context=True, **kwargs)
         except TypeError as e:

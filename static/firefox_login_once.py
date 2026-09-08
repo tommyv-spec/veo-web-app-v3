@@ -106,6 +106,15 @@ def main():
     print("")
 
     with sync_playwright() as p:
+        # The hand sign-in is the recovery path for a worker with no account, so
+        # it must not be blocked by the same orphan lock it exists to recover
+        # from — otherwise the operator gets "Camoufox is already running"
+        # instead of a Google page. Same gate as browser_driver.launch_context.
+        try:
+            import browser_driver as _bd
+            _bd.ensure_profile_unlocked(prof)
+        except ImportError:
+            pass
         ctx = NewBrowser(p, persistent_context=True, **kwargs)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         try:
