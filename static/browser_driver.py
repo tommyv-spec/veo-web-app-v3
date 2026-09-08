@@ -434,13 +434,31 @@ def launch_context(playwright, mode, **kwargs):
     if not is_firefox_mode(mode):
         return playwright.chromium.launch_persistent_context(**kwargs)
 
-    # Every route into a Firefox profile passes here, so the lock sweep does too.
-    if kwargs.get("user_data_dir"):
-        ensure_profile_unlocked(kwargs["user_data_dir"])
-
-    from camoufox.sync_api import NewBrowser
     cf = camoufox_launch_kwargs(kwargs, window=os.environ.get("FIREFOX_WINDOW"))
-    ctx = NewBrowser(playwright, persistent_context=True, **cf)
-    if kwargs.get("user_data_dir"):
-        _register_open_profile(kwargs["user_data_dir"], ctx)
+    return new_firefox_browser(playwright, **cf)
+
+
+def new_firefox_browser(playwright, **kwargs):
+    """THE one door a Camoufox persistent context is created through.
+
+    Everything that opens a Firefox profile comes here — the workers via
+    launch_context, and the tools that need their OWN launch kwargs directly —
+    so the profile-lock gate cannot be skipped by adding another launch site.
+    Before this existed the sweep lived in one launcher and five call sites
+    walked past it; `tests/test_profile_lock_gate.py::NoBypasses` now fails the
+    build if a new one appears.
+
+    It deliberately does NOT apply camoufox_launch_kwargs. That translation is
+    flow_worker's (it forces headless from the environment, pins the window and
+    strips Chrome-only keys), and callers like gemini_decode_worker and
+    amazon_range_capture pass their own tuned kwargs including an explicit
+    `headless` that a translation would silently overrule.
+    """
+    profile = kwargs.get("user_data_dir")
+    if profile:
+        ensure_profile_unlocked(profile)
+    from camoufox.sync_api import NewBrowser
+    ctx = NewBrowser(playwright, persistent_context=True, **kwargs)
+    if profile:
+        _register_open_profile(profile, ctx)
     return ctx
