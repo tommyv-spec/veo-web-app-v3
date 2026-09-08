@@ -12764,7 +12764,22 @@ def click_generate_button(page, context_name="", max_retries=3):
             # Still safe this early: tiles only appear on submit, and this
             # thread is the only submitter for this account.
             try:
+                # v963.19 — same reading as the ghost check below, or the diff
+                # between them is meaningless. On flow.google.com a tile is a
+                # flow-grid-tile-container identified by its thumbnail src;
+                # data-index / data-tile-id exist only on the legacy host.
                 _v700h_pre_ids = page.evaluate("""() => {
+                    const grid = Array.from(
+                        document.querySelectorAll('flow-grid-tile-container'));
+                    if (grid.length) {
+                        const ids = [];
+                        for (const t of grid) {
+                            const img = t.querySelector('img');
+                            const src = img ? (img.getAttribute('src') || '') : '';
+                            if (src) ids.push(src.slice(-64));
+                        }
+                        return ids;
+                    }
                     const c = document.querySelector("div[data-index='0']");
                     if (!c) return [];
                     const out = new Set();
@@ -22365,23 +22380,66 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
                     if _dialogue and len(_dialogue) > 5:
                         _needles.append(_dialogue[:60])
                     _needles = list({n.strip(): None for n in _needles if n and len(n.strip()) > 5}.keys())
+                    # v963.19 — read the results grid on whichever host we are on.
+                    #
+                    # This scan asked for div[data-index='0'] and [data-tile-id].
+                    # Measured live on flow.google.com: BOTH are absent —
+                    # document.querySelectorAll('[data-index]').length === 0. So
+                    # the scan returned tiles:0 on a project that visibly held
+                    # nine tiles, and every submitted clip was called a ghost:
+                    #
+                    #   [Flow] ⚠ GHOST: clip 1 — no tiles at data-index=0
+                    #
+                    # What this host really renders: flow-grid-tile-container,
+                    # newest first, each holding a flow-video-tile (or
+                    # flow-image-tile) and a thumbnail <img> whose /asb/ src is
+                    # the only stable per-tile identity — there is no tile id
+                    # attribute of any kind.
+                    #
+                    # The caption is the tile's aria-label, and it is a SUMMARY
+                    # ("Farmer and shopper talking at ma…"), not the prompt. So
+                    # the needle test cannot prove a tile wrong here, and
+                    # `found` stays true on this host: the honest signals are
+                    # the new-tile-id diff above and an empty grid below.
                     _ghost_result = page.evaluate(f"""() => {{
+                        const needles = {repr(_needles)};
+                        const countHits = (text) => {{
+                            let h = 0;
+                            for (const n of needles) {{ if (text.includes(n)) h++; }}
+                            return h;
+                        }};
+                        const grid = Array.from(
+                            document.querySelectorAll('flow-grid-tile-container'));
+                        if (grid.length) {{
+                            const ids = [], labels = [];
+                            for (const t of grid) {{
+                                const img = t.querySelector('img');
+                                const src = img ? (img.getAttribute('src') || '') : '';
+                                if (src) ids.push(src.slice(-64));
+                                const a = t.getAttribute('aria-label') || '';
+                                if (a) labels.push(a);
+                            }}
+                            return {{found: true, tiles: grid.length, tile_ids: ids,
+                                     needle_hits: countHits(labels.join(' | ')),
+                                     needle_count: needles.length, host: 'new'}};
+                        }}
                         const c = document.querySelector("div[data-index='0']");
-                        if (!c) return {{found: false, tiles: 0, needle_hits: 0, tile_ids: []}};
+                        if (!c) return {{found: false, tiles: 0, needle_hits: 0,
+                                         needle_count: needles.length,
+                                         tile_ids: [], host: 'legacy'}};
                         const seen = new Set();
                         c.querySelectorAll("[data-tile-id]").forEach(t => {{
                             const id = t.getAttribute("data-tile-id"); if (id) seen.add(id);
                         }});
                         const text = c.innerText || c.textContent || '';
-                        const needles = {repr(_needles)};
-                        let hits = 0;
-                        for (const n of needles) {{ if (text.includes(n)) hits++; }}
+                        const hits = countHits(text);
                         return {{
                             found: needles.length === 0 ? true : hits > 0,
                             tiles: seen.size,
                             tile_ids: Array.from(seen),
                             needle_hits: hits,
                             needle_count: needles.length,
+                            host: 'legacy'
                         }};
                     }}""")
                     # (B) new-tile-id detection
@@ -26356,23 +26414,66 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     if _dialogue and len(_dialogue) > 5:
                         _needles.append(_dialogue[:60])
                     _needles = list({n.strip(): None for n in _needles if n and len(n.strip()) > 5}.keys())
+                    # v963.19 — read the results grid on whichever host we are on.
+                    #
+                    # This scan asked for div[data-index='0'] and [data-tile-id].
+                    # Measured live on flow.google.com: BOTH are absent —
+                    # document.querySelectorAll('[data-index]').length === 0. So
+                    # the scan returned tiles:0 on a project that visibly held
+                    # nine tiles, and every submitted clip was called a ghost:
+                    #
+                    #   [Flow] ⚠ GHOST: clip 1 — no tiles at data-index=0
+                    #
+                    # What this host really renders: flow-grid-tile-container,
+                    # newest first, each holding a flow-video-tile (or
+                    # flow-image-tile) and a thumbnail <img> whose /asb/ src is
+                    # the only stable per-tile identity — there is no tile id
+                    # attribute of any kind.
+                    #
+                    # The caption is the tile's aria-label, and it is a SUMMARY
+                    # ("Farmer and shopper talking at ma…"), not the prompt. So
+                    # the needle test cannot prove a tile wrong here, and
+                    # `found` stays true on this host: the honest signals are
+                    # the new-tile-id diff above and an empty grid below.
                     _ghost_result = page.evaluate(f"""() => {{
+                        const needles = {repr(_needles)};
+                        const countHits = (text) => {{
+                            let h = 0;
+                            for (const n of needles) {{ if (text.includes(n)) h++; }}
+                            return h;
+                        }};
+                        const grid = Array.from(
+                            document.querySelectorAll('flow-grid-tile-container'));
+                        if (grid.length) {{
+                            const ids = [], labels = [];
+                            for (const t of grid) {{
+                                const img = t.querySelector('img');
+                                const src = img ? (img.getAttribute('src') || '') : '';
+                                if (src) ids.push(src.slice(-64));
+                                const a = t.getAttribute('aria-label') || '';
+                                if (a) labels.push(a);
+                            }}
+                            return {{found: true, tiles: grid.length, tile_ids: ids,
+                                     needle_hits: countHits(labels.join(' | ')),
+                                     needle_count: needles.length, host: 'new'}};
+                        }}
                         const c = document.querySelector("div[data-index='0']");
-                        if (!c) return {{found: false, tiles: 0, needle_hits: 0, tile_ids: []}};
+                        if (!c) return {{found: false, tiles: 0, needle_hits: 0,
+                                         needle_count: needles.length,
+                                         tile_ids: [], host: 'legacy'}};
                         const seen = new Set();
                         c.querySelectorAll("[data-tile-id]").forEach(t => {{
                             const id = t.getAttribute("data-tile-id"); if (id) seen.add(id);
                         }});
                         const text = c.innerText || c.textContent || '';
-                        const needles = {repr(_needles)};
-                        let hits = 0;
-                        for (const n of needles) {{ if (text.includes(n)) hits++; }}
+                        const hits = countHits(text);
                         return {{
                             found: needles.length === 0 ? true : hits > 0,
                             tiles: seen.size,
                             tile_ids: Array.from(seen),
                             needle_hits: hits,
                             needle_count: needles.length,
+                            host: 'legacy'
                         }};
                     }}""")
                     _pre_ids = getattr(page, '_v700h_pre_tile_ids', set()) or set()
