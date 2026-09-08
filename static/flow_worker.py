@@ -5632,6 +5632,48 @@ def suppress_chrome_signin_dialog(user_data_dir):
                 pass
 
 
+def _v963_keep_own_session(session_folder, label=""):
+    """True when this worker must launch on its OWN session, not the golden.
+
+    v963.23 — the startup restore wipes SESSION_FOLDER and copies the golden
+    over it on EVERY launch. That is right for a worker whose session is
+    derived from the operator's Firefox on each start. It is destructive for
+    one that owns its session, and it is why the Flow profile "kept losing"
+    its login on 2026-09-08:
+
+      repair the session  -> firefox-session and firefox-golden both good
+      launch #1           -> restore is a no-op, worker signs in, GOOGLE
+                             ROTATES THE TOKEN into firefox-session
+      launch #2           -> restore copies the OLD golden back over it
+                             -> "the Google session in this profile is dead"
+                             -> GOOGLE LOGIN REQUIRED
+
+    So the first launch after every repair worked and the next one never did,
+    which read as "the session keeps dying" rather than "we keep overwriting
+    it with an older copy of itself".
+
+    LAPTOP_PULL_DISABLED=1 already declares exactly this: the worker "uses its
+    own session or holds itself". It suppressed the PULL but not the RESTORE,
+    so half the loop stayed. This closes it.
+
+    Only skips when the session really is a profile — an empty or missing
+    folder still gets the golden, because starting from nothing is what the
+    golden is for.
+    """
+    if os.environ.get("LAPTOP_PULL_DISABLED", "").strip().lower() not in ("1", "true", "yes"):
+        return False
+    try:
+        if not os.path.isdir(session_folder):
+            return False
+        if not os.path.exists(os.path.join(session_folder, "cookies.sqlite")):
+            return False
+    except Exception:
+        return False
+    print(f"[{label}] [v963.23] LAPTOP_PULL_DISABLED=1 and this profile has its own "
+          f"session — NOT restoring the golden over it", flush=True)
+    return True
+
+
 def get_golden_folder(session_folder):
     """Derive the golden (baseline) folder path from a session folder path.
 
@@ -28171,7 +28213,9 @@ class AccountWorker(threading.Thread):
                 # copy-once guard makes it a no-op if the golden was already built
                 # in main()'s pre-restore, so it won't close Beta on a live worker.
                 _maybe_pull_laptop_profile(self.session_folder, _acct_golden, label=self.name)
-                if os.path.exists(_acct_golden):
+                if _v963_keep_own_session(self.session_folder, self.name):
+                    pass          # v963.23 — see the helper; same trap as STARTUP
+                elif os.path.exists(_acct_golden):
                     print(f"[{self.name}] Restoring session from golden before launch: {_acct_golden}", flush=True)
                     kill_chrome_using_profile(self.session_folder, label=self.name)
                     time.sleep(1)
@@ -30142,7 +30186,9 @@ def main(account_session=None, account_download=None, account_label=None):
         _startup_golden = get_golden_folder(SESSION_FOLDER)
         # Slot-1 laptop-profile pull (rebuilds golden from laptop trusted login).
         _maybe_pull_laptop_profile(SESSION_FOLDER, _startup_golden, label="STARTUP")
-        if os.path.exists(_startup_golden):
+        if _v963_keep_own_session(SESSION_FOLDER, "STARTUP"):
+            pass
+        elif os.path.exists(_startup_golden):
             print(f"[STARTUP] Restoring session from golden before launch: {_startup_golden}", flush=True)
             kill_chrome_using_profile(SESSION_FOLDER, label="STARTUP")
             time.sleep(1)
