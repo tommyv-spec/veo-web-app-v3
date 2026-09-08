@@ -25878,6 +25878,31 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 except Exception as _cs_rot_e:
                     print(f"{_cs_ctx} project rotation raised: {_cs_rot_e}",
                           flush=True)
+                if not _cs_new_url and _v962_on_new_host(page):
+                    # v963.28 — the TWIN of the movie-section rotation below,
+                    # with the same defect: it asks for an API create that does
+                    # not exist on flow.google.com and treats the decline as a
+                    # failed rotation, so every charswap clip after the first
+                    # fails before it costs a render. Fixed here as well because
+                    # a fix applied to one of these two paths and not the other
+                    # is exactly how this file drifts (the resolution fix earlier
+                    # today had to be applied twice for the same reason).
+                    try:
+                        page.goto(FLOW_HOME_URL, wait_until="domcontentloaded", timeout=60000)
+                        human_delay(2, 3)
+                        check_and_dismiss_popup(page)
+                        _fa_or_dom_new_project_click(page, context="v945.13-rotate")
+                        _m_cs = re.search(r"/project/([0-9a-f-]{36})", page.url or "")
+                        if _m_cs:
+                            _cs_new_url = page.url
+                            print(f"{_cs_ctx} [v963.28] rotated via the DOM 'New project' "
+                                  f"click → {_cs_new_url[:60]}", flush=True)
+                        else:
+                            print(f"{_cs_ctx} [v963.28] DOM rotation did not land on a "
+                                  f"/project/<uuid> (url={(page.url or '')[:70]})", flush=True)
+                    except Exception as _cs_dom_e:
+                        print(f"{_cs_ctx} [v963.28] DOM rotation raised: "
+                              f"{str(_cs_dom_e)[:110]}", flush=True)
                 if not _cs_new_url:
                     update_clip_status(clip['id'], 'failed', error_message=(
                         "charswap project rotation failed — refusing to attach "
@@ -26344,6 +26369,43 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         page, context="v959-rotate")
                 except Exception as _ms_rot_e:
                     print(f"{_ms_ctx} project rotation raised: {_ms_rot_e}", flush=True)
+                if not _ms_new_url and _v962_on_new_host(page):
+                    # v963.28 — the rotation asked for an API create and nothing
+                    # else, so on flow.google.com it failed EVERY time and took
+                    # the clip with it:
+                    #
+                    #   [v959-rotate] [v962.2] on flow.google.com — tRPC
+                    #       createProject does not exist here; going straight to
+                    #       the DOM 'New project' click
+                    #   [API] Clip 14988 status → failed
+                    #
+                    # That message comes from the API helper DECLINING. It is
+                    # telling the caller to do the DOM click — and this caller
+                    # never did, because it is the only rotation site that calls
+                    # _fa_try_create_new_project_api directly instead of
+                    # _fa_or_dom_new_project_click. So clip 1 rendered and every
+                    # later section clip failed, which is the 1-generating /
+                    # 6-failed shape this job kept showing.
+                    #
+                    # The button is real and present (measured: 1 match for
+                    # button:has-text('New project')), but only on the projects
+                    # HOME — a project page does not have it — so go there first.
+                    try:
+                        page.goto(FLOW_HOME_URL, wait_until="domcontentloaded", timeout=60000)
+                        human_delay(2, 3)
+                        check_and_dismiss_popup(page)
+                        _fa_or_dom_new_project_click(page, context="v959-rotate")
+                        _m_rot = re.search(r"/project/([0-9a-f-]{36})", page.url or "")
+                        if _m_rot:
+                            _ms_new_url = page.url
+                            print(f"{_ms_ctx} [v963.28] rotated via the DOM 'New project' "
+                                  f"click → {_ms_new_url[:60]}", flush=True)
+                        else:
+                            print(f"{_ms_ctx} [v963.28] DOM rotation did not land on a "
+                                  f"/project/<uuid> (url={(page.url or '')[:70]})", flush=True)
+                    except Exception as _dom_rot_e:
+                        print(f"{_ms_ctx} [v963.28] DOM rotation raised: "
+                              f"{str(_dom_rot_e)[:110]}", flush=True)
                 if not _ms_new_url:
                     movie_section_write_diag(stage="project_rotation_failed",
                                              job_id=clip.get('job_id') or job_id,
