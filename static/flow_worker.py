@@ -43,6 +43,173 @@ WORKER_VERSION = "v793+identity"
 
 import subprocess, sys, shutil
 
+# ── v963.7 — the stall watchdog ──────────────────────────────────────────────
+# A hung worker looked perfectly healthy for EIGHT HOURS: the process alive, the
+# heartbeat thread still posting "online" from its own thread, and the main
+# thread parked in the Playwright event loop waiting for a browser response that
+# never came. py-spy could see the OS thread but not the greenlet the worker's
+# own code runs in, so "where is it stuck" cost hours of guessing per attempt.
+#
+# faulthandler dumps the Python frames of EVERY thread, including that greenlet.
+# Armed here, before anything else can block, it turns a silent park into a
+# stack trace in the log at a known interval.
+#
+# It only PRINTS. Nothing is killed: a worker mid-generation is holding paid
+# work, and a watchdog that shoots it would be worse than the stall. The
+# operator-facing rule this serves is simply that silence must stop being
+# indistinguishable from progress.
+#
+# It detects a STALL, not a timer. `dump_traceback_later` fires on a schedule
+# whether or not anything is wrong, which is noise; this compares the main
+# thread's stack against the last sample and only speaks when it has not moved.
+# No instrumentation needed at the call sites, so it cannot miss a path nobody
+# thought to mark.
+#
+# FLOW_STALL_DUMP_S=0 disables it.
+def trace_page_calls(page, label=""):
+    """Print enter/leave around every Playwright call on this page.
+
+    The stall watchdog proves WHEN the worker parks but not WHERE: the worker's
+    frames live in a Playwright greenlet that neither it nor py-spy can walk, so
+    both only ever show the asyncio driver. Hand-picking call sites to trace
+    missed it twice, because the run that had the instrumentation had no work
+    and the run that had work had no instrumentation.
+
+    Wrapping the page object needs no guesswork: whichever call prints ENTER
+    with no matching LEAVE is the one that blocks.
+
+    Off unless FLOW_TRACE_PAGE=1. It is loud by design and belongs in a
+    diagnostic run, not a production one.
+    """
+    if (os.environ.get("FLOW_TRACE_PAGE") or "").strip() != "1":
+        return page
+    if getattr(page, "_call_trace_installed", False):
+        return page
+
+    import time as _time
+    METHODS = ("goto", "reload", "click", "evaluate", "wait_for_function",
+               "wait_for_selector", "wait_for_load_state", "wait_for_url",
+               "screenshot", "title", "content", "query_selector", "set_content")
+
+    def _wrap(name, fn):
+        def inner(*a, **k):
+            head = ""
+            if a and isinstance(a[0], str):
+                head = a[0].replace("\n", " ")[:70]
+            print(f"[PAGE-TRACE]{label} ENTER {name}({head})", flush=True)
+            t0 = _time.time()
+            try:
+                return fn(*a, **k)
+            finally:
+                print(f"[PAGE-TRACE]{label} leave {name} "
+                      f"{_time.time() - t0:.1f}s", flush=True)
+        return inner
+
+    for name in METHODS:
+        try:
+            fn = getattr(page, name, None)
+            if callable(fn):
+                setattr(page, name, _wrap(name, fn))
+        except Exception:
+            pass
+
+    # Locator calls too, and this is the half that matters: page methods all
+    # returned cleanly while the worker was parked, so the blocking call was a
+    # locator one. `page.locator(sel)` is wrapped so the Locator it hands back
+    # carries the same enter/leave, with the selector in the line — otherwise
+    # "ENTER click()" says nothing about WHICH element.
+    LOC_METHODS = ("click", "wait_for", "is_visible", "inner_text", "count",
+                   "get_attribute", "fill", "press", "hover", "text_content",
+                   "set_input_files", "scroll_into_view_if_needed")
+
+    def _wrap_locator(loc, sel):
+        for lname in LOC_METHODS:
+            try:
+                lfn = getattr(loc, lname, None)
+                if callable(lfn):
+                    setattr(loc, lname, _wrap(f"locator({sel[:40]}).{lname}", lfn))
+            except Exception:
+                pass
+        for prop in ("first", "last"):
+            try:
+                child = getattr(loc, prop, None)
+                if child is not None and not getattr(child, "_traced", False):
+                    _wrap_locator(child, f"{sel[:36]}.{prop}")
+                    child._traced = True
+            except Exception:
+                pass
+        return loc
+
+    try:
+        _real_locator = page.locator
+
+        def _traced_locator(selector, **kw):
+            loc = _real_locator(selector, **kw)
+            try:
+                return _wrap_locator(loc, str(selector))
+            except Exception:
+                return loc
+
+        page.locator = _traced_locator
+    except Exception:
+        pass
+    try:
+        page._call_trace_installed = True
+    except Exception:
+        pass
+    print(f"[PAGE-TRACE]{label} installed on {len(METHODS)} methods", flush=True)
+    return page
+
+
+def _install_stall_watchdog():
+    import threading as _th
+    import time as _time
+    import traceback as _tb
+
+    every = int((os.environ.get("FLOW_STALL_DUMP_S") or "120").strip() or 120)
+    if every <= 0:
+        return
+
+    main_id = _th.main_thread().ident
+
+    def _main_stack():
+        frame = sys._current_frames().get(main_id)
+        if frame is None:
+            return None
+        return "".join(_tb.format_stack(frame))
+
+    def _loop():
+        last, stuck_for, reported = None, 0, False
+        while True:
+            _time.sleep(every)
+            try:
+                now = _main_stack()
+                if now is None:
+                    continue
+                if now == last:
+                    stuck_for += every
+                    if not reported or stuck_for % (every * 5) == 0:
+                        print(f"\n[STALL] the main thread has not moved in "
+                              f"{stuck_for}s — it is parked here:\n{now}",
+                              file=sys.stderr, flush=True)
+                        print(f"[STALL] main thread unchanged for {stuck_for}s "
+                              f"(stack on stderr)", flush=True)
+                        reported = True
+                else:
+                    if reported:
+                        print(f"[STALL] cleared after {stuck_for}s", flush=True)
+                    last, stuck_for, reported = now, 0, False
+            except Exception:
+                pass
+
+    t = _th.Thread(target=_loop, name="stall-watchdog", daemon=True)
+    t.start()
+    print(f"[Init] stall watchdog armed — reports if the main thread stops "
+          f"moving for {every}s", flush=True)
+
+
+_install_stall_watchdog()
+
 
 # The lifecycle launcher serializes normal starts, but this file is also often
 # run directly while debugging. The worker must therefore own the final guard:
@@ -19827,6 +19994,9 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
     inline on page1 via the HTTP worker — same path as the main process.
     Page2 stays idle.
     """
+    # No-op unless FLOW_TRACE_PAGE=1. This is the path that parks, so this is
+    # where the tracer has to be armed to catch it.
+    trace_page_calls(page, label="[redo]")
     # v900 — same authoritative install as process_job_submission: the redo
     # path submits too, so it needs the response listener for mediaId binding
     # and fail-reason scanning. Idempotent.
@@ -20172,7 +20342,48 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
         if project_url:
             print(f"[REDO] ⚠ Could not navigate to project: {e} — creating new project", flush=True)
         _need_new_project = True
-    
+
+    # v963.8 — the composer we are about to use must actually EXIST.
+    #
+    # Measured 2026-09-08 on job 0d456c24: the reused project opens in AGENT
+    # mode — the composer is the "What do you want to create?" chat box, and
+    # Agent mode replaces the frames UI entirely, so <flow-ingredient-bar> is
+    # simply not on the page. Screenshot and DOM both confirm it: Generate
+    # present, prompt editor present, ingredient bar count = 0.
+    #
+    # Without that bar there is no Start slot, so the frame attach can never
+    # succeed. It then falls to the upload branch, which drops onto four targets
+    # and attaches nothing. That is the whole of "36 clips attempted, 0 videos":
+    #
+    #   ⚠ [v962.7] start frame: picked, but no chip appeared in the bar
+    #
+    # The worker's only lever for turning Agent off is the HAR replay's
+    # agentInfo / videoFx PATCHes, and those come back "missing required
+    # authentication credential" every time. Waiting for a bearer does not help:
+    # measured, this page mints no Bearer ya29.* token in 40s — it is a
+    # cookie-only session.
+    #
+    # So a project stuck in Agent mode cannot be recovered in place. A FRESH
+    # project can: that is the path the two clips that DID render today took.
+    # Rather than proceed optimistically into a composer that has no frame
+    # slots, notice and get a project that does.
+    if not _need_new_project:
+        try:
+            _bar = page.locator("flow-ingredient-bar")
+            _bar.first.wait_for(state="attached", timeout=8000)
+            _has_bar = _bar.count() > 0
+        except Exception:
+            _has_bar = False
+        if not _has_bar:
+            print("[REDO] ⚠ no flow-ingredient-bar on this project — it is in "
+                  "Agent mode and has no frame slots; using a fresh project "
+                  "instead of attaching into a composer that cannot hold a frame",
+                  flush=True)
+            flow_model_event(
+                "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+                requested_model=page._veo_model, stage="no_ingredient_bar_fresh_project")
+            _need_new_project = True
+
     if _need_new_project:
         # Create a fresh project for this redo
         try:
