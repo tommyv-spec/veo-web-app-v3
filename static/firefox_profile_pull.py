@@ -317,7 +317,7 @@ def _probe_google_emails_inproc(profile_dir, log=print):
                                  os.path.join(work, "cookies.sqlite"))
 
         from playwright.sync_api import sync_playwright
-        from camoufox.sync_api import NewBrowser
+        import browser_driver as _bd
         kwargs = {"user_data_dir": work, "headless": True, "os": "windows"}
         try:
             from camoufox.addons import DefaultAddons
@@ -326,7 +326,10 @@ def _probe_google_emails_inproc(profile_dir, log=print):
             pass
 
         with sync_playwright() as p:
-            ctx = NewBrowser(p, persistent_context=True, **kwargs)
+            # One door (browser_driver.new_firefox_browser): sweeps an orphan
+            # off this profile first, so the verification launch cannot die on
+            # "Camoufox is already running".
+            ctx = _bd.new_firefox_browser(p, **kwargs)
             try:
                 import re
 

@@ -203,7 +203,10 @@ def launch_firefox(p, headless=False):
     except ImportError:
         pass
 
-    ctx = NewBrowser(p, persistent_context=True, **kwargs)
+    # One door (browser_driver.new_firefox_browser) — the decode lane hits the
+    # same orphan-profile lock as the flow lane.
+    import browser_driver as _bd
+    ctx = _bd.new_firefox_browser(p, **kwargs)
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     page.set_default_timeout(30000)
     log(f"Camoufox ACTIVE (profile {os.path.basename(FF_PROFILE_DIR)})")

@@ -106,16 +106,11 @@ def main():
     print("")
 
     with sync_playwright() as p:
-        # The hand sign-in is the recovery path for a worker with no account, so
-        # it must not be blocked by the same orphan lock it exists to recover
-        # from — otherwise the operator gets "Camoufox is already running"
-        # instead of a Google page. Same gate as browser_driver.launch_context.
-        try:
-            import browser_driver as _bd
-            _bd.ensure_profile_unlocked(prof)
-        except ImportError:
-            pass
-        ctx = NewBrowser(p, persistent_context=True, **kwargs)
+        # One door, same gate as every worker — a hand sign-in must not die on
+        # "Camoufox is already running" either. (This branch is unreachable:
+        # main() returns above. The live path is tools/flow_profile.py rebuild.)
+        import browser_driver as _bd
+        ctx = _bd.new_firefox_browser(p, **kwargs)
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         try:
             page.goto(FLOW_URL, timeout=60000)

@@ -329,5 +329,77 @@ class WiredIntoLaunch(unittest.TestCase):
         self.assertEqual([], seen)
 
 
+class NoBypasses(unittest.TestCase):
+    """No file may open a Firefox profile without the gate.
+
+    This is the whole point. The cleanup existed since 2026-08 and the modal
+    kept coming back because it lived in ONE launcher while five other call
+    sites opened profiles directly. Fixing those five by hand fixes today; this
+    test is what stops a sixth appearing next month.
+
+    `browser_driver.new_firefox_browser` is the one door. A file that calls
+    Camoufox's NewBrowser itself, or plain Playwright's Firefox persistent
+    context, has to show that it gates the profile first.
+    """
+
+    ROOTS = [STATIC.parent, STATIC.parent.parent / "tools"]
+    SKIP_DIRS = ("site-packages", ".venv", "node_modules", "__pycache__",
+                 ".uv-cache", "tests", ".tmp-pytest", ".pytest")
+    GATE_MARKERS = ("new_firefox_browser", "ensure_profile_unlocked")
+
+    def _sources(self):
+        for root in self.ROOTS:
+            if not root.exists():
+                continue                      # standalone code/ checkout: no tools/
+            for path in root.rglob("*.py"):
+                sp = str(path).replace("\\", "/")
+                if any(d in sp for d in self.SKIP_DIRS):
+                    continue
+                if path.name == "browser_driver.py":
+                    continue                  # the door itself
+                try:
+                    yield path, path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+
+    def test_camoufox_is_only_constructed_behind_the_door(self):
+        offenders = [str(p) for p, src in self._sources()
+                     if "NewBrowser(" in src
+                     and not any(m in src for m in self.GATE_MARKERS)]
+        self.assertEqual([], offenders,
+                         "these build a Camoufox context without the profile-lock "
+                         "gate — call browser_driver.new_firefox_browser instead")
+
+    def test_plain_playwright_firefox_profiles_are_gated_too(self):
+        """`p.firefox.launch_persistent_context` takes the same parent.lock.
+
+        Two Amazon/Salvora tools used it with a hand-rolled 'unlink parent.lock
+        then retry', which cannot work while a process holds the profile.
+        """
+        offenders = []
+        for p, src in self._sources():
+            if ".firefox.launch_persistent_context(" not in src:
+                continue
+            if not any(m in src for m in self.GATE_MARKERS):
+                offenders.append(str(p))
+        self.assertEqual([], offenders,
+                         "these open a Firefox profile without the gate")
+
+    def test_the_door_itself_gates_and_registers(self):
+        """Belt and braces: the door must not quietly lose either half."""
+        src = (STATIC / "browser_driver.py").read_text(encoding="utf-8")
+        door = src[src.index("def new_firefox_browser("):]
+        door = door[:door.index("\ndef ") if "\ndef " in door[1:] else len(door)]
+        self.assertIn("ensure_profile_unlocked(profile)", door)
+        self.assertIn("_register_open_profile(profile, ctx)", door)
+
+    def test_launch_context_delegates_to_the_door(self):
+        src = (STATIC / "browser_driver.py").read_text(encoding="utf-8")
+        body = src[src.index("def launch_context("):src.index("def new_firefox_browser(")]
+        self.assertIn("new_firefox_browser(playwright", body)
+        self.assertNotIn("NewBrowser(", body,
+                         "launch_context must go through the door, not around it")
+
+
 if __name__ == "__main__":
     unittest.main()

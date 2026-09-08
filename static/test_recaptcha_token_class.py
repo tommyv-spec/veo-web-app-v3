@@ -279,6 +279,15 @@ def launch(browser, profile_dir, out_path, minutes):
     print(f"[init] capture  : {out_path}")
     print("")
 
+    # Same profile-lock gate every worker uses: an orphan browser still holding
+    # this profile makes the launch burn ~125s and die on the "Camoufox is
+    # already running" dialog, which would look like an experiment result.
+    try:
+        import browser_driver as _bd
+        _bd.ensure_profile_unlocked(profile_dir)
+    except ImportError:
+        pass
+
     with sync_playwright() as p:
         if browser == "chrome":
             # Mirror flow_worker.py single-account launch (see ~L24079 single_chrome_args)
