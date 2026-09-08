@@ -6963,6 +6963,91 @@ def _video_media_url(url):
 # enqueue it — no live DOM, no captured URL needed.
 FLOW_MEDIA_ORIGIN = "https://labs.google"
 
+# --------------------------------------------------------------------------
+# v963.24 — how a finished video is fetched on flow.google.com (measured
+# 2026-09-08, end to end, against renders this worker had just made).
+#
+# getMediaUrlRedirect DOES NOT EXIST on this host. Four URL shapes were tried
+# against a real bound uuid and all four answered with the SPA's own
+# text/html, which is why every download died on HTTP 401 against labs.google.
+#
+# What replaces it: the project's media listing is a batchexecute RPC,
+# rpcids=Zzl0ze, and every media item in it carries an lh3 "AB-nOU…" token.
+# That one token serves BOTH representations, chosen by the format suffix:
+#
+#   https://flow.google.com/asb/<token>              -> image/jpeg  ~56 KB  poster
+#   https://flow.google.com/asb/<token>=mm,22,15     -> video/mp4  ~2.5 MB  render
+#
+# Proven on uuid a5044622 — one of the four ids the submit had just bound to
+# clip 1 — which returned video/mp4 2,504,239 bytes with an ftypmp42 header.
+#
+# Two traps, both measured:
+#   * an in-page fetch() of that URL fails with NetworkError even though the
+#     <video> element plays it, so it must be fetched OUTSIDE the page (the
+#     browser context's request API, or plain HTTP with the session cookies);
+#   * tokens must be paired with the ITEM's own uuid. An item also contains
+#     workflow/batch uuids, so "nearest preceding uuid" mis-assigns a token to
+#     a sibling — pair on the item START instead.
+#
+# This keeps attribution exactly as it always was: uuid in, URL out. Nothing
+# downstream changes, and tile position is still never consulted.
+# --------------------------------------------------------------------------
+_V963_MEDIA_LIST_RPCID = "Zzl0ze"
+_V963_ASB_TOKEN_RE = re.compile(r"AB-nOU[A-Za-z0-9_\-]{40,}")
+_V963_ITEM_START_RE = re.compile(
+    r'\["([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",null,null,\[',
+    re.I)
+_V963_VIDEO_SUFFIX = "=mm,22,15"
+
+
+_V963_ANY_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+
+
+def _v963_media_urls_from_listing(body):
+    """{media uuid: mp4 URL} parsed from a Zzl0ze listing body. {} if it isn't one.
+
+    Pairing is POSITIONAL: each token belongs to the nearest uuid before it.
+    That is not a guess about the array layout, it is the only thing this
+    format reliably offers — and it is what was verified end to end, with the
+    uuid the submit had bound to clip 1 resolving to that clip's own mp4.
+
+    Its limit, stated because it matters: an item also carries workflow and
+    batch uuids, so a token can be attributed to a sibling id in the same
+    item. A wrong pairing yields a real video that belongs to a NEIGHBOUR of
+    the wanted clip, which is the failure mode worth fearing here, so:
+
+      * only the FIRST token seen for a uuid is kept, and
+      * a URL already claimed by another uuid is not re-assigned.
+
+    Both are cheap and stop one token being handed to several clips. A strict
+    per-item parse is the real answer and wants a session with the array shape
+    in front of it; the file at ~/.kaveno has a captured body to work from.
+    """
+    out, claimed = {}, set()
+    try:
+        text = (body or "").replace("\\\\", "").replace('\\"', '"')
+        ids = [(m.start(), m.group(0).lower()) for m in _V963_ANY_UUID_RE.finditer(text)]
+        if not ids:
+            return {}
+        for m in _V963_ASB_TOKEN_RE.finditer(text):
+            owner = None
+            for pos, uid in ids:
+                if pos < m.start():
+                    owner = uid
+                else:
+                    break
+            if not owner or owner in out:
+                continue
+            url = f"https://flow.google.com/asb/{m.group(0)}{_V963_VIDEO_SUFFIX}"
+            if url in claimed:
+                continue
+            claimed.add(url)
+            out[owner] = url
+    except Exception:
+        return {}
+    return out
+
 
 def _construct_media_url(uuid):
     """The stable getMediaUrlRedirect URL for a bound media uuid (re-resolves each
@@ -30295,11 +30380,27 @@ def main(account_session=None, account_download=None, account_label=None):
                 # that cannot be matched to a uuid falls back to tile position,
                 # which this host also does not support.
                 #
-                # Rather than guess the new scheme, record it: the first few
-                # media-ish responses are logged with any uuid they do carry.
-                # One real generation then answers whether the uuid survives
-                # into the media URL, or whether the tile has to be mapped some
-                # other way. Read-only, capped, and prints nothing after 6.
+                # v963.24 — the answer to the diagnostic below: the project's
+                # media listing (batchexecute rpcids=Zzl0ze) pairs every media
+                # uuid with the token whose =mm,22,15 form IS the mp4. Feed
+                # those straight into the same uuid -> URL map the old
+                # getMediaUrlRedirect capture filled, so every consumer of it
+                # keeps working untouched.
+                try:
+                    if _V963_MEDIA_LIST_RPCID in url and "batchexecute" in url:
+                        _found = _v963_media_urls_from_listing(response.text())
+                        if _found:
+                            _new = 0
+                            for _uid, _u in _found.items():
+                                if _uid not in _captured_media_urls:
+                                    _new += 1
+                                _captured_media_urls[_uid] = _u
+                            if _new:
+                                print(f"[v963.24] media listing: {_new} new uuid->mp4 "
+                                      f"URL(s) ({len(_captured_media_urls)} known)", flush=True)
+                            return
+                except Exception:
+                    pass
                 try:
                     if _v962_on_new_host(page):
                         _seen = getattr(page, '_v963_media_diag_n', 0)
