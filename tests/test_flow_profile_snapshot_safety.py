@@ -234,3 +234,46 @@ class ProfileSnapshotSafety(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LoginCheckIsBounded(unittest.TestCase):
+    """v963.5 — the login VERDICT is the months-old one; the CALL has a deadline.
+
+    These are separate concerns and conflating them cost a night. The verdict
+    (editor text confirms, splash and error page veto) is deliberately unchanged
+    and every assertion above still proves it. What changed is that its
+    `page.evaluate` became a `wait_for_function` with a timeout, because
+    `page.evaluate` has none and this call runs right after a reload while the
+    JS context is being replaced.
+
+    Measured twice on the primary worker, 2026-09-07/08: 8 hours stuck on clip
+    37, then 21 minutes on clip 4. Both times the process was alive, the
+    heartbeat still reported online, py-spy showed MainThread parked in
+    run_until_complete waiting on a browser response that never arrived, and the
+    stage telemetry stopped dead on `pre_submit_auth_check`.
+    """
+
+    def test_the_editor_text_probe_has_a_deadline(self):
+        body = _function_source("_flow_page_state")
+        self.assertNotIn(".evaluate(", body,
+                         "page.evaluate cannot time out; this call hangs the worker")
+        self.assertIn("wait_for_function(", body)
+        self.assertIn("timeout=", body)
+
+    def test_the_probe_returns_an_object_not_a_bare_boolean(self):
+        """wait_for_function waits for TRUTHY, so a real `false` must not block.
+
+        Returning the boolean directly would turn a fast "no, this is not the
+        editor" into a full timeout — a correct verdict delivered slowly, which
+        on 80 clips is its own outage.
+        """
+        body = _function_source("_flow_page_state")
+        self.assertIn("{ready:", body)
+        self.assertIn('.json_value().get("ready")', body)
+
+    def test_the_verdict_markers_are_untouched(self):
+        body = _function_source("_flow_page_state")
+        for marker in ("['videos', 'scenes', 'escenas']",
+                       "create with flow", "something went wrong",
+                       "se produjo un error"):
+            self.assertIn(marker, body, f"{marker!r} — the verdict must not change")

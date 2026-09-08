@@ -4020,14 +4020,41 @@ def _flow_page_state(p, label="Flow"):
         # is signed in.
         if "/project/" in url:
             try:
-                _editor_ready = bool(p.evaluate("""() => {
-                    const raw = (document.body && document.body.innerText) || '';
-                    const txt = raw.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase();
-                    const editor = ['videos', 'scenes', 'escenas'].some(s => txt.includes(s));
-                    const signedOut = txt.includes('create with flow') || txt.includes('create with google flow');
-                    const broken = txt.includes('something went wrong') || txt.includes('se produjo un error');
-                    return editor && !signedOut && !broken;
-                }"""))
+                # v963.5 — SAME verdict, BOUNDED call. The logic here is the one
+                # that has worked for months and is deliberately unchanged: the
+                # editor text confirms, the splash and the error page veto.
+                #
+                # What changed is only that it can no longer wait forever.
+                # `page.evaluate` takes no timeout, and this call runs right after
+                # a reload while the JS context is being replaced. Measured twice:
+                # the primary worker sat here 8 hours on clip 37, then 21 minutes
+                # on clip 4, both times alive with the heartbeat still reporting
+                # online, py-spy showing MainThread parked in run_until_complete
+                # waiting for a browser response that never came, and the stage
+                # telemetry stopping dead on `pre_submit_auth_check`.
+                #
+                # The JS returns an OBJECT, not the boolean. wait_for_function
+                # waits for a TRUTHY result, and a legitimate `false` here (a page
+                # that really is not the editor) would otherwise block until the
+                # timeout and turn a fast NO into a slow one. An object is always
+                # truthy, so this returns as soon as the page can answer.
+                try:
+                    _editor_ready = bool(p.wait_for_function("""() => {
+                        const raw = (document.body && document.body.innerText) || '';
+                        const txt = raw.normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase();
+                        const editor = ['videos', 'scenes', 'escenas'].some(s => txt.includes(s));
+                        const signedOut = txt.includes('create with flow') || txt.includes('create with google flow');
+                        const broken = txt.includes('something went wrong') || txt.includes('se produjo un error');
+                        return {ready: editor && !signedOut && !broken};
+                    }""", timeout=10000).json_value().get("ready"))
+                except Exception as _ed_err:
+                    # A timeout here means the page could not answer in 10s, which
+                    # is not the same as "not signed in" — fall through to the
+                    # locator checks below, exactly as a false would have.
+                    print(f"[{label}] editor-text probe did not answer "
+                          f"({type(_ed_err).__name__}); falling through to controls",
+                          flush=True)
+                    _editor_ready = False
                 if _editor_ready:
                     p._flow_auth_proof = "visible signed-in Flow project editor DOM"
                     flow_model_event(
