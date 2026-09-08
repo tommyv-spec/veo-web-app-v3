@@ -12479,7 +12479,34 @@ def wait_for_clip_approval(clip_id, clip_index, temp_dir, timeout=600):
 # ============================================================
 
 def ensure_videos_tab_selected(page):
-    """Ensure the 'Videos' view is selected in the project sidebar."""
+    """Ensure the 'Videos' view is selected in the project sidebar.
+
+    v963.25 — SKIPPED on flow.google.com, deliberately, because it has no job
+    left to do there.
+
+    Its only real purpose was making tile POSITION meaningful: filter the grid
+    to videos so data-index 0 is the newest VIDEO rather than the newest
+    anything. Attribution no longer works that way — a clip's videos are found
+    by the media uuids bound at submit time and resolved through the project's
+    media listing (v963.21 / v963.24), and this host has no data-index at all.
+    So the filter changes nothing that is read.
+
+    Left in place for the legacy host, where position attribution is still the
+    fallback. What it did on the new host was fail nine times a run:
+
+        (Videos tab not found, continuing...)
+
+    once per call site, each behind a 5s wait, because the selector looks for
+    `i:text('videocam')` — an <i> icon element. This UI renders mat-icon, so it
+    can never match. That noise is what a post-job harvest wait looked like
+    from outside, and it cost a diagnosis today.
+
+    Fixing the selector was the other option and was rejected: it would restore
+    a click nothing depends on, and every call is a page interaction that can
+    hang. Doing nothing is cheaper and cannot fail.
+    """
+    if _v962_on_new_host(page):
+        return
     try:
         # New UI: sidebar button with videocam icon
         videos_sidebar = page.locator("button:has(i:text('videocam')):not(.flow_tab_slider_trigger), button:has-text('View videos')").first
