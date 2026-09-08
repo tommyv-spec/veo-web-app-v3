@@ -2721,6 +2721,86 @@ def _scan_failure_reason(resp, url, buf_key=''):
         print(f"[v800] status feed failed (non-fatal): {_e}", flush=True)
 
 
+_V963_SUBMIT_RPCID = "MZZa6b"   # measured 2026-09-08 from a real Generate click
+_V963_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+_V963_BX_DUMP = os.path.expanduser("~/.kaveno/flow_batchexecute_submit.txt")
+
+
+def _v963_batchexecute_submit_data(resp, url):
+    """A flow.google.com submit response, in the shape the v700 binder expects.
+
+    Returns None when this is not the submit response.
+
+    Why an adapter instead of a new binder. Attribution has always worked by
+    binding the media uuids OUT of the submit response to (job, clip), so a
+    download is matched by uuid and tile position never matters. That whole
+    layer is fine — the only broken part is READING the response:
+
+      * the filter wants a URL containing 'batchAsyncGenerateVideo'; this host
+        posts to /data/batchexecute with rpcids=MZZa6b;
+      * the parser wants resp.json() and 'primaryMediaId' KEYS; batchexecute
+        answers with Google's )]}'-prefixed length-chunked arrays and no key
+        names at all.
+
+    So nothing binds, and the run falls back to tile-position attribution —
+    which needs data-index, which this host also does not have. Hence
+    "no submit response captured within 40s" on a submit that worked.
+
+    Which uuids are the OUTPUTS: the ones that appear in the response but NOT
+    in the request. The request body carries the inputs we just attached (the
+    scene and face chips) plus the project id, so subtracting it leaves what
+    the submit created. That is the discriminator, and it needs no knowledge of
+    the positional array layout.
+
+    The first response is also dumped to ~/.kaveno/flow_batchexecute_submit.txt
+    so the exact shape can be read rather than guessed at again.
+    """
+    try:
+        if "/data/batchexecute" not in url:
+            return None
+        req_body = ""
+        try:
+            req_body = resp.request.post_data or ""
+        except Exception:
+            req_body = ""
+        if _V963_SUBMIT_RPCID not in url and _V963_SUBMIT_RPCID not in req_body:
+            return None
+        if resp.status != 200:
+            return None
+        body = resp.text() or ""
+    except Exception:
+        return None
+
+    sent = {m.lower() for m in _V963_UUID_RE.findall(req_body)}
+    ids, seen = [], set()
+    for m in _V963_UUID_RE.findall(body):
+        m = m.lower()
+        if m in sent or m in seen:
+            continue
+        seen.add(m)
+        ids.append(m)
+
+    try:
+        if not os.path.exists(_V963_BX_DUMP):
+            os.makedirs(os.path.dirname(_V963_BX_DUMP), exist_ok=True)
+            with open(_V963_BX_DUMP, "w", encoding="utf-8", errors="replace") as fh:
+                fh.write(f"url: {url}\n\nrequest uuids: {sorted(sent)}\n"
+                         f"new uuids in response: {ids}\n\n--- body (first 20k) ---\n")
+                fh.write(body[:20000])
+            print(f"[v963.21] batchexecute submit shape dumped to {_V963_BX_DUMP}",
+                  flush=True)
+    except Exception:
+        pass
+
+    print(f"[v963.21] batchexecute submit response: {len(ids)} new media id(s) "
+          f"(request carried {len(sent)})", flush=True)
+    if not ids:
+        return None
+    return {"workflows": [{"name": "batchexecute",
+                           "metadata": {"primaryMediaId": i}} for i in ids]}
+
+
 def _install_submit_response_listener(page, account_label=""):
     """v700 — install a one-shot Playwright `response` handler on `page`
     that captures `batchAsyncGenerateVideoStartImage` 200 responses into
@@ -2773,16 +2853,23 @@ def _install_submit_response_listener(page, account_label=""):
                         )
                 except Exception:
                     pass
-                return
-            try:
-                if resp.status != 200:
+                # v963.21 — before giving up, try the flow.google.com submit.
+                # It does not match the strict filter and never will: this host
+                # posts to /data/batchexecute, not batchAsyncGenerateVideo.
+                _bx = _v963_batchexecute_submit_data(resp, url)
+                if _bx is None:
                     return
-            except Exception:
-                return
-            try:
-                data = resp.json()
-            except Exception:
-                return
+                data = _bx
+            else:
+                try:
+                    if resp.status != 200:
+                        return
+                except Exception:
+                    return
+                try:
+                    data = resp.json()
+                except Exception:
+                    return
             entry = {'data': data, 'captured_at': time.time(), 'url': url}
             with _SUBMIT_RESPONSE_BUFFERS_LOCK:
                 buf = _SUBMIT_RESPONSE_BUFFERS.setdefault(buf_key, [])
