@@ -23733,12 +23733,34 @@ def charswap_install_submit_probe(page, chip_ids):
        binary-framed submit is not silently scored as "no media".
     """
     state = {"seen": False, "hits": 0, "want": len(chip_ids or []),
-             "n_requests": 0, "first_seen_at": None, "body_media_ids": []}
+             "n_requests": 0, "first_seen_at": None, "body_media_ids": [],
+             "rpcid": ""}   # v963.18 — which batchexecute RPC carried the submit
     ids = [i for i in (chip_ids or []) if i]
 
     def _on_request(req):
         try:
-            if "batchAsyncGenerateVideo" not in req.url:
+            url = req.url
+            legacy = "batchAsyncGenerateVideo" in url
+            # v963.18 — flow.google.com does not call batchAsyncGenerateVideo at
+            # all. It submits through Google's batchexecute RPC, so this probe
+            # saw nothing and the gate refused a submit that had ALREADY
+            # HAPPENED:
+            #
+            #   Clicked Generate button
+            #   submit verdict: False - no generate request observed after the click
+            #   FAILED CLOSED: no generate request observed after the click
+            #
+            # Measured afterwards in project 51d95b24: two rendered videos
+            # carrying this clip's prompt. The click worked, the render was
+            # paid for, and the clip was marked failed — the worst of both.
+            #
+            # The CONTRACT does not change, only the transport: a request counts
+            # as the submit when its body carries our chip media ids. The app
+            # fires many batchexecute calls for its own housekeeping, and none
+            # of those mention this composer's media, so requiring an id keeps
+            # the gate as strict as it was on the old endpoint.
+            new_host = req.method == "POST" and "/data/batchexecute" in url
+            if not (legacy or new_host):
                 return
             body = req.post_data
             if not body:
@@ -23747,6 +23769,14 @@ def charswap_install_submit_probe(page, chip_ids):
                     body = raw.decode("utf-8", "replace") if raw else ""
                 except Exception:
                     body = ""
+            if new_host:
+                if not any(i in body for i in ids):
+                    return
+                if not state.get("rpcid"):
+                    m = re.search(r"rpcids=([^&]+)", url)
+                    state["rpcid"] = m.group(1) if m else "?"
+                    print(f"[v963.18] submit seen on batchexecute "
+                          f"rpcids={state['rpcid']}", flush=True)
             state["seen"] = True
             state["n_requests"] += 1
             if state["first_seen_at"] is None:
