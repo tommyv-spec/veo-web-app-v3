@@ -9388,6 +9388,33 @@ def observe_input_mode_tab(page):
         except Exception:
             return None
 
+    # v963.10 — flow.google.com has no flow_tab_slider_trigger at all, so every
+    # read below returned None, resolve_observed_input_mode() answered
+    # 'Unverified', and the v959 gate refused every movie-section clip with
+    # "movie-section needs the Ingredients tab; DOM says Unverified".
+    #
+    # Measured 2026-09-08 in the open settings overlay: the two modes are
+    # Angular Material toggles in the group aria-label="Video type", and the
+    # selected one is marked with aria-CHECKED (not aria-selected):
+    #
+    #   <button role="radio" aria-checked="true"  ...>crop_free Frames</button>
+    #   <button role="radio" aria-checked="false" ...>chrome_extension Ingredients</button>
+    #
+    # Same open-dropdown contract as the legacy path: these rows leave the DOM
+    # when the overlay closes.
+    if _v962_on_new_host(page):
+        def _checked(text):
+            try:
+                loc = page.locator(
+                    f"[aria-label='Video type'] button[role='radio']:has-text('{text}')").first
+                if loc.count() == 0:
+                    return None
+                return loc.get_attribute("aria-checked")
+            except Exception:
+                return None
+
+        return input_mode_from_tab_states(_checked("Ingredients"), _checked("Frames"))
+
     ing = _selected(
         "button.flow_tab_slider_trigger:has-text('Ingredients'), "
         "button.flow_tab_slider_trigger:has(i:text-is('experiment')), "
@@ -9744,8 +9771,9 @@ _V962_PICKER = (".cdk-overlay-container [role='listbox'], .cdk-overlay-container
                 ".cdk-overlay-container button:has-text('Upload media'), "
                 ".cdk-overlay-container flow-add-menu, "
                 ".cdk-overlay-container .cdk-overlay-pane")
-_V962_INGREDIENTS_HOLD = ("[v962.7] Ingredients on flow.google.com is UNMEASURED on the composer "
-                          "(video ingredient attach) — deliberate hold, not a bug; Frames works")
+# v962.7 held Ingredients on this host as UNMEASURED. v963.10 measured it and
+# lifted the hold — the recipe is in _pick_video_type. The constant is gone
+# rather than left behind saying something that is no longer true.
 
 
 def _v962_clear_frame_bar(page, prefix=""):
@@ -10133,30 +10161,45 @@ def _v962_material_video_settings(page, prefix="", variants_count=2,
         _durn = 8
 
     # v962.7 — the input mode IS a radio in this overlay ("Video type":
-    # Frames / Ingredients). Frames is measured end to end; Ingredients (the
-    # charswap video ingredient) stays a deliberate hold with its reason stashed
-    # where v945.15 reports it.
+    # Frames / Ingredients). Both modes are measured end to end as of v963.10;
+    # the Ingredients hold is lifted (see _pick_video_type for the recipe).
     mode_key = 'Ingredients' if _omni_ingredients_mode(page) else 'Frames'
 
     def _pick_video_type():
-        if mode_key == 'Ingredients':
-            print(f"{prefix}⚠ {_V962_INGREDIENTS_HOLD}", flush=True)
-            try:
-                page._model_apply_debug = _V962_INGREDIENTS_HOLD
-            except Exception:
-                pass
-            try:
-                page._input_mode_applied = None
-            except Exception:
-                pass
-            return False
-        ok = _v962_pick_radio(page, "Frames", "Video type", prefix)
+        # v963.10 — the Ingredients hold is LIFTED, and both modes now go
+        # through the same radio + read-back.
+        #
+        # The hold said Ingredients was "UNMEASURED on the composer (video
+        # ingredient attach)". Measured 2026-09-08 on project b226b464, the
+        # whole path works and is no harder than Frames:
+        #
+        #   1. the Video type group holds both toggles; clicking Ingredients
+        #      flips aria-checked to true and the frames bar goes away
+        #   2. button[aria-label='Add ingredients to the prompt box'] opens the
+        #      add menu, listing project assets (images AND videos)
+        #   3. clicking an asset marks it SILENTLY — aria-selected stays
+        #      "false"; the only visible change is that Play/Unmute appear
+        #   4. "Add to prompt" is the commit, and the chip lands in the
+        #      composer ~2s later
+        #
+        # Step 3 is why this looked broken: clicking the asset alone leaves the
+        # composer empty, so an attach that stops there reads as a dead end.
+        #
+        # The read-back matters as much as the click. Trusting the click is how
+        # _input_mode_observed used to be set to the mode we MEANT to pick;
+        # observe_input_mode_tab reads what the DOM actually says, while the
+        # overlay is still open, and v959's gate compares against that.
+        ok = _v962_pick_radio(page, mode_key, "Video type", prefix)
+        observed = observe_input_mode_tab(page)
         try:
-            page._input_mode_applied = 'Frames' if ok else None
-            page._input_mode_observed = 'Frames' if ok else None
+            page._input_mode_applied = mode_key if ok else None
+            page._input_mode_observed = observed
         except Exception:
             pass
-        return ok
+        if ok and observed != mode_key:
+            print(f"{prefix}⚠ [v963.10] clicked {mode_key} but the DOM says "
+                  f"{observed or 'nothing'}", flush=True)
+        return bool(ok and observed == mode_key)
 
     if input_mode_only:
         chip = _v962_open_settings(page, prefix)
