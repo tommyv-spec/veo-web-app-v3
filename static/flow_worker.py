@@ -20343,42 +20343,51 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
             print(f"[REDO] ⚠ Could not navigate to project: {e} — creating new project", flush=True)
         _need_new_project = True
 
-    # v963.8 — the composer we are about to use must actually EXIST.
+    # v963.9 — a REUSED project opens in INGREDIENTS mode. Select FRAMES before
+    # judging whether this composer can hold a frame.
     #
-    # Measured 2026-09-08 on job 0d456c24: the reused project opens in AGENT
-    # mode — the composer is the "What do you want to create?" chat box, and
-    # Agent mode replaces the frames UI entirely, so <flow-ingredient-bar> is
-    # simply not on the page. Screenshot and DOM both confirm it: Generate
-    # present, prompt editor present, ingredient bar count = 0.
+    # v963.8 read a missing <flow-ingredient-bar> as "this project is stuck in
+    # Agent mode" and burned a fresh project on every clip. Measured in the
+    # browser 2026-09-08, that diagnosis was wrong on both halves:
     #
-    # Without that bar there is no Start slot, so the frame attach can never
-    # succeed. It then falls to the upload branch, which drops onto four targets
-    # and attaches nothing. That is the whole of "36 clips attempted, 0 videos":
+    #   * Agent is OFF. flow-agent-mode-toggle-chip reads aria-pressed="false".
+    #   * The bar is not missing because of Agent mode. The composer carries a
+    #     "Video type" setting, and the Start/End slots only render on FRAMES.
+    #     On INGREDIENTS there is no bar at all, by design — which is the state
+    #     a reused project opens in.
     #
-    #   ⚠ [v962.7] start frame: picked, but no chip appeared in the bar
+    # Picking Frames on the settings trigger brings the whole thing back
+    # (project b226b464: bar 0 -> 1, composer text goes from "What do you want
+    # to create?" to "Start swap_horiz End ...").
     #
-    # The worker's only lever for turning Agent off is the HAR replay's
-    # agentInfo / videoFx PATCHes, and those come back "missing required
-    # authentication credential" every time. Waiting for a bearer does not help:
-    # measured, this page mints no Bearer ya29.* token in 40s — it is a
-    # cookie-only session.
-    #
-    # So a project stuck in Agent mode cannot be recovered in place. A FRESH
-    # project can: that is the path the two clips that DID render today took.
-    # Rather than proceed optimistically into a composer that has no frame
-    # slots, notice and get a project that does.
+    # The main submit path already calls select_frames_to_video_mode, which is
+    # why clips on fresh projects rendered all along. Only this reuse path
+    # skipped it, on the assumption stated a few lines below — that "existing
+    # projects already have settings from original job". Not true on the new
+    # host: the mode is per-composer, not remembered from the original job.
     if not _need_new_project:
-        try:
-            _bar = page.locator("flow-ingredient-bar")
-            _bar.first.wait_for(state="attached", timeout=8000)
-            _has_bar = _bar.count() > 0
-        except Exception:
-            _has_bar = False
-        if not _has_bar:
-            print("[REDO] ⚠ no flow-ingredient-bar on this project — it is in "
-                  "Agent mode and has no frame slots; using a fresh project "
-                  "instead of attaching into a composer that cannot hold a frame",
-                  flush=True)
+        def _bar_count():
+            try:
+                return page.locator("flow-ingredient-bar").count()
+            except Exception:
+                return 0
+
+        if not _bar_count():
+            try:
+                select_frames_to_video_mode(page, context="REDO", input_mode_only=True)
+            except Exception as e:
+                print(f"[REDO] ⚠ [v963.9] could not select Frames mode: {e}", flush=True)
+            human_delay(1, 2)
+        if _bar_count() > 0:
+            print("[REDO] ✅ [v963.9] frame slots present after selecting Frames "
+                  "mode — reusing this project", flush=True)
+            flow_model_event(
+                "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
+                requested_model=page._veo_model, stage="frames_mode_bar_ready")
+        else:
+            print("[REDO] ⚠ [v963.9] still no frame slots after selecting Frames "
+                  "mode; using a fresh project instead of attaching into a "
+                  "composer that cannot hold a frame", flush=True)
             flow_model_event(
                 "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
                 requested_model=page._veo_model, stage="no_ingredient_bar_fresh_project")
@@ -20452,7 +20461,10 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
         "redo_stage", job_id=job_id, clip_id=clip_id, clip_index=clip_index,
         requested_model=page._veo_model, stage="pre_submit_auth_ready")
     
-    # Apply settings on new project (existing projects already have settings from original job)
+    # Apply settings on new project. Existing projects keep the original job's
+    # model/duration/variants — but NOT the Frames/Ingredients mode, which is
+    # per-composer on flow.google.com and opens on Ingredients. The v963.9 block
+    # above selects Frames for the reuse path.
     if _need_new_project:
         try:
             variants = clip.get('flow_variants_count', 2)
