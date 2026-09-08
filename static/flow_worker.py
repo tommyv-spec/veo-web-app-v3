@@ -6924,6 +6924,49 @@ GENERATION_WAIT = 90    # Seconds to wait for generation before download
 # The HTTP-DL validates content-type + size and retries the SAME url until ready.
 # Fixes the clip-9 70KB-poster bug (last clip grabbed before render-complete).
 MIN_VIDEO_BYTES = 200_000  # below this (or image content-type) = poster/partial, not a real video
+
+
+def _v963_media_headers(url):
+    """Referer/Origin matching the host the media URL is on.
+
+    v963.27 — these were hardcoded to labs.google in four places. On
+    flow.google.com that sends a dead host's Origin with every media fetch, and
+    these URLs are origin-sensitive: an in-page fetch of one from the Flow page
+    fails with NetworkError even though the <video> element plays it. Sending
+    the wrong Origin is not a cosmetic mismatch here.
+    """
+    try:
+        host = (url or "").split("/")[2]
+        if host:
+            return {"Referer": f"https://{host}/", "Origin": f"https://{host}"}
+    except Exception:
+        pass
+    return {"Referer": "https://labs.google/", "Origin": "https://labs.google"}
+
+
+def _v963_looks_like_video(content_type, body):
+    """Is this response REALLY a video? Content-type or the container's own header.
+
+    v963.27 — the old test was `'image' not in content_type and len(body) >=
+    MIN_VIDEO_BYTES`: anything that is not an image and is big enough passes.
+    On this host that is too loose to trust, because the poster and the render
+    come from the SAME token and differ only by a URL suffix — so a wrong
+    suffix yields a plausible file rather than an error.
+
+    An mp4 says what it is in bytes 4..8 ('ftyp'), so ask the bytes. Keeps the
+    size floor: a truncated video is not a video either.
+    """
+    ct = (content_type or "").lower()
+    if "image" in ct or "html" in ct:
+        return False
+    if not body or len(body) < MIN_VIDEO_BYTES:
+        return False
+    if ct.startswith("video"):
+        return True
+    try:
+        return body[4:8] == b"ftyp"
+    except Exception:
+        return False
 POSTER_RETRY_MAX = 6       # retries on the same stable URL while it's still a poster
 POSTER_RETRY_DELAY = 20    # seconds between poster retries (6×20 = 120s ≈ an 8s clip's render time)
 
@@ -29360,7 +29403,10 @@ class AccountWorker(threading.Thread):
                         if not url or url.startswith('blob:'):
                             continue
                         if url.startswith('/'):
-                            url = 'https://labs.google' + url
+                            # v963.27 — was always labs.google; on the new host a
+                            # relative media path belongs to flow.google.com.
+                            url = ('https://flow.google.com' if _V963_MEDIA_URLS
+                                   else 'https://labs.google') + url
                         url = _video_media_url(url)  # thumbnail param -> serves poster forever
                         try:
                             print(f"[{account_name}-HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1}: {url[:80]}", flush=True)
@@ -29370,7 +29416,8 @@ class AccountWorker(threading.Thread):
                             # video-sized; once Flow finishes, the same url returns mp4.
                             body = None
                             for _vtry in range(POSTER_RETRY_MAX):
-                                resp = sess.get(url, timeout=120, allow_redirects=True)
+                                resp = sess.get(url, timeout=120, allow_redirects=True,
+                                                headers=_v963_media_headers(url))
                                 if resp.status_code == 401:
                                     # v843 — the snapshot's session-token rotated → 401.
                                     # The submit thread re-snapshots session_ref[0] on a
@@ -29381,7 +29428,8 @@ class AccountWorker(threading.Thread):
                                     for _a401 in range(6):
                                         _fresh = session_ref[0]
                                         if _fresh is not None and _fresh is not sess:
-                                            resp = _fresh.get(url, timeout=120, allow_redirects=True)
+                                            resp = _fresh.get(url, timeout=120, allow_redirects=True,
+                                                             headers=_v963_media_headers(url))
                                             sess = _fresh
                                             if resp.status_code != 401:
                                                 break
@@ -29393,7 +29441,7 @@ class AccountWorker(threading.Thread):
                                     raise Exception(f"HTTP {resp.status_code}")
                                 _ct = (resp.headers.get('Content-Type') or '').lower()
                                 _b = resp.content
-                                if 'image' not in _ct and len(_b) >= MIN_VIDEO_BYTES:
+                                if _v963_looks_like_video(_ct, _b):   # v963.27 — ask the bytes, not just the size
                                     body = _b
                                     break
                                 # poster/partial → clip still rendering; wait + retry SAME url
@@ -29449,7 +29497,11 @@ class AccountWorker(threading.Thread):
                                         continue
                                     _xct = (_r.headers.get('Content-Type') or '').lower()
                                     _xb = _r.content
-                                    if 'image' in _xct or len(_xb) < MIN_VIDEO_BYTES:
+                                    if not _v963_looks_like_video(_xct, _xb):
+                                        # v963.27 — ask the bytes. Poster and render
+                                        # share a token here and differ only by a URL
+                                        # suffix, so "not an image and big enough" is
+                                        # not enough to call something a render.
                                         continue  # still a poster — not the rendered tile
                                     _xout = os.path.join(temp_dir, f"clip_{ci}_{attempt}.late.mp4")
                                     with open(_xout, 'wb') as f:
@@ -30761,20 +30813,32 @@ def main(account_session=None, account_download=None, account_label=None):
                         if not url or url.startswith('blob:'):
                             continue
                         if url.startswith('/'):
-                            url = 'https://labs.google' + url
+                            # v963.27 — was always labs.google; on the new host a
+                            # relative media path belongs to flow.google.com.
+                            url = ('https://flow.google.com' if _V963_MEDIA_URLS
+                                   else 'https://labs.google') + url
                         url = _video_media_url(url)  # thumbnail param -> serves poster forever
                         try:
                             print(f"[HTTP-DL] Clip {ci+1} variant {attempt}.{vi+1}: {url[:80]}", flush=True)
-                            resp = sess.get(url, timeout=120, allow_redirects=True)
+                            resp = sess.get(url, timeout=120, allow_redirects=True,
+                                                headers=_v963_media_headers(url))
                             if resp.status_code == 401 and sess is not session_ref[0] and session_ref[0] is not None:
                                 # Pre-restore session got 401 — try with current (post-restore) session
                                 print(f"[HTTP-DL] 401 with old session — retrying with current session", flush=True)
-                                resp = session_ref[0].get(url, timeout=120, allow_redirects=True)
+                                resp = session_ref[0].get(url, timeout=120, allow_redirects=True,
+                                                          headers=_v963_media_headers(url))
                             if not resp.ok:
                                 raise Exception(f"HTTP {resp.status_code}")
                             body = resp.content
-                            if len(body) < 10000:
-                                raise Exception(f"Too small: {len(body)} bytes")
+                            # v963.27 — was `len(body) < 10000`, which a ~56 KB JPEG
+                            # poster passes. On this host the poster and the render
+                            # come from the SAME token and differ only by the URL
+                            # suffix, so a wrong suffix uploaded a still image AS the
+                            # clip's video and reported success.
+                            _ct2 = (resp.headers.get('Content-Type') or '').lower()
+                            if not _v963_looks_like_video(_ct2, body):
+                                raise Exception(
+                                    f"not a video (ct={_ct2 or '?'} {len(body):,}b)")
                             out = os.path.join(temp_dir, f"clip_{ci}_{attempt}.{vi+1}.mp4")
                             with open(out, 'wb') as f:
                                 f.write(body)
