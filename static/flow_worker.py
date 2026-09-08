@@ -17705,6 +17705,33 @@ def _v962_chips_in_box(page):
         return -1
 
 
+def _v962_asset_selected(item):
+    """Is this add-menu asset already selected? True / False / None if unknown.
+
+    The flag sits on the item or on the button inside it, as aria-selected or
+    aria-checked. None means the page did not say, and the caller must not
+    treat that as "selected" — an unclicked asset never attaches.
+    """
+    for loc, attrs in ((item, ("aria-selected", "aria-checked")),):
+        for attr in attrs:
+            try:
+                v = loc.get_attribute(attr)
+            except Exception:
+                v = None
+            if v is not None:
+                return str(v).strip().lower() == "true"
+    try:
+        btn = item.locator("button").first
+        if btn.count():
+            for attr in ("aria-selected", "aria-checked"):
+                v = btn.get_attribute(attr)
+                if v is not None:
+                    return str(v).strip().lower() == "true"
+    except Exception:
+        pass
+    return None
+
+
 def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
     """v963.11 — attach one ingredient on flow.google.com. (ok, reason).
 
@@ -17812,11 +17839,24 @@ def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
             print(f"{prefix}⚠ [v963.11] {name} never appeared in the add menu", flush=True)
             return (False, 'no_buttons')
 
-    try:
-        picked.click(timeout=8000)
-    except Exception as exc:
-        print(f"{prefix}⚠ [v963.11] could not click {name}: {str(exc)[:90]}", flush=True)
-        return (False, 'no_buttons')
+    # v963.14 — clicking an asset TOGGLES it, so only click one that is not
+    # already selected.
+    #
+    # The scene chip (an asset already in the project, unselected) needed the
+    # click and attached 0 -> 2. The very next ingredient, freshly uploaded,
+    # came back "no chip (chips 2, in-box 2, commit clicked=True)": the upload
+    # leaves its new asset SELECTED, the click turned it back off, and
+    # 'Add to prompt' then had nothing to commit. Blind-clicking is the bug.
+    sel = _v962_asset_selected(picked)
+    if sel is True:
+        print(f"{prefix}[v963.14] {name} already selected after upload — not "
+              f"clicking it off", flush=True)
+    else:
+        try:
+            picked.click(timeout=8000)
+        except Exception as exc:
+            print(f"{prefix}⚠ [v963.11] could not click {name}: {str(exc)[:90]}", flush=True)
+            return (False, 'no_buttons')
     time.sleep(1)
 
     # v963.13 — commit by OUTCOME, not by finding a button in one shot.
