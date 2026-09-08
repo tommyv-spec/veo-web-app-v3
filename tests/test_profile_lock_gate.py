@@ -180,6 +180,90 @@ class ProcessQuery(unittest.TestCase):
                 bd.ensure_profile_unlocked(TARGET, log=lambda *_a, **_k: None, settle_s=0)
 
 
+class SiblingWorkerInTheSameProcess(unittest.TestCase):
+    """The multi-account coordinator runs several AccountWorkers as threads of
+    ONE python process, so os.getpid() cannot tell "my own leftover browser"
+    from "my sibling's live one". Killing on a pid match takes a live render
+    out mid-flight. An OPEN context registers its profile; that is the
+    difference between the two.
+    """
+
+    def setUp(self):
+        bd._OPEN_PROFILES.clear()
+        self.addCleanup(bd._OPEN_PROFILES.clear)
+        self.killed = []
+        p = mock.patch.object(bd, "_kill_pid",
+                              side_effect=lambda pid: self.killed.append(pid) or True)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _rows(self):
+        return _holder_rows() + [_row(900, 1, "python.exe", "python.exe flow_worker.py")]
+
+    def _gate(self, held):
+        seq = list(held)
+        with mock.patch.object(bd, "lock_is_held", side_effect=lambda d: seq.pop(0) if seq else False), \
+             mock.patch.object(bd, "_query_processes", return_value=self._rows()), \
+             mock.patch.object(bd.os, "getpid", return_value=900):
+            return bd.ensure_profile_unlocked(TARGET, log=lambda *_a, **_k: None, settle_s=0)
+
+    def test_a_sibling_with_an_open_context_is_refused_not_killed(self):
+        ctx = mock.MagicMock()
+        bd._register_open_profile(TARGET, ctx)
+        with self.assertRaises(bd.ProfileLockedError):
+            self._gate([True, True, True, True])
+        self.assertEqual([], self.killed, "a sibling's live browser must survive")
+
+    def test_our_own_leftover_after_the_context_closed_is_killed(self):
+        ctx = mock.MagicMock()
+        bd._register_open_profile(TARGET, ctx)
+        # fire the close handler playwright would fire
+        ctx.on.call_args[0][1]()
+        self.assertFalse(bd.profile_open_in_this_process(TARGET))
+        self.assertTrue(self._gate([True, False]))
+        self.assertEqual([101, 100], self.killed)
+
+    def test_a_context_with_no_close_event_does_not_pin_the_profile_forever(self):
+        ctx = mock.MagicMock()
+        ctx.on.side_effect = RuntimeError("no close event here")
+        bd._register_open_profile(TARGET, ctx)
+        self.assertFalse(bd.profile_open_in_this_process(TARGET),
+                         "otherwise every later relaunch in this process is refused")
+
+
+class PosixSettleLoop(unittest.TestCase):
+    """`not lock_is_held(...)` is True for posix's None, so the loop declared the
+    profile free before the killed processes had gone. The process list is the
+    verdict where the lock cannot be probed."""
+
+    def setUp(self):
+        bd._OPEN_PROFILES.clear()
+        self.addCleanup(bd._OPEN_PROFILES.clear)
+
+    def test_none_from_the_probe_is_not_read_as_free(self):
+        rows = _holder_rows()
+        with mock.patch.object(bd, "lock_is_held", return_value=None), \
+             mock.patch.object(bd, "_query_processes", return_value=rows), \
+             mock.patch.object(bd, "_kill_pid", return_value=True), \
+             mock.patch.object(bd, "profile_holders", side_effect=[
+                 [{"pid": 100, "ppid": 900, "name": "camoufox.exe", "cmd": "x"}],  # holders to kill
+                 [{"pid": 100, "ppid": 900, "name": "camoufox.exe", "cmd": "x"}],  # still there
+                 [{"pid": 100, "ppid": 900, "name": "camoufox.exe", "cmd": "x"}],
+                 [{"pid": 100, "ppid": 900, "name": "camoufox.exe", "cmd": "x"}],
+                 [{"pid": 100, "ppid": 900, "name": "camoufox.exe", "cmd": "x"}]]):
+            with self.assertRaises(bd.ProfileLockedError):
+                bd.ensure_profile_unlocked(TARGET, log=lambda *_a, **_k: None, settle_s=0)
+
+    def test_none_plus_an_empty_holder_list_is_free(self):
+        with mock.patch.object(bd, "lock_is_held", return_value=None), \
+             mock.patch.object(bd, "_query_processes", return_value=_holder_rows()), \
+             mock.patch.object(bd, "_kill_pid", return_value=True), \
+             mock.patch.object(bd, "profile_holders", side_effect=[
+                 [{"pid": 100, "ppid": 0, "name": "camoufox.exe", "cmd": "x"}], []]):
+            self.assertTrue(bd.ensure_profile_unlocked(TARGET, log=lambda *_a, **_k: None,
+                                                       settle_s=0))
+
+
 class LockProbe(unittest.TestCase):
     """The probe is a delete attempt: Windows refuses it while a browser holds it.
 

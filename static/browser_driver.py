@@ -12,6 +12,7 @@ while Chrome minted ~0% real tokens the same day.
 import os
 import re
 import subprocess
+import threading
 import time
 
 # Firefox is strictly opt-in. Any other value — including unset — stays on
@@ -309,6 +310,46 @@ def _live_owner(holders, rows, levels=5):
     return None
 
 
+_OPEN_PROFILES = {}
+_OPEN_PROFILES_LOCK = threading.Lock()
+
+
+def profile_open_in_this_process(profile_dir):
+    """True while THIS process still holds an open context on that profile.
+
+    os.getpid() alone cannot tell "my own browser that nobody closed" from "my
+    SIBLING's live browser": the multi-account coordinator runs several
+    AccountWorkers as threads of ONE python process, so both wear the same pid.
+    Killing on a pid match would take a sibling's browser out mid-render.
+
+    An open context is registered here and deregistered when it closes, so a
+    profile a live context still owns is refused, while one whose context was
+    closed (or never came up) is ours to clear.
+    """
+    with _OPEN_PROFILES_LOCK:
+        return _norm(profile_dir) in _OPEN_PROFILES
+
+
+def _register_open_profile(profile_dir, ctx):
+    key = _norm(profile_dir)
+    with _OPEN_PROFILES_LOCK:
+        _OPEN_PROFILES[key] = _OPEN_PROFILES.get(key, 0) + 1
+
+    def _drop(*_a):
+        with _OPEN_PROFILES_LOCK:
+            left = _OPEN_PROFILES.get(key, 0) - 1
+            if left > 0:
+                _OPEN_PROFILES[key] = left
+            else:
+                _OPEN_PROFILES.pop(key, None)
+    try:
+        ctx.on("close", _drop)
+    except Exception:
+        # No close event to hang off: forget it rather than pin the profile
+        # forever, which would refuse every later relaunch in this process.
+        _drop()
+
+
 def profile_lock_gate_enabled(env=None):
     env = os.environ if env is None else env
     return (env.get("PROFILE_LOCK_GATE") or "").strip().lower() not in ("0", "false", "no", "off")
@@ -346,6 +387,13 @@ def ensure_profile_unlocked(profile_dir, log=print, settle_s=1.0):
             f"{profile_dir} is in use by a LIVE worker (pid {owner['pid']}, "
             f"{owner.get('name')}). That lane already has an owner — stop it "
             f"with `python tools/worker_lifecycle.py sweep` rather than racing it.")
+    if owner is not None and profile_open_in_this_process(profile_dir):
+        # Same pid, but a context in this process still has it open — the
+        # multi-account coordinator's sibling worker, not our own leftover.
+        raise ProfileLockedError(
+            f"{profile_dir} is already open by another worker in THIS process "
+            f"(pid {owner['pid']}). Two workers must not share one profile; "
+            f"killing it here would take a live render out mid-flight.")
 
     log(f"[profile-lock] {len(holders)} orphan browser process(es) still hold "
         f"{profile_dir} — clearing (scoped to this profile only)")
@@ -356,9 +404,17 @@ def ensure_profile_unlocked(profile_dir, log=print, settle_s=1.0):
     for _ in range(4):
         if settle_s:
             time.sleep(settle_s)
-        if not lock_is_held(profile_dir):
+        held = lock_is_held(profile_dir)
+        if held is False:
             log(f"[profile-lock] {profile_dir} is free — launching")
             return True
+        if held is None:
+            # posix: no honest lock probe, so the process list is the verdict.
+            # `not None` is truthy, so testing the probe alone declared victory
+            # before the killed processes had even gone.
+            if not profile_holders(profile_dir):
+                log(f"[profile-lock] {profile_dir} has no holder left — launching")
+                return True
     raise ProfileLockedError(
         f"{profile_dir} is still locked after clearing "
         f"{[h['pid'] for h in holders]}. Launching now would hang on the "
@@ -384,4 +440,7 @@ def launch_context(playwright, mode, **kwargs):
 
     from camoufox.sync_api import NewBrowser
     cf = camoufox_launch_kwargs(kwargs, window=os.environ.get("FIREFOX_WINDOW"))
-    return NewBrowser(playwright, persistent_context=True, **cf)
+    ctx = NewBrowser(playwright, persistent_context=True, **cf)
+    if kwargs.get("user_data_dir"):
+        _register_open_profile(kwargs["user_data_dir"], ctx)
+    return ctx
