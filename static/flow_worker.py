@@ -17664,6 +17664,158 @@ def click_frame_and_upload(page, image_path, is_end_frame=False, context=""):
     upload_frame(page, image_path, frame_name)
 
 
+_V962_ADD_MENU_BTN = "button[aria-label='Add ingredients to the prompt box']"
+# Chips the COMPOSER holds. Scoped to the prompt box on purpose: a result tile
+# in the results grid carries a flow-image-ingredient-chip of its own, and an
+# unscoped count reads that as "already attached".
+_V962_COMPOSER_CHIP = ("flow-prompt-box flow-image-ingredient-chip, "
+                       "flow-prompt-box flow-ingredient-chip, "
+                       "flow-base-prompt-box flow-image-ingredient-chip, "
+                       "flow-base-prompt-box flow-ingredient-chip")
+
+
+def _v962_composer_chips(page):
+    try:
+        return page.locator(_V962_COMPOSER_CHIP).count()
+    except Exception:
+        return 0
+
+
+def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
+    """v963.11 — attach one ingredient on flow.google.com. (ok, reason).
+
+    The legacy path opens an 'add_2' Create button, waits for [role=dialog],
+    sets a file input and clicks Add to Prompt. On the new host that fails at
+    step one - measured today, the whole run of movie-section clips died with
+
+        [Omni/Ingredients] add_2 button not found. dialog btns = []
+
+    because there is no add_2 icon, no aria-haspopup=dialog control, and (v962.8)
+    the picker carries no ARIA roles at all, so [role=dialog] never appears
+    either.
+
+    What the composer actually does, measured on project b226b464:
+
+      1. button[aria-label='Add ingredients to the prompt box'] opens the add
+         menu - project assets, images AND videos, plus 'Upload media'
+      2. an asset already in the project is a flow-add-menu-asset-item carrying
+         its file name as inner text
+      3. clicking one marks it SILENTLY: aria-selected stays "false" and the
+         composer stays empty. Only Play/Unmute appearing says anything
+         happened. An attach that stops here looks like a dead end - which is
+         exactly how this read from the logs.
+      4. 'Add to prompt' is the commit, and the chip lands ~2s later
+      5. there is no input[type=file], but 'Upload media' opens a REAL file
+         chooser (expect_file_chooser succeeds), so new files go in that way
+
+    Success is a chip-count INCREASE, keeping the v881 pair rule: the second
+    image of a pair must not be "confirmed" by the first one already sitting
+    there.
+    """
+    name = os.path.basename(image_path) if image_path else None
+    if not (image_path and os.path.isfile(image_path)):
+        print(f"{prefix}⚠ [v963.11] no image file to attach: {image_path}", flush=True)
+        return (False, 'no_buttons')
+
+    if clear_existing:
+        # Each chip carries its own 'cancel' control inside the composer.
+        try:
+            for _ in range(6):
+                x = page.locator("flow-prompt-box button:has-text('cancel'), "
+                                 "flow-base-prompt-box button:has-text('cancel')").first
+                if x.count() == 0:
+                    break
+                x.click(timeout=2500)
+                time.sleep(0.5)
+        except Exception:
+            pass
+
+    chips_before = _v962_composer_chips(page)
+
+    try:
+        add_btn = page.locator(_V962_ADD_MENU_BTN).first
+        add_btn.wait_for(state="visible", timeout=10000)
+    except Exception:
+        print(f"{prefix}⚠ [v963.11] add-ingredients button not on the composer", flush=True)
+        return (False, 'no_buttons')
+    human_click_locator(page, add_btn, f"{prefix}[v963.11] open add menu")
+    time.sleep(1.5)
+
+    try:
+        page.locator(_V962_PICKER).first.wait_for(state="visible", timeout=10000)
+    except Exception:
+        print(f"{prefix}⚠ [v963.11] add menu did not open", flush=True)
+        return (False, 'no_buttons')
+
+    def _item():
+        try:
+            loc = page.locator(".cdk-overlay-container flow-add-menu-asset-item",
+                               has_text=name).first
+            return loc if loc.count() else None
+        except Exception:
+            return None
+
+    picked = _item()
+    if picked is None:
+        # Not in the project yet — 'Upload media' is a real file chooser here.
+        monitor = FramePolicyMonitor(page)
+        monitor.start()
+        try:
+            up = page.locator(".cdk-overlay-container button:has-text('Upload media'), "
+                              "button:has-text('Upload media')").first
+            if up.count() == 0:
+                print(f"{prefix}⚠ [v963.11] no 'Upload media' in the add menu", flush=True)
+                return (False, 'no_buttons')
+            with page.expect_file_chooser(timeout=15000) as fc:
+                up.click(timeout=8000)
+            fc.value.set_files(image_path)
+            print(f"{prefix}✓ [v963.11] uploading {name}", flush=True)
+            deadline = time.time() + 90
+            while time.time() < deadline:
+                time.sleep(1.5)
+                if monitor.is_rejected():
+                    print(f"{prefix}⚠ [v963.11] policy rejected {name}", flush=True)
+                    return (False, 'policy')
+                picked = _item()
+                if picked is not None:
+                    break
+        except Exception as exc:
+            print(f"{prefix}⚠ [v963.11] upload failed: {str(exc)[:110]}", flush=True)
+            return (False, 'no_buttons')
+        finally:
+            monitor.stop()
+        if picked is None:
+            print(f"{prefix}⚠ [v963.11] {name} never appeared in the add menu", flush=True)
+            return (False, 'no_buttons')
+
+    try:
+        picked.click(timeout=8000)
+    except Exception as exc:
+        print(f"{prefix}⚠ [v963.11] could not click {name}: {str(exc)[:90]}", flush=True)
+        return (False, 'no_buttons')
+    time.sleep(1)
+
+    # The commit. Without this the composer stays empty however many assets
+    # were clicked.
+    try:
+        atp = page.locator(".cdk-overlay-container button:has-text('Add to prompt')").first
+        atp.wait_for(state="visible", timeout=8000)
+        human_click_locator(page, atp, f"{prefix}[v963.11] Add to prompt")
+    except Exception:
+        print(f"{prefix}⚠ [v963.11] no 'Add to prompt' button to commit with", flush=True)
+        return (False, 'no_buttons')
+
+    for _ in range(20):
+        time.sleep(1.5)
+        now = _v962_composer_chips(page)
+        if now > chips_before:
+            print(f"{prefix}✓ [v963.11] {name} attached ({chips_before} → {now})", flush=True)
+            return (True, None)
+    print(f"{prefix}⚠ [v963.11] {name}: no new chip after 'Add to prompt' "
+          f"(still {chips_before})", flush=True)
+    return (False, 'no_buttons')
+
+
 def attach_ingredient_image_with_check(page, image_path, context="", extra_images=None,
                                        gallery_cache=None, clear_existing=True):
     """Attach one image as an Ingredient (Omni Flash mode).
@@ -17686,6 +17838,10 @@ def attach_ingredient_image_with_check(page, image_path, context="", extra_image
     """
     prefix = f"{context} " if context else ""
     check_and_dismiss_popup(page)
+
+    # v963.11 — flow.google.com has none of the controls the path below needs.
+    if _v962_on_new_host(page):
+        return _v962_attach_ingredient(page, image_path, prefix, clear_existing)
 
     chip_sel = "button[data-card-open]:has(img[src*='getMediaUrlRedirect'])"
     target_name = os.path.basename(image_path) if image_path else None
