@@ -7049,10 +7049,46 @@ def _v963_media_urls_from_listing(body):
     return out
 
 
+_V963_MEDIA_URLS = {}      # uuid -> mp4 URL, learned from the media listing
+
+
+def _v963_remember_media_urls(mapping):
+    """Keep every uuid -> mp4 URL the media listing has shown us, process-wide.
+
+    The per-page capture dict dies with its page; a download can be resolved
+    long after, from another page or after a relaunch. Same reasoning as the
+    uuid bindings, which are module-level for exactly this.
+    """
+    try:
+        for k, v in (mapping or {}).items():
+            _V963_MEDIA_URLS[str(k).lower()] = v
+    except Exception:
+        pass
+    return len(_V963_MEDIA_URLS)
+
+
 def _construct_media_url(uuid):
-    """The stable getMediaUrlRedirect URL for a bound media uuid (re-resolves each
-    fetch; unlike the expiring CDN URL it carries). THUMBNAIL param never added, so
-    it resolves to the /video/ mp4, not the /image/ poster."""
+    """The download URL for a bound media uuid.
+
+    v963.24 — on flow.google.com the answer comes from the project's media
+    listing: /asb/<token>=mm,22,15, measured as video/mp4. The legacy
+    getMediaUrlRedirect shape is returned ONLY when we have no listing entry
+    AND have never seen a listing at all.
+
+    Once a listing HAS been seen, an unknown uuid returns "" rather than a
+    labs.google URL: that host answers 401 for this session, so building one is
+    not a fallback, it is four guaranteed failures and a spurious "all variants
+    failed - queuing for redo" on a clip that rendered perfectly well. An empty
+    string lets the caller wait for the next listing instead, which is what
+    actually resolves it - the listing only lists media that already exists, so
+    a just-submitted render appears on the NEXT refresh.
+    """
+    _u = str(uuid or "").lower()
+    hit = _V963_MEDIA_URLS.get(_u)
+    if hit:
+        return hit
+    if _V963_MEDIA_URLS:
+        return ""
     return f"{FLOW_MEDIA_ORIGIN}/fx/api/trpc/media.getMediaUrlRedirect?name={uuid}"
 
 
@@ -30395,9 +30431,12 @@ def main(account_session=None, account_download=None, account_label=None):
                                 if _uid not in _captured_media_urls:
                                     _new += 1
                                 _captured_media_urls[_uid] = _u
+                            # also process-wide: this page will die, the
+                            # download may be resolved from another one.
+                            _total = _v963_remember_media_urls(_found)
                             if _new:
                                 print(f"[v963.24] media listing: {_new} new uuid->mp4 "
-                                      f"URL(s) ({len(_captured_media_urls)} known)", flush=True)
+                                      f"URL(s) ({_total} known)", flush=True)
                             return
                 except Exception:
                     pass
