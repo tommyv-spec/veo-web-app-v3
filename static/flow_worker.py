@@ -30236,6 +30236,42 @@ def main(account_session=None, account_download=None, account_label=None):
                     m = _re2.search(r'[?&]name=([a-f0-9-]+)', url)
                     if m:
                         _captured_media_urls[m.group(1)] = url
+                        return
+                # v963.22 DIAGNOSTIC — how does a finished video reach the page
+                # on flow.google.com?
+                #
+                # The capture above maps uuid -> URL from
+                # getMediaUrlRedirect?name=<uuid>, which is what makes a
+                # download matchable to the clip that was bound at submit time.
+                # Measured on this host, tile thumbnails come from
+                # flow.google.com/asb/<opaque> with NO uuid anywhere in the
+                # URL, so that link may be broken here too — and a download
+                # that cannot be matched to a uuid falls back to tile position,
+                # which this host also does not support.
+                #
+                # Rather than guess the new scheme, record it: the first few
+                # media-ish responses are logged with any uuid they do carry.
+                # One real generation then answers whether the uuid survives
+                # into the media URL, or whether the tile has to be mapped some
+                # other way. Read-only, capped, and prints nothing after 6.
+                try:
+                    if _v962_on_new_host(page):
+                        _seen = getattr(page, '_v963_media_diag_n', 0)
+                        if _seen < 6:
+                            _ct = ''
+                            try:
+                                _ct = (response.headers or {}).get('content-type', '')
+                            except Exception:
+                                pass
+                            _looks_media = ('video' in _ct or '/asb/' in url
+                                            or 'videoFx' in url or '.mp4' in url)
+                            if _looks_media:
+                                page._v963_media_diag_n = _seen + 1
+                                _u = _V963_UUID_RE.findall(url)
+                                print(f"[v963.22-diag] media response ct={_ct[:24]!r} "
+                                      f"uuid_in_url={_u} url={url[:120]}", flush=True)
+                except Exception:
+                    pass
             except Exception:
                 pass
         page.on("response", _capture_media_url)
