@@ -7004,46 +7004,88 @@ _V963_ANY_UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 
-def _v963_media_urls_from_listing(body):
-    """{media uuid: mp4 URL} parsed from a Zzl0ze listing body. {} if it isn't one.
+def _v963_batchexecute_payloads(body, rpcid):
+    """Every payload `rpcid` returned in a batchexecute body.
 
-    Pairing is POSITIONAL: each token belongs to the nearest uuid before it.
-    That is not a guess about the array layout, it is the only thing this
-    format reliably offers — and it is what was verified end to end, with the
-    uuid the submit had bound to clip 1 resolving to that clip's own mp4.
-
-    Its limit, stated because it matters: an item also carries workflow and
-    batch uuids, so a token can be attributed to a sibling id in the same
-    item. A wrong pairing yields a real video that belongs to a NEIGHBOUR of
-    the wanted clip, which is the failure mode worth fearing here, so:
-
-      * only the FIRST token seen for a uuid is kept, and
-      * a URL already claimed by another uuid is not re-assigned.
-
-    Both are cheap and stop one token being handed to several clips. A strict
-    per-item parse is the real answer and wants a session with the array shape
-    in front of it; the file at ~/.kaveno has a captured body to work from.
+    The wire format is `)]}'` then length-prefixed chunks, each a JSON array of
+    `["wrb.fr", <rpcid>, "<payload as a JSON STRING>", ...]`. The chunk length
+    counts bytes that include a trailing newline, so the value is decoded with
+    raw_decode and the declared length is used only to find the next chunk.
     """
-    out, claimed = {}, set()
+    out = []
     try:
-        text = (body or "").replace("\\\\", "").replace('\\"', '"')
-        ids = [(m.start(), m.group(0).lower()) for m in _V963_ANY_UUID_RE.finditer(text)]
-        if not ids:
-            return {}
-        for m in _V963_ASB_TOKEN_RE.finditer(text):
-            owner = None
-            for pos, uid in ids:
-                if pos < m.start():
-                    owner = uid
-                else:
-                    break
-            if not owner or owner in out:
+        text = body or ""
+        if text.startswith(")]}'"):
+            text = text.split("\n", 1)[1]
+        dec = json.JSONDecoder()
+        i = 0
+        while i < len(text):
+            m = re.match(r"\s*(\d+)\s*\n", text[i:])
+            if not m:
+                break
+            start = i + m.end()
+            try:
+                val, _ = dec.raw_decode(text, start)
+            except Exception:
+                break
+            i = start + int(m.group(1))
+            if not isinstance(val, list):
                 continue
-            url = f"https://flow.google.com/asb/{m.group(0)}{_V963_VIDEO_SUFFIX}"
-            if url in claimed:
+            for entry in val:
+                if (isinstance(entry, list) and len(entry) > 2
+                        and entry[0] == "wrb.fr" and entry[1] == rpcid and entry[2]):
+                    try:
+                        out.append(json.loads(entry[2]))
+                    except Exception:
+                        continue
+    except Exception:
+        return []
+    return out
+
+
+def _v963_media_urls_from_listing(body):
+    """{media uuid: mp4 URL} parsed from a Zzl0ze listing. {} if it isn't one.
+
+    v963.26 — STRICT, per item. The first version paired each token with the
+    nearest preceding uuid, which Codex review correctly called unsafe: an item
+    carries workflow and batch uuids too, so a token could be attributed to a
+    sibling, and any later "is this uuid in the clip's bound set?" check would
+    then confirm the mis-pairing against itself. Worse, it barely worked — the
+    body puts every item header before the first token, so the positional
+    version collapsed to ONE pair out of twelve.
+
+    The real shape, decoded rather than guessed:
+
+        payload[1] -> the media items, [uuid, null, null, [caption, ...], project]
+        payload[2] -> a PARALLEL list, one entry per item:
+                        e[0] workflow id · e[2] THE MEDIA UUID · exactly one
+                        lh3 "AB-nOU…" token somewhere in the entry
+
+    So a uuid and its token come from the SAME entry, and an entry holding more
+    or fewer than one token is skipped rather than guessed at. Verified against
+    a captured listing: 10 entries, 10 uuids, 10 distinct tokens, and the uuid
+    whose token was fetched returned video/mp4.
+    """
+    out = {}
+    try:
+        for payload in _v963_batchexecute_payloads(body, _V963_MEDIA_LIST_RPCID):
+            if not isinstance(payload, list) or len(payload) < 3:
                 continue
-            claimed.add(url)
-            out[owner] = url
+            entries = payload[2]
+            if not isinstance(entries, list):
+                continue
+            for e in entries:
+                if not isinstance(e, list) or len(e) < 3:
+                    continue
+                uid = e[2]
+                if not (isinstance(uid, str) and _V963_UUID_RE.fullmatch(uid)):
+                    continue
+                toks = set(_V963_ASB_TOKEN_RE.findall(json.dumps(e)))
+                if len(toks) != 1:
+                    # 0 = no media yet; >1 = ambiguous. Both are "do not guess".
+                    continue
+                out[uid.lower()] = (f"https://flow.google.com/asb/{toks.pop()}"
+                                    f"{_V963_VIDEO_SUFFIX}")
     except Exception:
         return {}
     return out
