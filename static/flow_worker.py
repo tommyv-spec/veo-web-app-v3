@@ -20,10 +20,28 @@ import os, re
 # looked hung for 4+ minutes because "WORKER READY - Polling for jobs..." and the
 # whole poll loop are unflushed prints that never reached the log. Reconfigure
 # once here instead of auditing ~2000 print() calls for flush=True.
+#
+# v963.15 — and pin the ENCODING in the same breath, for the same reason.
+#
+# Line buffering fixed WHEN output arrives. It did nothing about output that
+# cannot be written at all: redirected to a file on Windows, stdout defaults to
+# cp1252, and this worker prints ✓ ⚠ ❌ → on almost every line. The first one
+# raises UnicodeEncodeError and the log stops there.
+#
+# Measured 2026-09-08: ~/.kaveno/flow_worker.log, which start_worker.bat writes
+# with `>> "%LOG%" 2>&1`, held nothing but "===== started =====" headers for
+# EVERY launch back to 09-07, while flow_model_events.jsonl proved the worker
+# had really run. A whole day of failures was invisible, and finding today's
+# root cause meant re-running the worker by hand with PYTHONIOENCODING set.
+#
+# Pinned HERE rather than in the launcher on purpose (repo CLAUDE.md §9.1.1):
+# an env var is inherited by every child process and silently changes tools
+# nobody was thinking about. errors="replace" so a stray byte degrades one
+# character instead of killing the run.
 try:
     import sys as _sys
-    _sys.stdout.reconfigure(line_buffering=True)
-    _sys.stderr.reconfigure(line_buffering=True)
+    _sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    _sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 except Exception:
     pass
 # Build version — auto-computed from file content hash (stable across downloads)
