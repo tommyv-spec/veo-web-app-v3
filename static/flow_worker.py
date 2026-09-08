@@ -17723,6 +17723,38 @@ def _v962_chips_in_box(page):
         return -1
 
 
+def _v962_ensure_ingredients_mode(page, prefix=""):
+    """Put the composer on INGREDIENTS. True/False, or None if it can't be read.
+
+    Frames holds exactly two slots — start and end. Ingredients holds many. A
+    movie-section clip needs three (a scene plus two faces), so an attach that
+    runs while the composer has drifted back to Frames fills two and then has
+    nowhere to put the third.
+
+    Reads the DOM rather than trusting the earlier click: the radios only exist
+    while the settings overlay is open, so this opens it, looks, corrects only
+    if needed, and closes.
+    """
+    chip = _v962_open_settings(page, prefix)
+    if chip is None:
+        return None
+    observed = observe_input_mode_tab(page)
+    if observed == 'Ingredients':
+        _v962_close_settings(page)
+        return True
+    ok = _v962_pick_radio(page, "Ingredients", "Video type", prefix)
+    now = observe_input_mode_tab(page)
+    _v962_close_settings(page)
+    try:
+        page._input_mode_observed = now
+    except Exception:
+        pass
+    print(f"{prefix}[v963.16] composer was on {observed or 'unreadable'} — "
+          f"re-selected Ingredients (clicked={ok}, now {now or 'unreadable'})",
+          flush=True)
+    return now == 'Ingredients'
+
+
 def _v962_asset_selected(item):
     """Is this add-menu asset already selected? True / False / None if unknown.
 
@@ -17785,6 +17817,27 @@ def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
     if not (image_path and os.path.isfile(image_path)):
         print(f"{prefix}⚠ [v963.11] no image file to attach: {image_path}", flush=True)
         return (False, 'no_buttons')
+
+    # v963.16 — the composer must be on INGREDIENTS before every attach, not
+    # just once at the top of the clip.
+    #
+    # Operator, 2026-09-08: "frames has 2 - start and end, ingredients can have
+    # multiple". That is exactly the shape of the movie-section failure:
+    #
+    #   scene  image_00.png    attached (0 -> 2)     <- start slot
+    #   face1  ms_face_0_0.png attached (2 -> 4)     <- end slot
+    #   face2  ms_face_0_1.png no chip               <- no third slot exists
+    #
+    # Two attaches then a wall is what a two-slot composer looks like, and
+    # attaching the first image makes a flow-ingredient-bar appear (measured),
+    # so the composer can end up back on Frames after the mode was set. Three
+    # images DO attach when the composer really is on Ingredients - measured on
+    # this project, chips 2 -> 4 -> 6 -> 8 with the composer reading
+    # "cancel cancel cancel".
+    #
+    # Checking costs one settings open/close per ingredient, which is cheap
+    # next to a clip that renders with the wrong references or not at all.
+    _v962_ensure_ingredients_mode(page, prefix)
 
     if clear_existing:
         # Each chip carries its own 'cancel' control inside the composer.
