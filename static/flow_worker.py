@@ -1176,12 +1176,57 @@ async ([url, method, headers, bodyStr]) => {
 """
 
 
+# v963.6 — how long the PYTHON side waits for an in-page fetch to come back.
+# Larger than the JS AbortSignal (15s) so a request that aborts in the browser
+# still reports its own status 0 rather than being cut off here.
+_FA_FETCH_CALL_TIMEOUT_MS = 25000
+
+
+def _fa_page_call(page, js, arg, what):
+    """Run an in-page fetch with a deadline on the PYTHON side too.
+
+    `page.evaluate` has no timeout. The JS already carries AbortSignal.timeout,
+    but that only helps if the page is answering at all: if the renderer stops
+    responding, evaluate never returns and the worker parks in the Playwright
+    event loop forever. Measured three times on the primary worker — 8 hours on
+    clip 37, then 21 minutes on clip 4, then again on clip 14907 — every time
+    with py-spy showing:
+
+        MainThread (idle):
+          run_until_complete (asyncio\\base_events.py:712)
+          greenlet_main (playwright\\sync_api\\_context_manager.py:56)
+
+    and the stage telemetry stopping dead on `pre_submit_auth_check`, which is
+    the auth probe's call into here.
+
+    `wait_for_function` is the same evaluation with a driver-enforced deadline.
+    It waits for a TRUTHY result and this JS always resolves to an object, so it
+    runs the fetch ONCE and returns as soon as the answer exists — it does not
+    re-fire the request.
+
+    A timeout returns the same shape a failed fetch returns, status 0, which
+    `_fa_is_error` already treats as an error and `_fa_is_auth_denial` refuses to
+    treat as a denial. So a slow page degrades exactly like a failed request
+    instead of stopping the worker.
+    """
+    try:
+        handle = page.wait_for_function(js, arg=arg,
+                                        timeout=_FA_FETCH_CALL_TIMEOUT_MS)
+        return handle.json_value()
+    except Exception as e:
+        name = type(e).__name__
+        if "Timeout" in name:
+            print(f"[flow_api] {what} did not answer in "
+                  f"{_FA_FETCH_CALL_TIMEOUT_MS // 1000}s — treating as a failed "
+                  f"request, not as a verdict", flush=True)
+            return {"status": 0, "ok": False, "data": None,
+                    "text": f"fetch failed: page did not answer ({what})"}
+        return {"status": 0, "ok": False, "data": None, "text": f"evaluate failed: {e}"}
+
+
 def _fa_trpc_fetch(page, url, method, body_obj=None):
     body_str = json.dumps(body_obj) if body_obj is not None else None
-    try:
-        return page.evaluate(_FA_TRPC_FETCH_JS, [url, method, body_str])
-    except Exception as e:
-        return {"status": 0, "ok": False, "data": None, "text": f"evaluate failed: {e}"}
+    return _fa_page_call(page, _FA_TRPC_FETCH_JS, [url, method, body_str], "trpc")
 
 
 def _fa_api_fetch(page, url, method, token, body_obj=None):
@@ -1191,10 +1236,7 @@ def _fa_api_fetch(page, url, method, token, body_obj=None):
     if body_obj is not None:
         headers["content-type"] = "application/json"
     body_str = json.dumps(body_obj) if body_obj is not None else None
-    try:
-        return page.evaluate(_FA_API_FETCH_JS, [url, method, headers, body_str])
-    except Exception as e:
-        return {"status": 0, "ok": False, "data": None, "text": f"evaluate failed: {e}"}
+    return _fa_page_call(page, _FA_API_FETCH_JS, [url, method, headers, body_str], "api")
 
 
 def _fa_is_error(result):

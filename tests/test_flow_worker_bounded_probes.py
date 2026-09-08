@@ -276,3 +276,52 @@ def test_no_unbounded_evaluate_on_the_picker_path():
         f"unbounded page.evaluate is back on the picker path: {offenders}. "
         f"These three are the calls between a confirmed login and the Generate "
         f"click; a hang in any of them is invisible until a human notices.")
+
+
+# ---------------------------------------------------------------------------
+# v963.6 — the in-page fetch needed a deadline on the PYTHON side too.
+#
+# The JS already carried AbortSignal.timeout(15000). That only helps if the page
+# is answering at all. `page.evaluate` has no timeout, so when the renderer
+# stopped responding the worker parked in the Playwright event loop forever:
+#
+#     MainThread (idle):
+#       run_until_complete (asyncio\base_events.py:712)
+#       greenlet_main (playwright\sync_api\_context_manager.py:56)
+#
+# Measured three times on the primary worker - 8 hours on clip 37, 21 minutes on
+# clip 4, then again on clip 14907 - every time with the stage telemetry
+# stopping dead on `pre_submit_auth_check`, which is the auth probe calling into
+# _fa_api_fetch.
+# ---------------------------------------------------------------------------
+
+def test_the_in_page_fetch_helpers_are_bounded():
+    for name in ("_fa_api_fetch", "_fa_trpc_fetch", "_fa_page_call"):
+        body = _source_of(name)
+        assert ".evaluate(" not in body, (
+            f"{name} still calls page.evaluate, which cannot time out")
+    call = _source_of("_fa_page_call")
+    assert "wait_for_function(" in call
+    assert "_FA_FETCH_CALL_TIMEOUT_MS" in call
+
+
+def test_a_timeout_looks_like_a_failed_request_not_a_verdict():
+    """status 0 is already 'the fetch never got an answer' everywhere else.
+
+    That matters: _fa_is_error treats status 0 as an error, and
+    _fa_is_auth_denial refuses to treat it as a denial. So a slow page degrades
+    exactly like a failed request and can never be mistaken for 'signed out'.
+    """
+    call = _source_of("_fa_page_call")
+    assert '"status": 0' in call
+    assert "Timeout" in call
+
+
+def test_the_python_deadline_is_longer_than_the_js_abort():
+    """Otherwise Python cuts the call off before the browser can report its own
+    abort, and a real answer gets replaced by a synthetic one."""
+    py_ms = _const("_FA_FETCH_CALL_TIMEOUT_MS")
+    assert py_ms is not None, "_FA_FETCH_CALL_TIMEOUT_MS not found"
+    i = SOURCE.find("AbortSignal.timeout(")
+    js_ms = int(SOURCE[i:i + 40].split("(")[1].split(")")[0])
+    assert py_ms > js_ms, f"python {py_ms}ms must exceed the JS abort {js_ms}ms"
