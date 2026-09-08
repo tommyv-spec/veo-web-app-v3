@@ -17819,25 +17819,40 @@ def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
         return (False, 'no_buttons')
     time.sleep(1)
 
-    # The commit. Without this the composer stays empty however many assets
-    # were clicked.
-    try:
-        atp = page.locator(".cdk-overlay-container button:has-text('Add to prompt')").first
-        atp.wait_for(state="visible", timeout=8000)
-        human_click_locator(page, atp, f"{prefix}[v963.11] Add to prompt")
-    except Exception:
-        print(f"{prefix}⚠ [v963.11] no 'Add to prompt' button to commit with", flush=True)
-        return (False, 'no_buttons')
-
-    for _ in range(20):
-        time.sleep(1.5)
+    # v963.13 — commit by OUTCOME, not by finding a button in one shot.
+    #
+    # 'Add to prompt' is the commit and usually sits in the menu from the
+    # moment it opens, but a hard wait_for on it is brittle: an asset that was
+    # already in the project attaches on a different rhythm than one just
+    # uploaded, and a single 8s window produced
+    #
+    #   no 'Add to prompt' button to commit with
+    #
+    # on a click that had in fact selected the asset. So poll for the thing
+    # that actually matters - the chip - and press the button if and when it
+    # shows up. Some assets attach on the click alone, which this also covers.
+    # Same shape as the legacy path's clicked_add loop.
+    clicked_add = False
+    for _ in range(24):
         now = _v962_composer_chips(page)
         if now > chips_before:
             print(f"{prefix}✓ [v963.11] {name} attached ({chips_before} → {now}, "
                   f"{_v962_chips_in_box(page)} in the box)", flush=True)
             return (True, None)
-    print(f"{prefix}⚠ [v963.11] {name}: no new chip after 'Add to prompt' "
-          f"(chips {chips_before}, in-box {_v962_chips_in_box(page)})", flush=True)
+        if not clicked_add:
+            try:
+                atp = page.locator(
+                    ".cdk-overlay-container button:has-text('Add to prompt'), "
+                    "button:has-text('Add to prompt')").first
+                if atp.count() and atp.is_visible():
+                    human_click_locator(page, atp, f"{prefix}[v963.11] Add to prompt")
+                    clicked_add = True
+            except Exception:
+                pass
+        time.sleep(1.5)
+    print(f"{prefix}⚠ [v963.11] {name}: no chip "
+          f"(chips {chips_before}, in-box {_v962_chips_in_box(page)}, "
+          f"commit clicked={clicked_add})", flush=True)
     return (False, 'no_buttons')
 
 
