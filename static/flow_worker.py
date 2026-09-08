@@ -23572,6 +23572,36 @@ def charswap_generate_readiness(enabled, prompt_len, chip_count):
     return True, f"Generate enabled (prompt {prompt_len} chars, {chip_count} chips)"
 
 
+def _prompt_box_locator(page):
+    """The composer's prompt box on either host, or None.
+
+    v963.17 — the legacy selector is div[role="textbox"]. flow.google.com has
+    none: the v962.7 survey of that composer recorded "the prompt is
+    flow-rich-text-editor [contenteditable='true'] (no div[role=textbox], no
+    textarea)", and the two readers below never got the update.
+
+    The cost, measured 2026-09-08 on a clip that had everything else right:
+
+        [v962.7] prompt in the editor: 1536 chars
+        prompt read-back: prompt box could not be read
+        re-entering the prompt by keyboard (attempt 1)
+        prompt read-back after re-entry: prompt box could not be read
+        not ready to generate: prompt box is empty (3 chips attached)
+
+    The prompt WAS in the box. The reader was looking at an element that does
+    not exist, could not tell "unreadable" from "empty", and the retype typed
+    into the same nothing. Tried in order, so the legacy host is unaffected.
+    """
+    for sel in ('div[role="textbox"]', _V962_PROMPT_EDITOR):
+        try:
+            loc = page.locator(sel).first
+            if loc.count():
+                return loc
+        except Exception:
+            continue
+    return None
+
+
 def charswap_prompt_box_text(page):
     """The text the composer's prompt box currently shows, or None.
 
@@ -23579,8 +23609,8 @@ def charswap_prompt_box_text(page):
     charswap_prompt_readback_action for why the difference matters.
     """
     try:
-        box = page.locator('div[role="textbox"]').first
-        if box.count() == 0:
+        box = _prompt_box_locator(page)
+        if box is None:
             return None
         return (box.inner_text() or "").strip()
     except Exception:
@@ -23596,7 +23626,10 @@ def charswap_retype_prompt(page, prompt, context="[v943]"):
     pure functions above.
     """
     try:
-        box = page.locator('div[role="textbox"]').first
+        box = _prompt_box_locator(page)   # v963.17 — works on both hosts
+        if box is None:
+            print(f"{context} ⚠ [v963.17] no prompt box to retype into", flush=True)
+            return
         try:
             box.scroll_into_view_if_needed(timeout=3000)
         except Exception:
