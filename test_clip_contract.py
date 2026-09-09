@@ -523,3 +523,50 @@ def test_a_text_card_in_an_in_scope_build_is_fine_without_bullets():
     s = _scenes(md)[0]
     assert s["clip_contract_json"] is None
     assert s["clip_contract_version"] is None
+
+
+# --------------------------------------------------------------------------
+# 7. the carry — every surface between the parser and the Clip writer
+#
+# These are source-level assertions on purpose. The failure this guards is a
+# BRANCH BEING MISSED, and the file's own comments say why that is the trap:
+# "a binding that lives only on the per-scene payload arrives as None on every
+# clip" (v718i.2, quoted at image_platform.py:11454-11458). A behavioural test
+# that happens to exercise the spoken branch would pass while the silent branch
+# was still empty. Counting the branches is the check that cannot be fooled.
+# Same technique as code/test_charswap_render_method.py:35.
+# --------------------------------------------------------------------------
+
+IP_SRC = (_HERE / "image_platform.py").read_text(encoding="utf-8")
+
+
+def test_the_declaration_is_read_from_the_scene_exactly_once():
+    assert IP_SRC.count('_v965_contract = scene.get("clip_contract_json")') == 1
+    assert IP_SRC.count('_v965_version = scene.get("clip_contract_version")') == 1
+
+
+def test_all_three_payloads_carry_the_declaration():
+    """One scene payload plus BOTH flat-row branches, spoken and silent."""
+    assert IP_SRC.count('"clip_contract_json": _v965_contract,') == 3
+    assert IP_SRC.count('"clip_contract_version": _v965_version,') == 3
+
+
+def test_the_assignment_constructor_passes_it():
+    """The half check_field_plumbing.py blocked this commit over: a column with
+    no constructor kwarg is a value that is parsed and thrown away."""
+    assert 'clip_contract_json=s.get("clip_contract_json")' in IP_SRC
+    assert 'clip_contract_version=s.get("clip_contract_version")' in IP_SRC
+
+
+def test_both_flat_row_branches_are_still_two():
+    """The count above only means something while there are exactly two
+    flat-row branches. If a third appears, this fails and someone has to look
+    rather than quietly bump a number."""
+    # the flat-row branches are the ones indented inside a per-line loop
+    assert IP_SRC.count(
+        "                # v965 - the clip contract declaration, denormed onto the line".replace(
+            " - ", " — ")) == 2
+    # and the scene payload is the one that is not
+    assert IP_SRC.count(
+        "            # v965 - the clip contract declaration.".replace(
+            " - ", " — ")) == 1

@@ -11252,6 +11252,11 @@ def prepare_batch_for_video(
         # which is what makes the legacy payload unchanged apart from four
         # null-valued keys.
         _v943_method = scene.get("render_method")
+        # v965 — the clip contract declaration, read once and denormed
+        # onto all three payloads below. None on every out-of-scope
+        # build and on every text_card.
+        _v965_contract = scene.get("clip_contract_json")
+        _v965_version = scene.get("clip_contract_version")
         _v943_source_key = scene.get("swap_source_r2_key")
         _v943_mode = scene.get("swap_mode")
         _v943_avatar = scene.get("swap_avatar_upload_id")
@@ -11325,6 +11330,9 @@ def prepare_batch_for_video(
             # v959 — movie-section face refs; empty on every normal scene.
             "face_ref_node_ids": _v959_nids,
             "face_ref_local_indexes": _v959_face_local_idxs,
+            # v965 — the clip contract declaration.
+            "clip_contract_json": _v965_contract,
+            "clip_contract_version": _v965_version,
         })
 
         # v681 — scenes with no `- **line:**` bullets but a real video
@@ -11455,6 +11463,14 @@ def prepare_batch_for_video(
                 # per-scene payload arrives as None on every clip.
                 "face_ref_node_ids": _v959_nids,
                 "face_ref_local_indexes": _v959_face_local_idxs,
+                # v965 — the clip contract declaration, denormed onto the line
+                # for the same reason v718i.2 denormed the end frame: the
+                # dialogue payload builder reads THIS flat array, not the
+                # per-scene payload, so a binding that lives only on the scene
+                # arrives as None on every clip. Both branches, spoken and
+                # silent — missing the silent one is v718i.2's exact failure.
+                "clip_contract_json": _v965_contract,
+                "clip_contract_version": _v965_version,
             })
             veo_prompts_flat.append(silent_vp)
             pads_flat.append(None)
@@ -11651,6 +11667,14 @@ def prepare_batch_for_video(
                 # v959 — face refs, same reason as the silent-line branch above.
                 "face_ref_node_ids": _v959_nids,
                 "face_ref_local_indexes": _v959_face_local_idxs,
+                # v965 — the clip contract declaration, denormed onto the line
+                # for the same reason v718i.2 denormed the end frame: the
+                # dialogue payload builder reads THIS flat array, not the
+                # per-scene payload, so a binding that lives only on the scene
+                # arrives as None on every clip. Both branches, spoken and
+                # silent — missing the silent one is v718i.2's exact failure.
+                "clip_contract_json": _v965_contract,
+                "clip_contract_version": _v965_version,
             })
             veo_prompts_flat.append(vp)
             pads_flat.append(pad)
