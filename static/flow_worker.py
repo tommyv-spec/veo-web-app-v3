@@ -23543,6 +23543,152 @@ def movie_section_selected(clip):
         return False
 
 
+# ===========================================================================
+# v965 — the clip contract. The brain declares; these arms obey.
+#
+# THE TWO SWITCHES, AND WHY THEY TURN ON AT DIFFERENT STAGES
+# ----------------------------------------------------------
+#   V965_APPLY  — write the declared values to the page and record the
+#                 read-back. ON at plan stage 2.
+#   V965_ASSERT — refuse the clip before Generate when a field did not land.
+#                 ON at plan stage 4, and NOT before.
+#
+# Between those two stages a field that fails to land writes an UNAPPLIED
+# ledger row and the clip still renders. That is deliberate: stage 3 exists to
+# FIND those rows, and it cannot find a row on a clip that refused before it
+# was written.
+#
+# THIS FILE IMPORTS NOTHING FROM code/
+# ------------------------------------
+# It runs standalone on worker machines and imports same-directory modules only
+# (see :7338-7346). So the worker never validates the contract and never reads
+# a version: the server already refused anything illegal three doors earlier,
+# and the worker walks the KEYS OF THE DICT IT WAS SENT. That is what makes the
+# ledger's critical list unable to drift from what the server declared — there
+# is no second copy of the field list here to drift from.
+# ===========================================================================
+V965_APPLY = False
+V965_ASSERT = False
+
+V965_DIAG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "clip_contract_diag.jsonl")
+
+# Which contract fields correspond to a control on the page, and which do not.
+# The applier walks the keys it was SENT and looks each one up here, so a field
+# the server adds later and this table has not learned shows up as UNAPPLIED
+# rather than being silently skipped.
+V965_UI_FIELDS = ("input_mode", "veo_model", "duration_s", "aspect_ratio",
+                  "variants", "resolution")
+V965_NO_UI_FIELDS = ("clip_contract_version", "isolate_project",
+                     "policy_fallback", "swap_mode", "swap_max_source_s",
+                     "assets")
+
+
+def v965_write_diag(**fields):
+    """One JSON line per clip, beside the worker — the charswap_diag pattern.
+
+    `start_worker.bat` runs the worker in a console window whose output is lost
+    (v945, :271-274), so the evidence goes to a file as well as to stdout.
+    """
+    try:
+        fields.setdefault("ts", datetime.now().isoformat(timespec="seconds"))
+        with open(V965_DIAG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(fields, default=str) + "\n")
+    except Exception as e:
+        # A diagnostic must never fail a render — but one that fails SILENTLY
+        # leaves you with no evidence and no idea there is none.
+        print(f"[v965] diag write failed: {e}", flush=True)
+
+
+def v965_contract_of(clip):
+    """The contract dict this clip arrived with, or None.
+
+    PRESENCE is the whole predicate. The server attaches a contract only for a
+    stamped clip (`main.py` `_v965_attach_contract`), so "a contract is here"
+    and "this clip is in scope" are the same statement, decided in the one
+    place allowed to decide it. The worker never reads a version to work that
+    out.
+    """
+    if not isinstance(clip, dict):
+        return None
+    c = clip.get('clip_contract')
+    return c if isinstance(c, dict) and c else None
+
+
+def v965_build_ledger(contract, applied=None):
+    """One row per field of the contract, in the state it actually reached.
+
+    Five states, and only five:
+      APPLIED               set on the page and read back equal
+      READ_BACK_DIFFERS     set, but the page says something else
+      NO_UI_ACTION          no control exists; honoured elsewhere or inert
+      ARMED                 reactive; nothing to apply until it fires
+      UNAPPLIED             should have been applied and was not
+
+    `applied` maps field -> read-back value, and is empty while V965_APPLY is
+    off, which is why every UI field reads UNAPPLIED at plan stage 1. That is
+    the honest answer at that stage: nothing was applied.
+    """
+    applied = applied or {}
+    ledger = []
+    for field, declared in contract.items():
+        if field in V965_NO_UI_FIELDS:
+            state, action, read_back = "NO_UI_ACTION", "none", None
+            if field == "policy_fallback":
+                state, action = "ARMED", "reactive"
+            elif field == "isolate_project":
+                action = "scheduling"
+                state = "HONOURED_BY_SCHEDULER"
+        elif field in V965_UI_FIELDS:
+            action = "control"
+            if field in applied:
+                read_back = applied[field]
+                state = ("APPLIED" if str(read_back).strip().lower()
+                         == str(declared).strip().lower()
+                         else "READ_BACK_DIFFERS")
+            else:
+                state, read_back = "UNAPPLIED", None
+        else:
+            # A field the server sent that this worker build has never heard
+            # of. NOT skipped: an unknown key is exactly the thing that must be
+            # loud, because it means the server is ahead of the worker.
+            state, action, read_back = "UNAPPLIED", "unknown-field", None
+        ledger.append({"field": field, "declared": declared, "action": action,
+                       "read_back": read_back, "state": state})
+    return ledger
+
+
+def v965_observe_contract(clip, context=""):
+    """Read the contract, write the ledger, say what happened. Applies nothing.
+
+    This is plan stage 1's whole worker-side behaviour. It exists before the
+    applier does so that stage 3 has a diag file to read and so a clip that
+    arrives WITHOUT a contract is visibly recorded as unstamped rather than
+    silently ignored.
+    """
+    contract = v965_contract_of(clip)
+    clip_id = clip.get('id') if isinstance(clip, dict) else None
+    if contract is None:
+        v965_write_diag(clip_id=clip_id, contract="absent", applied=False,
+                        note="pre-contract clip; renders the way it always did")
+        return None
+    ledger = v965_build_ledger(contract)
+    v965_write_diag(clip_id=clip_id,
+                    contract_version=contract.get("clip_contract_version"),
+                    declared_sha=_hashlib.sha256(
+                        (clip.get('clip_contract_declared') or "").encode("utf-8")
+                    ).hexdigest()[:16],
+                    apply=V965_APPLY, assert_=V965_ASSERT,
+                    keys=len(contract), assets=len(contract.get("assets") or []),
+                    ledger=ledger)
+    print(f"{context}[v965] contract v{contract.get('clip_contract_version')} "
+          f"received, apply={'on' if V965_APPLY else 'off'} "
+          f"assert={'on' if V965_ASSERT else 'off'} "
+          f"({len(contract)} keys, {len(contract.get('assets') or [])} assets)",
+          flush=True)
+    return contract
+
+
 MOVIE_SECTION_DIAG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                        "movie_section_diag.jsonl")
 
@@ -25833,6 +25979,22 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                    f"needed {_this_dur}s"))
                 permanently_failed_clips.add(clip_index)
                 continue
+
+        # v965 — read the clip contract and record what arrived, BEFORE any arm
+        # runs. Applies nothing while V965_APPLY is off; this exists at plan
+        # stage 1 so stage 3 has a diag file to read, and so a clip arriving
+        # WITHOUT a contract is visibly recorded as pre-contract rather than
+        # silently ignored. Every lane passes through here — simple, charswap
+        # and movie-section alike — because "the worker just executes what is
+        # written on the markdown of each job" is not a per-lane statement.
+        try:
+            v965_observe_contract(clip, context=f"clip {clip_index+1}: ")
+        except Exception as _v965_e:
+            # Observation must never fail a render while it is observation
+            # only. It becomes able to refuse a clip at plan stage 4, and that
+            # is a deliberate, separate change.
+            print(f"[v965] observe failed (non-fatal at this stage): {_v965_e}",
+                  flush=True)
 
         # v943 — CHARACTER SWAP ARM. Selected by render_method == 'charswap' and
         # by nothing else: a clip with the field absent or NULL falls straight

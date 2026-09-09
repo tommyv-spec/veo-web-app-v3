@@ -761,3 +761,125 @@ def test_both_polling_endpoints_call_the_same_helper():
     src = (_HERE / "main.py").read_text(encoding="utf-8")
     assert src.count("_v965_attach_contract(clip_data, clip, base_url, \"local-worker\")") == 1
     assert src.count("_v965_attach_contract(_clip_data, clip, base_url, \"user-worker\")") == 1
+
+
+# --------------------------------------------------------------------------
+# 10. the worker side — read, ledger, diag. Nothing applied yet.
+#
+# Read out of the real worker source and executed, the same way
+# code/test_charswap_render_method.py:36 does it: importing flow_worker.py
+# boots a browser driver. This runs the shipped code, not a paraphrase.
+# --------------------------------------------------------------------------
+
+WORKER_SRC = _HERE / "static" / "flow_worker.py"
+
+
+def _worker_ns(*names):
+    """The named functions PLUS the v965 module constants they read.
+
+    The constants have to come along or the extracted function raises NameError
+    on its first lookup — which is itself worth knowing, because it means the
+    table and the function are genuinely coupled and neither works alone.
+    """
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    ns = {"os": __import__("os"), "json": json,
+          "datetime": __import__("datetime").datetime,
+          "_hashlib": __import__("hashlib"),
+          # the constants block computes the diag path from __file__
+          "__file__": str(WORKER_SRC)}
+    consts = src[src.index("\nV965_APPLY = False"):src.index("\ndef v965_write_diag(")]
+    exec(consts, ns)  # noqa: S102 — our own file, on purpose
+    for name in names:
+        start = src.index(f"\ndef {name}(")
+        rest = src[start + 1:]
+        end = rest.index("\ndef ", 1)
+        exec(rest[:end], ns)  # noqa: S102 — our own file, on purpose
+    return ns
+
+
+def test_the_worker_scopes_on_presence_not_on_a_version():
+    """The worker never reads clip_contract_version to decide anything. The
+    server attaches a contract only for a stamped clip, so 'a contract is here'
+    and 'this clip is in scope' are the same statement, decided in one place."""
+    ns = _worker_ns("v965_contract_of")
+    of = ns["v965_contract_of"]
+    assert of({"id": "c1"}) is None
+    assert of({"id": "c1", "clip_contract": {}}) is None
+    assert of({"id": "c1", "clip_contract": {"input_mode": "frames"}}) == {
+        "input_mode": "frames"}
+    assert of("not a dict") is None
+
+
+def test_no_version_comparison_is_written_in_the_worker():
+    """Step 1.10's static check in miniature, and the reason the worker scopes
+    on presence: it imports nothing from code/, so it could not route a version
+    predicate through the accessor even if it wanted one."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    assert "clip_contract_version ==" not in src
+    assert "clip_contract_version >" not in src
+    assert "import clip_contract" not in src
+
+
+def test_every_contract_field_gets_a_ledger_row():
+    """The critical list IS the contract's own field list, so it cannot omit a
+    field that exists. That is the structural fix for v945.15 — 'a verifier
+    whose critical list omits the setting that varies is a rubber stamp for
+    exactly that setting'."""
+    ns = _worker_ns("v965_build_ledger")
+    contract = json.loads(cc.ClipContract(
+        clip_contract_version=1, input_mode="frames", isolate_project=True,
+        policy_fallback=["fail"], veo_model="Veo 3.1 - Lite [Lower Priority]",
+        duration_s=8, aspect_ratio="9:16", variants=2, resolution="720p",
+        swap_mode=None, swap_max_source_s=None,
+        assets=[{"role": "start_frame", "media": "image", "key": "k",
+                 "url": "u", "origin": "image_1"}],
+    ).model_dump_json())
+
+    ledger = ns["v965_build_ledger"](contract)
+    assert {r["field"] for r in ledger} == set(contract)
+    assert len(ledger) == 12
+
+
+def test_an_unknown_field_is_loud_not_skipped():
+    """A key the server sent that this worker build has never heard of means
+    the server is AHEAD of the worker. Skipping it silently is the failure."""
+    ns = _worker_ns("v965_build_ledger")
+    ledger = ns["v965_build_ledger"]({"something_new": "x"})
+    assert ledger[0]["state"] == "UNAPPLIED"
+    assert ledger[0]["action"] == "unknown-field"
+
+
+def test_with_apply_off_every_ui_field_reads_unapplied():
+    """The honest answer at plan stage 1: nothing was applied. If these came
+    back APPLIED with the switch off, the ledger would be lying."""
+    ns = _worker_ns("v965_build_ledger")
+    ledger = {r["field"]: r for r in ns["v965_build_ledger"]({
+        "input_mode": "frames", "resolution": "720p", "isolate_project": True,
+        "policy_fallback": ["fail"], "assets": []})}
+    assert ledger["input_mode"]["state"] == "UNAPPLIED"
+    assert ledger["resolution"]["state"] == "UNAPPLIED"
+    # and the ones with no control say so rather than pretending
+    assert ledger["isolate_project"]["state"] == "HONOURED_BY_SCHEDULER"
+    assert ledger["policy_fallback"]["state"] == "ARMED"
+    assert ledger["assets"]["state"] == "NO_UI_ACTION"
+
+
+def test_a_read_back_that_differs_is_its_own_state():
+    """Set-and-differs is not the same fault as never-set, and telling them
+    apart is the difference between 'the click missed' and 'the code never
+    tried'."""
+    ns = _worker_ns("v965_build_ledger")
+    rows = {r["field"]: r for r in ns["v965_build_ledger"](
+        {"resolution": "1080p"}, applied={"resolution": "720p"})}
+    assert rows["resolution"]["state"] == "READ_BACK_DIFFERS"
+    rows = {r["field"]: r for r in ns["v965_build_ledger"](
+        {"resolution": "720p"}, applied={"resolution": "720p"})}
+    assert rows["resolution"]["state"] == "APPLIED"
+
+
+def test_both_switches_ship_off():
+    """Stage 1 applies nothing and refuses nothing. Turning either on is a
+    separate, deliberate commit."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    assert "\nV965_APPLY = False\n" in src
+    assert "\nV965_ASSERT = False\n" in src
