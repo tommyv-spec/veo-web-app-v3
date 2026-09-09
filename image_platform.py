@@ -6711,6 +6711,23 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                         f"CONTRACT: v1, so every shot scene needs "
                         f"`- **{_name}:** {_shape[_name]}` (v965)"
                     )
+            # v965 — a charswap or movie-section clip MUST own its project.
+            # This is not a preference the brain gets to make: the worker's own
+            # submit proof is only sound because one submitter owns the project
+            # for the length of the run ("if that ever changes, this fallback
+            # stops being safe and the fix is a real submit receipt, not a
+            # better DOM heuristic", static/flow_worker.py:23816-23824). It
+            # stays legal on a simple clip, where nothing depends on it.
+            _method_now = (render_method or "").strip().lower()
+            if _method_now in ("charswap", MOVIE_SECTION_RENDER_METHOD):
+                if any(v is False for v in clip_isolate_projects):
+                    raise ValueError(
+                        f"Scene {scene_index}: isolate_project: false is not "
+                        f"allowed on a {_method_now} clip — the automation "
+                        f"cannot prove a reused composer is clean, and the "
+                        f"submit proof depends on one submitter per project. "
+                        f"Use `- **isolate_project:** true` (v965)"
+                    )
 
         # v681 — text_card scenes AND silent scenes have no `- **line:**`
         # bullets by design. Tolerate missing lines on those. Other scenes
