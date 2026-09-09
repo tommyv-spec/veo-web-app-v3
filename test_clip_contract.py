@@ -988,3 +988,103 @@ def test_the_skeleton_itself_is_not_in_scope():
     import re as _re2
     assert not _re2.search(r"^CLIP CONTRACT:\s*v1\s*$", src, _re2.M), (
         "the skeleton has the opt-in at column 0 and would parse as in-scope")
+
+
+# --------------------------------------------------------------------------
+# 13. the applier — the contract becomes the SOURCE, and the ledger is honest
+# --------------------------------------------------------------------------
+
+class _Page:
+    """Just enough page for the applier. No browser."""
+    pass
+
+
+def _apply_ns():
+    return _worker_ns("v965_declared_input_mode", "v965_apply_contract",
+                      "v965_build_ledger", "v965_ledger_from_page")
+
+
+def test_a_declared_mode_is_read_not_derived():
+    ns = _apply_ns()
+    p = _Page()
+    assert ns["v965_declared_input_mode"](p) is None      # nothing declared
+    p._v965_contract = {"input_mode": "ingredients"}
+    assert ns["v965_declared_input_mode"](p) is True
+    p._v965_contract = {"input_mode": "frames"}
+    assert ns["v965_declared_input_mode"](p) is False
+
+
+def test_the_declared_mode_wins_over_the_old_inference():
+    """The whole point. The old rule would infer Frames here (Omni, no end
+    frame); the contract says Ingredients, and the contract wins."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    i = src.index("def _omni_ingredients_mode(")
+    body = src[i:src.index("\ndef ", i + 1)]
+    assert '_v965_c.get("input_mode")' in body, (
+        "the declared mode must be read INSIDE this function")
+    assert body.index("_v965_contract") < body.index("is_omni("), (
+        "the declared answer must be consulted BEFORE the inference")
+    # and it must stay self-contained: the worker's tests lift this function
+    # out as text and exec it, so a helper call here is a NameError in 30 of
+    # them. This assertion is what stops someone tidying it into a call.
+    assert "v965_declared_input_mode(" not in body, (
+        "keep this inline — test_charswap_render_method.py execs this function "
+        "alone and a helper call breaks 30 tests")
+
+
+def test_apply_is_a_no_op_while_the_switch_is_off():
+    """Stage 1 and 2 ship with V965_APPLY off; nothing may change until it is
+    deliberately turned on."""
+    ns = _apply_ns()
+    p = _Page()
+    assert ns["v965_apply_contract"](p, {"veo_model": "Omni Flash"}) is False
+    assert not hasattr(p, "_veo_model")
+
+
+def test_the_contract_becomes_the_source_when_the_switch_is_on():
+    ns = _apply_ns()
+    ns["V965_APPLY"] = True                     # the switch, in this namespace
+    p = _Page()
+    c = {"input_mode": "ingredients", "veo_model": "Omni Flash",
+         "duration_s": 10, "resolution": "720p", "variants": 2}
+    assert ns["v965_apply_contract"](p, c) is True
+    assert p._veo_model == "Omni Flash"
+    assert p._duration == "10"
+    assert p._resolution == "720p"
+    assert p._v965_contract is c
+
+
+def test_the_ledger_reports_a_failed_pick_instead_of_hiding_it():
+    """`Resolution` is absent from the settings pass's critical list, so a
+    failed pick reports success today. The ledger is what makes it visible."""
+    ns = _apply_ns()
+    p = _Page()
+    contract = {"input_mode": "frames", "resolution": "720p",
+                "duration_s": 8, "veo_model": "Omni Flash",
+                "aspect_ratio": "9:16", "variants": 2}
+    p._v965_mode_key = "Frames"
+    p._v965_applied = {"Frames": True, "Resolution": False, "Duration": True,
+                       "Model": True, "Portrait": True, "Variants": True}
+    rows = {r["field"]: r for r in ns["v965_ledger_from_page"](p, contract)}
+    assert rows["resolution"]["state"] == "READ_BACK_DIFFERS"
+    assert rows["duration_s"]["state"] == "APPLIED"
+    assert rows["input_mode"]["state"] == "APPLIED"
+
+
+def test_a_contract_does_not_leak_to_the_next_clip():
+    """The page is reused across clips in a shared project. An unstamped clip
+    following a stamped one must not inherit the declaration — that would look
+    declared while being wrong, which is worse than the inference it replaces."""
+    ns = _worker_ns("v965_contract_of", "v965_declared_input_mode",
+                    "v965_apply_contract", "v965_build_ledger",
+                    "v965_write_diag", "v965_observe_contract")
+    ns["V965_APPLY"] = True
+    p = _Page()
+
+    ns["v965_observe_contract"]({"id": "c1", "clip_contract": {
+        "input_mode": "ingredients", "clip_contract_version": 1}}, page=p)
+    assert ns["v965_declared_input_mode"](p) is True
+
+    ns["v965_observe_contract"]({"id": "c2"}, page=p)     # unstamped
+    assert ns["v965_declared_input_mode"](p) is None, (
+        "clip 2 inherited clip 1's contract")

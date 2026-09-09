@@ -10590,6 +10590,33 @@ def _v962_material_video_settings(page, prefix="", variants_count=2,
     applied['Model'] = _v962_pick_model(page, target_model, prefix)
     _v962_close_settings(page)
 
+    # v965 — hand the ledger what THIS pass actually achieved. Recorded rather
+    # than re-read, because these are the only booleans that came from a real
+    # aria-checked read-back.
+    page._v965_applied = dict(applied)
+    page._v965_mode_key = mode_key
+    # ...and write the ledger HERE, because this is the moment the read-backs
+    # happened. Writing it later would be reporting a memory of a measurement.
+    _v965_c = getattr(page, "_v965_contract", None)
+    if isinstance(_v965_c, dict):
+        try:
+            _v965_led = v965_ledger_from_page(page, _v965_c)
+            _v965_bad = [r for r in _v965_led if r["state"] in
+                         ("UNAPPLIED", "READ_BACK_DIFFERS")]
+            v965_write_diag(clip_id=getattr(page, "_v965_clip_id", None),
+                            stage="settings-applied",
+                            contract_version=_v965_c.get("clip_contract_version"),
+                            ledger=_v965_led,
+                            unapplied=[r["field"] for r in _v965_bad])
+            print(f"{prefix}[v965] ledger: "
+                  + ", ".join(f"{r['field']}={r['state']}" for r in _v965_led
+                              if r["action"] == "control")
+                  + (f"  !! NOT APPLIED: {[r['field'] for r in _v965_bad]}"
+                     if _v965_bad else "  (every declared control verified)"),
+                  flush=True)
+        except Exception as _e:
+            print(f"{prefix}[v965] ledger write failed: {_e}", flush=True)
+
     critical = ['Video', mode_key, 'Portrait']  # v962.7 — legacy parity: the input mode is critical again
     if target_model == "Omni Flash":
         critical.append('Model')  # v945.15 — an Omni job cannot ship on the default
@@ -17908,6 +17935,23 @@ def _omni_ingredients_mode(page) -> bool:
     check is unchanged: no model but Omni offers the tab at all, so forcing it
     on a Veo model still comes back False and the arm refuses before it
     attaches anything."""
+    # v965 — a DECLARED mode wins. Additive on purpose: this returns early only
+    # when the clip actually carried a contract and V965_APPLY is on, so every
+    # pre-contract clip falls through to the inference below and behaves exactly
+    # as it did. The inference is not deleted here; deleting it is stage 4 and
+    # is gated on knowing which call sites are live.
+    # INLINE on purpose, not a call to v965_declared_input_mode. The worker's
+    # tests lift single functions out of this file as text and exec them
+    # (test_charswap_render_method.py:36), so a helper call here is a NameError
+    # in every one of them -- 30 of them, measured. A function the tests read
+    # alone has to stand alone.
+    _v965_c = getattr(page, "_v965_contract", None)
+    if isinstance(_v965_c, dict):
+        _m = str(_v965_c.get("input_mode") or "").strip().lower()
+        if _m == "ingredients":
+            return True
+        if _m == "frames":
+            return False
     return bool(is_omni(getattr(page, "_veo_model", ""))
                 and (getattr(page, "_clip_has_end_frame", False)
                      or getattr(page, "_force_ingredients", False)))
@@ -23672,7 +23716,83 @@ def v965_build_ledger(contract, applied=None):
     return ledger
 
 
-def v965_observe_contract(clip, context=""):
+def v965_declared_input_mode(page):
+    """The mode THIS clip declared, or None when it declared nothing.
+
+    This is the whole point of the rule. `_omni_ingredients_mode` used to
+    derive Frames-vs-Ingredients from the model name plus whether an end frame
+    existed plus a force flag — three ways in, three v-numbers (v784, v881,
+    v959) to keep correct. When a contract is present the answer is simply
+    read.
+    """
+    c = getattr(page, "_v965_contract", None)
+    if not isinstance(c, dict):
+        return None
+    m = str(c.get("input_mode") or "").strip().lower()
+    return {"ingredients": True, "frames": False}.get(m)
+
+
+def v965_apply_contract(page, contract, prefix=""):
+    """Make the contract the SOURCE the settings pass reads. Applies nothing
+    itself.
+
+    Deliberately not a second place that clicks controls. `CONTRACT.md` Part 4
+    says there must be exactly one applier, and one already exists:
+    `_v962_material_video_settings`. So this stamps the values it reads —
+    `page._veo_model`, `page._duration`, `page._resolution` — and lets that one
+    pass do the clicking and the read-back. A second clicker would be a second
+    thing to drift.
+    """
+    if not V965_APPLY or not isinstance(contract, dict):
+        return False
+    page._v965_contract = contract
+    if contract.get("veo_model"):
+        page._veo_model = contract["veo_model"]
+    if contract.get("duration_s"):
+        page._duration = str(contract["duration_s"])
+    if contract.get("resolution"):
+        page._resolution = contract["resolution"]
+    print(f"{prefix}[v965] contract is the source: "
+          f"mode={contract.get('input_mode')} model={contract.get('veo_model')} "
+          f"{contract.get('duration_s')}s {contract.get('resolution')} "
+          f"x{contract.get('variants')}", flush=True)
+    return True
+
+
+# contract field -> the key `_v962_material_video_settings` reports it under.
+# `input_mode` is special: its key is the mode itself ('Frames'/'Ingredients').
+V965_FIELD_TO_APPLIED_KEY = {
+    "veo_model": "Model",
+    "duration_s": "Duration",
+    "aspect_ratio": "Portrait",
+    "variants": "Variants",
+    "resolution": "Resolution",
+}
+
+
+def v965_ledger_from_page(page, contract):
+    """Turn the settings pass's own result into ledger rows.
+
+    `_v962_pick_radio` returns True ONLY when `aria-checked` reads true after
+    the click (:9961), so a True here is a real read-back and APPLIED is an
+    honest word. A False means the control was not left in the declared state,
+    which is exactly the silent failure `Resolution` has today — it is absent
+    from the critical list at :10593, so a failed pick reports success.
+    """
+    applied_raw = getattr(page, "_v965_applied", None) or {}
+    mode_key = getattr(page, "_v965_mode_key", None)
+    applied = {}
+    for field, key in V965_FIELD_TO_APPLIED_KEY.items():
+        if key in applied_raw:
+            applied[field] = (contract.get(field) if applied_raw[key]
+                              else "__NOT_SET__")
+    if mode_key and mode_key in applied_raw:
+        applied["input_mode"] = (contract.get("input_mode")
+                                 if applied_raw[mode_key] else "__NOT_SET__")
+    return v965_build_ledger(contract, applied)
+
+
+def v965_observe_contract(clip, page=None, context=""):
     """Read the contract, write the ledger, say what happened. Applies nothing.
 
     This is plan stage 1's whole worker-side behaviour. It exists before the
@@ -23682,12 +23802,28 @@ def v965_observe_contract(clip, context=""):
     """
     contract = v965_contract_of(clip)
     clip_id = clip.get('id') if isinstance(clip, dict) else None
+    # CLEAR FIRST, ALWAYS. The page is reused across clips in a shared project,
+    # so a contract left on it would be inherited by the NEXT clip — and an
+    # unstamped clip following a stamped one would silently render under
+    # someone else's declaration. That is worse than the inference this rule
+    # replaces, because it would look declared.
+    if page is not None:
+        page._v965_contract = None
+        page._v965_applied = None
+        page._v965_mode_key = None
+        page._v965_clip_id = clip_id
     if contract is None:
-        v965_write_diag(clip_id=clip_id, contract="absent", applied=False,
+        v965_write_diag(clip_id=clip_id, stage="received", contract="absent",
+                        applied=False,
                         note="pre-contract clip; renders the way it always did")
         return None
+    # make the contract the source the settings pass reads, and remember which
+    # clip this page is rendering so the ledger line can name it
+    if page is not None:
+        page._v965_clip_id = clip_id
+        v965_apply_contract(page, contract, prefix=context)
     ledger = v965_build_ledger(contract)
-    v965_write_diag(clip_id=clip_id,
+    v965_write_diag(clip_id=clip_id, stage="received",
                     contract_version=contract.get("clip_contract_version"),
                     declared_sha=_hashlib.sha256(
                         (clip.get('clip_contract_declared') or "").encode("utf-8")
@@ -26002,7 +26138,8 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         # and movie-section alike — because "the worker just executes what is
         # written on the markdown of each job" is not a per-lane statement.
         try:
-            v965_observe_contract(clip, context=f"clip {clip_index+1}: ")
+            v965_observe_contract(clip, page=page,
+                                  context=f"clip {clip_index+1}: ")
         except Exception as _v965_e:
             # Observation must never fail a render while it is observation
             # only. It becomes able to refuse a clip at plan stage 4, and that
