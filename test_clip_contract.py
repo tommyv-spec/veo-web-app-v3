@@ -883,3 +883,88 @@ def test_both_switches_ship_off():
     src = WORKER_SRC.read_text(encoding="utf-8")
     assert "\nV965_APPLY = False\n" in src
     assert "\nV965_ASSERT = False\n" in src
+
+
+# --------------------------------------------------------------------------
+# 11. parity — the worker's table cannot fall behind the server's model
+# --------------------------------------------------------------------------
+
+def test_every_contract_field_has_a_worker_entry():
+    """The parity check. If someone adds a 13th field to ClipContract and does
+    not teach the worker what it is, this fails at CI instead of the field
+    reading UNAPPLIED on a live clip and refusing it at stage 4."""
+    ns = _worker_ns("v965_contract_of")
+    covered = set(ns["V965_UI_FIELDS"]) | set(ns["V965_NO_UI_FIELDS"])
+    missing = set(cc.ClipContract.model_fields) - covered
+    assert not missing, (
+        f"the worker has no entry for {sorted(missing)} — add it to "
+        f"V965_UI_FIELDS or V965_NO_UI_FIELDS in static/flow_worker.py")
+    stale = covered - set(cc.ClipContract.model_fields)
+    assert not stale, (
+        f"the worker names {sorted(stale)}, which the contract no longer has")
+
+
+def test_the_worker_advertises_the_contract_level_on_every_poll():
+    """A worker reads the served flow_worker.py once, when it starts. Shipping
+    the advertisement BEFORE the server gate is what lets the server hold a
+    stamped clip back from a worker running older code."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    assert "&contract={V965_CONTRACT_LEVEL}" in src
+    # all three poll urls go through the one builder, so one change covers them
+    assert src.count("_worker_arms_q()") >= 3
+
+
+# --------------------------------------------------------------------------
+# 12. the allowlisted static check (F5)
+#
+# NOT a blanket ban on the string `clip_contract_json`: the column has to be
+# declared, migrated, serialized and accepted, and this repo's own plan puts
+# that name in image_platform.py, models.py and main.py. Banning it would fail
+# by construction. The real target is scattered VALUE reads with hand-written
+# null-guards — the way render_method is read at ~15 sites with no shared
+# accessor, which is the drift v892.x is scarred from.
+# --------------------------------------------------------------------------
+
+# Files allowed to name the column at all, and why.
+_PLUMBING_ALLOWED = {
+    "clip_contract.py": "the accessors themselves",
+    "image_platform.py": "schema, migrations, the parser and to_dict()",
+    "models.py": "the ORM column and to_dict()",
+    "main.py": "the API models and the hand-out helper",
+    "test_clip_contract.py": "these tests",
+    "check_field_plumbing.py": "the plumbing checker's own field list",
+}
+
+# What a VALUE read looks like when it bypasses the accessor.
+_BANNED_READ_PATTERNS = (
+    'clip.clip_contract_json',
+    'getattr(clip, "clip_contract_json"',
+    "getattr(clip, 'clip_contract_json'",
+)
+
+
+def test_no_module_reads_the_contract_value_outside_the_accessor():
+    offenders = []
+    for path in sorted((_HERE).glob("*.py")):
+        if path.name in ("clip_contract.py", "test_clip_contract.py"):
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for pat in _BANNED_READ_PATTERNS:
+            if pat in text:
+                offenders.append(f"{path.name}: {pat}")
+    assert not offenders, (
+        "[v965] contract field read outside the accessor: "
+        + "; ".join(offenders)
+        + ". Read it with clip_contract.read_contract_json(clip) — see "
+          "CONTRACT.md section 5.3.")
+
+
+def test_the_allowlist_is_about_plumbing_not_secrecy():
+    """The check permits the name where the column genuinely has to live, so a
+    future reader does not 'fix' it by hiding a legitimate declaration."""
+    ip = (_HERE / "image_platform.py").read_text(encoding="utf-8")
+    assert "clip_contract_json" in ip          # column + parser: allowed
+    mn = (_HERE / "main.py").read_text(encoding="utf-8")
+    assert "clip_contract_json" in mn          # API model: allowed
+    # ...but neither of them reaches past the accessor for the VALUE
+    assert "clip.clip_contract_json" not in mn

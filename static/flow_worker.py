@@ -11460,7 +11460,15 @@ def _worker_arms_q():
     query string built by hand and never escaped is how a later arm name with a
     space or an `&` in it silently truncates the URL and turns the gate off.
     """
-    return f"arms={_url_quote(','.join(WORKER_ARMS))}"
+    # v965 — advertise that this worker build understands the clip contract,
+    # beside the arms it advertises. Inert until the server reads it (plan step
+    # 4.2 adds that gate); shipping it FIRST is what makes the gate safe when it
+    # arrives, because a worker reads the served flow_worker.py once, when it
+    # starts (`main.py:19165`). A worker running older code never sends this, so
+    # the server can hold a stamped clip back from it rather than handing over a
+    # contract it would ignore.
+    return (f"arms={_url_quote(','.join(WORKER_ARMS))}"
+            f"&contract={V965_CONTRACT_LEVEL}")
 
 
 def _flow_only_clip_ids_q():
@@ -23569,6 +23577,12 @@ def movie_section_selected(clip):
 # ===========================================================================
 V965_APPLY = False
 V965_ASSERT = False
+
+# The contract level this worker build understands, advertised on every poll.
+# It is NOT a per-clip version comparison — the worker never reads a clip's
+# version (see v965_contract_of). It says what this BUILD can do, so the server
+# can decide what to hand it. Bump only when the worker learns something new.
+V965_CONTRACT_LEVEL = 1
 
 V965_DIAG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "clip_contract_diag.jsonl")
