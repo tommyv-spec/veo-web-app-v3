@@ -80,6 +80,55 @@ LANE_MOVIE_SECTION = "movie-section"
 ALLOWED_LANES = (LANE_SIMPLE, LANE_CHARSWAP, LANE_MOVIE_SECTION)
 
 
+# ---------------------------------------------------------------------------
+# The rules, as plain functions. BOTH models call these, so "legal" has exactly
+# ONE spelling. Two copies of a validator is how a parser and an API drift into
+# disagreeing about the same value -- and pydantic v2 binds a @field_validator
+# to the class that declares it, so sharing by copying the attribute silently
+# registers nothing at all. (Tried it; it accepted every bad value.)
+# ---------------------------------------------------------------------------
+
+
+def check_version(v: int) -> int:
+    if v != CONTRACT_VERSION:
+        raise ValueError(
+            f"[v965] clip_contract_version {v} is not {CONTRACT_VERSION}; "
+            f"this build of the platform only writes v{CONTRACT_VERSION}")
+    return v
+
+
+def check_input_mode(v: str) -> str:
+    if v not in ALLOWED_INPUT_MODES:
+        raise ValueError(
+            f"[v965] input_mode {v!r} is not one of "
+            f"{' | '.join(ALLOWED_INPUT_MODES)}")
+    return v
+
+
+def check_ladder(v):
+    """A policy ladder must be able to end. Every rung legal, `fail` last, and
+    `fail` nowhere earlier -- otherwise a blocked clip either retries for ever
+    or carries rungs nothing can reach."""
+    if not v:
+        raise ValueError(
+            f"[v965] policy_fallback is empty; it must end in "
+            f"{TERMINAL_RUNG!r} even when there is nothing to try first")
+    unknown = [r for r in v if r not in ALLOWED_RUNGS]
+    if unknown:
+        raise ValueError(
+            f"[v965] policy_fallback has unknown rung(s) {unknown}; "
+            f"legal rungs are {', '.join(ALLOWED_RUNGS)}")
+    if v[-1] != TERMINAL_RUNG:
+        raise ValueError(
+            f"[v965] policy_fallback must end in {TERMINAL_RUNG!r}; "
+            f"{v} does not, so a blocked clip would retry for ever")
+    if TERMINAL_RUNG in v[:-1]:
+        raise ValueError(
+            f"[v965] policy_fallback has {TERMINAL_RUNG!r} before the end; "
+            f"nothing after it can run")
+    return v
+
+
 class Role(str, Enum):
     """What an asset is FOR. Closed on purpose.
 
@@ -231,22 +280,12 @@ class ClipContract(BaseModel):
     @field_validator("clip_contract_version")
     @classmethod
     def _known_version(cls, v: int) -> int:
-        if v != CONTRACT_VERSION:
-            raise ValueError(
-                f"[v965] clip_contract_version {v} is not {CONTRACT_VERSION}; "
-                f"this build of the platform only writes v{CONTRACT_VERSION}"
-            )
-        return v
+        return check_version(v)
 
     @field_validator("input_mode")
     @classmethod
     def _known_input_mode(cls, v: str) -> str:
-        if v not in ALLOWED_INPUT_MODES:
-            raise ValueError(
-                f"[v965] input_mode {v!r} is not one of "
-                f"{' | '.join(ALLOWED_INPUT_MODES)}"
-            )
-        return v
+        return check_input_mode(v)
 
     @field_validator("veo_model")
     @classmethod
@@ -288,28 +327,58 @@ class ClipContract(BaseModel):
     @field_validator("policy_fallback")
     @classmethod
     def _ladder_terminates(cls, v: List[str]) -> List[str]:
-        if not v:
-            raise ValueError(
-                f"[v965] policy_fallback is empty; it must end in "
-                f"{TERMINAL_RUNG!r} even when there is nothing to try first"
-            )
-        unknown = [r for r in v if r not in ALLOWED_RUNGS]
-        if unknown:
-            raise ValueError(
-                f"[v965] policy_fallback has unknown rung(s) {unknown}; "
-                f"legal rungs are {', '.join(ALLOWED_RUNGS)}"
-            )
-        if v[-1] != TERMINAL_RUNG:
-            raise ValueError(
-                f"[v965] policy_fallback must end in {TERMINAL_RUNG!r}; "
-                f"{v} does not, so a blocked clip would retry for ever"
-            )
-        if TERMINAL_RUNG in v[:-1]:
-            raise ValueError(
-                f"[v965] policy_fallback has {TERMINAL_RUNG!r} before the end; "
-                f"nothing after it can run"
-            )
-        return v
+        return check_ladder(v)
+
+
+class ClipContractDeclaration(BaseModel):
+    """What the AUTHOR declared, before anything is resolved.
+
+    WHY THIS EXISTS AND IS NOT JUST `ClipContract`
+    ----------------------------------------------
+    A full `ClipContract` cannot be built at parse time, because `AssetEntry`
+    needs the R2 key -- and 2.3 makes the key the authoritative identity on
+    purpose. The key does not exist yet. The resolution chain is markdown
+    `image_N` -> `ImageNode` id at import -> R2 key at job creation
+    (`_v959_materialise_face_frames`, called from `promote_batch_to_video`,
+    `image_platform.py:13633`). The parser sees markdown text and nothing else.
+
+    So the object is assembled in two stages, which is the same split the
+    face-ref columns already use: `face_ref_node_ids_json` on the assignment
+    row holds the authoring form, `face_ref_frames_json` on the clip holds the
+    resolved form. Here:
+
+      * this model -> `image_scene_assignments.clip_contract_json`, at import
+      * `ClipContract` -> `clips.clip_contract_json`, at job creation
+
+    Asset ORIGINS are not repeated here. They already have homes on the same
+    row (`image_node_id`, `end_frame_image_node_id`, `face_ref_node_ids_json`,
+    the swap columns), and copying them would create a second place for the
+    same fact to drift.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    clip_contract_version: int
+    input_mode: str
+    isolate_project: bool
+    policy_fallback: List[str]
+
+    # The SAME functions ClipContract validates with, so a declaration cannot
+    # say something the finished contract would refuse.
+    @field_validator("clip_contract_version")
+    @classmethod
+    def _known_version(cls, v: int) -> int:
+        return check_version(v)
+
+    @field_validator("input_mode")
+    @classmethod
+    def _known_input_mode(cls, v: str) -> str:
+        return check_input_mode(v)
+
+    @field_validator("policy_fallback")
+    @classmethod
+    def _ladder_terminates(cls, v: List[str]) -> List[str]:
+        return check_ladder(v)
 
 
 def validate_lane(contract: ClipContract, render_method: Optional[str]) -> None:

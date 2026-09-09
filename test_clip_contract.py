@@ -448,3 +448,78 @@ def test_a_bad_contract_bullet_fails_the_import(bullet, bad):
 """
     with pytest.raises(ValueError, match="v965"):
         _scenes(md)
+
+
+# --------------------------------------------------------------------------
+# 6. the opt-in — a build is only in scope if it says so
+# --------------------------------------------------------------------------
+
+IN_SCOPE_HEADER = "## §0\nCLIP CONTRACT: v1\n"
+
+FULL = """
+### Scene 1
+- **image:** image_1
+- **scene_type:** shot
+- **line:** a line
+- **input_mode:** ingredients
+- **isolate_project:** true
+- **policy_fallback:** prompt_b, fail
+"""
+
+
+def test_an_out_of_scope_build_is_never_judged():
+    """345 of the 347 builds carry nothing. They must parse exactly as before,
+    and come out unstamped."""
+    s = _scenes(FULL.replace("- **input_mode:** ingredients\n", "")
+                    .replace("- **isolate_project:** true\n", "")
+                    .replace("- **policy_fallback:** prompt_b, fail\n", ""))[0]
+    assert s["clip_contract_json"] is None
+    assert s["clip_contract_version"] is None
+
+
+def test_an_in_scope_build_is_stamped():
+    s = _scenes(IN_SCOPE_HEADER + FULL)[0]
+    assert s["clip_contract_version"] == cc.CONTRACT_VERSION
+    d = cc.ClipContractDeclaration.model_validate_json(s["clip_contract_json"])
+    assert d.input_mode == "ingredients"
+    assert d.isolate_project is True
+    assert d.policy_fallback == ["prompt_b", "fail"]
+
+
+@pytest.mark.parametrize("drop", [
+    "- **input_mode:** ingredients\n",
+    "- **isolate_project:** true\n",
+    "- **policy_fallback:** prompt_b, fail\n",
+])
+def test_an_in_scope_shot_scene_refuses_a_missing_bullet(drop):
+    """Opting in and then leaving a scene undeclared is the exact hole the rule
+    exists to close — the worker would have to guess again."""
+    md = IN_SCOPE_HEADER + FULL.replace(drop, "")
+    with pytest.raises(ValueError, match="CLIP CONTRACT: v1"):
+        _scenes(md)
+
+
+def test_a_text_card_scene_refuses_contract_bullets():
+    """A card is drawn by ffmpeg and never submitted, so there is no tab to
+    pick and no project to isolate."""
+    md = IN_SCOPE_HEADER + """
+### Scene 1
+- **scene_type:** text_card
+- **caption:** hello
+- **bg_color:** #000000
+- **input_mode:** frames
+"""
+    with pytest.raises(ValueError, match="text_card scenes take no input_mode"):
+        _scenes(md)
+
+
+def test_a_text_card_in_an_in_scope_build_is_fine_without_bullets():
+    md = IN_SCOPE_HEADER + """
+### Scene 1
+- **scene_type:** text_card
+- **caption:** hello
+- **bg_color:** #000000
+"""
+    s = _scenes(md)[0]
+    assert s["clip_contract_json"] is None
+    assert s["clip_contract_version"] is None

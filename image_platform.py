@@ -5888,6 +5888,41 @@ def parse_finishing_section(md_text: str):
     return spec
 
 
+def _v965_declaration_json(scene_index, input_modes, isolate_projects,
+                           policy_fallbacks, in_scope, is_text_card):
+    """The scene's contract DECLARATION as a JSON string, or None.
+
+    None whenever the scene is not in scope — an out-of-scope build, or a
+    text_card, which is drawn by ffmpeg and never submitted to Flow. None is
+    the house NULL-means-legacy value and every reader downstream already
+    treats it that way.
+
+    A scene is one shot, so the scene-level answer is the FIRST declared value,
+    exactly as `veo_model` resolves (:6726 and the comment above it). The
+    per-line arrays travel beside this for anything that needs the finer grain.
+
+    Built through `ClipContractDeclaration` rather than by hand so the parser
+    cannot store a shape the API would later refuse.
+    """
+    if is_text_card or not in_scope:
+        return None
+    _im = next((v for v in input_modes if v), None)
+    _ip = next((v for v in isolate_projects if v is not None), None)
+    _pf = next((v for v in policy_fallbacks if v), None)
+    if _im is None or _ip is None or _pf is None:
+        # The presence check above this call already refused that case; this is
+        # the belt-and-braces half, because a half-built declaration is exactly
+        # the thing the contract exists to make impossible.
+        raise ValueError(
+            f"Scene {scene_index}: incomplete clip contract declaration "
+            f"(input_mode={_im!r}, isolate_project={_ip!r}, "
+            f"policy_fallback={_pf!r}) (v965)")
+    return _clip_contract_mod.ClipContractDeclaration(
+        clip_contract_version=_clip_contract_mod.CONTRACT_VERSION,
+        input_mode=_im, isolate_project=_ip, policy_fallback=_pf,
+    ).model_dump_json()
+
+
 def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict[str, Any]]:
     """New format: parse ``### Scene N`` headers as storyboard scenes.
 
@@ -5904,6 +5939,14 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
     Validates that every referenced image exists in ``known_image_indexes``.
     """
     scenes: List[Dict[str, Any]] = []
+    # v965 — the opt-in. A build declares `CLIP CONTRACT: v1` in its §0 and only
+    # such a build is in scope: every shot scene in it must carry the three
+    # contract bullets. A build WITHOUT the line imports exactly as it did
+    # before this rule existed, which is what makes the backfill zero — 345 of
+    # the 347 builds in videos/ carry no render_method either and none of them
+    # has to change. Same no-metadata regression contract v943 and v944 keep.
+    contract_in_scope = bool(_re.search(
+        r"^\s*CLIP CONTRACT:\s*v1\s*$", md_text, flags=_re.MULTILINE | _re.IGNORECASE))
     blocks = _re.split(r"(?=^###\s+Scene\s+\d+\s*$)", md_text, flags=_re.MULTILINE)
     for block in blocks:
         header = _re.match(r"^###\s+Scene\s+(\d+)\s*$", block, flags=_re.MULTILINE)
@@ -6624,6 +6667,46 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         if not lines_list and dangling_policy_fallback is not None:
             clip_policy_fallbacks = [dangling_policy_fallback]
 
+        # v965 — the opt-in's consequences, checked here because this is the
+        # first point where the scene's type and all three bullets are known.
+        #
+        # Two directions, and both matter:
+        #   * an in-scope SHOT scene must carry all three. A build that opts in
+        #     and then leaves a scene undeclared is the exact hole this rule
+        #     exists to close — the worker would have to guess again.
+        #   * a TEXT_CARD scene must carry none. A card is drawn by ffmpeg and
+        #     never submitted to Flow, so there is no tab to pick and no project
+        #     to isolate. Same reason `render_method: movie-section` is refused
+        #     on a text card (:6259-6262); this refusal is the wider one.
+        # `is_text_card` is already computed at :5938 — reuse it rather than
+        # spelling the same fact twice.
+        _declared = {
+            "input_mode": clip_input_modes,
+            "isolate_project": clip_isolate_projects,
+            "policy_fallback": clip_policy_fallbacks,
+        }
+        if is_text_card:
+            for _name, _arr in _declared.items():
+                if any(v is not None for v in _arr):
+                    raise ValueError(
+                        f"Scene {scene_index}: text_card scenes take no "
+                        f"{_name} — a card is drawn by ffmpeg, never submitted "
+                        f"(v965)"
+                    )
+        elif contract_in_scope:
+            _shape = {
+                "input_mode": "frames|ingredients",
+                "isolate_project": "true|false",
+                "policy_fallback": "prompt_b, fail",
+            }
+            for _name, _arr in _declared.items():
+                if not _arr or any(v is None for v in _arr):
+                    raise ValueError(
+                        f"Scene {scene_index}: this build declares CLIP "
+                        f"CONTRACT: v1, so every shot scene needs "
+                        f"`- **{_name}:** {_shape[_name]}` (v965)"
+                    )
+
         # v681 — text_card scenes AND silent scenes have no `- **line:**`
         # bullets by design. Tolerate missing lines on those. Other scenes
         # (on-camera / voiceover / auto / unset speaker_mode) still
@@ -6739,6 +6822,20 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 (p for p in clip_isolate_projects if p is not None), None),
             "policy_fallback": next(
                 (p for p in clip_policy_fallbacks if p), None),
+            # v965 — the DECLARATION, ready to store on the assignment row. Not
+            # the finished ClipContract: that needs each asset's R2 key, and the
+            # key does not exist until job creation resolves it
+            # (`_v959_materialise_face_frames` from `promote_batch_to_video`,
+            # :13633). Same two-stage split the face-ref columns already use —
+            # the assignment row carries the authoring form, the clip row the
+            # resolved one. None on an out-of-scope build, which is all 347 of
+            # them today.
+            "clip_contract_json": _v965_declaration_json(
+                scene_index, clip_input_modes, clip_isolate_projects,
+                clip_policy_fallbacks, contract_in_scope, is_text_card),
+            "clip_contract_version": (
+                None if (is_text_card or not contract_in_scope)
+                else _clip_contract_mod.CONTRACT_VERSION),
             "speaker_mode": speaker_mode,  # v537
             "cut_mode": cut_mode,  # v668 — None | 'whisper' | 'timeline' | 'auto'
             "explicit_target_s": explicit_target_s,  # v889 — authored, outranks the v667 anchor diff
@@ -10001,6 +10098,14 @@ def _import_scene_table_impl(
                 if (s.get("render_method") or "").strip().lower()
                 == MOVIE_SECTION_RENDER_METHOD else None
             ),
+            # v965 — the clip contract DECLARATION, carried straight from the
+            # parsed scene. None on every out-of-scope build (all 347 today)
+            # and on every text_card. Without these two kwargs the value is
+            # parsed and thrown away and every reader downstream sees NULL,
+            # which is the v889 failure the plumbing check exists to catch —
+            # and it did catch exactly this, on this commit.
+            clip_contract_json=s.get("clip_contract_json"),
+            clip_contract_version=s.get("clip_contract_version"),
         )
         db.add(assignment)
         assignments_created += 1
