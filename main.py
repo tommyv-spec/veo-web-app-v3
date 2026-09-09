@@ -321,6 +321,40 @@ class DialogueLineInput(BaseModel):
     # not a movie section. Undeclared, pydantic would drop it and the section
     # would render with no face chips — a stranger on screen.
     face_ref_local_indexes: Optional[List[int]] = None
+    # v965 — the clip contract declaration, as the JSON string the parser
+    # stored. Declared here for the same v892.2 reason as every field above it:
+    # pydantic drops what it is not told about, so an undeclared field reaches
+    # the Clip row as NULL and the whole chain looks wired while doing nothing.
+    # That failure has happened twice on this feature's own subject matter —
+    # `resolution` was declared and dropped for months, and `input_mode` is sent
+    # to the worker today and never read. NULL on every out-of-scope build,
+    # which is all 347 of them.
+    clip_contract_json: Optional[str] = None
+    clip_contract_version: Optional[int] = None
+
+    @field_validator("clip_contract_json")
+    @classmethod
+    def _v965_parsable_contract(cls, v):
+        """Refuse a contract string the platform cannot read back.
+
+        The worker is handed this string and compared byte-for-byte against it,
+        so a value that does not parse here would fail much later, on a render
+        slot, with a worse message. Empty normalises to None the way every
+        other optional field on this model does.
+        """
+        if v is None:
+            return None
+        raw = str(v).strip()
+        if not raw:
+            return None
+        try:
+            import clip_contract as _cc_mod
+            _cc_mod.ClipContractDeclaration.model_validate_json(raw)
+        except Exception as e:
+            raise ValueError(
+                f"clip_contract_json is not a readable clip contract "
+                f"declaration — {e}") from None
+        return raw
 
     @field_validator("render_method")
     @classmethod
@@ -521,6 +555,13 @@ class ClipResponse(BaseModel):
     # chips travelled, and the R2 keys are nobody else's business.
     render_method: Optional[str] = None
     has_face_refs: bool = False
+    # v965 — the clip contract. On the response because it is how a human, a
+    # test and the stage-3 evidence all ask "did this clip actually get
+    # stamped?" without going to the database. Undeclared, pydantic would drop
+    # it from every response and the whole chain would look wired while showing
+    # nothing (`main.py:302-306`).
+    clip_contract_json: Optional[str] = None
+    clip_contract_version: Optional[int] = None
 
 
 def _v959_1_has_face_refs(clip) -> bool:
@@ -3063,10 +3104,34 @@ async def _create_job_impl(
             swap_audio=(
                 line.get('swap_audio') if isinstance(line, dict) else None
             ),
+            # v965 — the clip contract declaration, straight off the dialogue
+            # line. This is the last hop before the row exists; a field that is
+            # declared, validated, carried through six payloads and then not
+            # passed HERE reaches the worker as NULL with every surface upstream
+            # looking correctly wired. That is the v889/v892.2 failure, and it
+            # is the one check_field_plumbing.py blocked this feature over once
+            # already.
+            clip_contract_json=(
+                line.get('clip_contract_json') if isinstance(line, dict) else None
+            ),
+            clip_contract_version=(
+                line.get('clip_contract_version') if isinstance(line, dict) else None
+            ),
         )
         db.add(clip)
     db.commit()
     print(f"[main.py] Created {len(dialogue_list)} clip rows for job {job_id[:8]}")
+    # v965 TEMPORARY DIAGNOSTIC — remove once read in the Render log (plan step
+    # 4.17). Counts how many of the rows just written carry a contract, so a
+    # silent branch that dropped it is visible without asking the database.
+    try:
+        _v965_n = sum(
+            1 for _l in dialogue_list
+            if isinstance(_l, dict) and _l.get('clip_contract_version'))
+        print(f"[v965] job {job_id[:8]}: {_v965_n}/{len(dialogue_list)} "
+              f"clip rows carry a contract")
+    except Exception as _e:
+        print(f"[v965] contract count failed (non-fatal): {_e}")
 
     # v475: if this job originated from an image batch ("Prepare for video"
     # flow from the image tab), stamp the link on the batch so the sidebar

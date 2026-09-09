@@ -570,3 +570,51 @@ def test_both_flat_row_branches_are_still_two():
     assert IP_SRC.count(
         "            # v965 - the clip contract declaration.".replace(
             " - ", " — ")) == 1
+
+
+# --------------------------------------------------------------------------
+# 8. the API surface — pydantic drops what it is not told about
+# --------------------------------------------------------------------------
+
+def test_the_request_model_declares_and_validates_the_contract():
+    """`main.py:302-306` states the rule this guards: an undeclared field
+    reaches the Clip row as NULL and the whole chain looks wired while doing
+    nothing. Both fields must be declared, and a string that cannot be read
+    back must be refused HERE rather than on a render slot."""
+    from main import DialogueLineInput
+
+    assert "clip_contract_json" in DialogueLineInput.model_fields
+    assert "clip_contract_version" in DialogueLineInput.model_fields
+
+    good = cc.ClipContractDeclaration(
+        clip_contract_version=1, input_mode="frames",
+        isolate_project=False, policy_fallback=["fail"]).model_dump_json()
+    m = DialogueLineInput(id=1, text="hi", clip_contract_json=good,
+                          clip_contract_version=1)
+    assert m.clip_contract_json == good
+
+    for bad in ("{not json", '{"input_mode":"frames"}', '{"clip_contract_version":9}'):
+        with pytest.raises(Exception):
+            DialogueLineInput(id=1, text="hi", clip_contract_json=bad)
+
+    # empty normalises to None, like every other optional field on the model
+    assert DialogueLineInput(id=1, text="hi", clip_contract_json="  ").clip_contract_json is None
+
+
+def test_the_response_model_surfaces_the_contract():
+    """Without this the field is invisible over the API and stage 3 could not
+    ask 'did this clip get stamped?' without going to the database."""
+    from main import ClipResponse
+
+    assert "clip_contract_json" in ClipResponse.model_fields
+    assert "clip_contract_version" in ClipResponse.model_fields
+
+
+def test_the_frontend_sends_it_too():
+    """The field-plumbing checker is satisfied by the SERVER-side promote, so a
+    miss in the browser payload would be completely silent: the build imports
+    in scope, every surface looks wired, and the clip reaches the worker
+    unstamped and renders by inference exactly as before."""
+    html = (_HERE / "static" / "index.html").read_text(encoding="utf-8")
+    assert "clip_contract_json: promoteMeta.clip_contract_json" in html
+    assert "clip_contract_version:" in html
