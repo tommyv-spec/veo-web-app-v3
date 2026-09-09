@@ -20772,6 +20772,46 @@ path nor the inference path it needs.
 
 ---
 
+### v965.5 HOW THIS RULE IS PROVEN — read before you try to prove it
+
+**Shipped and live 2026-09-09** (`72abe0a`). The columns are confirmed present on both tables in
+production (`GET /api/admin/verify-charswap-columns` -> `missing: []`). `V965_APPLY` is **ON**;
+`V965_ASSERT` is **OFF** until stage 4.
+
+**You may not manufacture a job to prove this.** `tools/deploy_claims.py` states the rule in its own
+docstring: *"It must never manufacture a job to look at"*
+(`feedback_no-test-jobs-on-production-platform`). A proof rides the next REAL build the operator
+wanted anyway. That is not a formality — a test job on production burns render slots and pollutes the
+job history that every later measurement reads.
+
+**So the proof works like this.** Put `CLIP CONTRACT: v1` at column 0 in the §0 of a build the operator
+is going to render regardless, and add the three bullets to its shot scenes. Render it. Then read
+`clip_contract_diag.jsonl` beside the worker — one JSON line per clip:
+
+| the line says | what it means |
+|---|---|
+| `stage: "received"`, `contract: "absent"` | a pre-contract clip. It rendered by inference, exactly as before. This line existing on EVERY unstamped clip is half the proof. |
+| `stage: "received"` with a `declared_sha` | the contract arrived. The sha is the first 16 chars of the stored declaration, so it can be compared with the row. |
+| `stage: "settings-applied"` with every control `APPLIED` | the declared values reached the page and were read back. **This is the proof.** |
+| any row `READ_BACK_DIFFERS` or `UNAPPLIED` | the pick failed. The clip STILL rendered, because ASSERT is off — that is deliberate: this stage exists to FIND these rows. |
+| `stage: "refused-pre-generate"` | only possible once ASSERT is on. No render was spent. |
+
+**Two things the diag file cannot tell you, so look at them yourself.** Whether the clip is *good* —
+the ledger proves a setting landed, not that the video is right. And whether an unstamped clip in the
+same job changed at all; it must not have.
+
+**Where the pieces live.** The applier is `v965_apply_contract` in `static/flow_worker.py`; it does not
+click anything, it makes the contract the source `_v962_material_video_settings` reads, because
+CONTRACT Part 4 requires exactly one applier and that one already existed. The ledger is written inside
+that pass, at the moment the read-backs happen — writing it later would report a memory of a
+measurement rather than the measurement.
+
+**Do not "fix" the inline read in `_omni_ingredients_mode` into a helper call.** The worker's tests lift
+single functions out of the file as text and exec them (`test_charswap_render_method.py:36`), so a
+helper call there is a `NameError` in 30 of them. A test pins it inline and says so.
+
+---
+
 ## v966 — REDO PROJECT SELECTION: a redo reads the contract, it does not probe the page
 (2026-09-09)**
 
