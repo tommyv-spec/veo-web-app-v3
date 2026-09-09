@@ -1203,3 +1203,34 @@ def test_the_field_is_declared_on_the_response_model_too():
     body = src[i:src.index("\nclass ", i + 1)]
     assert "clip_contract_json" in body
     assert "clip_contract_version" in body
+
+
+# --------------------------------------------------------------------------
+# 16. v967 — a restore that can only make things worse is not a restore
+# --------------------------------------------------------------------------
+
+def test_the_golden_restore_refuses_to_overwrite_a_fresher_session():
+    """Measured 2026-09-09: a rebuilt profile logged in and rendered, then the
+    next launch restored the now-stale golden over it and sat at "Still waiting
+    for login". Every sign-in rotates the token, so the golden a worker logged
+    in FROM is dead the moment it logs in."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    i = src.index("def restore_from_golden(")
+    body = src[i:src.index("\ndef ", i + 1)]
+    # the guard runs BEFORE the copy
+    assert "[v967] SKIPPING golden restore" in body
+    assert body.index("v967") < body.index("GOLDEN RESTORE: Restoring")
+    # it compares the two cookie DBs, not a guess
+    assert "cookies.sqlite" in body
+    # and it stays overridable, because a genuinely dead session needs it
+    assert "FORCE_GOLDEN_RESTORE" in body
+
+
+def test_the_freshness_guard_fails_open():
+    """A guard that cannot read the clock must not block a restore — that would
+    turn a diagnostic into an outage."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    i = src.index("def restore_from_golden(")
+    body = src[i:src.index("\ndef ", i + 1)]
+    tail = body[body.index("v967"):]
+    assert "restoring anyway" in tail

@@ -5950,6 +5950,43 @@ def restore_from_golden(session_folder, account_label="", restore_session=True,
     if not restore_session or not session_folder:
         return True
 
+    # v967 — NEVER overwrite a session that is FRESHER than the golden.
+    #
+    # Every Google sign-in rotates the token, so the moment a worker logs in,
+    # the golden it was restored from becomes a corpse (tools/flow_profile.py
+    # states this: "every clone signs in again and kills the previous
+    # session"). Restoring that corpse over a working session on the next
+    # launch signs the worker OUT, and the next launch does it again. Measured
+    # 2026-09-09: a freshly rebuilt profile logged in and rendered, and the
+    # following launch restored the now-stale golden over it and sat at
+    # "Still waiting for login" for ten minutes.
+    #
+    # The rule is one comparison: if the live session's cookie DB is NEWER than
+    # the golden's, the session knows something the golden does not, so leave
+    # it alone. A restore that can only make things worse is not a restore.
+    # Set FORCE_GOLDEN_RESTORE=1 to override (that is what a genuinely broken
+    # session needs, and it stays a deliberate act).
+    try:
+        if os.environ.get("FORCE_GOLDEN_RESTORE", "").strip() not in ("1", "true", "yes"):
+            _sess_ck = os.path.join(session_folder, "cookies.sqlite")
+            _gold_ck = os.path.join(golden_folder, "cookies.sqlite")
+            if os.path.exists(_sess_ck) and os.path.exists(_gold_ck):
+                _s_age = os.path.getmtime(_sess_ck)
+                _g_age = os.path.getmtime(_gold_ck)
+                if _s_age > _g_age:
+                    print(f"{prefix}[v967] SKIPPING golden restore — the live "
+                          f"session is newer than the golden "
+                          f"({int(_s_age - _g_age)}s), so restoring would "
+                          f"replace a working login with a rotated-dead "
+                          f"snapshot. FORCE_GOLDEN_RESTORE=1 overrides.",
+                          flush=True)
+                    return True
+    except Exception as _e:
+        # A guard that cannot read the clock must not block a restore — fall
+        # through to the old behaviour and say why.
+        print(f"{prefix}[v967] freshness check failed ({_e}); restoring anyway",
+              flush=True)
+
     print(f"{prefix}🔄 GOLDEN RESTORE: Restoring session profile from {golden_folder}", flush=True)
 
     # v701g — Windows file-handle release loop. After taskkill on a Chrome
