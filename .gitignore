@@ -72,3 +72,6 @@ __pycache__/
 # Valid only for one exact tree + loss set (self-stales on any new commit).
 # Must be ignored so deploy.ps1's clean-checkout gate does not see it.
 .deploy_ack.json
+
+# local machine config: which Google account the workers drive (holds an email)
+worker_settings.json
