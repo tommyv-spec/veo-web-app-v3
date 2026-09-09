@@ -2664,9 +2664,25 @@ async def create_job_from_batch(
         "dialogue_text": c.dialogue_text,
         "audio_from_scene": c.audio_from_scene,
         "target_duration_s": c.target_duration_s,
+        "clip_contract_version": c.clip_contract_version,
     } for c in db.query(Clip)
         .filter(Clip.job_id == job_id, Clip.clip_index < 100000)
         .order_by(Clip.clip_index).all()]
+
+    # v965 — the same transport question v892.12 asks about duration, asked
+    # about the clip contract: prepare said this batch is stamped, so the rows
+    # it just wrote must be stamped too. Without this the contract can be
+    # declared, validated, carried through every payload and then land as NULL,
+    # with every surface upstream looking correctly wired — which is exactly
+    # what happened on job 97d985b6 and is why this check exists.
+    _v965_declared = sum(1 for r in (prepared.get("scenes_metadata") or [])
+                         if r.get("clip_contract_version"))
+    _v965_written = sum(1 for r in clip_rows if r.get("clip_contract_version"))
+    if _v965_declared and not _v965_written:
+        print(f"[v965 TRANSPORT FAIL] job={job_id[:8]} prepare declared "
+              f"{_v965_declared} stamped row(s) and the Clip writer wrote "
+              f"{_v965_written} — the contract was dropped between "
+              f"prepare and the clip row", flush=True)
 
     expected_rows = expected_rows_from_prepare(prepared)
     scene_position = {sa.get("scene_index"): pos for pos, sa
@@ -2736,6 +2752,11 @@ async def create_job_from_batch(
             "clips": len(clip_rows),
             "roles": roles,
             "audio_from_scene": afs_list,
+            # v965 — returned, not just logged. A console line on Render is
+            # evidence nobody reads; the caller asked for this job and is the
+            # one who needs to know the contract survived the last hop.
+            "contract_declared_rows": _v965_declared,
+            "contract_written_rows": _v965_written,
         },
     }
 
