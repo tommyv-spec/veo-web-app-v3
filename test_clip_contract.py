@@ -1164,3 +1164,42 @@ def test_a_ledger_that_cannot_be_built_also_refuses_when_asserting():
     body = src[i:src.index("\ndef ", i + 1)]
     tail = body[body.index("ledger write failed"):]
     assert "if V965_ASSERT:" in tail and "return False" in tail
+
+
+# --------------------------------------------------------------------------
+# 15. declared on the response model is NOT the same as populated
+#
+# The bug this section exists for cost an afternoon. `clip_contract_json` was
+# declared on ClipResponse, so it appeared in the live OpenAPI schema and every
+# clip returned it as None -- while the database row was correct all along. I
+# read that None as "the platform dropped the contract" and went hunting a
+# transport bug that did not exist. The codebase already knew: the comment
+# beside `render_method=c.render_method` says "on the model is not enough and
+# the row reads its default forever".
+# --------------------------------------------------------------------------
+
+def test_every_clipresponse_site_populates_the_contract():
+    """A ClipResponse construction that names render_method must name the
+    contract too. They are the same kind of field, written at the same sites,
+    and one being present without the other is the exact hole that hid a
+    correct pipeline behind a null."""
+    src = (_HERE / "main.py").read_text(encoding="utf-8")
+    sites = src.count("render_method=c.render_method,") + \
+        src.count("render_method=clip.render_method,")
+    # through the accessor, not the raw attribute: the repo's own static check
+    # refuses a direct read even at a serialization site, and it is right to
+    populated = src.count("clip_contract_json=_v965_read_json(")
+    assert populated == sites, (
+        f"{sites} ClipResponse site(s) name render_method but only {populated} "
+        f"name clip_contract_json — a clip will read as unstamped while its row "
+        f"is stamped")
+
+
+def test_the_field_is_declared_on_the_response_model_too():
+    """Both halves are needed: declared so it can be returned, populated so it
+    actually is. This test is the pair to the one above."""
+    src = (_HERE / "main.py").read_text(encoding="utf-8")
+    i = src.index("class ClipResponse")
+    body = src[i:src.index("\nclass ", i + 1)]
+    assert "clip_contract_json" in body
+    assert "clip_contract_version" in body

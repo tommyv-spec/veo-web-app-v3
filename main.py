@@ -6974,6 +6974,14 @@ async def get_job_clips(
             # on the model is not enough and the row reads its default forever.
             render_method=c.render_method,
             has_face_refs=_v959_1_has_face_refs(c),
+            # v965 — POPULATED, not just declared. Declaring these on
+            # ClipResponse put them in the schema and left them defaulting to
+            # None here, so the API reported every stamped clip as unstamped
+            # while the row was correct. That cost an afternoon of hunting a
+            # transport bug that did not exist, and it is the same lesson the
+            # render_method comment above already records.
+            clip_contract_json=_v965_read_json(c),
+            clip_contract_version=c.clip_contract_version,
         )
         for c in clips
     ]
@@ -7163,6 +7171,14 @@ async def get_job_clips_active(
             # on the model is not enough and the row reads its default forever.
             render_method=c.render_method,
             has_face_refs=_v959_1_has_face_refs(c),
+            # v965 — POPULATED, not just declared. Declaring these on
+            # ClipResponse put them in the schema and left them defaulting to
+            # None here, so the API reported every stamped clip as unstamped
+            # while the row was correct. That cost an afternoon of hunting a
+            # transport bug that did not exist, and it is the same lesson the
+            # render_method comment above already records.
+            clip_contract_json=_v965_read_json(c),
+            clip_contract_version=c.clip_contract_version,
         )
         for c in clips
     ]
@@ -9106,6 +9122,9 @@ async def select_clip_variant(
             # would tell a caller this section clip is an ordinary one.
             render_method=clip.render_method,
             has_face_refs=_v959_1_has_face_refs(clip),
+            # v965 — see the note at the other two ClipResponse sites.
+            clip_contract_json=_v965_read_json(clip),
+            clip_contract_version=clip.clip_contract_version,
         )
     }
 
@@ -19332,6 +19351,19 @@ def _v965_resolve_assets(clip, base_url: str, lane: str, method: str):
             key=clip.end_frame, url=_frame_url(clip.end_frame),
             origin=_os.path.basename(clip.end_frame)))
     return out
+
+
+def _v965_read_json(clip):
+    """The contract string for a response, through the accessor.
+
+    Reading the column straight off the row would work, and is what I wrote
+    first -- the repo's own static check refused it, correctly. The accessor
+    exists so ONE place knows how to read this column; a serialization site is
+    still a reader. (Naming the banned expression in this docstring also
+    tripped the check, which is fair: a text rule cannot tell prose from code.)
+    """
+    import clip_contract as _cc_mod
+    return _cc_mod.read_contract_json(clip)
 
 
 def _v943_maybe_charswap(clip_data: dict, clip, base_url: str, lane: str) -> dict:
