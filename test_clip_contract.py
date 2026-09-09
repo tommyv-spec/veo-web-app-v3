@@ -324,3 +324,127 @@ def test_stamped_clip_filter_asks_the_column_not_the_blob():
         clip_contract_version = _Col()
 
     assert cc.stamped_clip_filter(_FakeClip) == ("isnot", None)
+
+
+# --------------------------------------------------------------------------
+# 5. the parser — line attachment, and the dangling fallback for a silent scene
+#
+# The convention is not new. A per-line bullet on a scene with ZERO lines is
+# held in a `dangling_*` variable and emitted as a one-entry list, with three
+# precedents in the same loop: v786 action_note, v861 clip_duration_s, v961
+# veo_model (`code/image_platform.py:6425-6445`). These three copy it.
+# --------------------------------------------------------------------------
+
+import image_platform as ip  # noqa: E402
+
+
+def _scenes(md):
+    return ip._parse_scene_blocks_new(md, known_image_indexes={1, 2, 3})
+
+
+SILENT = """
+### Scene 1
+- **image:** image_1
+- **scene_type:** shot
+- **speaker:** silent
+- **input_mode:** ingredients
+- **isolate_project:** true
+- **policy_fallback:** prompt_b, fail
+- **clip_duration_s:** 8
+- **action_note:** she lifts the jar
+"""
+
+TWO_LINES = """
+### Scene 1
+- **image:** image_1
+- **scene_type:** shot
+- **line:** first line here
+- **input_mode:** frames
+- **isolate_project:** false
+- **policy_fallback:** fail
+- **clip_duration_s:** 4
+- **line:** second line here
+- **input_mode:** ingredients
+- **isolate_project:** true
+- **policy_fallback:** prompt_b, model_swap, fail
+- **clip_duration_s:** 6
+"""
+
+
+def test_a_silent_shot_scene_keeps_its_contract_bullets():
+    """No `line` bullet to attach to, and the scene still renders a clip. The
+    dangling hold is what stops a declaration being parsed, validated and then
+    thrown away."""
+    s = _scenes(SILENT)[0]
+    assert s["lines"] == []
+    assert s["clip_input_modes"] == ["ingredients"]
+    assert s["clip_isolate_projects"] == [True]
+    assert s["clip_policy_fallbacks"] == [["prompt_b", "fail"]]
+    # and the scene-level resolution, which is what actually reaches a Clip
+    assert s["input_mode"] == "ingredients"
+    assert s["isolate_project"] is True
+    assert s["policy_fallback"] == ["prompt_b", "fail"]
+
+
+def test_two_lines_in_one_scene_do_not_leak_into_each_other():
+    s = _scenes(TWO_LINES)[0]
+    assert len(s["lines"]) == 2
+    assert s["clip_input_modes"] == ["frames", "ingredients"]
+    assert s["clip_isolate_projects"] == [False, True]
+    assert s["clip_policy_fallbacks"] == [
+        ["fail"], ["prompt_b", "model_swap", "fail"]]
+    # first declared value in the scene wins for the scene-level answer
+    assert s["input_mode"] == "frames"
+
+
+def test_a_scene_with_no_contract_bullets_is_untouched():
+    """347 builds carry none of these. They must parse exactly as before."""
+    s = _scenes("""
+### Scene 1
+- **image:** image_1
+- **scene_type:** shot
+- **line:** just a normal line
+- **clip_duration_s:** 4
+""")[0]
+    assert s["clip_input_modes"] == [None]
+    assert s["input_mode"] is None
+    assert s["isolate_project"] is None
+    assert s["policy_fallback"] is None
+
+
+def test_the_parser_normalises_case_but_the_model_stays_strict():
+    """Normalise at the edge, be strict inside -- the same shape `veo_model`
+    uses (`normalize_veo_model` then `is_legal_veo_model`). An author writing
+    the UI's label `Ingredients` gets it stored as `ingredients`; the model
+    itself never accepts the capitalised form, because by the time a contract
+    object exists the value has already been through the parser."""
+    s = _scenes("""
+### Scene 1
+- **image:** image_1
+- **scene_type:** shot
+- **line:** a line
+- **input_mode:** Ingredients
+""")[0]
+    assert s["input_mode"] == "ingredients"
+    with pytest.raises(Exception):
+        cc.ClipContract(**_contract(input_mode="Ingredients"))
+
+
+@pytest.mark.parametrize("bullet,bad", [
+    ("input_mode", "frames-tab"),
+    ("isolate_project", "yes"),      # explicitly not accepted
+    ("isolate_project", "1"),
+    ("policy_fallback", "prompt_b"),             # never terminates
+    ("policy_fallback", "fail, prompt_b"),       # fail before the end
+    ("policy_fallback", "prompt_b, teleport, fail"),  # unknown rung
+])
+def test_a_bad_contract_bullet_fails_the_import(bullet, bad):
+    md = f"""
+### Scene 1
+- **image:** image_1
+- **scene_type:** shot
+- **line:** a line
+- **{bullet}:** {bad}
+"""
+    with pytest.raises(ValueError, match="v965"):
+        _scenes(md)

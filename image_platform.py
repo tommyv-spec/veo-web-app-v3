@@ -63,6 +63,10 @@ from veo_models import (
     normalize_veo_model,
     offers_ingredients_tab,
 )
+# v965 — the declarative clip contract. Another leaf module, imported for the
+# same reason veo_models is: the legal values live in ONE place so the parser,
+# the API and the linters cannot disagree about them.
+import clip_contract as _clip_contract_mod
 from chatgpt_extension_pairing import (
     ExpiredPairingTicket,
     InvalidPairingTicket,
@@ -6400,8 +6404,13 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # reason: it is a PER-CLIP override of a job-level setting, so it
         # attaches to the closest preceding `line` exactly as v861's duration
         # does, and a no-line (silent / text_card) scene holds a dangling one.
+        # v965 — `input_mode`, `isolate_project` and `policy_fallback` join the
+        # same per-line bullet set, for the same reason again: each is a
+        # PER-CLIP statement about what the clip IS, so a two-line scene can
+        # hold two different answers, and a no-line scene holds a dangling one.
         bullet_pattern = _re.compile(
-            r"^\s*[-*]\s*\*\*(line|action_note|pad|clip_duration_s|veo_model)\s*:\*\*\s*(.+?)\s*$",
+            r"^\s*[-*]\s*\*\*(line|action_note|pad|clip_duration_s|veo_model"
+            r"|input_mode|isolate_project|policy_fallback)\s*:\*\*\s*(.+?)\s*$",
             flags=_re.MULTILINE | _re.IGNORECASE,
         )
         lines_list: List[str] = []
@@ -6409,7 +6418,15 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         pads: List[Optional[str]] = []  # v644 parallel array
         clip_durations: List[Optional[int]] = []  # v861 parallel array
         clip_veo_models: List[Optional[str]] = []  # v961 parallel array
+        clip_input_modes: List[Optional[str]] = []       # v965 parallel array
+        clip_isolate_projects: List[Optional[bool]] = []  # v965 parallel array
+        clip_policy_fallbacks: List[Optional[list]] = []  # v965 parallel array
         dangling_veo_model: Optional[str] = None  # v961, mirrors v861's
+        # v965 — three more of the same shape. A shot scene with no `line`
+        # bullet still renders a clip, and it still has to say what it is.
+        dangling_input_mode: Optional[str] = None
+        dangling_isolate_project: Optional[bool] = None
+        dangling_policy_fallback: Optional[list] = None
         # v786 — silent / text_card scenes have an action_note but NO line
         # bullets, so the attach-to-most-recent-line rule below would drop
         # it. Hold it here; if the scene ends with zero lines, emit it as a
@@ -6430,6 +6447,9 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 pads.append(None)
                 clip_durations.append(None)  # v861
                 clip_veo_models.append(None)  # v961
+                clip_input_modes.append(None)       # v965
+                clip_isolate_projects.append(None)  # v965
+                clip_policy_fallbacks.append(None)  # v965
             elif key == "action_note":
                 if lines_list:
                     # Attach to most recent line
@@ -6502,6 +6522,74 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                     clip_veo_models[-1] = _model_val
                 else:
                     dangling_veo_model = _model_val
+            elif key == "input_mode":
+                # v965 — WHICH TAB the clip renders on, declared instead of
+                # inferred. The worker used to derive this from the model name
+                # plus whether an end frame existed plus a force flag — three
+                # ways in, and it needed v784, v881 and v959 to stay correct.
+                # Lowercase and exact: the values are ours, not the UI's label.
+                _im = value.strip().lower()
+                if _im not in _clip_contract_mod.ALLOWED_INPUT_MODES:
+                    raise ValueError(
+                        f"Scene {scene_index}: input_mode {value!r} is not one "
+                        f"of {' | '.join(_clip_contract_mod.ALLOWED_INPUT_MODES)} (v965). "
+                        f"Lowercase — 'Ingredients' is the UI's label for the "
+                        f"radio, not the value the build declares."
+                    )
+                if lines_list:
+                    clip_input_modes[-1] = _im
+                else:
+                    dangling_input_mode = _im
+            elif key == "isolate_project":
+                # v965 — whether this clip gets its own Flow project. The brain
+                # decides it because the brain knows whether the clip shares
+                # references with its neighbours; the worker just obeys.
+                _ip_raw = value.strip().lower()
+                if _ip_raw not in ("true", "false"):
+                    raise ValueError(
+                        f"Scene {scene_index}: isolate_project is 'true' or "
+                        f"'false' (v965); {value!r} is neither. 'yes'/'no' are "
+                        f"not accepted — the field is a boolean, and a value "
+                        f"nobody parsed is a decision nobody made."
+                    )
+                _ip = (_ip_raw == "true")
+                if lines_list:
+                    clip_isolate_projects[-1] = _ip
+                else:
+                    dangling_isolate_project = _ip
+            elif key == "policy_fallback":
+                # v965 — what to try when Flow's content policy blocks this
+                # generation, in order, ending in `fail`. The worker used to
+                # own this ladder and it swapped the MODEL on rung two, which
+                # is a decision about what the video IS, not about how fast to
+                # retry. Comma-separated so a build reads it aloud.
+                _rungs = [r.strip().lower() for r in value.split(",") if r.strip()]
+                try:
+                    # The same legal-rung list the model itself validates
+                    # against, so the parser and the contract cannot disagree
+                    # about what a legal ladder is.
+                    _bad = [r for r in _rungs if r not in _clip_contract_mod.ALLOWED_RUNGS]
+                    if _bad:
+                        raise ValueError(
+                            f"unknown rung(s) {_bad}; legal rungs are "
+                            f"{', '.join(_clip_contract_mod.ALLOWED_RUNGS)}")
+                    if not _rungs or _rungs[-1] != _clip_contract_mod.TERMINAL_RUNG:
+                        raise ValueError(
+                            f"the ladder must end in {_clip_contract_mod.TERMINAL_RUNG!r}, "
+                            f"or a blocked clip retries for ever")
+                    if _clip_contract_mod.TERMINAL_RUNG in _rungs[:-1]:
+                        raise ValueError(
+                            f"{_clip_contract_mod.TERMINAL_RUNG!r} appears before the end; "
+                            f"nothing after it can run")
+                except ValueError as _e:
+                    raise ValueError(
+                        f"Scene {scene_index}: policy_fallback {value!r} is "
+                        f"invalid (v965) — {_e}"
+                    ) from None
+                if lines_list:
+                    clip_policy_fallbacks[-1] = _rungs
+                else:
+                    dangling_policy_fallback = _rungs
 
         # v786 — no-lines scene with a scene-level action_note: surface it
         # as a 1-entry list. Parallel-array invariants hold downstream:
@@ -6523,6 +6611,18 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # wants on the cheap model. Without this its declaration would be lost.
         if not lines_list and dangling_veo_model is not None:
             clip_veo_models = [dangling_veo_model]
+
+        # v965 — the same for the three contract bullets, and for the same
+        # reason a fourth time: a SILENT shot scene renders a clip but has no
+        # `line` bullet to attach to. Without these three the declaration would
+        # be parsed, validated, and then thrown away — which is the exact class
+        # of failure this whole rule exists to remove.
+        if not lines_list and dangling_input_mode is not None:
+            clip_input_modes = [dangling_input_mode]
+        if not lines_list and dangling_isolate_project is not None:
+            clip_isolate_projects = [dangling_isolate_project]
+        if not lines_list and dangling_policy_fallback is not None:
+            clip_policy_fallbacks = [dangling_policy_fallback]
 
         # v681 — text_card scenes AND silent scenes have no `- **line:**`
         # bullets by design. Tolerate missing lines on those. Other scenes
@@ -6624,6 +6724,21 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             # THOSE ROWS, so a per-line-only value never reaches a Clip.
             # First declared model in the scene wins; a scene is one shot.
             "veo_model": next((m for m in clip_veo_models if m), None),
+            # v965 — the contract bullets, parallel to lines like the two
+            # above, plus the SCENE-level value each resolves to. The
+            # scene-level ones matter for the same reason v961's does and the
+            # comment above says why: the assignment table is scene-grained and
+            # both promote paths rebuild their scene dicts from those rows, so
+            # a per-line-only value never reaches a Clip. First declared value
+            # in the scene wins; a scene is one shot.
+            "clip_input_modes": clip_input_modes,
+            "clip_isolate_projects": clip_isolate_projects,
+            "clip_policy_fallbacks": clip_policy_fallbacks,
+            "input_mode": next((m for m in clip_input_modes if m), None),
+            "isolate_project": next(
+                (p for p in clip_isolate_projects if p is not None), None),
+            "policy_fallback": next(
+                (p for p in clip_policy_fallbacks if p), None),
             "speaker_mode": speaker_mode,  # v537
             "cut_mode": cut_mode,  # v668 — None | 'whisper' | 'timeline' | 'auto'
             "explicit_target_s": explicit_target_s,  # v889 — authored, outranks the v667 anchor diff
