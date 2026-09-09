@@ -415,7 +415,7 @@ def validate_lane(contract: ClipContract, render_method: Optional[str]) -> None:
             )
         if kind == _R and not n:
             raise ValueError(
-                f"[v965] a {lane} clip needs a {role.value!r} asset and has none"
+                f"[v965] a {lane} clip is missing its {role.value!r} asset"
             )
         if n and not (lo <= n <= hi):
             raise ValueError(

@@ -18280,6 +18280,9 @@ async def local_worker_get_pending_job(
         # v959 — movie-section keys, on the same terms: nothing is added unless
         # the clip declares that method.
         clip_data = _v959_maybe_movie_section(clip_data, clip, base_url, "local-worker")
+        # v965 — the clip contract, on the same additive terms. Attached only
+        # when the clip carries one, because the worker scopes on PRESENCE.
+        clip_data = _v965_attach_contract(clip_data, clip, base_url, "local-worker")
 
         clips_data.append(clip_data)
     
@@ -19174,6 +19177,140 @@ async def _v943_swap_avatar_response(node_id: int, user_id=None):
     data = await asyncio.to_thread(local_path.read_bytes)
     media_type = "image/png" if str(rel_path).lower().endswith(".png") else "image/jpeg"
     return _Resp(content=data, media_type=media_type)
+
+
+def _v965_attach_contract(clip_data: dict, clip, base_url: str, lane: str) -> dict:
+    """Attach the clip contract, resolved for THIS lane. v965.
+
+    Additive, exactly like `_v943_maybe_charswap` below it: a clip that carries
+    no contract gets back the dict it went in with, same keys, same values. That
+    is not politeness, it is the whole scoping mechanism — the worker decides
+    whether to apply anything by asking "did a contract arrive", so "a contract
+    is on the payload" has to mean "this clip is stamped", decided here and
+    nowhere else.
+
+    WHY THE ASSET LIST IS BUILT HERE AND NOT STORED ON THE ROW
+    ---------------------------------------------------------
+    Because it could not be stored. Every asset url is
+    `f"{base_url}/api/{lane}/..."` (`:19209`, `:19214`, `:19421`): the two
+    worker lanes carry different credentials and get different urls for
+    identical bytes. So a stored url would be wrong for one of them. The clip
+    row keeps the DECLARATION (what the author said); the finished contract is
+    assembled per hand-out, which is the only moment both the resolved R2 keys
+    and the lane are known.
+
+    Two keys go out, on purpose:
+      * `clip_contract`          — the finished object the worker applies
+      * `clip_contract_declared` — the stored declaration string, byte-unchanged
+    The second exists so the worker's copy can be compared byte-for-byte with
+    what the database holds. Re-serialising a parsed model would not be
+    byte-identical (key order, separators, escaping), and then the comparison
+    would prove nothing.
+    """
+    import clip_contract as _cc_mod
+
+    declared = _cc_mod.read_contract_json(clip)
+    if declared is None:
+        return clip_data
+
+    decl = _cc_mod.ClipContractDeclaration.model_validate_json(declared)
+    method = (getattr(clip, "render_method", None) or "").strip().lower()
+    assets = _v965_resolve_assets(clip, base_url, lane, method)
+
+    contract = _cc_mod.ClipContract(
+        clip_contract_version=decl.clip_contract_version,
+        input_mode=decl.input_mode,
+        isolate_project=decl.isolate_project,
+        policy_fallback=decl.policy_fallback,
+        veo_model=getattr(clip, "veo_model", None) or DEFAULT_VEO_MODEL,
+        duration_s=int(getattr(clip, "veo_render_duration_s", None) or 8),
+        aspect_ratio=getattr(clip, "aspect_ratio", None) or "9:16",
+        variants=int(getattr(clip, "flow_variants_count", None) or 2),
+        resolution=getattr(clip, "resolution", None) or "720p",
+        swap_mode=(getattr(clip, "swap_mode", None) or "video-led") if method == "charswap" else None,
+        swap_max_source_s=_cc_mod.SWAP_MAX_SOURCE_S if method == "charswap" else None,
+        assets=assets,
+    )
+    # Refuse here rather than on a render slot. The lane table is the same set
+    # of refusals the parser already makes; this is the second door, and it is
+    # the one that sees the RESOLVED assets rather than the author's tokens.
+    _cc_mod.validate_lane(contract, method or None)
+
+    clip_data["clip_contract"] = contract.model_dump(mode="json")
+    clip_data["clip_contract_declared"] = declared
+    return clip_data
+
+
+def _v965_resolve_assets(clip, base_url: str, lane: str, method: str):
+    """The clip's assets as contract entries, with lane-correct urls.
+
+    Reads the columns that already hold each binding rather than inventing a
+    second home for any of them. The order is ATTACH order and it is normative
+    (`CONTRACT.md` §2.4): scene chip first, then faces in list order; start
+    first, end second for a frames pair.
+    """
+    import json as _json
+    import os as _os
+    from urllib.parse import quote as _quote
+
+    import clip_contract as _cc_mod
+
+    out = []
+
+    def _frame_url(key):
+        return (f"{base_url}/api/{lane}/frames/{clip.job_id}/"
+                f"{_os.path.basename(key)}")
+
+    if method == "charswap":
+        avatar_id = getattr(clip, "swap_avatar_upload_id", None)
+        if avatar_id:
+            out.append(_cc_mod.AssetEntry(
+                role=_cc_mod.Role.AVATAR, media=_cc_mod.Media.IMAGE,
+                # An upload is not a job frame and has no jobs/<job>/frames key,
+                # so it carries the namespaced form (CONTRACT.md §2.3).
+                key=f"upload:{avatar_id}",
+                url=f"{base_url}/api/{lane}/swap-avatar/{avatar_id}",
+                origin=f"upload:{avatar_id}"))
+        src_key = getattr(clip, "swap_source_r2_key", None)
+        if src_key:
+            out.append(_cc_mod.AssetEntry(
+                role=_cc_mod.Role.SWAP_SOURCE, media=_cc_mod.Media.VIDEO,
+                key=src_key,
+                url=(f"{base_url}/api/{lane}/swap-source?"
+                     f"key={_quote(src_key, safe='')}"),
+                origin=_os.path.basename(src_key)))
+        # A video-led swap takes no start frame; the source supplies the motion.
+        if (getattr(clip, "swap_mode", None) or "video-led") == "image-led":
+            if clip.start_frame:
+                out.append(_cc_mod.AssetEntry(
+                    role=_cc_mod.Role.START_FRAME, media=_cc_mod.Media.IMAGE,
+                    key=clip.start_frame, url=_frame_url(clip.start_frame),
+                    origin=_os.path.basename(clip.start_frame)))
+        return out
+
+    if clip.start_frame:
+        out.append(_cc_mod.AssetEntry(
+            role=_cc_mod.Role.START_FRAME, media=_cc_mod.Media.IMAGE,
+            key=clip.start_frame, url=_frame_url(clip.start_frame),
+            origin=_os.path.basename(clip.start_frame)))
+
+    if method == "movie-section":
+        try:
+            keys = _json.loads(getattr(clip, "face_ref_frames_json", None) or "[]")
+        except (TypeError, ValueError):
+            keys = []
+        for k in keys:
+            out.append(_cc_mod.AssetEntry(
+                role=_cc_mod.Role.FACE, media=_cc_mod.Media.IMAGE,
+                key=k, url=_frame_url(k), origin=_os.path.basename(k)))
+        return out
+
+    if getattr(clip, "end_frame", None):
+        out.append(_cc_mod.AssetEntry(
+            role=_cc_mod.Role.END_FRAME, media=_cc_mod.Media.IMAGE,
+            key=clip.end_frame, url=_frame_url(clip.end_frame),
+            origin=_os.path.basename(clip.end_frame)))
+    return out
 
 
 def _v943_maybe_charswap(clip_data: dict, clip, base_url: str, lane: str) -> dict:
@@ -20616,6 +20753,10 @@ async def user_worker_get_pending_job(
         _clip_data = _v943_maybe_charswap(_clip_data, clip, base_url, "user-worker")
         # v959 — and the section keys, only on a section clip.
         _clip_data = _v959_maybe_movie_section(_clip_data, clip, base_url, "user-worker")
+        # v965 — same helper, same terms. The two endpoints hand-build their
+        # dicts independently, so this is the one place the contract does not
+        # get a second, drifting implementation.
+        _clip_data = _v965_attach_contract(_clip_data, clip, base_url, "user-worker")
         clips_data.append(_clip_data)
     
     return {

@@ -181,7 +181,7 @@ def test_a_section_clip_needs_one_or_two_faces():
 
 def test_a_section_clip_with_no_face_is_refused():
     c = cc.ClipContract(**_contract(input_mode="ingredients"))
-    with pytest.raises(ValueError, match="needs a 'face'"):
+    with pytest.raises(ValueError, match="missing its 'face'"):
         cc.validate_lane(c, "movie-section")
 
 
@@ -618,3 +618,146 @@ def test_the_frontend_sends_it_too():
     html = (_HERE / "static" / "index.html").read_text(encoding="utf-8")
     assert "clip_contract_json: promoteMeta.clip_contract_json" in html
     assert "clip_contract_version:" in html
+
+
+# --------------------------------------------------------------------------
+# 9. hand-out — the contract is resolved PER LANE, and only for a stamped clip
+# --------------------------------------------------------------------------
+
+class _FakeClip:
+    """Only the columns the hand-out helper reads."""
+
+    def __init__(self, **kw):
+        self.id = "c1"
+        self.job_id = "job123"
+        self.start_frame = "jobs/job123/frames/img1.png"
+        self.end_frame = None
+        self.render_method = None
+        self.swap_mode = None
+        self.swap_source_r2_key = None
+        self.swap_avatar_upload_id = None
+        self.face_ref_frames_json = None
+        self.veo_model = "Veo 3.1 - Lite [Lower Priority]"
+        self.veo_render_duration_s = 8
+        self.aspect_ratio = "9:16"
+        self.flow_variants_count = 2
+        self.resolution = "720p"
+        self.clip_contract_version = None
+        self.clip_contract_json = None
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def _decl(**kw):
+    base = dict(clip_contract_version=1, input_mode="frames",
+                isolate_project=False, policy_fallback=["fail"])
+    base.update(kw)
+    return cc.ClipContractDeclaration(**base).model_dump_json()
+
+
+def test_an_unstamped_clip_payload_is_byte_identical():
+    """The scoping mechanism. The worker asks 'did a contract arrive', so an
+    unstamped clip must look exactly as it does today."""
+    from main import _v965_attach_contract
+
+    before = {"id": "c1", "start_frame_url": "u"}
+    after = _v965_attach_contract(dict(before), _FakeClip(), "https://h", "local-worker")
+    assert after == before
+
+
+def test_a_stamped_simple_clip_gets_a_resolved_contract():
+    from main import _v965_attach_contract
+
+    clip = _FakeClip(clip_contract_version=1,
+                     clip_contract_json=_decl(input_mode="frames"))
+    out = _v965_attach_contract({}, clip, "https://h", "local-worker")
+    c = out["clip_contract"]
+    assert c["input_mode"] == "frames"
+    assert c["resolution"] == "720p"
+    assert [a["role"] for a in c["assets"]] == ["start_frame"]
+    assert c["assets"][0]["key"] == "jobs/job123/frames/img1.png"
+    # and the declaration travels byte-unchanged beside it
+    assert out["clip_contract_declared"] == clip.clip_contract_json
+
+
+def test_the_url_is_lane_specific_but_the_key_is_not():
+    """Why the asset list cannot be stored on the row: the two lanes carry
+    different credentials and get different urls for identical bytes."""
+    from main import _v965_attach_contract
+
+    def _for(lane):
+        clip = _FakeClip(clip_contract_version=1, clip_contract_json=_decl())
+        return _v965_attach_contract({}, clip, "https://h", lane)["clip_contract"]["assets"][0]
+
+    a, b = _for("local-worker"), _for("user-worker")
+    assert a["key"] == b["key"]
+    assert a["url"] != b["url"]
+    assert "/api/local-worker/" in a["url"] and "/api/user-worker/" in b["url"]
+
+
+def test_a_movie_section_clip_carries_scene_then_faces_in_order():
+    """Order is ATTACH order and it is normative: scene chip first, then faces
+    in list order."""
+    from main import _v965_attach_contract
+
+    clip = _FakeClip(
+        render_method="movie-section",
+        clip_contract_version=1, clip_contract_json=_decl(input_mode="ingredients"),
+        face_ref_frames_json=json.dumps(["jobs/job123/frames/f0.png",
+                                         "jobs/job123/frames/f1.png"]))
+    c = _v965_attach_contract({}, clip, "https://h", "local-worker")["clip_contract"]
+    assert [a["role"] for a in c["assets"]] == ["start_frame", "face", "face"]
+    assert [a["origin"] for a in c["assets"][1:]] == ["f0.png", "f1.png"]
+
+
+def test_a_video_led_charswap_carries_avatar_and_video_and_no_start_frame():
+    from main import _v965_attach_contract
+
+    clip = _FakeClip(
+        render_method="charswap", swap_mode="video-led",
+        clip_contract_version=1, clip_contract_json=_decl(input_mode="ingredients"),
+        swap_avatar_upload_id=77,
+        swap_source_r2_key="swap-sources/u1/dance.mp4")
+    c = _v965_attach_contract({}, clip, "https://h", "local-worker")["clip_contract"]
+    roles = [a["role"] for a in c["assets"]]
+    assert roles == ["avatar", "swap_source"]
+    assert "start_frame" not in roles
+    src = [a for a in c["assets"] if a["role"] == "swap_source"][0]
+    assert src["media"] == "video"
+    assert c["swap_mode"] == "video-led"
+    assert c["swap_max_source_s"] == cc.SWAP_MAX_SOURCE_S
+
+
+def test_an_image_led_charswap_keeps_its_start_frame():
+    from main import _v965_attach_contract
+
+    clip = _FakeClip(
+        render_method="charswap", swap_mode="image-led",
+        clip_contract_version=1, clip_contract_json=_decl(input_mode="ingredients"),
+        swap_avatar_upload_id=77,
+        swap_source_r2_key="swap-sources/u1/dance.mp4")
+    c = _v965_attach_contract({}, clip, "https://h", "local-worker")["clip_contract"]
+    assert "start_frame" in [a["role"] for a in c["assets"]]
+
+
+def test_a_lane_violation_is_refused_at_hand_out():
+    """The second door. The parser checks the author's tokens; this one sees
+    the RESOLVED assets, and a charswap clip whose avatar never materialised
+    would otherwise reach a render slot."""
+    from main import _v965_attach_contract
+
+    clip = _FakeClip(
+        render_method="charswap", swap_mode="video-led",
+        clip_contract_version=1, clip_contract_json=_decl(input_mode="ingredients"),
+        swap_avatar_upload_id=None,
+        swap_source_r2_key="swap-sources/u1/dance.mp4")
+    with pytest.raises(ValueError, match="missing its 'avatar' asset"):
+        _v965_attach_contract({}, clip, "https://h", "local-worker")
+
+
+def test_both_polling_endpoints_call_the_same_helper():
+    """The two endpoints hand-build their dicts independently; this is the one
+    place the contract does not get a second, drifting implementation."""
+    src = (_HERE / "main.py").read_text(encoding="utf-8")
+    assert src.count("_v965_attach_contract(clip_data, clip, base_url, \"local-worker\")") == 1
+    assert src.count("_v965_attach_contract(_clip_data, clip, base_url, \"user-worker\")") == 1
