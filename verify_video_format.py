@@ -157,6 +157,13 @@ def lint(path: str) -> int:
     if not scenes:
         fails.append("v696: no `### Scene N` blocks found")
 
+    # v965 — is this build in scope? The opt-in sits at COLUMN 0 in §0. An
+    # indented copy (a comment, a fenced block, the skeleton's own example)
+    # must NOT opt a build in, which is why this is anchored and not a
+    # substring search.
+    v965_in_scope = bool(re.search(r"^CLIP CONTRACT:\s*v1\s*$", t, re.M | re.I))
+    v965_bullets = ("input_mode", "isolate_project", "policy_fallback")
+
     # split scene blocks
     sblocks = re.split(r"(?=^###\s+Scene\s+\d+\s*$)", t, flags=re.M)
     used_imgs: set[int] = set()
@@ -180,6 +187,38 @@ def lint(path: str) -> int:
         rm = re.search(r"^-\s+\*\*render_method:\*\*\s*(\S+)", blk, re.M)
         rm_val = rm.group(1).strip().lower() if rm else None
         is_section = rm_val == "movie-section"
+        # v965 — the clip contract, BOTH directions. A shot scene in an
+        # in-scope build must carry all three; a scene in an out-of-scope build
+        # must carry none, because a bullet nothing reads is a declaration the
+        # author wrote and the platform silently threw away.
+        _v965_present = {b: bool(re.search(
+            r"^-\s+\*\*" + b + r":\*\*\s*\S", blk, re.M)) for b in v965_bullets}
+        if is_text_card:
+            for _b, _hit in _v965_present.items():
+                if _hit:
+                    fails.append(f"v965: Scene {sn} — text_card scenes take no "
+                                 f"{_b} (a card is drawn by ffmpeg, never "
+                                 f"submitted to Flow)")
+        elif v965_in_scope:
+            _miss = [b for b, hit in _v965_present.items() if not hit]
+            if _miss:
+                fails.append(f"v965: Scene {sn} — this build declares "
+                             f"CLIP CONTRACT: v1, so every shot scene needs "
+                             f"{', '.join(_miss)}")
+            _iso = re.search(r"^-\s+\*\*isolate_project:\*\*\s*(\S+)", blk, re.M)
+            if (_iso and _iso.group(1).strip().lower() == "false"
+                    and rm_val in ("charswap", "movie-section")):
+                fails.append(f"v965: Scene {sn} — a {rm_val} clip cannot share "
+                             f"a project; the submit proof depends on one "
+                             f"submitter per project")
+        else:
+            _stray = [b for b, hit in _v965_present.items() if hit]
+            if _stray:
+                fails.append(f"v965: Scene {sn} carries {', '.join(_stray)} but "
+                             f"the build has no `CLIP CONTRACT: v1` line at "
+                             f"column 0 in §0, so it would be ignored and the "
+                             f"clip would render by inference")
+
         img_m = re.search(r"^-\s+\*\*image:\*\*\s+image_(\d+)", blk, re.M)
         if not is_text_card and not img_m:
             fails.append(f"v696: Scene {sn} missing `- **image:** image_N`")

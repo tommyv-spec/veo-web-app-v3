@@ -666,6 +666,44 @@ Step 5 — OUTPUT shape (per code/template_new_format.md skeleton)
   then on EVERY shot scene of the build or none (template_reference.md §v959 —
   import is latched off until the worker arm ships).
 
+CLIP CONTRACT (v965): OPTIONAL, and it is all-or-nothing. A build that says
+nothing renders exactly as every build did before this rule, and 347 of 347 do.
+To put a build IN SCOPE, add ONE line to its section 0, AT COLUMN 0 (an indented
+copy does nothing, and the auditor fails you for it):
+
+    CLIP CONTRACT: v1
+
+Then EVERY shot scene must carry all three of these, attached to the closest
+preceding `- **line:**` the way `clip_duration_s` already is (a SILENT shot
+scene has no line bullet and still needs them; they attach to the scene):
+
+    - **input_mode:** frames | ingredients
+    - **isolate_project:** true | false
+    - **policy_fallback:** prompt_b, fail
+
+What each one means, in plain terms. `input_mode` is WHICH TAB the clip renders
+on -- Frames takes a start and an end frame, Ingredients takes multiple
+reference images. The worker used to GUESS this from the model name plus
+whether an end frame existed; declaring it is the whole point of the rule.
+`isolate_project` says whether this clip needs its own Flow project; `false` is
+a HARD FAIL on a charswap or movie-section scene, because the worker's proof
+that a submit really happened is only sound while one submitter owns the
+project. `policy_fallback` is what to try when Google's content policy blocks
+the generation -- rungs from `prompt_b` | `model_swap` | `fail`, and it MUST end
+in `fail` or a blocked clip retries for ever.
+
+A `text_card` scene carries NONE of them and hard-fails if it does: a card is
+drawn by ffmpeg and never submitted to Flow, so there is no tab to pick.
+
+Do NOT hand-write an asset or `refs:` list. The platform derives it from the
+bullets that already exist (`image:`, `end_frame_image:`, `face_refs:`, the swap
+bullets) and resolves it per lane at hand-out.
+
+If you write the three bullets and FORGET the section-0 line, the import now
+REFUSES the build rather than ignoring them -- silently dropping a declaration
+the author wrote is the failure this rule exists to remove
+(template_reference.md §v965, §v965.5 for how it is proven).
+
 RENDER MODEL (v961): a build normally declares nothing and every clip renders on
 the job's one model. To mix models inside ONE job, declare `- **veo_model:**` on a
 scene: exactly one of `Omni Flash` | `Veo 3.1 - Quality` | `Veo 3.1 - Fast` |
