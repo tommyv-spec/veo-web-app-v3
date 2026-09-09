@@ -459,6 +459,19 @@ class Clip(Base):
     # Migration registered in image_platform.py next to the other clip columns.
     face_ref_frames_json = Column(Text, nullable=True)
 
+    # v965 — the declarative clip contract. ONE typed object holding everything
+    # about this clip the worker must not decide for itself: input_mode, the
+    # asset list with roles, isolate_project, the policy-fallback ladder, and
+    # the settings it must obey rather than re-derive. `clip_contract_version`
+    # is the scope: NULL means the clip was made before the contract existed
+    # and is not judged by it, which is the same NULL-means-legacy convention
+    # every other nullable column here follows.
+    # Read via clip_contract.read_contract / read_contract_json — never off the
+    # column directly. Migration registered in image_platform.py next to the
+    # other clip columns.
+    clip_contract_json = Column(Text, nullable=True)
+    clip_contract_version = Column(Integer, nullable=True)
+
     # Status
     status = Column(String(20), default=ClipStatus.PENDING.value)
     retry_count = Column(Integer, default=0)
@@ -626,6 +639,12 @@ class Clip(Base):
             # v959 — movie-section face-reference frames. None on every clip
             # that renders the normal way.
             "face_ref_frames_json": self.face_ref_frames_json,
+            # v965 — the declarative clip contract. None on every clip made
+            # before the contract existed. Without these two keys the columns
+            # are invisible to every reader downstream, which is how a field
+            # gets stored and then silently never arrives.
+            "clip_contract_json": self.clip_contract_json,
+            "clip_contract_version": self.clip_contract_version,
         }
 
 

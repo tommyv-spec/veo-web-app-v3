@@ -389,6 +389,20 @@ def run_image_platform_migrations():
         # it promotes keeps today's auto-edit defaults.
         ("image_job_batches", "finishing_spec",
          "ALTER TABLE image_job_batches ADD COLUMN finishing_spec TEXT"),
+        # v965: the declarative clip contract — everything about a clip the
+        # worker must not decide for itself, as ONE typed object, plus the
+        # version that scopes enforcement to it. Nullable, NO default: an
+        # existing row stays NULL, NULL means pre-contract, and a pre-contract
+        # clip renders exactly the way it does today. See code/clip_contract.py
+        # for what the object holds.
+        ("image_scene_assignments", "clip_contract_json",
+         "ALTER TABLE image_scene_assignments ADD COLUMN clip_contract_json TEXT"),
+        ("image_scene_assignments", "clip_contract_version",
+         "ALTER TABLE image_scene_assignments ADD COLUMN clip_contract_version INTEGER"),
+        ("clips", "clip_contract_json",
+         "ALTER TABLE clips ADD COLUMN clip_contract_json TEXT"),
+        ("clips", "clip_contract_version",
+         "ALTER TABLE clips ADD COLUMN clip_contract_version INTEGER"),
     ]
     postgres_migrations = [
         ("image_nodes", "claimed_by_worker",
@@ -613,6 +627,17 @@ def run_image_platform_migrations():
         # every write to it 500s.
         ("image_job_batches", "finishing_spec",
          "ALTER TABLE image_job_batches ADD COLUMN IF NOT EXISTS finishing_spec TEXT"),
+        # v965: the declarative clip contract — see the SQLite block above.
+        # Production is Postgres: a SQLite-only entry means the column never
+        # exists live and every write to it 500s.
+        ("image_scene_assignments", "clip_contract_json",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS clip_contract_json TEXT"),
+        ("image_scene_assignments", "clip_contract_version",
+         "ALTER TABLE image_scene_assignments ADD COLUMN IF NOT EXISTS clip_contract_version INTEGER"),
+        ("clips", "clip_contract_json",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS clip_contract_json TEXT"),
+        ("clips", "clip_contract_version",
+         "ALTER TABLE clips ADD COLUMN IF NOT EXISTS clip_contract_version INTEGER"),
     ]
 
     # v479: widen ImageJobBatch string columns to TEXT. The previous
@@ -694,24 +719,41 @@ def run_image_platform_migrations():
 
     with engine.connect() as conn:
         _guard(conn)
+        # v965 TEMPORARY DIAGNOSTIC — remove once the four contract columns are
+        # confirmed present in the Render log (plan step 4.17). The loop's own
+        # log line only fires when a column is ADDED; "already present" exits
+        # via `continue` and says nothing, so a column that never arrived and a
+        # column that arrived last deploy look identical. These four have to be
+        # provable on BOTH paths before anything is allowed to write to them.
+        _V965_COLS = ("clip_contract_json", "clip_contract_version")
+
+        def _v965_note(table, column, what):
+            if column in _V965_COLS:
+                log.info(f"[v965] migration: {table}.{column} {what}")
+
         for table, column, sql in migrations:
             if table not in existing_tables:
                 # Table doesn't exist yet — create_all will make it with the
                 # columns already in place, so skip.
+                _v965_note(table, column, "table absent, create_all will make it")
                 continue
             if not is_sqlite and column in existing_pg_cols.get(table, ()):
+                _v965_note(table, column, "already present")
                 continue  # column already present → skip the ALTER + its lock
             try:
                 if is_sqlite:
                     result = conn.execute(text(f"PRAGMA table_info({table})"))
                     cols = [row[1] for row in result]
                     if column in cols:
+                        _v965_note(table, column, "already present")
                         continue
                 conn.execute(text(sql))
                 conn.commit()
                 log.info(f"[image_platform] Migration: added {table}.{column}")
+                _v965_note(table, column, "added")
             except Exception as e:
                 log.warning(f"[image_platform] Migration skipped {table}.{column}: {e}")
+                _v965_note(table, column, f"FAILED: {e}")
 
         # v479: widen VARCHAR columns on image_job_batches to TEXT so
         # long free-form markdown metadata doesn't trigger
@@ -804,12 +846,16 @@ CHARSWAP_COLUMNS = {
         "swap_audio",
         # v959 — movie-section face reference image nodes.
         "face_ref_node_ids_json",
+        # v965 — the declarative clip contract and the version that scopes it.
+        "clip_contract_json", "clip_contract_version",
     ],
     "clips": [
         "render_method", "swap_source_r2_key", "swap_mode", "swap_avatar_upload_id",
         "swap_audio",
         # v959 — movie-section face reference frames.
         "face_ref_frames_json",
+        # v965 — the declarative clip contract and the version that scopes it.
+        "clip_contract_json", "clip_contract_version",
     ],
 }
 
@@ -1891,6 +1937,18 @@ class ImageSceneAssignment(Base):
     # every scene that is not a movie section (a charswap scene is NULL here
     # too, and it does not render the normal way either).
     face_ref_node_ids_json = Column(Text, nullable=True)
+
+    # v965 — the declarative clip contract: everything about this clip the
+    # worker must not decide for itself, as ONE typed object (the JSON of a
+    # code/clip_contract.py ClipContract), plus the version that scopes
+    # enforcement to it. NULL on every scene authored before the contract
+    # existed, and NULL means pre-contract: that clip renders the way it always
+    # did. Read them through clip_contract.read_contract / read_contract_json,
+    # never off the column — `render_method` is read at ~15 sites with 15
+    # hand-written null-guards and this file's own comments name four incidents
+    # caused by one of them drifting.
+    clip_contract_json = Column(Text, nullable=True)
+    clip_contract_version = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1988,6 +2046,12 @@ class ImageSceneAssignment(Base):
             # v959 — movie-section face reference image nodes. None on every
             # scene that renders the normal way.
             "face_ref_node_ids_json": self.face_ref_node_ids_json,
+            # v965 — the declarative clip contract. None on every scene
+            # authored before the contract existed. Without these two keys the
+            # columns are invisible to every reader downstream, which is how a
+            # field gets stored and then silently never arrives.
+            "clip_contract_json": self.clip_contract_json,
+            "clip_contract_version": self.clip_contract_version,
         }
 
 
