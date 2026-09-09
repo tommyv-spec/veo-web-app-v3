@@ -20635,3 +20635,167 @@ stashed for v945.15, and every legacy site branches before its dialog work.
 **Touched:** `code/static/flow_worker.py`, `code/tests/test_v962_flow_host.py`. Measurements:
 this session (probes 1-8), sessions 08 / e8 / 35 (Video-type radiogroup recorded, hold file,
 DailyFinish launch path). Operator 2026-09-06.
+
+---
+
+## v965 — THE DECLARED CLIP CONTRACT: the build says what, the worker only does it (2026-09-09)
+
+**Where it came from.** Operator, 2026-09-09: *"The worker should be arms. The markdown is the brain.
+The worker's only job is to know how to operate this platform... It shouldn't decide what to do. Right
+now it decides a lot, and that's why it keeps breaking in ways that need me."* And, sharper, the same
+day: *"I want the worker only to make decisions on the performance (example: the parallel jobs)."*
+
+**The line.** The worker decides HOW FAST — scheduling, concurrency, retry timing, which profile picks
+up a job, queue order where order is free. The worker never decides WHAT — mode, refs and their roles,
+project isolation, duration, model, aspect, variants, resolution, the prompt, the policy ladder.
+
+**The opt-in.** A build declares `CLIP CONTRACT: v1` in §0. Only such a build is in scope. A build
+without the line imports and renders exactly as it did before this rule existed — the same
+no-metadata regression contract v943 and v944 keep.
+
+**The bullets.** On every shot scene of an in-scope build, attached to the closest preceding
+`- **line:**` the way `clip_duration_s` and `veo_model` already are:
+
+```markdown
+- **input_mode:** ingredients          # frames | ingredients — never inferred
+- **isolate_project:** true            # true | false — the worker just obeys
+- **policy_fallback:** prompt_b, fail  # rungs, ends in fail
+```
+
+The asset list is **not** authored. It is derived at import from the bullets that already exist —
+`image:`, `end_frame_image:`, `face_refs:`, `swap_source_video:`, and the one character row in
+`## Ingredients` — and stamped onto the clip. Nothing an author writes today changes.
+
+**What is stored.** One typed object per clip, `clips.clip_contract_json`, whose shape is
+`ClipContract` in `code/clip_contract.py` — a dependency-neutral module the parser, the API and the
+linters import, on the `veo_models.py` pattern. **The worker does not import it.** It runs standalone
+on worker machines and imports same-dir modules only, so it reads the resolved object off the payload
+and never validates a value — the same discipline `flow_worker.py:7338-7346` states for the model and
+`clip_duration.py:5` for the duration. Plus
+`clips.clip_contract_version`, an integer, which is what scopes enforcement. `render_method` stays a
+plain column, because the claim query filters on it in SQL.
+
+**Resolve once, at job creation.** Every default and every precedence rule runs on the platform, and
+the clip carries the answer. By the time the worker sees a clip, nothing is implicit. This is what
+removes `apply_clip_veo_model`'s ordering hazard: nothing downstream recomputes a UI tab from a model
+any more.
+
+**Prove it landed.** A declared field that never reaches the page is the same failure as an inferred
+one, and it has already happened twice — `resolution` was read and dropped, and `input_mode` is sent
+by the platform on every movie-section clip and read by nothing. So: one applier,
+`apply_clip_contract`, is the only code in the worker that touches a setting; it writes a ledger row
+per field with the value it read back off the control; and `assert_contract_applied` refuses the clip
+**before the Generate click** if any field is unapplied. The critical list is the contract object the
+server sent — the worker iterates the keys it was handed, so it cannot omit the setting that varies
+(§v945.15), and a key it has no applier for is `UNAPPLIED`, which is a refusal, never a shrug.
+
+**Fail closed.** A clip carrying a contract must carry every field; a gap is a refusal, never an
+inference. A clip with a NULL version is pre-contract, out of scope, and keeps the house convention
+that NULL means legacy. **The worker scopes on PRESENCE** — did this payload arrive carrying a
+contract — and never reads a version number. **The server scopes the rollout on the version column**,
+through one imported predicate. Three accessors in `code/clip_contract.py` are the entire surface:
+`read_contract` (what did this clip declare), `read_contract_json` (what exactly is stored, handed to
+the worker byte-for-byte) and `stamped_clip_filter` (which rows are in scope). No other module reads a
+contract value or writes a version predicate; the allowlisted static check enforces it (§5.3).
+
+**What it deletes.** `_omni_ingredients_mode` and the computed half of `set_clip_input_mode` (v881,
+v959's `force_ingredients`) · both project-rotation blocks (v945.13, v959) · the reused-project frame
+probe · the hardcoded policy ladders · the duration re-click bookkeeping. What it **keeps**: every DOM
+read-back, every selector, both project-creation mechanisms, the durable retry counter, the
+account-health router. Those are platform literacy and performance, and they are the worker's.
+
+**Revert.** Not by editing markdown. `clips.clip_contract_version` is **database state stamped at job
+creation** — the stamp is on the clip row, not in the build file — so deleting `CLIP CONTRACT: v1`
+from a build only stops FUTURE clips being stamped. Rows that already exist keep their version and
+keep being enforced. The real rollback is four steps, in this order:
+
+1. **Turn scoped enforcement off first.** The switch is the poll parameter: the worker stops sending
+   `contract=1` (5.1 stage 4), so `_v959_next_job_for_poller` hands it no stamped clip and
+   `assert_contract_applied` is never reached. One worker restart, no database write, and it is the
+   only step that stops the bleeding immediately. Do this before anything else.
+2. **Find the affected rows.** `SELECT id, job_id, status, clip_contract_version FROM clips WHERE
+   clip_contract_version IS NOT NULL` — and the same on `image_scene_assignments` for the readback
+   mirror. This is the list the rest of the rollback acts on, and it is why 5.2 puts the version in
+   its own column instead of inside the blob: a JSON key cannot answer this portably.
+3. **Stop the workers before touching a single row.** Disabling the poll (step 1) stops new claims;
+   it does **not** stop a clip already claimed and mid-render. Drain every lane —
+   `python tools/worker_lifecycle.py sweep` to see what is up, then let in-flight clips finish or stop
+   the lane — and confirm no worker is running before step 4. Clearing a stamp under a live renderer is
+   a race: the worker holds the contract it was handed at claim time, and the row it would be reconciled
+   against has changed underneath it.
+
+4. **Handle every active status explicitly.** The repo's own active set is six, not two:
+   `pending, generating, retrying, redo_queued, flow_redo_queued, waiting_approval`
+   (`code/main.py:6982-6984`). Two of them were missed in the first draft of this section, which is why
+   this table now names all six.
+
+   | status | rendered? | rollback action |
+   |---|---|---|
+   | `pending` | no | **clear** — safe, never started |
+   | `redo_queued` | no | **clear** — queued, never started |
+   | `flow_redo_queued` | no | **clear** — queued, never started |
+   | `generating` | in flight | **do not touch.** Drain first (step 3). Clear only after it leaves this status, then per its landing status |
+   | `retrying` | in flight | **do not touch.** Same as `generating` |
+   | `waiting_approval` | **yes** | **leave alone permanently.** The render happened; its contract is the record of how it was made, and the record of an irreversible act is not ours to erase (`feedback_the-record-of-an-irreversible-act-is-sacred`, §v953.1) |
+
+   "Clear" means `SET clip_contract_json = NULL, clip_contract_version = NULL`, which returns the row to
+   the house NULL-means-legacy convention (`image_platform.py:356-358`) so it renders the old way. Any
+   already-rendered clip in any terminal status is left alone for the same reason as `waiting_approval`.
+
+5. **Verify before deleting any code**, over the FULL active set rather than two of it:
+
+   ```sql
+   SELECT count(*) FROM clips
+    WHERE clip_contract_version IS NOT NULL
+      AND status IN ('pending','generating','retrying','redo_queued','flow_redo_queued');
+   ```
+
+   It must return **0**. (`waiting_approval` is excluded on purpose — those rows keep their stamp and
+   must not be counted as outstanding work.) The diag file must also show no new
+   `clip_contract_diag.jsonl` lines since step 1, which is the independent check that no worker is still
+   running. Only then remove the applier.
+
+   **Order matters and it is easy to get backwards:** clear the stamps BEFORE deleting the code that
+   understands them. Delete the applier first and any stamped row still in flight becomes a clip the
+   platform can no longer render either way — it has a contract nothing reads and has lost the legacy
+   path.
+
+**What is reversible and what is not.** Reversible: enforcement (step 1, instantly), the stamp on an
+unrendered clip (step 4), the markdown bullets, the code. Not reversible: a clip that already rendered
+under the contract — the render happened, and its stamp stays as the record of it. Also not undone by
+any of this: the deletions the rule makes (`_omni_ingredients_mode`, the two rotation blocks, the
+hardcoded ladders). Those are code, so reverting them is a git revert, but note the ordering — revert
+the deletions **before** step 4 clears the stamps, or a pending clip will find neither the contract
+path nor the inference path it needs.
+
+---
+
+---
+
+## v966 — REDO PROJECT SELECTION: a redo reads the contract, it does not probe the page
+(2026-09-09)**
+
+**This rule has never existed.** The behaviour it governs shipped as code-version markers in
+`code/static/flow_worker.py` (v963.8, then v963.9) and was never written down as a rule — recon C
+confirmed zero hits for `v963` in `code/template_reference.md` and no `rules/v963.md`. So this is
+written for the first time, and it is written as the corrected behaviour, not the old one.
+
+**What went wrong twice.** v963.8 read a missing `<flow-ingredient-bar>` as "this project is stuck in
+Agent mode" and burned a fresh project on every redo clip. Measured in the browser 2026-09-08, that
+diagnosis was wrong on both halves: Agent is off, and the bar is missing because the composer carries
+a Video type setting and the Start/End slots only render on Frames. v963.9 replaced it with a better
+probe — which is still a probe. Both versions were the worker guessing what a clip needs.
+
+**The rule.** A redo re-renders the **same clip**. So it reads the **same contract**, and it takes the
+same two answers from it: the tab it must click (`input_mode`), and whether it needs its own project
+(`isolate_project`). There is no probe. The worker clicks the declared tab on every clip, fresh or
+reused, and reads it back (§v965.2). If the declared tab cannot be selected, the clip fails closed
+pre-click — which is what the probe was trying to prevent, said directly.
+
+**Redos of pre-contract clips** keep the v963.9 behaviour unchanged until they drain — a redo of a
+clip with a NULL contract version is out of scope, exactly as §v965 says.
+
+**What does NOT change.** The redo queue guard stays: `_v945_14_reject_charswap_redos` still refuses
+to hand a charswap or movie-section clip to a redo lane that has no arm for it, and its `error_code`
+stays `CHARSWAP_NO_REDO` because that is the grep token other code and tests search for (§v945.14,
+§v959).
