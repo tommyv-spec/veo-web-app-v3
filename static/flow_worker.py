@@ -10625,8 +10625,30 @@ def _v962_material_video_settings(page, prefix="", variants_count=2,
                   + (f"  !! NOT APPLIED: {[r['field'] for r in _v965_bad]}"
                      if _v965_bad else "  (every declared control verified)"),
                   flush=True)
+            # THE REFUSAL. This runs inside the settings pass, which is before
+            # the Generate click by construction, so a clip refused here costs
+            # no render. Returning False is how every caller already spells
+            # "these settings are not safe to submit" (v962.7), so the refusal
+            # rides a path that is proven rather than a new one.
+            if V965_ASSERT and _v965_bad:
+                page._v965_refused = [r["field"] for r in _v965_bad]
+                v965_write_diag(clip_id=getattr(page, "_v965_clip_id", None),
+                                stage="refused-pre-generate",
+                                unapplied=page._v965_refused, ledger=_v965_led)
+                print(f"{prefix}[v965] REFUSING before Generate: declared "
+                      f"{page._v965_refused} never reached the page. No render "
+                      f"is spent.", flush=True)
+                _v962_close_settings(page)
+                return False
         except Exception as _e:
+            # While asserting, a ledger that cannot be built is itself a reason
+            # to stop: "log and continue" is failing open (v939.9).
             print(f"{prefix}[v965] ledger write failed: {_e}", flush=True)
+            if V965_ASSERT:
+                print(f"{prefix}[v965] REFUSING before Generate: the contract "
+                      f"could not be checked, so it is not proven applied.",
+                      flush=True)
+                return False
 
     critical = ['Video', mode_key, 'Portrait']  # v962.7 — legacy parity: the input mode is critical again
     if target_model == "Omni Flash":

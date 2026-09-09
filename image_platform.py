@@ -6699,6 +6699,22 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                         f"{_name} — a card is drawn by ffmpeg, never submitted "
                         f"(v965)"
                     )
+        elif not contract_in_scope:
+            # THE INVERSE, and it is the one that bites hardest. A build that
+            # writes all three bullets and forgets the one §0 opt-in line got
+            # ZERO enforcement and rendered by inference, while its author had
+            # every reason to believe it was covered. Silence is the worst
+            # possible answer here, so say it loudly and name the fix.
+            for _name, _arr in _declared.items():
+                if any(v is not None for v in _arr):
+                    raise ValueError(
+                        f"Scene {scene_index}: `- **{_name}:**` is a clip "
+                        f"contract bullet, but this build has no "
+                        f"`CLIP CONTRACT: v1` line at column 0 in §0 — so the "
+                        f"bullet would be ignored and the clip would render by "
+                        f"inference. Add the §0 line, or remove the bullet "
+                        f"(v965)"
+                    )
         elif contract_in_scope:
             _shape = {
                 "input_mode": "frames|ingredients",

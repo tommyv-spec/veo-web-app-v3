@@ -342,7 +342,7 @@ def _scenes(md):
     return ip._parse_scene_blocks_new(md, known_image_indexes={1, 2, 3})
 
 
-SILENT = """
+SILENT = """CLIP CONTRACT: v1
 ### Scene 1
 - **image:** image_1
 - **scene_type:** shot
@@ -354,7 +354,7 @@ SILENT = """
 - **action_note:** she lifts the jar
 """
 
-TWO_LINES = """
+TWO_LINES = """CLIP CONTRACT: v1
 ### Scene 1
 - **image:** image_1
 - **scene_type:** shot
@@ -418,12 +418,14 @@ def test_the_parser_normalises_case_but_the_model_stays_strict():
     the UI's label `Ingredients` gets it stored as `ingredients`; the model
     itself never accepts the capitalised form, because by the time a contract
     object exists the value has already been through the parser."""
-    s = _scenes("""
+    s = _scenes("""CLIP CONTRACT: v1
 ### Scene 1
 - **image:** image_1
 - **scene_type:** shot
 - **line:** a line
 - **input_mode:** Ingredients
+- **isolate_project:** true
+- **policy_fallback:** fail
 """)[0]
     assert s["input_mode"] == "ingredients"
     with pytest.raises(Exception):
@@ -975,9 +977,18 @@ def test_an_indented_mention_does_not_opt_a_build_in():
     the opt-in inside an INDENTED html comment, and a build that quoted the
     line in a comment or a fenced block must not opt itself in silently."""
     md = "<!-- docs say:\n         CLIP CONTRACT: v1\n -->\n" + FULL
-    s = _scenes(md)[0]
-    assert s["clip_contract_version"] is None, (
-        "an indented mention opted the build in")
+    # The build is NOT in scope. And because it carries the bullets anyway, the
+    # parser now REFUSES it outright instead of ignoring them — the stronger
+    # answer, because silently dropping a declaration the author wrote is
+    # exactly the failure this rule exists to remove.
+    with pytest.raises(ValueError, match="clip contract bullet"):
+        _scenes(md)
+
+    # with the bullets removed too, it simply parses as an ordinary build
+    plain = md.replace("- **input_mode:** ingredients\n", "") \
+              .replace("- **isolate_project:** true\n", "") \
+              .replace("- **policy_fallback:** prompt_b, fail\n", "")
+    assert _scenes(plain)[0]["clip_contract_version"] is None
 
 
 def test_the_skeleton_itself_is_not_in_scope():
@@ -1106,3 +1117,43 @@ def test_aspect_and_variants_are_driven_by_the_contract_not_hardcoded():
     assert '_v965_cs.get("variants")' in body
     # and it must still work with no contract at all
     assert 'or "9:16"' in body and "or variants_count" in body
+
+
+# --------------------------------------------------------------------------
+# 14. the refusal — V965_ASSERT must actually refuse, not just exist
+# --------------------------------------------------------------------------
+
+def test_the_assert_switch_is_read_by_a_real_refusal_path():
+    """Codex found this: the switch existed and NOTHING read it except a
+    diagnostic string, so turning it on would have promised fail-closed
+    behaviour that did not exist."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    i = src.index("def _v962_material_video_settings(")
+    body = src[i:src.index("\ndef ", i + 1)]
+    assert "if V965_ASSERT and _v965_bad:" in body, (
+        "no refusal path reads V965_ASSERT")
+    # the refusal must come BEFORE the pass reports success
+    assert body.index("if V965_ASSERT and _v965_bad:") < body.index("return not missing")
+    assert "return False" in body
+
+
+def test_the_refusal_happens_before_generate_is_ever_clicked():
+    """A refusal after the click would cost a render, which is the whole thing
+    it exists to avoid. The settings pass runs before the Generate button by
+    construction — assert that the refusal lives there and not in the click."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    i = src.index("def _v962_material_video_settings(")
+    body = src[i:src.index("\ndef ", i + 1)]
+    assert "_V962_GENERATE_BTN" not in body, (
+        "the settings pass should not be clicking Generate at all")
+    assert "REFUSING before Generate" in body
+
+
+def test_a_ledger_that_cannot_be_built_also_refuses_when_asserting():
+    """Log-and-continue is failing open (v939.9). If the contract cannot be
+    checked, it is not proven applied."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    i = src.index("def _v962_material_video_settings(")
+    body = src[i:src.index("\ndef ", i + 1)]
+    tail = body[body.index("ledger write failed"):]
+    assert "if V965_ASSERT:" in tail and "return False" in tail
