@@ -23652,7 +23652,13 @@ def movie_section_selected(clip):
 # ledger's critical list unable to drift from what the server declared — there
 # is no second copy of the field list here to drift from.
 # ===========================================================================
-V965_APPLY = False
+# APPLY is ON (plan step 2.13). It changes NOTHING for a clip that did not
+# arrive carrying a contract, and no build carried one when this shipped.
+V965_APPLY = True
+# ASSERT stays OFF until stage 4. Between here and there a field that fails
+# to land writes an UNAPPLIED ledger row and the clip STILL renders -- on
+# purpose, because stage 3 exists to FIND those rows and cannot find one on
+# a clip that refused before it was written.
 V965_ASSERT = False
 
 # The contract level this worker build understands, advertised on every poll.

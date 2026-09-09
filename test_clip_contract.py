@@ -789,7 +789,10 @@ def _worker_ns(*names):
           "_hashlib": __import__("hashlib"),
           # the constants block computes the diag path from __file__
           "__file__": str(WORKER_SRC)}
-    consts = src[src.index("\nV965_APPLY = False"):src.index("\ndef v965_write_diag(")]
+    # Anchor on the NAME, never the value. The first version of this sliced on
+    # "V965_APPLY = False" and all 13 of these tests broke the moment the switch
+    # was turned on — the helper was pinned to a value it does not care about.
+    consts = src[src.index("\nV965_APPLY"):src.index("\ndef v965_write_diag(")]
     exec(consts, ns)  # noqa: S102 — our own file, on purpose
     for name in names:
         start = src.index(f"\ndef {name}(")
@@ -883,7 +886,7 @@ def test_both_switches_ship_off():
     """Stage 1 applies nothing and refuses nothing. Turning either on is a
     separate, deliberate commit."""
     src = WORKER_SRC.read_text(encoding="utf-8")
-    assert "\nV965_APPLY = False\n" in src
+    assert "\nV965_APPLY = True\n" in src
     assert "\nV965_ASSERT = False\n" in src
 
 
@@ -1047,6 +1050,10 @@ def test_apply_is_a_no_op_while_the_switch_is_off():
     """Stage 1 and 2 ship with V965_APPLY off; nothing may change until it is
     deliberately turned on."""
     ns = _apply_ns()
+    # force the switch OFF here rather than depending on what shipped — this
+    # test is about the off-behaviour, so it must not change meaning the day
+    # the switch is turned on.
+    ns["V965_APPLY"] = False
     p = _Page()
     assert ns["v965_apply_contract"](p, {"veo_model": "Omni Flash"}) is False
     assert not hasattr(p, "_veo_model")

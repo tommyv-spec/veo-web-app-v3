@@ -120,7 +120,7 @@ def _worker_ledger(contract):
     ns = {"os": __import__("os"), "json": json,
           "datetime": __import__("datetime").datetime,
           "_hashlib": __import__("hashlib"), "__file__": str(_HERE)}
-    consts = src[src.index("\nV965_APPLY = False"):src.index("\ndef v965_write_diag(")]
+    consts = src[src.index("\nV965_APPLY"):src.index("\ndef v965_write_diag(")]
     exec(consts, ns)                                       # noqa: S102
     start = src.index("\ndef v965_build_ledger(")
     rest = src[start + 1:]
