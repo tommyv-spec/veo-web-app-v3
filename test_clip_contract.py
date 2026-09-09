@@ -968,3 +968,23 @@ def test_the_allowlist_is_about_plumbing_not_secrecy():
     assert "clip_contract_json" in mn          # API model: allowed
     # ...but neither of them reaches past the accessor for the VALUE
     assert "clip.clip_contract_json" not in mn
+
+
+def test_an_indented_mention_does_not_opt_a_build_in():
+    """A §0 declaration sits at column 0. `template_new_format.md` documents
+    the opt-in inside an INDENTED html comment, and a build that quoted the
+    line in a comment or a fenced block must not opt itself in silently."""
+    md = "<!-- docs say:\n         CLIP CONTRACT: v1\n -->\n" + FULL
+    s = _scenes(md)[0]
+    assert s["clip_contract_version"] is None, (
+        "an indented mention opted the build in")
+
+
+def test_the_skeleton_itself_is_not_in_scope():
+    """The real case that found this: the shipped skeleton mentions the opt-in
+    and must not be read as an in-scope build."""
+    src = (_HERE / "template_new_format.md").read_text(encoding="utf-8")
+    assert "CLIP CONTRACT: v1" in src, "the skeleton should document the opt-in"
+    import re as _re2
+    assert not _re2.search(r"^CLIP CONTRACT:\s*v1\s*$", src, _re2.M), (
+        "the skeleton has the opt-in at column 0 and would parse as in-scope")

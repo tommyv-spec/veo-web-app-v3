@@ -1009,7 +1009,40 @@ The main character, same [setting anchor] as image 2, same framing — shot on i
      parses to None and the scene raises "needs clip_duration_s 8 or 10 ... got None". The bullet
      was above the line when this example first shipped; it was moved, not reworded. -->
 
+### Scene 7 — example in-scope contract scene (v965)
+- **image:** image_1
+- **scene_type:** shot
+- **speaker:** on-camera
+- **line:** the words of this clip in order lowercase
+- **veo_model:** Omni Flash                     # v961 — resolved and stamped per clip by v965
+- **clip_duration_s:** 8                        # v861
+- **input_mode:** ingredients                   # v965 — frames | ingredients. NEVER inferred. Attaches to the `- **line:**` above it, like clip_duration_s. MANDATORY on every shot scene of a build whose §0 says `CLIP CONTRACT: v1`.
+- **isolate_project:** true                     # v965 — true | false. Does this clip need its own Flow project? The worker obeys; it has no rotation policy. `false` HARD-FAILS at import on a charswap / movie-section scene (the submit proof depends on one submitter per project); it stays legal on a simple clip.
+- **policy_fallback:** prompt_b, fail           # v965 — the content-policy ladder, comma-separated, MUST end in `fail`. Rungs: prompt_b | model_swap | fail.
+- **action_note:** [Start beat 0-4s] ... [End beat 4-8s] ...
 
+<!-- v965 — the three bullets above are the CLIP CONTRACT and they are all-or-nothing on a build
+     that declares `CLIP CONTRACT: v1` in §0: a shot scene missing any one of them HARD-FAILS at
+     import naming which. A build WITHOUT that §0 line takes no new bullets and behaves exactly as
+     it did before this rule — the same no-metadata contract v943/v944 keep. A `text_card` scene
+     carries NONE of them and hard-fails if it does: a card is drawn by ffmpeg, never submitted to
+     Flow, so there is no tab to pick and no project to isolate.
+     The ASSET LIST is not authored. The platform derives it at import from `image:`,
+     `end_frame_image:`, `face_refs:`, the swap bullets and the one `## Ingredients` character row,
+     and resolves it per lane at hand-out. Do not hand-write it.
+     Deep-dive: template_reference.md §v965. Redo behaviour: §v966. -->
+
+
+
+<!-- v965 — §0 of the build carries ONE optional declaration, and it is the opt-in:
+
+         CLIP CONTRACT: v1
+
+     Present = this build is IN SCOPE, and every shot scene must then carry `input_mode`,
+     `isolate_project` and `policy_fallback`. Absent = out of scope, no new bullets, imports exactly
+     as it did before the rule existed. There is no half-way state: the line is the switch.
+     345 of the 347 builds in videos/ carry no render_method either, and none of them has to change,
+     which is what makes the backfill for this rule zero. -->
 
 <!-- v959 — §0 of the build carries one extra declaration: `MOVIE SECTION ANCHOR: image_K — wide
      because <why>`, and the `### Image K` prompt must itself name wide framing (wide / full shot /

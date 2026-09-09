@@ -5945,8 +5945,13 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
     # before this rule existed, which is what makes the backfill zero — 345 of
     # the 347 builds in videos/ carry no render_method either and none of them
     # has to change. Same no-metadata regression contract v943 and v944 keep.
+    # COLUMN 0, deliberately. An earlier version allowed leading whitespace and
+    # that is a false-positive waiting to happen: `template_new_format.md`
+    # documents the opt-in inside an INDENTED html comment, and any build that
+    # quoted the line in a comment or a fenced block would have opted itself in
+    # silently. A §0 declaration sits at column 0, like every other one.
     contract_in_scope = bool(_re.search(
-        r"^\s*CLIP CONTRACT:\s*v1\s*$", md_text, flags=_re.MULTILINE | _re.IGNORECASE))
+        r"^CLIP CONTRACT:\s*v1\s*$", md_text, flags=_re.MULTILINE | _re.IGNORECASE))
     blocks = _re.split(r"(?=^###\s+Scene\s+\d+\s*$)", md_text, flags=_re.MULTILINE)
     for block in blocks:
         header = _re.match(r"^###\s+Scene\s+(\d+)\s*$", block, flags=_re.MULTILINE)
