@@ -6581,8 +6581,9 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                     raise ValueError(
                         f"Scene {scene_index}: input_mode {value!r} is not one "
                         f"of {' | '.join(_clip_contract_mod.ALLOWED_INPUT_MODES)} (v965). "
-                        f"Lowercase — 'Ingredients' is the UI's label for the "
-                        f"radio, not the value the build declares."
+                        f"Case is forgiven ('Ingredients' works); the value "
+                        f"itself must be one of those two. They are OUR values, "
+                        f"not the UI's radio labels."
                     )
                 if lines_list:
                     clip_input_modes[-1] = _im

@@ -1088,3 +1088,21 @@ def test_a_contract_does_not_leak_to_the_next_clip():
     ns["v965_observe_contract"]({"id": "c2"}, page=p)     # unstamped
     assert ns["v965_declared_input_mode"](p) is None, (
         "clip 2 inherited clip 1's contract")
+
+
+def test_aspect_and_variants_are_driven_by_the_contract_not_hardcoded():
+    """The bug this test exists for: `Portrait` was a hardcoded "9:16" and
+    `Variants` came from a function ARGUMENT. A build declaring anything else
+    would have been ignored while the ledger said APPLIED — a verifier
+    rubber-stamping the setting that varies, which is v945.15 exactly."""
+    src = WORKER_SRC.read_text(encoding="utf-8")
+    i = src.index("def _v962_material_video_settings(")
+    body = src[i:src.index("\ndef ", i + 1)]
+    assert '_v962_pick_radio(page, "9:16", "Aspect"' not in body, (
+        "aspect is hardcoded again — a declared aspect_ratio would be ignored")
+    assert 'f"x{variants_count}", "Variants"' not in body, (
+        "variants ignores the contract again")
+    assert '_v965_cs.get("aspect_ratio")' in body
+    assert '_v965_cs.get("variants")' in body
+    # and it must still work with no contract at all
+    assert 'or "9:16"' in body and "or variants_count" in body

@@ -10581,8 +10581,19 @@ def _v962_material_video_settings(page, prefix="", variants_count=2,
     applied['Video'] = _v962_pick_radio(page, "Video", "Mode", prefix)
     time.sleep(0.5)  # the overlay re-renders its rows for video mode
     applied[mode_key] = _pick_video_type()
-    applied['Portrait'] = _v962_pick_radio(page, "9:16", "Aspect", prefix)
-    applied['Variants'] = _v962_pick_radio(page, f"x{variants_count}", "Variants", prefix)
+    # v965 — the contract, when present, is the SOURCE for these two as well.
+    # Before this they were a hardcoded "9:16" and a function ARGUMENT, so a
+    # declared aspect or variant count would have been quietly ignored while
+    # the ledger reported APPLIED — a verifier rubber-stamping the setting that
+    # varies, which is v945.15 word for word. Absent contract = unchanged.
+    _v965_cs = getattr(page, "_v965_contract", None) or {}
+    _v965_aspect = str(_v965_cs.get("aspect_ratio") or "9:16")
+    try:
+        _v965_vars = int(_v965_cs.get("variants") or variants_count or 2)
+    except (TypeError, ValueError):
+        _v965_vars = variants_count
+    applied['Portrait'] = _v962_pick_radio(page, _v965_aspect, "Aspect", prefix)
+    applied['Variants'] = _v962_pick_radio(page, f"x{_v965_vars}", "Variants", prefix)
     _res = getattr(page, "_resolution", None)
     if _res:
         applied['Resolution'] = _v962_pick_radio(page, str(_res), "Resolution", prefix)
