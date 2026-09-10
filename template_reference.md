@@ -20839,3 +20839,465 @@ clip with a NULL contract version is out of scope, exactly as §v965 says.
 to hand a charswap or movie-section clip to a redo lane that has no arm for it, and its `error_code`
 stays `CHARSWAP_NO_REDO` because that is the grep token other code and tests search for (§v945.14,
 §v959).
+
+## v963.25-v963.31 — THE flow.google.com CONTRACT: structure, errors, and what each old assumption cost
+
+**Scope.** `code/static/flow_worker.py`. The 2026-09-06 move from `labs.google` +
+`aisandbox-pa.googleapis.com` to `flow.google.com` changed the transport, the response SHAPE and the
+error VOCABULARY. The worker was ported selector-by-selector, so several code paths kept asking the
+OLD host's questions and silently got no answer. Every item below is measured, not inferred — the
+evidence is the captured `batchexecute` traffic of 2026-09-10 (job `df454e3c`, clip 14993).
+
+### The new transport
+
+Everything goes through ONE endpoint:
+
+    POST https://flow.google.com/_/AiSandboxAngularFrontend/data/batchexecute
+
+with the RPC named in `rpcids`. Observed RPCs and what they carry:
+
+| rpcid | carries |
+|---|---|
+| `MZZa6b` | the SUBMIT — response returns one record per requested variant, each with its media id |
+| `jwpduf` | generation RESULT/status — **this is where a refusal appears** |
+| `Zzl0ze` / `UpteDb` | the media LISTING — the only place a real `/asb/<token>=mm,22,15` download URL comes from |
+
+**The response is double-encoded.** The envelope is
+`)]}'\n<len>\n[["wrb.fr","<rpcid>","<payload as a JSON STRING>",...]]`, so the payload needs a
+SECOND `json.loads` before anything can be read out of it. Decoder: `_decode_batchexecute()`.
+
+### The error shape, and the vocabulary change
+
+A refusal arrives inside an **HTTP 200** whose workflows were created and whose media ids were
+returned. Per record:
+
+    [4,[3,"PUBLIC_ERROR_UNSAFE_GENERATION"],["IDENTIFIABLE_PERSON_SAFETY"]],4
+
+`MEDIA_GENERATION_STATUS_FAILED` — the old host's marker — **does not appear anywhere in new-host
+traffic.** `IDENTIFIABLE_PERSON_SAFETY` is the new name for the family the old host called
+`PROMINENT_PEOPLE`, but it arrives under `UNSAFE_GENERATION`, i.e. the PROMPT bucket
+(`wiki/synthesis/swap-lane-operator-rules-2026-08-23.md` §9): the fix is REWORDING, not replacing the
+frame. Hence `_VIDEO_POLICY_PROMPT_REASONS = ('UNSAFE_GENERATION','DANGER_FILTER','IDENTIFIABLE_PERSON')`
+kept SEPARATE from `_VIDEO_POLICY_TERMINAL_REASONS`, which stays for rejects that are a fact about
+the image and never change between attempts.
+
+### Attribution: by POSITION, never by proximity
+
+A generation record is `[operation_uuid, project_uuid, MEDIA_uuid, "CAE", ...]` and its error tuple
+sits ~3400 chars later, AFTER the prompt. **The three uuids NEAREST the error are the attached
+INGREDIENT images** — a "closest uuid wins" heuristic blames an input picture and sends us replacing
+innocent frames. `_failed_media_ids_new_host()` takes the THIRD uuid of the record that contains the
+reason and does not descend once matched, so a sibling record cannot contribute. Verified against
+both real refusal bodies: returns exactly the two media ids the submit bound, zero ingredients.
+`_failed_media_ids_any_host()` tries the legacy dict shape first, then this.
+
+### The five old assumptions and what each one cost
+
+1. **`_install_flow_api_capture` gated on `aisandbox-pa.googleapis.com`** → skipped EVERY generate
+   after the move. No response was readable, `page._flow_api_last` stayed empty, so every submit fell
+   through `"input shape unverified (last capture was nothing/-)"` — **the shape check had not run in
+   production for four days.** Fixed: accept `batchexecute`; added a `page.on('response')` listener
+   that records status + body + markers, and prints `[SAFETY-REFUSAL] … a retry cannot help`.
+2. **The reason vocabulary predated the move** → `_scan_failure_reason` matched nothing, recorded
+   nothing, no policy action fired, **Prompt B was never offered a chance** (`rendered_prompt_variant`
+   stayed `A` on all 7 clips of the job) and the clip was resubmitted as a "ghost" four times, one
+   render slot each.
+3. **`_failed_media_ids_in_status` needs a dict with a `'media'` key** → the new host has no such
+   key, so even a recognised reason attributed to nobody. This is why fixing (2) alone was inert.
+4. **`_construct_media_url` fell back to `labs.google/…/getMediaUrlRedirect`** whenever no listing had
+   been seen yet — which is exactly the state ~60s after a click. That host answers **401** for this
+   session: four guaranteed failures and a spurious `all variants failed — queuing for redo` **on a
+   clip that rendered perfectly well.** Fixed: once `_V963_NEW_HOST_SEEN` (set on the first
+   batchexecute response — proof, not assumption), return `""` so the caller waits for the listing,
+   which is the thing that actually resolves it.
+5. **The tile scanner is still wrong.** `scan_tiles_for_policy_failures` and the FailCheck read
+   `document.querySelectorAll('[data-index]')`. Measured 2026-09-10: **0 tiles while the project held
+   two finished mp4s**, and a safety refusal draws no tile at all. So the DOM cannot answer "did this
+   fail" on this host. `check_recent_clip_failure` now asks the SUBMIT RESPONSE
+   (`prompt_policy_refusal_for_clip`, scoped to the uuids that submit bound) before its old
+   "no clear signal — assume OK". **The selector itself is still unported — open work.**
+
+### The rule that generalises
+
+**A checker that only records what WE send can never explain a refusal.** When a system accepts and
+then does nothing, capture the REPLY before theorising about transport, sessions or timing. Two real
+bugs (the reCAPTCHA token class, the 401 download path) were chased for two days as the cause; both
+were genuine and neither was it. Related: §v962 (host move), §v959 (movie-section arm), §v805/§v821
+(Prompt B ladder), §v899.6 (terminal vs retryable rejects).
+
+## v963.33 — THE DELIVERY LEG: a fresh render is fetched by its DOWNLOAD BUTTON, not by a media URL
+
+**Scope.** `code/static/flow_worker.py` — `_v963_download_project_videos()` plus the fallback inside
+`_recover_pending_clip_downloads()`.
+
+**What broke.** On flow.google.com the worker renders and then does not deliver. Measured 2026-09-10,
+job `df454e3c` clip 14993: both videos finished (`9facd356` 3,708,921 B, `969ed637` 3,964,879 B) and
+the worker sat with `clips_downloaded: []` for seven minutes until it was stopped.
+
+**Why.** Delivery went `bound uuid -> _construct_media_url -> _uuid_video_ready -> http_dl_queue`,
+and every step after the first needs the media LISTING to contain the render. It never does in that
+window: those two ids appear only in `jwpduf` / `as29s` / `MZZa6b` frames and **in no frame carrying
+an `/asb` URL**, so `_v963_media_urls_from_listing` returns nothing for them, `_construct_media_url`
+has no URL to hand out, `_ready` is empty, and the loop `continue`s for ever. (Before v963.31 it was
+worse: it fell back to a `labs.google` URL that answers **401**, producing a spurious "all variants
+failed — queuing for redo" on a clip that had rendered perfectly well.)
+
+**The route that does work is the UI download button** — it is how every video recovered by hand on
+2026-09-10 was retrieved. The worker already HAD a UI fallback and it could not fire, because it was
+written for the old host: `button[aria-label='download']` (this host says **"Download batch"**), a
+styled-components scope `div.sc-d90fd836-2.dLxTam` that no longer exists, a click on
+"Original size (720p)", and a single-file save — while this host returns a **.zip** of mp4s.
+
+**The fix.** `_v963_download_project_videos(page, out_dir)` clicks each
+`button[aria-label*='ownload']`, handles the optional quality menu, unzips, and keeps only files over
+200 KB (an input image arrives as a jpeg in its own zip and must never be offered as a render).
+**Verified live** against the real project: 4 buttons in, 2 videos out, sizes 3,964,879 and
+3,708,921 — byte-for-byte the two known renders.
+
+**Two guards, both deliberate.**
+1. **ISOLATED projects only.** A movie-section clip owns its project outright, so every video in it
+   is that clip's output — that is what makes "download the project's videos" a safe mapping. On the
+   shared project it would be a guess, so it is not attempted there.
+2. **The output count must match `expected_outputs`.** A half-finished project or a stray file is
+   ambiguous; the clip is left generating for the next pass rather than delivered as a guess.
+
+**Status of the proof.** The download ROUTE is proven live, byte-exact. The WIRING into the recovery
+is verified by import plus structural assertions (isolation guard precedes any upload, wrong count
+refuses) but has NOT yet run end-to-end, because the job reached 7/7 and no pending clip remained to
+exercise it. Watch for `[v963.33] ✓ clip N: 2 variant(s) delivered via the download button` on the
+next real render, and treat that line as the missing evidence.
+
+## v963.34-v963.36 — STOP ROTATING A PROJECT PER CLIP: honour the declaration, deliver by SIZE
+
+**Operator, 2026-09-10: "do we really need a new project per clip? … we were already generating
+multiple clips in the same project, no big deal."** Correct on both counts, and the history agrees:
+`first_submission_in_project = False  # Tiles now exist — subsequent clips can reuse` is the
+ORIGINAL behaviour and still the normal path. Per-clip rotation was added later and only for two
+arms — charswap (`v945.13`) and movie-section (`v959`, commit `8925ca4`) — in both cases bundled
+with chip-reading work, i.e. defensively, not after a measured reuse failure.
+
+**What it cost** (measured across 19 clip cycles on 2026-09-10): **~130s of re-upload per clip**,
+~142s rotate→submit, so **~16.6 minutes of pure setup on a 7-clip job** — re-uploading the same four
+images every time. With the assets already in the project the attach logs
+`picker=existing_asset_ready` instead of `picker=uploaded_asset_ready` and is near-instant.
+
+**v963.36 — the declaration is now real.** `isolate_project` is an authored contract field documented
+as "the worker just obeys", parsed in `image_platform.py`, carried through `main.py`, and reported by
+the worker's ledger as `HONOURED_BY_SCHEDULER` — **and nothing read it.** The section rotation ran
+unconditionally. It now rotates ONLY when the clip declares `isolate_project: true`; otherwise it
+reuses. A declaration nothing consults is not a setting.
+
+**What isolation was protecting, and why reuse is now safe.** `v945.11` measured a chip surviving the
+composer clear — a leftover image contaminating the next render. That hazard is now **detected**
+rather than avoided: the attach verifies exact chip ids and counts (`0 -> 1 -> 2 -> 3`,
+`3 distinct chips`, `mode verified=True`) and movie-section readiness demands exactly that fresh ID
+set before Generate. Rotation was belt over braces.
+
+**v963.35 — delivery no longer needs ownership.** The download-button fallback (§v963.33) matched
+files to clips by "this clip owns the project", which a shared project destroys. It now matches by
+**byte size**: `_v963_note_media_sizes()` learns `uuid -> size` from the same records the failure
+scan already decodes, and `media_sizes_for_clip()` returns the sizes for the uuids THIS clip's submit
+bound. Ownership remains the fallback when no size is known yet. Verified on real traffic: the two
+renders of clip 14993 were recovered as `9facd356 -> 3,708,921` and `969ed637 -> 3,964,879`, exactly
+the delivered files.
+
+**v963.34 — the failure scan was dead on this host.** Its hook fired only for
+`batchcheckasyncvideogenerationstatus` or `batchAsyncGenerateVideo`, both OLD-host names, so
+`_scan_failure_reason` never ran on flow.google.com: nothing was recorded per media and v963.29's
+FailCheck refusal check could never see anything. (The `[SAFETY-REFUSAL]` line still printed, from
+the capture listener — a different hook — which is why the gap was easy to miss.) `batchexecute` is
+now in the filter, which is also what feeds v963.35's size learning.
+
+**Proof status.** Size learning, the rotation gate and the size-matched delivery are verified against
+REAL captured traffic and by import; none has yet run end-to-end on a live job, because the job
+reached 7/7 with no pending clip left. The evidence to watch on the next render:
+`reusing this project (isolate_project=None)`, `[v963.35] learned N finished media size(s)`, and
+`[v963.33] ✓ clip N: 2 variant(s) delivered via the download button`.
+
+## v963.37 — A JOB PIN DOES NOT LIMIT WHICH CLIPS RUN
+
+**Scope.** Operating the Flow worker. No code change — this documents what the two scope env vars
+actually do, because assuming otherwise spent a render on a protected clip on 2026-09-10.
+
+**What happened.** To run a 4-clip model comparison (14908/14909 Omni Flash, 14935/14936 Veo Lite)
+inside the 80-clip job `0d456c24`, the job was pinned with `FLOW_ONLY_JOB_IDS` and exactly those four
+clips were set to `pending`, on the assumption that only pending clips would be taken. The worker
+started at the top of the job instead:
+
+    --- Clip 1/80 (clip_index=0) ---      <- 14907, explicitly do-not-touch
+    [API] Clip 14907 status → generating
+    --- Clip 2/80 (clip_index=1) ---
+
+**Inside a pinned job the worker walks EVERY clip that is not already done, in index order** —
+`failed` and `generating` included. It skips only what is completed or cached
+(`Clip 1/7 SKIPPED (cached)`). Left running it would have rendered all 80.
+
+**The two scopes, and why neither does what was wanted:**
+
+| env var | what it really scopes |
+|---|---|
+| `FLOW_ONLY_JOB_IDS` | the whole JOB — every unfinished clip in it, first generation included |
+| `FLOW_ONLY_CLIP_IDS` | the **redo endpoint ONLY**. It prints `normal job polling disabled`, so first-generation `pending` clips are never polled and the worker sits on `No pending jobs or redos` |
+
+**There is no "these specific clips, first generation" scope.** That is precisely why HANDOFF rev 843
+says to use *"the existing exact clip-scoped normal redo lane"*: the redo lane is the only per-clip
+path, and `FLOW_ONLY_CLIP_IDS` exists for it.
+
+**The check that catches this in two seconds.** Before starting a pinned-job run, read the clip
+status counts and ask **how many clips are NOT completed** — that number, not the pending count, is
+how many renders the worker will attempt. Then read the first console line: `Clip 1/N` states the
+denominator immediately. If N is not what you intended, kill it there.
+
+**Recovery that worked, and it takes both halves.** Write `~/.kaveno/hold/flow` so the 15-minute
+`KavenoWorkerSweep` cannot restart the lane, AND restore `.env` to a DIFFERENT job's pin so the
+dangerous job is unreachable even if something does start. One without the other leaves a hole.
+
+## v969 — THE ATTACH LINE: a clip says what goes into the composer, and cannot lie about it (2026-09-11)
+
+**Read these three facts before anything else. A future session that reads only this rule still has to know all three.**
+
+1. **It is a MIRROR, never a source.** The build already says what attaches, in `- **image:**`,
+`- **end_frame_image:**`, `- **face_refs:**` and the swap trio. The parser DERIVES the same list from
+those bullets and refuses any `- **attach:**` line that disagrees with it. Editing the attach line
+changes nothing about what is handed over — it only changes whether the import passes. There is no
+second source of truth, which is the whole disease §v965 exists to cure.
+
+2. **It is DESCRIPTIVE, not enforced, until `docs/plans/declarative-clip-contract/PLAN.md` step 4.12.**
+The worker still attaches files in its own hardcoded order; the contract's `assets` list is recorded
+in the ledger and applied by nothing (`assets` sits in `V965_NO_UI_FIELDS` in
+`code/static/flow_worker.py`). The two agree today, which is what makes the line honest — but nothing
+at render time reads it. **Do not write, in a rule, a checklist, a bundle or a build, that v969 is
+enforced at render time until 4.12 ships.**
+
+3. **It is REQUIRED on every shot scene of a build that declares `CLIP CONTRACT: v1`** (the §v965 §0
+opt-in, at column 0), and **forbidden on a `text_card`**. Both directions, exactly like v965's three
+bullets. A rule that is only checked when present teaches authors to omit it.
+
+### The grammar
+
+    - **attach:** image_1:start_frame, image_3:face, image_2:face
+
+Comma-separated `TOKEN:ROLE` entries, **in attach order**. The five legal roles are the `Role` values
+from `code/clip_contract.py`, spelled identically in `image_platform.V969_ATTACH_ROLES`:
+
+    start_frame | end_frame | face | avatar | swap_source
+
+The TOKEN is the author's own spelling — `image_N` for an image, the source video's filename for a
+swap source. It is never an R2 key: at parse time no R2 key exists yet, and that resolution happens
+at job creation.
+
+Order is significant on purpose. Attach order is normative (`CONTRACT.md` §2.4), so a face list
+authored `image_3, image_2` attaches in that order, and a mirror that ignored order could not tell
+the two apart.
+
+### The derived order — it must equal `main._v965_resolve_assets`, lane by lane
+
+`image_platform.derive_attach_tokens` produces the list the declared line is checked against, and it
+copies `main._v965_resolve_assets` exactly. Any divergence makes the mirror a liar, so read that
+function rather than this table whenever either one is touched.
+
+| lane (`render_method`) | derived order |
+|---|---|
+| `charswap` | the avatar (the scene's `image:`), then the swap source, **then the start frame LAST and ONLY on `swap_mode: image-led`**. A `video-led` swap hands over NO start frame — the source supplies the motion. An absent `swap_mode` defaults to `video-led`, the same default the resolver uses. |
+| `movie-section` | the scene chip (`image:`) as `start_frame`, then the faces in the author's `face_refs:` order — **and it RETURNS there**. A movie-section clip hands over **NO end frame**, even when the build declares `end_frame_image:` (nothing forbids declaring one). The resolver returns at exactly the same point. A mirror that listed an end frame would name a file the worker is never given, and would put it ahead of the faces as well. |
+| everything else (the ordinary `simple` lane) | start frame, then end frame. Faces never occur here — §v959 refuses `face_refs:` off a movie-section scene. |
+
+### The refusals, and what each one says
+
+- **absent, on an in-scope shot scene** — the message prints the exact line the author should have
+  written: ``Add `- **attach:** image_1:start_frame` (v969)``.
+- **names the wrong files** — "attach does not match what this scene actually attaches", printing
+  both the declared list and the derived one.
+- **right files, wrong sequence** — its own separate message naming ORDER, because "does not match"
+  would send the author hunting for a missing image that is right there.
+- **an entry not shaped `image_N:role`** — refused, naming that shape.
+- **a role outside the five** — refused, naming the whole legal set.
+
+### What v969 does NOT do
+
+- It decides nothing. See fact 1, and fact 2 for what actually attaches today.
+- **The text_card refusal is real but INDIRECT.** A text_card carries no `image:`, so its derived
+  list is empty and any `attach:` on it fails with the mismatch message ("the build says ``")
+  rather than a message about text cards. There is no dedicated text_card message in the parser.
+- **On an OUT-OF-SCOPE build the line is optional but still checked.** Writing a correct one is
+  accepted; writing a wrong one still fails the import. This is deliberately asymmetric with §v970,
+  whose bullets hard-fail merely by being present on a build that never opted in — v969's line is a
+  restatement of bullets that are already there, v970's are new instructions that nothing would read.
+- It does not check that a named file exists, resolves or uploads. It checks that the author's
+  sentence agrees with the author's own bullets.
+
+---
+
+## v970 — PER-CLIP COMPOSER SETTINGS: aspect ratio, variants, resolution (2026-09-11)
+
+Three settings that only ever existed at JOB level now have per-clip bullets:
+
+    - **aspect_ratio:** 9:16
+    - **variants:** 2               # `x2` is accepted too — see the v826 note below
+    - **resolution:** 720p
+
+They are per-LINE bullets, attached to the closest preceding `- **line:**` exactly as §v861's
+`clip_duration_s` and §v961's `veo_model` are; a silent shot scene with no line holds them and emits
+them as a one-entry list. The scene-level answer is the FIRST declared value, the same resolution
+`veo_model` uses.
+
+**v970 is obeyed the day it ships, with NO worker change.** The three values were already being read
+off the clip row at hand-out with hardcoded fallbacks. All this rule does is let the build supply
+them, ahead of the row.
+
+### The fallthrough, spelled out
+
+At hand-out (`main._v965_attach_contract`) each value resolves **declaration → clip row → hardcoded
+fallback**, and the fallbacks are unchanged: `"9:16"`, `2`, `"720p"`.
+
+**The three bullets are individually optional and each falls through on its own.** Declaring
+`resolution` says nothing about `variants`. A build that declares none of them leaves all three
+`None` in the stored declaration, the expression collapses to exactly the two terms that were there
+before v970, and every existing clip renders exactly as it did.
+
+"Declared 720p" and "said nothing" stay distinguishable all the way to the ledger: the fields are
+`Optional[...] = None` on `ClipContractDeclaration`, and `None` means "the author did not decide",
+not "declared nothing". That is the one place that model departs from `ClipContract`'s
+every-field-always-present rule, and the reason is that here the third answer is real and useful.
+A default is also NOT the same as an absent key — a declaration stored before v970 has no such keys
+at all, and `extra="forbid"` only refuses UNKNOWN keys, so every already-stored declaration still
+loads.
+
+### Where the legal values live — NOT in the parser
+
+They live in `code/clip_contract.py`, the import-free module, beside every other legal set:
+`ALLOWED_ASPECTS`, `ALLOWED_RESOLUTIONS`, `VARIANTS_MIN` / `VARIANTS_MAX`, and the
+`check_aspect_ratio` / `check_resolution` / `check_variants` functions. `image_platform` re-exports
+them as `V970_ASPECTS` / `V970_RESOLUTIONS` / `V970_VARIANTS_MIN` / `V970_VARIANTS_MAX` and calls the
+same check functions — the parser, the API and the linters all need them, and a second copy is how
+two of them come to disagree about the same value.
+
+| setting | legal values | how well evidenced |
+|---|---|---|
+| `aspect_ratio` | `9:16` \| `16:9` | good — the job UI's `#aspectSeg` offers exactly these two, and the Flow overlay's aspect radiogroup is described the same way |
+| `variants` | `1`-`4` | good — `#flowVariantsSeg`, and the worker clicks the radio labelled `x{n}` |
+| `resolution` | `720p` \| `1080p` | **WEAK. Say so; do not present this set as settled.** The composer's Resolution radiogroup exists and is picked, but **its labels have never been read off the page.** `720p` is the only value alive anywhere in this codebase — the platform default, the UI default, and what §v861 says Flow always exports. `1080p` survives only in v861's note about the retired 1080p→8s rule. Anyone with the composer open should read the radio labels and correct the tuple. |
+
+A declared value the composer cannot take is a refused render, not a bad default — which is why the
+sets are checked at import at all.
+
+### The v826 name collision — the same two words, two grammars, kept compatible on purpose
+
+`aspect_ratio` and `variants` are ALSO §v826 bullets on an `### Image N` block, where they mean the
+Banana IMAGE's framing and its variant count. **70 such bullets exist across 9 builds today.**
+
+They never collide mechanically: an `### Image N` block is parsed by a different function, and the
+scene splitter cuts each block at the next `###` header. But an author reading a build meets the same
+two words meaning two different things, so the grammars are kept COMPATIBLE rather than separate —
+v970's `variants` accepts v826's `x2` spelling as well as a bare `2`, and `x2` is also the label the
+Flow overlay itself uses. One bullet name does not get to carry two grammars.
+
+### The refusals
+
+- **on a `text_card`** — a card is drawn by ffmpeg and never reaches a composer, so all three are
+  refused there, naming which.
+- **on a build with no `CLIP CONTRACT: v1` line at column 0** — refused, because the bullet would be
+  parsed, validated and then thrown away while the clip rendered at the job's setting. The message
+  names both fixes: add the §0 line, or remove the bullet.
+- **an illegal value** — refused, naming the legal set, from `clip_contract.py`'s own message.
+
+### What v970 does NOT do
+
+- There is **no presence requirement**. Unlike v965's three bullets, these are optional even on an
+  in-scope build: the overwhelming majority of clips want the job's value, and a required field here
+  would mean stamping three bullets onto every shot scene of every build to say nothing.
+- It does not touch `## Finishing` (§v944 / §v947) or any job-level export setting.
+
+---
+
+## v971 — ONE GENERIC PER-CLIP AUDIO SOURCE (2026-09-11)
+
+    - **audio:** render | source-original | scene:N | none
+
+One bullet says where a clip's audio comes from, backed by one table where **adding a style is a
+ROW** — not a new rule, a new bullet and a new column.
+
+### What said this before: four grammars, each locked to one lane
+
+| how a clip got its audio | grammar | where it was legal | consumed by |
+|---|---|---|---|
+| the Veo render's own native track | nothing — it is what happens when you say nothing | everywhere | the render itself |
+| the swap source's track, re-laid at export | `- **audio:** source-original` (§v943.1) | **charswap only** — a hard import error on every other scene type | `video_processor.swap_audio_with_speed_match`, via the `swap_audio` guard in main's export path |
+| another scene's spoken track, this clip silent under it | `- **audio_from_scene:** N` (§v698A many-to-one) | voiceover lines; mutually exclusive with `voiceover_anchor_image` | the audio-pair export path |
+| an image minted only to be an audio twin's start frame | `- **voiceover_anchor_image:** image_K` (§v698A) | paired renders | `image_nodes.role = 'voiceover_anchor'` |
+
+The charswap one is the sharpest illustration of the problem it solved: `- **audio:** source-original`
+was the closest thing the repo had to a general "where does this clip's audio come from" statement,
+and it refused to be written on any scene that was not a charswap. A style with a new audio source
+could not be expressed at all.
+
+### The table is the extension point, and the ONLY place legality lives
+
+`image_platform.V971_AUDIO_SOURCES`. Every row carries four keys and **every row names its consumer**.
+
+- `lanes` — which `render_method` may declare it. `None` means every lane.
+- `speakers` — which `speaker_mode` may declare it. `None` means every mode.
+- `arg` — the shape after the colon, or `None` for a bare source.
+- `consumer` — the code that actually READS the value.
+
+**TWO legality axes, and both are narrow on purpose.** A source declared legal where nothing reads it
+imports cleanly and then vanishes. `swap_audio` is NULLed for any non-charswap scene and the export
+consumer returns early unless the method is charswap AND the value is `source-original`;
+`audio_from_scene` is forwarded only when the scene's speaker mode is voiceover and is `None` on
+every other line. So `lanes` / `speakers` say where a source is REAL, and **widening one means
+writing its consumer first.** That is the honest version of "extensible".
+
+| source | lanes | speakers | arg | writes | consumer |
+|---|---|---|---|---|---|
+| `render` | any | any | — | **nothing** | the Veo render's own native track — nothing to do at export |
+| `source-original` | `charswap` | any | — | `swap_audio` | `video_processor.swap_audio_with_speed_match` (§v943.1) |
+| `scene` (`scene:N`) | any | `voiceover` | int | `audio_from_scene` | the audio-pair export path, via `clips.audio_from_scene`, which the flat-clip-row writer forwards for voiceover lines only (§v698A) |
+| `none` | `charswap` | any | — | `swap_audio` | §v943.1's "do NOT re-lay the swap source's track". **There is no general silence step anywhere**, so `none` on an ordinary Veo clip would be a declaration with no consumer. To widen it: write the strip step, add a test that ffprobe reports no audio stream, THEN change the tuple. |
+
+**`render` writes NOTHING, deliberately.** It IS the absence of an override, and storing a sentinel
+for it would make every downstream reader learn a new value to mean what NULL already means.
+
+**Absent is not the same as `render`.** Absent means the build predates this rule and every
+downstream default stands untouched. That is what keeps all 348 existing builds byte-identical in
+behaviour.
+
+### Forward-only — nothing existing changed meaning
+
+`- **audio_from_scene:** N` and `- **voiceover_anchor_image:** image_K` **still work, still mean what
+§v698A said, and still write the same columns.** Neither is retired. `source-original` and `none`
+keep exactly their §v943.1 values and their charswap-only legality. **No new column was added**:
+`audio: source-original|none` writes `swap_audio`, and `audio: scene:N` writes `audio_from_scene`. A
+row that one day needs a NEW destination is the moment to add one, and not before.
+
+### The new spelling inherits v698A's refusals — all of them
+
+The mutual-exclusion rule lives inside the OLD bullet's parse, which runs earlier and never sees the
+new spelling, so it is re-checked for `audio: scene:N`:
+
+- `audio: scene:N` beside `voiceover_anchor_image:` is refused. An anchor means "mint an audio twin";
+  borrowing a scene's audio means "do not".
+- `audio: scene:N` disagreeing with an `audio_from_scene: M` on the same scene is refused, rather
+  than one silently winning.
+- `audio: scene:N` pointing at its own scene is refused — a clip cannot borrow its own track.
+
+**A second spelling must inherit EVERY refusal the first one carries, not just some**, or the new
+syntax is a way around a rule the old syntax obeys.
+
+### Parsing details
+
+The FIRST whitespace-separated token is read, the same way §v943.1 always did, so a value carrying a
+parenthetical suffix keeps parsing exactly as it did. Case is folded. A source that takes no argument
+and is given one is refused, naming what was written.
+
+**The lane refusal names the way out, per lane.** A movie-section scene can never grow a swap source,
+so it is told to drop the bullet (§v959) rather than to declare a swap trio; an ordinary scene is
+told it may declare the trio instead (§v943.1). Same fault, different exit.
+
+### What v971 does NOT do
+
+- It does not touch the JOB-level music bed. `export_music_filename` / `export_music_start_s` /
+  `export_music_gain_db` / `export_music_mode` / `export_beat_align` in `## Finishing` (§v944 /
+  §v947) already worked and are unchanged. v971 is the PER-CLIP question.
+- It adds no silence step. See the `none` row.
+- **It has no text_card refusal.** `- **audio:** render` on a text_card is currently accepted and
+  writes nothing, unlike §v965's and §v970's bullets, which are refused there.
