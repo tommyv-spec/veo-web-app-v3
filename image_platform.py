@@ -6002,9 +6002,18 @@ def derive_attach_tokens(*, image, end_frame_image, face_refs,
     """What this scene attaches, as (token, role) pairs in ATTACH ORDER.
 
     The order is normative and is the same one `main._v965_resolve_assets`
-    produces from the resolved columns: scene chip first, then faces in the
-    author's list order; start first and end second for a frames pair; avatar
-    then source for a swap, plus the start frame LAST on an image-led swap.
+    produces from the resolved columns:
+
+      charswap       avatar, swap source, and the start frame LAST on an
+                     image-led swap only (`main.py:19322-19328`)
+      movie-section  the scene chip, then the faces in the author's order --
+                     and NOTHING after them. The resolver RETURNS there
+                     (`main.py:19337-19346`), so a movie-section scene never
+                     hands over an end frame even if the build declares one.
+      everything else  start frame, then end frame (`main.py:19348-19353`).
+                     Faces do not occur here; v959 refuses `face_refs:` off a
+                     movie-section scene.
+
     This function works in AUTHOR tokens (`image_N`, the source filename)
     because at parse time no R2 key exists yet -- that resolution happens at
     job creation (STATE.md B5).
@@ -6025,10 +6034,17 @@ def derive_attach_tokens(*, image, end_frame_image, face_refs,
             out.append((image, "start_frame"))
         return out
     out = [(image, "start_frame")] if image else []
+    if method == "movie-section":
+        # RETURN here, before the end frame -- the resolver does exactly this
+        # at `main.py:19337-19346`. A movie-section scene that also declares
+        # `end_frame_image:` (nothing forbids it) hands over NO end frame, so
+        # a mirror that listed one would name an asset the worker is never
+        # given, and would put it ahead of the faces as well.
+        for ref in (face_refs or []):
+            out.append((ref, "face"))
+        return out
     if end_frame_image:
         out.append((end_frame_image, "end_frame"))
-    for ref in (face_refs or []):
-        out.append((ref, "face"))
     return out
 
 

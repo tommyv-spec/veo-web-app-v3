@@ -132,6 +132,18 @@ def test_swap_mode_defaults_to_video_led_exactly_like_the_resolver():
         ("image_1", "avatar"), ("clip.mp4", "swap_source")]
 
 
+def test_a_movie_section_scene_hands_over_NO_end_frame():
+    """The resolver returns right after the faces (`main.py:19337-19346`), so
+    a movie-section scene never hands over an end frame even when the build
+    declares one. A mirror that listed it would name an asset the worker is
+    never given, and would order it ahead of the faces."""
+    assert ip.derive_attach_tokens(
+        image="image_1", end_frame_image="image_9",
+        face_refs=["image_3", "image_2"],
+        render_method="movie-section", swap_source_video=None) == [
+        ("image_1", "start_frame"), ("image_3", "face"), ("image_2", "face")]
+
+
 def test_derived_order_matches_the_platform_resolver_docstring():
     """CONTRACT.md 2.4 and main._v965_resolve_assets both say: scene chip
     first, then faces in list order; start first, end second for a pair."""
