@@ -19264,9 +19264,17 @@ def _v965_attach_contract(clip_data: dict, clip, base_url: str, lane: str) -> di
         policy_fallback=decl.policy_fallback,
         veo_model=getattr(clip, "veo_model", None) or DEFAULT_VEO_MODEL,
         duration_s=int(getattr(clip, "veo_render_duration_s", None) or 8),
-        aspect_ratio=getattr(clip, "aspect_ratio", None) or "9:16",
-        variants=int(getattr(clip, "flow_variants_count", None) or 2),
-        resolution=getattr(clip, "resolution", None) or "720p",
+        # v970 — what the BUILD declared wins over what the job row says, and
+        # the row wins over the hardcoded fallback. A declaration that says
+        # nothing leaves `decl.aspect_ratio` None, so the expression collapses
+        # to exactly the two terms that were here before v970 and every
+        # existing clip renders unchanged.
+        aspect_ratio=(getattr(decl, "aspect_ratio", None)
+                      or getattr(clip, "aspect_ratio", None) or "9:16"),
+        variants=int(getattr(decl, "variants", None)
+                     or getattr(clip, "flow_variants_count", None) or 2),
+        resolution=(getattr(decl, "resolution", None)
+                    or getattr(clip, "resolution", None) or "720p"),
         swap_mode=(getattr(clip, "swap_mode", None) or "video-led") if method == "charswap" else None,
         swap_max_source_s=_cc_mod.SWAP_MAX_SOURCE_S if method == "charswap" else None,
         assets=assets,

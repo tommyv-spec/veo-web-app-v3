@@ -5889,7 +5889,8 @@ def parse_finishing_section(md_text: str):
 
 
 def _v965_declaration_json(scene_index, input_modes, isolate_projects,
-                           policy_fallbacks, in_scope, is_text_card):
+                           policy_fallbacks, in_scope, is_text_card,
+                           aspect_ratios=(), variants=(), resolutions=()):
     """The scene's contract DECLARATION as a JSON string, or None.
 
     None whenever the scene is not in scope — an out-of-scope build, or a
@@ -5920,6 +5921,20 @@ def _v965_declaration_json(scene_index, input_modes, isolate_projects,
     return _clip_contract_mod.ClipContractDeclaration(
         clip_contract_version=_clip_contract_mod.CONTRACT_VERSION,
         input_mode=_im, isolate_project=_ip, policy_fallback=_pf,
+        # v970 — first declared value wins, the same way `veo_model` and the
+        # three above resolve. None when nobody declared it, and that is the
+        # whole point: it keeps "declared 720p" and "said nothing"
+        # distinguishable all the way to hand-out, where "said nothing" falls
+        # through to the job's setting.
+        #
+        # The three arguments are keyword-only WITH DEFAULTS on purpose. A
+        # mandatory argument is an API break
+        # (`feedback_a-mandatory-argument-is-an-api-break`), and an empty
+        # tuple resolves to None, which is exactly what a caller that does not
+        # know about v970 means.
+        aspect_ratio=next((v for v in aspect_ratios if v), None),
+        variants=next((v for v in variants if v), None),
+        resolution=next((v for v in resolutions if v), None),
     ).model_dump_json()
 
 
@@ -6045,6 +6060,82 @@ def derive_attach_tokens(*, image, end_frame_image, face_refs,
         return out
     if end_frame_image:
         out.append((end_frame_image, "end_frame"))
+    return out
+
+
+# v970 -- the three composer settings a clip could not say. They are read off
+# the clip row at hand-out (`main._v965_attach_contract`) with hardcoded
+# fallbacks "9:16" / 2 / "720p"; those fallbacks STAY, so a build that declares
+# nothing renders exactly as it does today.
+#
+# The legal sets are NOT spelled here. They live in `clip_contract.py` beside
+# every other one, with the evidence for each, and are read through the module
+# exactly as `ALLOWED_INPUT_MODES` and `ALLOWED_RUNGS` already are (:6829,
+# :6867). A second copy in this file is how a parser and an API come to
+# disagree about the same value.
+V970_ASPECTS = _clip_contract_mod.ALLOWED_ASPECTS
+V970_RESOLUTIONS = _clip_contract_mod.ALLOWED_RESOLUTIONS
+V970_VARIANTS_MIN = _clip_contract_mod.VARIANTS_MIN
+V970_VARIANTS_MAX = _clip_contract_mod.VARIANTS_MAX
+
+
+def _v970_check_aspect(value, scene_index):
+    try:
+        return _clip_contract_mod.check_aspect_ratio((value or "").strip())
+    except ValueError as _e:
+        raise ValueError(f"Scene {scene_index}: {_e} (v970)") from None
+
+
+def _v970_check_resolution(value, scene_index):
+    try:
+        return _clip_contract_mod.check_resolution(
+            (value or "").strip().lower())
+    except ValueError as _e:
+        raise ValueError(f"Scene {scene_index}: {_e} (v970)") from None
+
+
+def _v970_check_variants(value, scene_index):
+    """The count, as an int. A leading `x` is accepted.
+
+    `x2` is already legal for the SAME bullet name on an `### Image N` block
+    (v826, :5374-5377) and `x2` is the label the Flow overlay itself uses, so
+    refusing it here would mean one bullet name with two grammars -- the kind
+    of split that teaches authors to guess.
+    """
+    raw = (value or "").strip()
+    v = raw[1:] if raw[:1].lower() == "x" else raw
+    if not v.isdigit():
+        raise ValueError(
+            f"Scene {scene_index}: variants {raw!r} is not a whole "
+            f"number (v970)")
+    try:
+        return _clip_contract_mod.check_variants(int(v))
+    except ValueError as _e:
+        raise ValueError(f"Scene {scene_index}: {_e} (v970)") from None
+
+
+def parse_v970_composer_bullets(block, scene_index):
+    """The declared composer settings in `block`, validated. v970.
+
+    Sparse: a key is present only when the author wrote the bullet, so
+    "declared 720p" and "said nothing" stay distinguishable all the way to
+    the ledger.
+
+    `block` is any text holding the bullets -- a whole scene block, or the one
+    matched bullet line the per-line loop hands over. The legality lives in the
+    three `_v970_check_*` functions above and NOWHERE else, so the loop and
+    this function cannot drift apart about what a legal value is.
+    """
+    out = {}
+    asp = _parse_bullet_field(block, "aspect_ratio")
+    if asp:
+        out["aspect_ratio"] = _v970_check_aspect(asp, scene_index)
+    res = _parse_bullet_field(block, "resolution")
+    if res:
+        out["resolution"] = _v970_check_resolution(res, scene_index)
+    var = _parse_bullet_field(block, "variants")
+    if var:
+        out["variants"] = _v970_check_variants(var, scene_index)
     return out
 
 
@@ -6599,7 +6690,8 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # hold two different answers, and a no-line scene holds a dangling one.
         bullet_pattern = _re.compile(
             r"^\s*[-*]\s*\*\*(line|action_note|pad|clip_duration_s|veo_model"
-            r"|input_mode|isolate_project|policy_fallback)\s*:\*\*\s*(.+?)\s*$",
+            r"|input_mode|isolate_project|policy_fallback"
+            r"|aspect_ratio|variants|resolution)\s*:\*\*\s*(.+?)\s*$",
             flags=_re.MULTILINE | _re.IGNORECASE,
         )
         lines_list: List[str] = []
@@ -6610,12 +6702,23 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         clip_input_modes: List[Optional[str]] = []       # v965 parallel array
         clip_isolate_projects: List[Optional[bool]] = []  # v965 parallel array
         clip_policy_fallbacks: List[Optional[list]] = []  # v965 parallel array
+        # v970 — three more parallel arrays of the same shape. Per LINE, not
+        # per scene, for the same reason `veo_model` is: a scene may hold two
+        # lines and therefore two clips, and the scene-level answer is the
+        # FIRST declared value.
+        clip_aspect_ratios: List[Optional[str]] = []   # v970 parallel array
+        clip_variants: List[Optional[int]] = []        # v970 parallel array
+        clip_resolutions: List[Optional[str]] = []     # v970 parallel array
         dangling_veo_model: Optional[str] = None  # v961, mirrors v861's
         # v965 — three more of the same shape. A shot scene with no `line`
         # bullet still renders a clip, and it still has to say what it is.
         dangling_input_mode: Optional[str] = None
         dangling_isolate_project: Optional[bool] = None
         dangling_policy_fallback: Optional[list] = None
+        # v970 — three more, for the same silent-shot-scene reason.
+        dangling_aspect_ratio: Optional[str] = None
+        dangling_variants: Optional[int] = None
+        dangling_resolution: Optional[str] = None
         # v786 — silent / text_card scenes have an action_note but NO line
         # bullets, so the attach-to-most-recent-line rule below would drop
         # it. Hold it here; if the scene ends with zero lines, emit it as a
@@ -6639,6 +6742,9 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                 clip_input_modes.append(None)       # v965
                 clip_isolate_projects.append(None)  # v965
                 clip_policy_fallbacks.append(None)  # v965
+                clip_aspect_ratios.append(None)     # v970
+                clip_variants.append(None)          # v970
+                clip_resolutions.append(None)       # v970
             elif key == "action_note":
                 if lines_list:
                     # Attach to most recent line
@@ -6780,6 +6886,33 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                     clip_policy_fallbacks[-1] = _rungs
                 else:
                     dangling_policy_fallback = _rungs
+            elif key in ("aspect_ratio", "variants", "resolution"):
+                # v970 — the three composer settings. Validated by
+                # `parse_v970_composer_bullets`, fed THIS ONE MATCHED LINE, so
+                # the per-line loop and the scene-level reader run the same
+                # legality checks rather than two copies of them.
+                #
+                # NOTE the namespace: `aspect_ratio` and `variants` are ALSO
+                # v826 bullets on an `### Image N` block, where they mean the
+                # Banana image's framing and variant count. They never collide
+                # — an Image block is parsed by a different function and the
+                # scene splitter cuts each block at the next `###` header
+                # (:6086) — but an author reading a build will meet the same
+                # two words meaning two things, so the grammars are kept
+                # compatible (see `_v970_check_variants`).
+                _v970_val = parse_v970_composer_bullets(
+                    m.group(0), scene_index)[key]
+                _v970_arr = {"aspect_ratio": clip_aspect_ratios,
+                             "variants": clip_variants,
+                             "resolution": clip_resolutions}[key]
+                if lines_list:
+                    _v970_arr[-1] = _v970_val
+                elif key == "aspect_ratio":
+                    dangling_aspect_ratio = _v970_val
+                elif key == "variants":
+                    dangling_variants = _v970_val
+                else:
+                    dangling_resolution = _v970_val
 
         # v786 — no-lines scene with a scene-level action_note: surface it
         # as a 1-entry list. Parallel-array invariants hold downstream:
@@ -6814,6 +6947,17 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         if not lines_list and dangling_policy_fallback is not None:
             clip_policy_fallbacks = [dangling_policy_fallback]
 
+        # v970 — and the same emit, for the same reason, three more times. A
+        # SILENT shot scene renders a clip and may well be the one an author
+        # wants in 16:9 or at x1; without this its declaration would be
+        # parsed, validated, and then thrown away.
+        if not lines_list and dangling_aspect_ratio is not None:
+            clip_aspect_ratios = [dangling_aspect_ratio]
+        if not lines_list and dangling_variants is not None:
+            clip_variants = [dangling_variants]
+        if not lines_list and dangling_resolution is not None:
+            clip_resolutions = [dangling_resolution]
+
         # v965 — the opt-in's consequences, checked here because this is the
         # first point where the scene's type and all three bullets are known.
         #
@@ -6832,6 +6976,40 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "isolate_project": clip_isolate_projects,
             "policy_fallback": clip_policy_fallbacks,
         }
+        # v970 — the three composer settings ride the SAME two refusals as the
+        # v965 bullets above, and NOT the third. They are optional by design
+        # (the overwhelming majority of clips want the job's value, and a
+        # required field here would mean stamping three bullets onto every
+        # shot scene of every build to say nothing), so there is no
+        # presence check. But the two REFUSALS still apply for the same
+        # reasons v965 gives: a text_card is drawn by ffmpeg and never sees a
+        # composer, and a bullet on a build that never opted in would be
+        # parsed, validated and then thrown away — the exact disease the
+        # contract exists to cure.
+        _v970_declared = {
+            "aspect_ratio": clip_aspect_ratios,
+            "variants": clip_variants,
+            "resolution": clip_resolutions,
+        }
+        if is_text_card:
+            for _name, _arr in _v970_declared.items():
+                if any(v is not None for v in _arr):
+                    raise ValueError(
+                        f"Scene {scene_index}: text_card scenes take no "
+                        f"{_name} — a card is drawn by ffmpeg and never "
+                        f"reaches the composer (v970)"
+                    )
+        elif not contract_in_scope:
+            for _name, _arr in _v970_declared.items():
+                if any(v is not None for v in _arr):
+                    raise ValueError(
+                        f"Scene {scene_index}: `- **{_name}:**` is a clip "
+                        f"contract bullet, but this build has no "
+                        f"`CLIP CONTRACT: v1` line at column 0 in §0 — so the "
+                        f"bullet would be ignored and the clip would render "
+                        f"at the job's setting. Add the §0 line, or remove "
+                        f"the bullet (v970)"
+                    )
         if is_text_card:
             for _name, _arr in _declared.items():
                 if any(v is not None for v in _arr):
@@ -6997,6 +7175,13 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             "clip_input_modes": clip_input_modes,
             "clip_isolate_projects": clip_isolate_projects,
             "clip_policy_fallbacks": clip_policy_fallbacks,
+            # v970 — the composer settings, same shape and same reason. The
+            # value that actually travels is the one inside
+            # `clip_contract_json` below; these arrays are here so the finer
+            # per-line grain is not lost on the way.
+            "clip_aspect_ratios": clip_aspect_ratios,
+            "clip_variants": clip_variants,
+            "clip_resolutions": clip_resolutions,
             "input_mode": next((m for m in clip_input_modes if m), None),
             "isolate_project": next(
                 (p for p in clip_isolate_projects if p is not None), None),
@@ -7012,7 +7197,10 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
             # them today.
             "clip_contract_json": _v965_declaration_json(
                 scene_index, clip_input_modes, clip_isolate_projects,
-                clip_policy_fallbacks, contract_in_scope, is_text_card),
+                clip_policy_fallbacks, contract_in_scope, is_text_card,
+                aspect_ratios=clip_aspect_ratios,
+                variants=clip_variants,
+                resolutions=clip_resolutions),
             "clip_contract_version": (
                 None if (is_text_card or not contract_in_scope)
                 else _clip_contract_mod.CONTRACT_VERSION),

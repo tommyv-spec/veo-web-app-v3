@@ -66,6 +66,28 @@ ALLOWED_DURATIONS = (4, 6, 8, 10)
 ALLOWED_INPUT_MODES = ("frames", "ingredients")
 ALLOWED_SWAP_MODES = ("video-led", "image-led")
 
+# v970 -- the composer settings a clip may declare for itself. They live HERE,
+# in the import-free module, for the same reason every other legal set does:
+# the parser, the API and the linters all need them, and a second copy is how
+# two of them come to disagree about the same value.
+#
+# aspect: the job UI offers exactly these two (`static/index.html`,
+#   `#aspectSeg`) and the Flow overlay's aspect radiogroup is described the
+#   same way (`static/flow_worker.py:10685`).
+# variants: x1..x4 (`#flowVariantsSeg`, and the same worker comment). The
+#   worker clicks the radio labelled `x{n}` (`flow_worker.py:11396`).
+# resolution: THE WEAK ONE. The composer's Resolution radiogroup exists
+#   (`flow_worker.py:10685`, picked at :11397-11399) but its LABELS have never
+#   been read off the page. 720p is the only value alive in this codebase --
+#   the platform default (`main.py:407`), the UI default
+#   (`getSelectedResolution`, whose `#resSeg` control no longer exists), and
+#   what v861 says Flow always exports. 1080p survives only in v861's note
+#   about the retired 1080p->8s rule. Read the radio labels with the composer
+#   open and correct this tuple.
+ALLOWED_ASPECTS = ("9:16", "16:9")
+ALLOWED_RESOLUTIONS = ("720p", "1080p")
+VARIANTS_MIN, VARIANTS_MAX = 1, 4
+
 # The last rung of every fallback ladder. A ladder that cannot end is a ladder
 # that retries for ever, which is how a policy block once became an infinite
 # swap loop (v959).
@@ -102,6 +124,30 @@ def check_input_mode(v: str) -> str:
         raise ValueError(
             f"[v965] input_mode {v!r} is not one of "
             f"{' | '.join(ALLOWED_INPUT_MODES)}")
+    return v
+
+
+def check_aspect_ratio(v: str) -> str:
+    if v not in ALLOWED_ASPECTS:
+        raise ValueError(
+            f"[v970] aspect_ratio {v!r} is not one of "
+            f"{' | '.join(ALLOWED_ASPECTS)}")
+    return v
+
+
+def check_resolution(v: str) -> str:
+    if v not in ALLOWED_RESOLUTIONS:
+        raise ValueError(
+            f"[v970] resolution {v!r} is not one of "
+            f"{' | '.join(ALLOWED_RESOLUTIONS)}")
+    return v
+
+
+def check_variants(v: int) -> int:
+    if not VARIANTS_MIN <= v <= VARIANTS_MAX:
+        raise ValueError(
+            f"[v965] variants {v} is outside Flow's "
+            f"x{VARIANTS_MIN}-x{VARIANTS_MAX}")
     return v
 
 
@@ -310,9 +356,7 @@ class ClipContract(BaseModel):
     @field_validator("variants")
     @classmethod
     def _sane_variants(cls, v: int) -> int:
-        if not 1 <= v <= 4:
-            raise ValueError(f"[v965] variants {v} is outside Flow's x1-x4")
-        return v
+        return check_variants(v)
 
     @field_validator("swap_mode")
     @classmethod
@@ -363,6 +407,24 @@ class ClipContractDeclaration(BaseModel):
     isolate_project: bool
     policy_fallback: List[str]
 
+    # v970 -- the composer settings, OPTIONAL and defaulted to None, which is
+    # the one place this model departs from `ClipContract`'s
+    # every-field-always-present rule. The reason is that here `None` is not
+    # "does not apply to this clip", it is "the author did not decide", and
+    # that is a real and useful third answer: the clip then renders at the
+    # job's setting, which is what every clip does today. Making them required
+    # would mean stamping three bullets onto every shot scene of every build
+    # to say nothing.
+    #
+    # A default is NOT the same as an absent key. A declaration stored before
+    # v970 has no such keys at all, and `extra="forbid"` only refuses UNKNOWN
+    # keys -- a known field with a default is filled in. That is what keeps
+    # every already-stored declaration loadable, and it is why these defaults
+    # exist rather than the fields being added without them.
+    aspect_ratio: Optional[str] = None
+    variants: Optional[int] = None
+    resolution: Optional[str] = None
+
     # The SAME functions ClipContract validates with, so a declaration cannot
     # say something the finished contract would refuse.
     @field_validator("clip_contract_version")
@@ -379,6 +441,26 @@ class ClipContractDeclaration(BaseModel):
     @classmethod
     def _ladder_terminates(cls, v: List[str]) -> List[str]:
         return check_ladder(v)
+
+    # v970. Declared separately rather than borrowed from `ClipContract`:
+    # pydantic v2 binds a @field_validator to the class that declares it, so
+    # sharing by copying the attribute registers nothing at all (the comment
+    # above `check_version` says so, and it was learned the hard way). None
+    # passes untouched -- it means "not declared", not "declared nothing".
+    @field_validator("aspect_ratio")
+    @classmethod
+    def _known_aspect(cls, v: Optional[str]) -> Optional[str]:
+        return v if v is None else check_aspect_ratio(v)
+
+    @field_validator("resolution")
+    @classmethod
+    def _known_resolution(cls, v: Optional[str]) -> Optional[str]:
+        return v if v is None else check_resolution(v)
+
+    @field_validator("variants")
+    @classmethod
+    def _sane_variants(cls, v: Optional[int]) -> Optional[int]:
+        return v if v is None else check_variants(v)
 
 
 def validate_lane(contract: ClipContract, render_method: Optional[str]) -> None:

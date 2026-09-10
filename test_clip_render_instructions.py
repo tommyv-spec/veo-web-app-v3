@@ -149,3 +149,245 @@ def test_derived_order_matches_the_platform_resolver_docstring():
     first, then faces in list order; start first, end second for a pair."""
     doc = ip.derive_attach_tokens.__doc__ or ""
     assert "attach order" in doc.lower()
+
+
+# ---------------------------------------------------------------------------
+# v970 — the three composer settings a clip could not say.
+# ---------------------------------------------------------------------------
+
+def _in_scope_build_with_scene(extra=""):
+    """A whole minimal build that has opted in to the clip contract.
+
+    `CLIP CONTRACT: v1` sits at COLUMN 0, because that is the opt-in the
+    parser looks for (`image_platform.py`, `contract_in_scope`). One shot
+    scene, the three v965 bullets, and the v969 attach line that mirrors
+    `- **image:** image_1`. `extra` is whatever the test is about.
+    """
+    return (
+        "CLIP CONTRACT: v1\n"
+        "\n"
+        "## Storyboard\n"
+        "\n"
+        "### Scene 1\n"
+        "\n"
+        "- **scene_type:** shot\n"
+        "- **image:** image_1\n"
+        "- **target_duration_s:** 8\n"
+        "- **speaker:** silent\n"
+        "- **action_note:** she lifts the jar. [Start beat] hands enter "
+        "[End beat] jar held\n"
+        "- **input_mode:** frames\n"
+        "- **isolate_project:** true\n"
+        "- **policy_fallback:** prompt_b, fail\n"
+        "- **attach:** image_1:start_frame\n"
+        + extra
+    )
+
+
+class _FakeClip:
+    """A stand-in for the SQLAlchemy Clip row, with only the attributes
+    `_v965_attach_contract` and `_v965_resolve_assets` actually read.
+
+    Deliberately not the real model: importing it would drag the whole DB
+    layer into a parser test, and the point here is the precedence rule, not
+    the ORM.
+    """
+
+    def __init__(self, **kw):
+        self.job_id = "job1"
+        self.start_frame = "jobs/job1/frames/scene_01.png"
+        self.end_frame = None
+        self.render_method = None
+        self.clip_contract_version = 1
+        self.clip_contract_json = None
+        self.veo_model = None
+        self.veo_render_duration_s = 8
+        self.aspect_ratio = None
+        self.flow_variants_count = None
+        self.resolution = None
+        self.__dict__.update(kw)
+
+
+def test_declared_aspect_variants_resolution_are_read():
+    d = ip.parse_v970_composer_bullets(
+        "- **aspect_ratio:** 9:16\n"
+        "- **variants:** 2\n"
+        "- **resolution:** 1080p\n", scene_index=1)
+    assert d == {"aspect_ratio": "9:16", "variants": 2, "resolution": "1080p"}
+
+
+def test_absent_bullets_declare_nothing():
+    assert ip.parse_v970_composer_bullets("- **image:** image_1\n",
+                                          scene_index=1) == {}
+
+
+def test_an_unsupported_resolution_is_refused_with_the_legal_set():
+    with pytest.raises(ValueError) as exc:
+        ip.parse_v970_composer_bullets("- **resolution:** 4k\n", scene_index=1)
+    assert "720p" in str(exc.value) and "1080p" in str(exc.value)
+    assert "v970" in str(exc.value)
+
+
+def test_variants_must_be_a_whole_number_in_range():
+    for bad in ("0", "5", "two", "2.5"):
+        with pytest.raises(ValueError) as exc:
+            ip.parse_v970_composer_bullets(f"- **variants:** {bad}\n",
+                                           scene_index=1)
+        assert "v970" in str(exc.value)
+
+
+def test_an_unsupported_aspect_is_refused():
+    with pytest.raises(ValueError) as exc:
+        ip.parse_v970_composer_bullets("- **aspect_ratio:** 4:3\n",
+                                       scene_index=1)
+    assert "9:16" in str(exc.value)
+
+
+def test_the_x_prefixed_variant_count_is_accepted_like_v826():
+    """`- **variants:** x2` is already legal on an `### Image N` block (v826,
+    `image_platform.py:5374-5377`) and `x2` is the Flow overlay's own label.
+    Two grammars for one bullet name would be a trap, so this one takes both.
+    """
+    assert ip.parse_v970_composer_bullets("- **variants:** x3\n",
+                                          scene_index=1) == {"variants": 3}
+
+
+def test_declared_v970_values_reach_the_stored_declaration():
+    """Markdown in, clip_contract_json out. Fails if ANY hop is missing."""
+    import json
+    md = _in_scope_build_with_scene(
+        "- **aspect_ratio:** 16:9\n"
+        "- **resolution:** 1080p\n")            # variants deliberately absent
+    scenes = ip._parse_scene_blocks_new(md, known_image_indexes={1})
+    decl = json.loads(scenes[0]["clip_contract_json"])
+    assert decl["aspect_ratio"] == "16:9"
+    assert decl["resolution"] == "1080p"
+    assert decl["variants"] is None            # undeclared stays undeclared
+
+
+def test_an_in_scope_build_that_declares_nothing_stores_three_nulls():
+    """The fallbacks stay: a build that says nothing renders as it does today,
+    and the declaration says so explicitly rather than by omission."""
+    import json
+    scenes = ip._parse_scene_blocks_new(_in_scope_build_with_scene(),
+                                        known_image_indexes={1})
+    decl = json.loads(scenes[0]["clip_contract_json"])
+    assert decl["aspect_ratio"] is None
+    assert decl["variants"] is None
+    assert decl["resolution"] is None
+
+
+def test_a_bad_v970_value_is_refused_at_import_not_at_render():
+    scenes_md = _in_scope_build_with_scene("- **resolution:** 4k\n")
+    with pytest.raises(ValueError) as exc:
+        ip._parse_scene_blocks_new(scenes_md, known_image_indexes={1})
+    assert "v970" in str(exc.value)
+
+
+def test_declared_composer_settings_beat_the_clip_row():
+    """A build that says 1080p gets 1080p even when the row says 720p."""
+    import main
+    contract = main._v965_attach_contract(
+        {}, _FakeClip(resolution="720p", flow_variants_count=2,
+                      clip_contract_json='{"clip_contract_version":1,'
+                                         '"input_mode":"frames",'
+                                         '"isolate_project":true,'
+                                         '"policy_fallback":["fail"],'
+                                         '"aspect_ratio":null,'
+                                         '"variants":null,'
+                                         '"resolution":"1080p"}'),
+        base_url="https://x", lane="user-worker")["clip_contract"]
+    assert contract["resolution"] == "1080p"
+    assert contract["variants"] == 2          # undeclared falls through
+    assert contract["aspect_ratio"] == "9:16"  # undeclared falls through
+
+
+def test_an_older_declaration_without_the_v970_keys_still_loads():
+    """Forward-only: every declaration stored before v970 has no such keys,
+    and `extra=forbid` would refuse a shape it did not expect. Absent keys
+    must read as 'declared nothing', not as an error."""
+    import main
+    contract = main._v965_attach_contract(
+        {}, _FakeClip(resolution="720p", flow_variants_count=3,
+                      clip_contract_json='{"clip_contract_version":1,'
+                                         '"input_mode":"frames",'
+                                         '"isolate_project":true,'
+                                         '"policy_fallback":["fail"]}'),
+        base_url="https://x", lane="user-worker")["clip_contract"]
+    assert contract["resolution"] == "720p"
+    assert contract["variants"] == 3
+
+
+def test_the_first_declared_value_in_a_spoken_scene_wins():
+    """The scene in `_in_scope_build_with_scene` is SILENT, so it exercises
+    the dangling path. This one has `- **line:**` bullets, so the values
+    attach to a line and are collected in the parallel arrays instead — the
+    other half of the v961 pattern, and the half a silent-only test misses.
+    """
+    import json
+    md = (
+        "CLIP CONTRACT: v1\n"
+        "\n"
+        "## Storyboard\n"
+        "\n"
+        "### Scene 1\n"
+        "\n"
+        "- **scene_type:** shot\n"
+        "- **image:** image_1\n"
+        "- **target_duration_s:** 8\n"
+        "- **attach:** image_1:start_frame\n"
+        # Every per-line bullet attaches to the line ABOVE it, so a two-line
+        # scene declares the contract twice — which is exactly why these are
+        # per-line arrays and not one scene-level value.
+        "- **line:** first thing she says\n"
+        "- **input_mode:** frames\n"
+        "- **isolate_project:** true\n"
+        "- **policy_fallback:** prompt_b, fail\n"
+        "- **variants:** 4\n"
+        "- **line:** second thing she says\n"
+        "- **input_mode:** frames\n"
+        "- **isolate_project:** true\n"
+        "- **policy_fallback:** prompt_b, fail\n"
+        "- **variants:** 1\n"
+    )
+    scenes = ip._parse_scene_blocks_new(md, known_image_indexes={1})
+    assert scenes[0]["clip_variants"] == [4, 1]
+    assert json.loads(scenes[0]["clip_contract_json"])["variants"] == 4
+
+
+def test_a_text_card_may_not_carry_composer_settings():
+    md = (
+        "CLIP CONTRACT: v1\n"
+        "\n"
+        "## Storyboard\n"
+        "\n"
+        "### Scene 1\n"
+        "\n"
+        "- **scene_type:** text_card\n"
+        "- **caption:** THE ONE SPICE\n"
+        "- **bg_color:** #000000\n"
+        "- **resolution:** 1080p\n"
+    )
+    with pytest.raises(ValueError) as exc:
+        ip._parse_scene_blocks_new(md, known_image_indexes={1})
+    assert "v970" in str(exc.value) and "text_card" in str(exc.value)
+
+
+def test_a_build_that_never_opted_in_is_told_the_bullet_would_be_ignored():
+    """The inverse refusal, and the one that bites hardest: a build that
+    writes the bullet and forgets the §0 opt-in would render at the job's
+    setting while its author believed otherwise."""
+    md = (
+        "## Storyboard\n"
+        "\n"
+        "### Scene 1\n"
+        "\n"
+        "- **scene_type:** shot\n"
+        "- **image:** image_1\n"
+        "- **target_duration_s:** 8\n"
+        "- **speaker:** silent\n"
+        "- **aspect_ratio:** 16:9\n"
+    )
+    with pytest.raises(ValueError) as exc:
+        ip._parse_scene_blocks_new(md, known_image_indexes={1})
+    assert "v970" in str(exc.value) and "CLIP CONTRACT: v1" in str(exc.value)
