@@ -20597,6 +20597,46 @@ async def revoke_user_worker_token(
 
 # --- Worker Endpoints ---
 
+def _user_worker_clip_payload(clip, base_url: str, start_frame_key=None,
+                              end_frame_key=None):
+    """Build the full clip contract used by both pending and exact-job reads.
+
+    Exact recovery used to receive only status fields. That made a resumed clip
+    lose its prompt, attachments, render method, duration and per-clip model,
+    even though the normal pending poll carried them all.
+    """
+    if start_frame_key is None:
+        start_frame_key = clip.start_frame
+    if end_frame_key is None:
+        end_frame_key = clip.end_frame
+    start_filename = start_frame_key.split('/')[-1] if start_frame_key else None
+    end_filename = end_frame_key.split('/')[-1] if end_frame_key else None
+    payload = {
+        "id": clip.id,
+        "clip_index": clip.clip_index,
+        "dialogue_text": clip.dialogue_text,
+        "prompt": clip.prompt_text,
+        "prompt_b": clip.prompt_text_b,
+        "start_frame_key": start_frame_key,
+        "end_frame_key": end_frame_key,
+        "status": clip.status,
+        "start_frame_url": (
+            f"{base_url}/api/user-worker/frames/{clip.job_id}/{start_filename}"
+            if start_filename else None
+        ),
+        "end_frame_url": (
+            f"{base_url}/api/user-worker/frames/{clip.job_id}/{end_filename}"
+            if end_filename else None
+        ),
+        "clip_mode": clip.clip_mode or "fresh",
+        "scene_index": clip.scene_index or 0,
+        "veo_render_duration_s": clip.veo_render_duration_s,
+        "veo_model": clip.veo_model,
+    }
+    payload = _v943_maybe_charswap(payload, clip, base_url, "user-worker")
+    payload = _v959_maybe_movie_section(payload, clip, base_url, "user-worker")
+    return _v965_attach_contract(payload, clip, base_url, "user-worker")
+
 @app.get("/api/user-worker/health")
 async def user_worker_health():
     """Health check for user worker."""
@@ -20779,38 +20819,8 @@ async def user_worker_get_pending_job(
             except Exception:
                 pass
         
-        start_filename = start_frame_key.split('/')[-1] if start_frame_key else None
-        end_filename = end_frame_key.split('/')[-1] if end_frame_key else None
-        
-        _clip_data = {
-            "id": clip.id,
-            "clip_index": clip.clip_index,
-            "dialogue_text": clip.dialogue_text,
-            "prompt": clip.prompt_text,
-            "prompt_b": clip.prompt_text_b,  # v805 — policy-fallback prompt (voice-only)
-            "start_frame_key": start_frame_key,
-            "end_frame_key": end_frame_key,
-            "status": clip.status,
-            "start_frame_url": f"{base_url}/api/user-worker/frames/{job.id}/{start_filename}" if start_filename else None,
-            "end_frame_url": f"{base_url}/api/user-worker/frames/{job.id}/{end_filename}" if end_filename else None,
-            "clip_mode": clip.clip_mode or "fresh",
-            "scene_index": clip.scene_index or 0,
-            # v861 — per-clip render duration (4|6|8|10). NULL → the worker
-            # falls back to the job-level duration (legacy / manual jobs).
-            "veo_render_duration_s": clip.veo_render_duration_s,
-            # v961 — per-clip render model. NULL → the worker uses
-            # the job-level model, exactly as before v961.
-            "veo_model": clip.veo_model,
-        }
-        # v943 — see the local-worker payload; keys appear only on a swap clip.
-        _clip_data = _v943_maybe_charswap(_clip_data, clip, base_url, "user-worker")
-        # v959 — and the section keys, only on a section clip.
-        _clip_data = _v959_maybe_movie_section(_clip_data, clip, base_url, "user-worker")
-        # v965 — same helper, same terms. The two endpoints hand-build their
-        # dicts independently, so this is the one place the contract does not
-        # get a second, drifting implementation.
-        _clip_data = _v965_attach_contract(_clip_data, clip, base_url, "user-worker")
-        clips_data.append(_clip_data)
+        clips_data.append(_user_worker_clip_payload(
+            clip, base_url, start_frame_key, end_frame_key))
     
     return {
         "job": {
@@ -21208,14 +21218,29 @@ async def user_worker_set_kling_status(
 @app.get("/api/user-worker/jobs/{job_id}")
 async def user_worker_get_job(
     job_id: str,
+    request: Request,
     db: DBSession = Depends(get_db_session),
     user_id: str = Depends(verify_user_worker_token)
 ):
-    """Get job details including clip statuses — for worker dedup and status checks."""
+    """Get one exact job with the full render contract used by recovery runs."""
     job = db.query(Job).filter(Job.id == job_id, Job.user_id == user_id).first()
     if not job:
         raise HTTPException(404, "Job not found")
     clips = db.query(Clip).filter(Clip.job_id == job_id).order_by(Clip.clip_index.asc()).all()
+    job_config = {}
+    if job.config_json:
+        try:
+            job_config = (json.loads(job.config_json)
+                          if isinstance(job.config_json, str) else job.config_json)
+        except Exception:
+            pass
+    base_url = str(request.base_url).rstrip('/')
+    clip_payloads = [_user_worker_clip_payload(c, base_url) for c in clips]
+    # TEMP DIAG: operator-side proof must show the exact recovery endpoint
+    # carrying the four model values before this line is removed.
+    print(f"[UserWorker] exact job {job.id[:8]} full contract: "
+          f"clips={len(clip_payloads)} models="
+          f"{[c.get('veo_model') for c in clip_payloads]}", flush=True)
     return {
         "id": job.id,
         "status": job.status,
@@ -21223,9 +21248,23 @@ async def user_worker_get_job(
         "total_clips": job.total_clips,
         "completed_clips": job.completed_clips,
         "failed_clips": job.failed_clips,
-        "clips": [{"id": c.id, "clip_index": c.clip_index, "status": c.status,
-                   "output_filename": c.output_filename, "approval_status": c.approval_status}
-                  for c in clips]
+        "aspect_ratio": job_config.get("aspect_ratio", "9:16"),
+        "duration": job_config.get("duration", "8"),
+        "language": job_config.get("language", "English"),
+        "voice_profile": (job_config.get("voice_profile", "")
+                          or job_config.get("user_context", "")),
+        "resolution": job_config.get("resolution", "720p"),
+        "use_interpolation": job_config.get("use_interpolation", True),
+        "single_image_mode": len({c.start_frame for c in clips if c.start_frame}) <= 1,
+        "flow_project_url": job.flow_project_url,
+        "flow_variants_count": job_config.get("flow_variants_count", 2),
+        "veo_model": job_config.get(
+            "veo_model", "Veo 3.1 - Lite [Lower Priority]"),
+        "short_dialogue_mode": job_config.get("short_dialogue_mode", "optimized"),
+        "prefix_short_enabled": job_config.get("prefix_short_enabled", False),
+        "prefix_short_word": job_config.get("prefix_short_word", "only"),
+        "prefix_short_threshold": job_config.get("prefix_short_threshold", 15),
+        "clips": clip_payloads,
     }
 
 

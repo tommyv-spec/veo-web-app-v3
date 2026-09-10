@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import ast
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -185,6 +186,53 @@ def test_v961_model_audit_file_excludes_prompts_and_secrets():
         assert forbidden not in body
     assert '"flow_generate_request"' in fw
     assert "actual_model_key=model_key or None" in fw
+
+
+def test_v961_exact_recovery_clip_keeps_full_contract(monkeypatch):
+    """An exact-job resume must not lose the model or attachment locations."""
+    import main
+
+    monkeypatch.setattr(main, "_v943_maybe_charswap",
+                        lambda payload, *_: {**payload, "swap_checked": True})
+    monkeypatch.setattr(main, "_v959_maybe_movie_section",
+                        lambda payload, *_: {**payload, "section_checked": True})
+    monkeypatch.setattr(main, "_v965_attach_contract",
+                        lambda payload, *_: {**payload, "contract_checked": True})
+    clip = SimpleNamespace(
+        id=14908,
+        job_id="job-1",
+        clip_index=1,
+        dialogue_text="line",
+        prompt_text="prompt",
+        prompt_text_b="prompt b",
+        start_frame="jobs/job-1/frames/image_01.png",
+        end_frame=None,
+        status="pending",
+        clip_mode="fresh",
+        scene_index=1,
+        veo_render_duration_s=8,
+        veo_model="Omni Flash",
+    )
+
+    out = main._user_worker_clip_payload(clip, "https://kavenobuilder.com")
+
+    assert out["veo_model"] == "Omni Flash"
+    assert out["prompt"] == "prompt"
+    assert out["start_frame_url"].endswith(
+        "/api/user-worker/frames/job-1/image_01.png")
+    assert out["swap_checked"] and out["section_checked"] and out["contract_checked"]
+
+
+def test_v961_pending_and_exact_reads_share_one_clip_serializer():
+    """The two worker reads must not drift into different model contracts again."""
+    main_src = open(os.path.join(HERE, "main.py"), encoding="utf-8").read()
+    tree = ast.parse(main_src)
+    functions = {
+        node.name: ast.get_source_segment(main_src, node)
+        for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert "_user_worker_clip_payload" in functions["user_worker_get_pending_job"]
+    assert "_user_worker_clip_payload" in functions["user_worker_get_job"]
 
 
 def test_flow_ui_probe_is_opt_in_local_and_avoids_form_values():
