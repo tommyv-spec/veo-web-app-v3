@@ -852,6 +852,61 @@ REFUSES the build rather than ignoring them -- silently dropping a declaration
 the author wrote is the failure this rule exists to remove
 (template_reference.md §v965, §v965.5 for how it is proven).
 
+ATTACH LINE (v969): once a build is IN SCOPE, every shot scene must ALSO carry
+one more bullet, naming what goes into the composer in ATTACH ORDER:
+
+    - **attach:** image_1:start_frame, image_3:face, image_2:face
+
+The five legal roles are `start_frame` | `end_frame` | `face` | `avatar` |
+`swap_source`. YOU ARE NOT CHOOSING ANYTHING HERE. The line is a MIRROR: the
+parser derives the same list from the bullets that are already on the scene --
+`image:`, `end_frame_image:`, `face_refs:`, the swap trio -- and refuses any line
+that disagrees, that is in the wrong order, that names an unknown role, or that
+is not shaped `image_N:role`. If the import complains, the fix is usually the
+scene, not the line. Three order traps worth knowing before you write one:
+
+  * a movie-section scene lists the scene chip, then its faces in your
+    `face_refs:` order, and NO end frame -- even if the build declares
+    `end_frame_image:`. The platform stops there;
+  * a video-led charswap lists the avatar, then the source, and NO start frame;
+  * an image-led charswap lists avatar, source, and the start frame LAST.
+
+A `text_card` has no `image:` at all, so any attach line on one fails as a
+mismatch. And note the status honestly: v969 is DESCRIPTIVE today. The worker
+still attaches in its own hardcoded order until
+docs/plans/declarative-clip-contract/PLAN.md step 4.12 ships, so do not plan a
+render around the line being obeyed (template_reference.md §v969).
+
+COMPOSER SETTINGS (v970): three OPTIONAL per-clip bullets, each independent of
+the other two:
+
+    - **aspect_ratio:** 9:16      (9:16 | 16:9)
+    - **variants:** 2             (1-4; `x2` is accepted, the v826 spelling)
+    - **resolution:** 720p        (720p | 1080p)
+
+Anything you leave out falls through to the JOB's setting, which is what every
+clip does today -- so a build that writes none of them renders exactly as it
+always has. They are refused on a `text_card`, and refused on a build that has
+no `CLIP CONTRACT: v1` line, because a bullet nothing would read is worse than
+no bullet. Reach for `resolution` LAST: `720p` is the only value alive in the
+codebase and nobody has read the composer's Resolution radio labels off the
+page, so `1080p` is a guess (template_reference.md §v970).
+
+AUDIO SOURCE (v971): one OPTIONAL bullet says where a clip's audio comes from.
+
+    - **audio:** render | source-original | scene:N | none
+
+`render` is the render's own track, is legal on every lane, and writes nothing
+at all -- it IS the absence of an override. `source-original` and `none` are
+charswap-only and keep exactly their v943.1 meaning. `scene:N` borrows another
+scene's spoken track and needs `speaker: voiceover`; it is a second spelling of
+`- **audio_from_scene:** N`, which STILL WORKS unchanged, as does
+`- **voiceover_anchor_image:**`. Writing both spellings so they disagree is an
+error rather than a silent winner, and neither may sit beside a
+`voiceover_anchor_image:`. Leaving the bullet OUT is not the same as writing
+`render`: absent means every downstream default stands untouched, which is why
+no existing build changed (template_reference.md §v971).
+
 RENDER MODEL (v961): a build normally declares nothing and every clip renders on
 the job's one model. To mix models inside ONE job, declare `- **veo_model:**` on a
 scene: exactly one of `Omni Flash` | `Veo 3.1 - Quality` | `Veo 3.1 - Fast` |

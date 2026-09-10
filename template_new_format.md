@@ -1019,7 +1019,41 @@ The main character, same [setting anchor] as image 2, same framing — shot on i
 - **input_mode:** ingredients                   # v965 — frames | ingredients. NEVER inferred. Attaches to the `- **line:**` above it, like clip_duration_s. MANDATORY on every shot scene of a build whose §0 says `CLIP CONTRACT: v1`.
 - **isolate_project:** true                     # v965 — true | false. Does this clip need its own Flow project? The worker obeys; it has no rotation policy. `false` HARD-FAILS at import on a charswap / movie-section scene (the submit proof depends on one submitter per project); it stays legal on a simple clip.
 - **policy_fallback:** prompt_b, fail           # v965 — the content-policy ladder, comma-separated, MUST end in `fail`. Rungs: prompt_b | model_swap | fail.
+- **attach:** image_1:start_frame               # v969 — a MIRROR of the bullets above, in ATTACH ORDER. It must MATCH what this scene already implies or the import fails. MANDATORY on every shot scene once §0 says `CLIP CONTRACT: v1`. This scene attaches one file, so the line names one; a movie-section scene would read `image_1:start_frame, image_3:face, image_2:face`.
+- **aspect_ratio:** 9:16                        # v970 — OPTIONAL. Omit to take the job's value. 9:16 | 16:9.
+- **variants:** 2                               # v970 — OPTIONAL. 1-4. `x2` is accepted too (that is v826's spelling of the same number, and the Flow overlay's own radio label).
+- **resolution:** 720p                          # v970 — OPTIONAL. 720p | 1080p. Reach for this LAST: 720p is the only value alive in the codebase and the composer's radio labels have never been read off the page.
+- **audio:** render                             # v971 — OPTIONAL. Where this clip's audio comes from: render | source-original | scene:N | none.
 - **action_note:** [Start beat 0-4s] ... [End beat 4-8s] ...
+
+<!-- v969 / v970 / v971 — the rest of the render instruction, and what each one is worth.
+
+     v969 `attach:` is a MIRROR, never a source. The parser derives the same list from `image:`,
+     `end_frame_image:`, `face_refs:` and the swap trio, and refuses any line that disagrees, is in
+     the wrong ORDER (attach order is normative), names a role outside
+     start_frame | end_frame | face | avatar | swap_source, or is not shaped `image_N:role`. It is
+     REQUIRED on every shot scene of a build that declares the §0 opt-in and must not appear on a
+     `text_card` (a card has no `image:`, so any attach line on one fails as a mismatch). Three
+     order traps: a movie-section scene lists the scene chip then its faces and NO end frame even if
+     `end_frame_image:` is declared; a video-led charswap lists avatar then source and NO start
+     frame; an image-led charswap adds the start frame LAST.
+     STATUS: v969 is DESCRIPTIVE. The worker still attaches in its own hardcoded order until
+     docs/plans/declarative-clip-contract/PLAN.md step 4.12 ships. Do not plan a render around it.
+
+     v970's three bullets are INDEPENDENT and individually OPTIONAL. Declaring `resolution` says
+     nothing about `variants`. Anything undeclared falls through to the job's setting, which is what
+     every clip does today — so a build that writes none of them renders exactly as it always has.
+     They are refused on a `text_card`, and refused on a build with no `CLIP CONTRACT: v1` line.
+
+     v971's `audio:` is OPTIONAL and each source has its own legality. `render` is the render's own
+     track, is legal on every lane, and writes nothing at all. `source-original` and `none` are
+     charswap-only and keep exactly their v943.1 meaning. `scene:N` borrows another scene's spoken
+     track and needs `speaker: voiceover`; it is a second spelling of `- **audio_from_scene:** N`,
+     which STILL WORKS, as does `- **voiceover_anchor_image:**`. The two spellings disagreeing is an
+     error, not a silent winner, and neither may sit beside a `voiceover_anchor_image:`. Omitting the
+     bullet is NOT the same as writing `render`.
+
+     Deep-dives: template_reference.md §v969 / §v970 / §v971. -->
 
 <!-- v965 — the three bullets above are the CLIP CONTRACT and they are all-or-nothing on a build
      that declares `CLIP CONTRACT: v1` in §0: a shot scene missing any one of them HARD-FAILS at
@@ -1030,6 +1064,8 @@ The main character, same [setting anchor] as image 2, same framing — shot on i
      The ASSET LIST is not authored. The platform derives it at import from `image:`,
      `end_frame_image:`, `face_refs:`, the swap bullets and the one `## Ingredients` character row,
      and resolves it per lane at hand-out. Do not hand-write it.
+     v969 NOTE: `- **attach:**` does not change that. It RESTATES the derived list so a reader can
+     see it, and is checked against it; it never decides it.
      Deep-dive: template_reference.md §v965. Redo behaviour: §v966. -->
 
 
