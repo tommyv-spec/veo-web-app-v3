@@ -329,8 +329,46 @@ def lint(path):
         for kw, label in need.items():
             if kw not in body:
                 fails.append(f"## Adaptation-extraction missing the {label} (keyword '{kw}')")
-        _lint_intensity_ledger(adaptation_body, fails)
-        _lint_shown_beats_ledger(adaptation_body, fails)
+        # THE TWO LEDGERS ARE ERA-GATED, like every other forward-only rule here.
+        #
+        # Until now these two alone ran unconditionally, so every decode written before
+        # the ledgers existed failed for not carrying them — 141 of 207 decodes were red,
+        # and a source file could not be committed at all without either faking the ledger
+        # or bypassing the hook. That is not what forward-only means, and this file already
+        # says so in its own words a few lines up: "a decode written on or after the rule
+        # date must comply (FAIL); anything older keeps its thin blocks (WARN)… the era
+        # boundary is a date the linter reads, not a habit." v887a, v887c, v890b and v938
+        # all work that way. These two were simply never given the guard.
+        #
+        # EACH LEDGER KEEPS ITS OWN DATE. They coincide today, and that is a fact rather
+        # than a shortcut — established twice over, from the rule files and from the
+        # commits that introduced each check:
+        #   v622 intensity     rules/v622.md "2026-07-22 intensity-calibration amendment"
+        #                      + code commit 621aca9 (2026-07-22)
+        #   v790 Half C beats  rules/v790.md "Half C … (2026-07-22)"
+        #                      + code commit 2fbd93e (2026-07-22)
+        # Separate constants so a later amendment to one cannot silently move the other.
+        V622_LEDGER_DATE = "2026-07-22"   # hero-symptom intensity ledger
+        V790C_LEDGER_DATE = "2026-07-22"  # shown-beats ledger
+
+        def _era_gated(fn, rule_date, label):
+            """Run a ledger check; FAIL for new-era decodes, WARN for older ones."""
+            found = []
+            fn(adaptation_body, found)
+            if not found:
+                return
+            if bool(created) and created >= rule_date:
+                fails.extend(found)
+            else:
+                where = f"created {created}" if created else "no created: date"
+                warns.extend(
+                    f"{m}  [{label} is forward-only from {rule_date}; this decode is "
+                    f"{where}, so this is a WARN]"
+                    for m in found
+                )
+
+        _era_gated(_lint_intensity_ledger, V622_LEDGER_DATE, "v622")
+        _era_gated(_lint_shown_beats_ledger, V790C_LEDGER_DATE, "v790 Half C")
         _lint_overlay_ledger(adaptation_body, t, geom_era, fails, warns)
 
         # v887a — audio design read (WARN-only, forward-only 2026-08-03:
