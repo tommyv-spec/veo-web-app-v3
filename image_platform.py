@@ -5997,6 +5997,41 @@ def parse_attach_line(block, scene_index, derived, in_scope=False):
     return pairs
 
 
+def derive_attach_tokens(*, image, end_frame_image, face_refs,
+                         render_method, swap_source_video, swap_mode=None):
+    """What this scene attaches, as (token, role) pairs in ATTACH ORDER.
+
+    The order is normative and is the same one `main._v965_resolve_assets`
+    produces from the resolved columns: scene chip first, then faces in the
+    author's list order; start first and end second for a frames pair; avatar
+    then source for a swap, plus the start frame LAST on an image-led swap.
+    This function works in AUTHOR tokens (`image_N`, the source filename)
+    because at parse time no R2 key exists yet -- that resolution happens at
+    job creation (STATE.md B5).
+
+    Any divergence from `_v965_resolve_assets` makes the mirror a liar, so
+    read that function (`code/main.py:19283`) rather than this docstring
+    whenever you touch either.
+    """
+    method = (render_method or "").strip().lower()
+    if method == "charswap":
+        out = [(image, "avatar")] if image else []
+        if swap_source_video:
+            out.append((swap_source_video, "swap_source"))
+        # A video-led swap takes no start frame; the source supplies the
+        # motion. An image-led one DOES, and it comes last -- same order and
+        # same default as `main.py:19322-19328`.
+        if (swap_mode or "video-led") == "image-led" and image:
+            out.append((image, "start_frame"))
+        return out
+    out = [(image, "start_frame")] if image else []
+    if end_frame_image:
+        out.append((end_frame_image, "end_frame"))
+    for ref in (face_refs or []):
+        out.append((ref, "face"))
+    return out
+
+
 def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict[str, Any]]:
     """New format: parse ``### Scene N`` headers as storyboard scenes.
 
@@ -6504,6 +6539,22 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
                         f"wide anchor; they cannot be the same file (v959, "
                         f"wiki/concepts/prompting/movie-style-prompting.md §5c)"
                     )
+
+        # v969 — the attach mirror. Runs LAST of the per-scene bullets, because
+        # it is checked against every one of them. The scene's image bindings
+        # are held here as bare ints (`image_index`, `end_frame_image`, the
+        # entries of `face_refs`), so they are put back into the author's
+        # `image_N` spelling — that is what the attach line is written in.
+        _v969_declared = parse_attach_line(
+            block, scene_index,
+            derive_attach_tokens(
+                image=(f"image_{image_index}" if image_index is not None else None),
+                end_frame_image=(f"image_{end_frame_image}"
+                                 if end_frame_image is not None else None),
+                face_refs=[f"image_{fr}" for fr in face_refs],
+                render_method=render_method,
+                swap_source_video=swap_source_video, swap_mode=swap_mode),
+            in_scope=(contract_in_scope and not is_text_card))
 
         # Parse interleaved `- **line:**` / `- **action_note:**` / `- **pad:**`
         # bullets. Order matters: action_note and pad attach to the closest
