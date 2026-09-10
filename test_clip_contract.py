@@ -345,6 +345,7 @@ def _scenes(md):
 SILENT = """CLIP CONTRACT: v1
 ### Scene 1
 - **image:** image_1
+- **attach:** image_1:start_frame
 - **scene_type:** shot
 - **speaker:** silent
 - **input_mode:** ingredients
@@ -357,6 +358,7 @@ SILENT = """CLIP CONTRACT: v1
 TWO_LINES = """CLIP CONTRACT: v1
 ### Scene 1
 - **image:** image_1
+- **attach:** image_1:start_frame
 - **scene_type:** shot
 - **line:** first line here
 - **input_mode:** frames
@@ -421,6 +423,7 @@ def test_the_parser_normalises_case_but_the_model_stays_strict():
     s = _scenes("""CLIP CONTRACT: v1
 ### Scene 1
 - **image:** image_1
+- **attach:** image_1:start_frame
 - **scene_type:** shot
 - **line:** a line
 - **input_mode:** Ingredients
@@ -461,6 +464,7 @@ IN_SCOPE_HEADER = "## §0\nCLIP CONTRACT: v1\n"
 FULL = """
 ### Scene 1
 - **image:** image_1
+- **attach:** image_1:start_frame
 - **scene_type:** shot
 - **line:** a line
 - **input_mode:** ingredients

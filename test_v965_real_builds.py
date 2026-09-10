@@ -76,10 +76,21 @@ def _stamp(md, input_mode="ingredients", isolate="true",
     the same rule v861's clip_duration_s follows. A text_card scene is left
     alone on purpose; the rule refuses the bullets there.
     """
-    out, in_scene, is_card = [], False, False
+    # v969 made `- **attach:**` mandatory on an in-scope shot scene, so a
+    # stamper emitting only v965's three bullets now produces a build the
+    # parser refuses. The attach line is DERIVED, never guessed: ask
+    # image_platform for it -- the same function the parser checks a declared
+    # line against -- so this helper cannot drift from the rule it exercises.
+    attach_by_scene = _derive_attach_lines(md)
+
+    out, in_scene, is_card, scene_n = [], False, False, None
     for line in md.splitlines():
         if line.startswith("### Scene "):
             in_scene, is_card = True, False
+            try:
+                scene_n = int(line.split()[2])
+            except (IndexError, ValueError):
+                scene_n = None
         elif line.startswith("## ") or line.startswith("### Image"):
             in_scene = False
         if in_scene and "scene_type:**" in line and "text_card" in line:
@@ -89,7 +100,51 @@ def _stamp(md, input_mode="ingredients", isolate="true",
             out.append(f"- **input_mode:** {input_mode}")
             out.append(f"- **isolate_project:** {isolate}")
             out.append(f"- **policy_fallback:** {ladder}")
+            attach = attach_by_scene.get(scene_n)
+            if attach:
+                out.append(f"- **attach:** {attach}")
     return "CLIP CONTRACT: v1\n" + "\n".join(out)
+
+
+def _derive_attach_lines(md):
+    """{scene_index: "image_1:start_frame, ..."} for every SHOT scene.
+
+    Reads each scene's own bullets and hands them to
+    `image_platform.derive_attach_tokens`, which is the same function the
+    parser cross-checks a declared line against. Deriving rather than
+    hardcoding keeps this fixture honest across every real build shape: a
+    movie-section scene gets its faces, a swap gets its avatar and source.
+    """
+    out = {}
+    for blk in re.split(r"^(?=###\s+Scene\s+\d+)", md, flags=re.M):
+        m = re.match(r"###\s+Scene\s+(\d+)", blk)
+        if not m:
+            continue
+        n = int(m.group(1))
+        # stop at the next top-level or Image heading so a later block's
+        # bullets cannot be read as this scene's
+        blk = re.split(r"^###\s+Image\s+\d+|^##\s+", blk, flags=re.M)[0]
+        if re.search(r"^-\s+\*\*scene_type:\*\*\s*text_card", blk, re.M):
+            continue
+
+        def one(name, _blk=blk):
+            mm = re.search(r"^-\s+\*\*" + name + r":\*\*\s*(\S.*?)\s*$",
+                           _blk, re.M)
+            return mm.group(1).strip() if mm else None
+
+        image = one("image")
+        if not image:
+            continue
+        faces = one("face_refs")
+        tokens = ip.derive_attach_tokens(
+            image=image,
+            end_frame_image=one("end_frame_image"),
+            face_refs=[f.strip() for f in faces.split(",")] if faces else [],
+            render_method=one("render_method"),
+            swap_source_video=one("swap_source_video"),
+            swap_mode=one("swap_mode"))
+        out[n] = ", ".join(f"{tok}:{role}" for tok, role in tokens)
+    return out
 
 
 class _Clip:
