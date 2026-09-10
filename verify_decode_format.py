@@ -15,6 +15,7 @@ script catches missing, empty, malformed, or contradictory data.
 Usage:  python code/verify_decode_format.py raw/videos/decoded_<id>.md
 Exit 0 = pass, 1 = fail, 2 = bad invocation.
 """
+import datetime
 import re
 import sys
 
@@ -274,9 +275,38 @@ def lint(path):
     # need it and they run in different blocks.
     V938_DATE = "2026-08-22"        # v938.3 / v938.4 — measured composite + overlay geometry
     created = ""
-    cm = re.search(r'^created:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})', t, re.M)
+    cm = re.search(r'^created:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})\s*$', t, re.M)
     if cm:
         created = cm.group(1)
+        try:
+            datetime.date.fromisoformat(created)
+        except ValueError:
+            # Shape-valid but not a real day (2026-13-45). Same hole as below.
+            fails.append(
+                f"`created: {created}` is not a real date - every forward-only era gate "
+                "reads this field, so an impossible date silently buys old-era treatment"
+            )
+            created = ""
+    else:
+        # PRESENT BUT UNPARSEABLE must FAIL, and this closes a real hole.
+        #
+        # Every era gate here is `bool(created) and created >= DATE`, so an empty `created`
+        # means OLD ERA and the forward-only rules soften to WARN. Until now anything the
+        # strict regex missed - `created: today`, `created: 2026-8-4`, a stray quote, a
+        # trailing comment - left the field empty, so a BRAND-NEW decode could take the
+        # legacy path by typing a bad date. The absent case is legitimate legacy and keeps
+        # its WARN; a field that is THERE and wrong is a defect, not a legacy marker.
+        #
+        # Measured before landing (2026-09-11, all 207 decodes in raw/videos): 6 carry a
+        # valid date, 201 carry none, and ZERO are malformed or impossible - so this turns
+        # nothing red today. It is a lock on the door, not a new demand.
+        loose = re.search(r'^created:[ \t]*(\S.*?)[ \t]*$', t, re.M)
+        if loose:
+            fails.append(
+                f"`created:` is present but not a valid YYYY-MM-DD date: {loose.group(1)!r} "
+                "- either fix it or remove the line (an ABSENT created: is the legacy path "
+                "and still only warns)"
+            )
     geom_era = bool(created) and created >= V938_DATE
 
     # 1. required top-level sections present (incl the canary)
