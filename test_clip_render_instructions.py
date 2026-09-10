@@ -391,3 +391,197 @@ def test_a_build_that_never_opted_in_is_told_the_bullet_would_be_ignored():
     with pytest.raises(ValueError) as exc:
         ip._parse_scene_blocks_new(md, known_image_indexes={1})
     assert "v970" in str(exc.value) and "CLIP CONTRACT: v1" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# v971 — one generic per-clip audio source.
+# ---------------------------------------------------------------------------
+
+def _build_with(extra="", speaker="silent"):
+    """A minimal build that has NOT opted in to the clip contract.
+
+    v971 is forward-only and lane-neutral, so the scene here carries nothing
+    but what a scene needs: no `CLIP CONTRACT: v1`, no v965 bullets, no
+    attach line. `speaker` is a parameter because the legality of
+    `audio: scene:N` depends on it -- a voiceover scene also needs a line
+    (v698A Gate 11) and gets its Gate 9 answer from the audio bullet itself.
+    """
+    line = ""
+    if speaker == "voiceover":
+        line = "- **line:** she says it plainly\n"
+    return (
+        "## Storyboard\n"
+        "\n"
+        "### Scene 1\n"
+        "\n"
+        "- **scene_type:** shot\n"
+        "- **image:** image_1\n"
+        "- **target_duration_s:** 8\n"
+        f"- **speaker:** {speaker}\n"
+        + line
+        + extra
+    )
+
+
+def _charswap_build_with(extra=""):
+    """The same minimal build, with the v943 swap trio so the charswap-only
+    sources are legal on it."""
+    return (
+        "## Storyboard\n"
+        "\n"
+        "### Scene 1\n"
+        "\n"
+        "- **scene_type:** shot\n"
+        "- **image:** image_1\n"
+        "- **target_duration_s:** 8\n"
+        "- **speaker:** silent\n"
+        "- **render_method:** charswap\n"
+        "- **swap_source_video:** source_clip.mp4\n"
+        "- **swap_mode:** video-led\n"
+        + extra
+    )
+
+
+def test_render_is_legal_everywhere():
+    for method in (None, "charswap", "movie-section"):
+        assert ip.parse_audio_source("render", scene_index=1,
+                                     render_method=method) == ("render", None)
+
+
+def test_source_original_stays_charswap_only():
+    assert ip.parse_audio_source("source-original", scene_index=1,
+                                 render_method="charswap") == (
+        "source-original", None)
+    with pytest.raises(ValueError) as exc:
+        ip.parse_audio_source("source-original", scene_index=1,
+                              render_method=None)
+    msg = str(exc.value)
+    assert "v971" in msg
+    assert "source-original" in msg
+    assert "charswap" in msg          # says WHY, and where it IS legal
+
+
+def test_scene_reference_parses_its_number():
+    assert ip.parse_audio_source("scene:4", scene_index=1, render_method=None,
+                                 speaker_mode="voiceover") == ("scene", 4)
+
+
+def test_scene_reference_is_refused_outside_voiceover():
+    """`audio_from_scene` is forwarded for voiceover lines only (the
+    scene_speaker_mode guard on the flat clip rows in image_platform.py);
+    anywhere else it is dropped, so accepting it would be a declaration that
+    silently does nothing."""
+    with pytest.raises(ValueError) as exc:
+        ip.parse_audio_source("scene:4", scene_index=1, render_method=None,
+                              speaker_mode="on-camera")
+    msg = str(exc.value)
+    assert "voiceover" in msg and "v971" in msg
+
+
+def test_a_scene_reference_to_itself_is_refused():
+    with pytest.raises(ValueError) as exc:
+        ip.parse_audio_source("scene:1", scene_index=1, render_method=None,
+                              speaker_mode="voiceover")
+    assert "itself" in str(exc.value)
+
+
+def test_a_malformed_scene_reference_says_the_shape():
+    with pytest.raises(ValueError) as exc:
+        ip.parse_audio_source("scene:four", scene_index=1, render_method=None,
+                              speaker_mode="voiceover")
+    assert "scene:N" in str(exc.value)
+
+
+def test_an_unknown_source_names_every_legal_one():
+    with pytest.raises(ValueError) as exc:
+        ip.parse_audio_source("ambient", scene_index=1, render_method=None)
+    msg = str(exc.value)
+    for legal in ("render", "source-original", "scene:N", "none"):
+        assert legal in msg
+
+
+def test_none_keeps_its_v943_1_meaning_and_stays_charswap_only():
+    assert ip.parse_audio_source("none", scene_index=1,
+                                 render_method="charswap") == ("none", None)
+    # No general silence step exists, so `none` on an ordinary clip would be
+    # accepted and do nothing. Refuse until a consumer is written.
+    with pytest.raises(ValueError) as exc:
+        ip.parse_audio_source("none", scene_index=1, render_method=None)
+    assert "v971" in str(exc.value)
+
+
+def test_absent_is_distinct_from_every_declared_source():
+    assert ip.parse_audio_source(None, scene_index=1,
+                                 render_method=None) is None
+
+
+def test_the_table_is_the_only_place_legality_is_written():
+    """Adding a style must be a row, not a new branch. If someone adds a
+    source with an `if` instead, this catches it."""
+    for src, spec in ip.V971_AUDIO_SOURCES.items():
+        assert {"lanes", "speakers", "arg", "consumer"} <= set(spec), src
+
+
+def test_every_source_names_a_consumer_that_actually_reads_it():
+    """The rule this table exists to enforce: a source is legal only where
+    something reads it. A row whose consumer text is empty is a row that will
+    import cleanly and vanish."""
+    for src, spec in ip.V971_AUDIO_SOURCES.items():
+        assert spec["consumer"].strip(), src
+
+
+def test_source_original_still_writes_the_swap_audio_column():
+    """v943.1 behaviour is unchanged — the bullet is the same, the column is
+    the same, only the legality check moved into the table."""
+    md = _charswap_build_with("- **audio:** source-original\n")
+    scenes = ip._parse_scene_blocks_new(md, known_image_indexes={1})
+    assert scenes[0]["swap_audio"] == "source-original"
+
+
+def test_audio_scene_n_writes_the_same_column_as_the_old_bullet():
+    a = ip._parse_scene_blocks_new(
+        _build_with("- **audio:** scene:2\n", speaker="voiceover"),
+        known_image_indexes={1, 2})
+    b = ip._parse_scene_blocks_new(
+        _build_with("- **audio_from_scene:** 2\n", speaker="voiceover"),
+        known_image_indexes={1, 2})
+    assert a[0]["audio_from_scene"] == b[0]["audio_from_scene"] == 2
+
+
+def test_the_two_spellings_disagreeing_is_an_error_not_a_silent_winner():
+    with pytest.raises(ValueError) as exc:
+        ip._parse_scene_blocks_new(
+            _build_with("- **audio:** scene:2\n- **audio_from_scene:** 3\n",
+                        speaker="voiceover"),
+            known_image_indexes={1, 2, 3})
+    assert "disagree" in str(exc.value)
+
+
+def test_the_new_spelling_inherits_the_anchor_mutual_exclusion():
+    """v698A refuses `audio_from_scene` beside `voiceover_anchor_image`, but
+    that check sits inside the OLD bullet's parse. A second spelling that
+    skipped it would be a way around the rule."""
+    with pytest.raises(ValueError) as exc:
+        ip._parse_scene_blocks_new(
+            _build_with("- **audio:** scene:2\n"
+                        "- **voiceover_anchor_image:** image_9\n",
+                        speaker="voiceover"),
+            known_image_indexes={1, 2, 9})
+    assert "voiceover_anchor_image" in str(exc.value)
+
+
+def test_each_declaration_alone_still_passes():
+    """The refusal above must be about the PAIR, not about either half."""
+    ip._parse_scene_blocks_new(
+        _build_with("- **audio:** scene:2\n", speaker="voiceover"),
+        known_image_indexes={1, 2})
+    ip._parse_scene_blocks_new(
+        _build_with("- **voiceover_anchor_image:** image_9\n",
+                    speaker="voiceover"),
+        known_image_indexes={1, 9})
+
+
+def test_render_writes_no_override_at_all():
+    s = ip._parse_scene_blocks_new(_build_with("- **audio:** render\n"),
+                                   known_image_indexes={1})[0]
+    assert s["swap_audio"] is None and s["audio_from_scene"] is None

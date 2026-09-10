@@ -6139,6 +6139,145 @@ def parse_v970_composer_bullets(block, scene_index):
     return out
 
 
+# v971 — WHERE THIS CLIP'S AUDIO COMES FROM, in one bullet and one table.
+#
+# Three grammars said this before, each locked to one lane: v943.1's
+# `audio: source-original|none` (charswap only, and a hard error anywhere
+# else), v698A's `audio_from_scene: N`, and the implicit "say nothing and
+# keep the render's own track". A fourth style needed a fourth rule.
+#
+# The table below is the extension point and the ONLY place legality lives.
+# A new style adds a row naming which lanes may use it and what consumes it;
+# it does not add an `if` here, a bullet in the parser, or a column.
+#
+# `lanes = None` means every lane. `arg` is the shape after the colon, or
+# None for a bare source.
+# EVERY SOURCE IS PINNED TO THE LANES AND SPEAKER MODES THAT ACTUALLY
+# CONSUME IT. Not conservatism -- measured. A source declared legal where
+# nothing reads it is accepted at import and then vanishes:
+#   * `swap_audio` is NULLed for any non-charswap scene in
+#     `_scene_assignments_from_parsed` below, and the export consumer returns
+#     early unless render_method is charswap AND the value is
+#     `source-original` (`main.py`, the swap_audio guard in the export path);
+#   * `audio_from_scene` is forwarded ONLY when the scene's speaker mode is
+#     voiceover (the `scene_speaker_mode` guard on the flat clip rows) and is
+#     None on every other line.
+# So `lanes`/`speakers` say where a source is REAL, and widening one means
+# writing its consumer first. That is the honest version of "extensible".
+V971_AUDIO_SOURCES = {
+    "render": {
+        "lanes": None, "speakers": None, "arg": None,
+        "consumer": "the Veo render's own native track — nothing to do at export",
+    },
+    "source-original": {
+        "lanes": ("charswap",), "speakers": None, "arg": None,
+        "consumer": "video_processor.swap_audio_with_speed_match, reached via "
+                    "the swap_audio guard in main.py's export path (v943.1)",
+    },
+    "scene": {
+        "lanes": None, "speakers": ("voiceover",), "arg": "int",
+        "consumer": "the audio-pair export path, via clips.audio_from_scene, "
+                    "which the flat-clip-row writer below forwards for "
+                    "voiceover lines only (v698A)",
+    },
+    "none": {
+        # charswap-only for now, and this is the interesting row: `none` is
+        # already meaningful there (it is v943.1's other value, "do NOT re-lay
+        # the source track"). Nothing anywhere strips audio from an ordinary
+        # Veo clip, so `audio: none` on one would be a declaration with no
+        # consumer. Widening it = write the strip step, add a test that
+        # ffprobe reports no audio stream, THEN change this tuple to None.
+        "lanes": ("charswap",), "speakers": None, "arg": None,
+        "consumer": "v943.1's 'do not re-lay the swap source's track'. There "
+                    "is no general silence step yet — see the note above",
+    },
+}
+
+
+def _v971_legal_forms():
+    out = []
+    for name, spec in V971_AUDIO_SOURCES.items():
+        out.append(f"{name}:N" if spec["arg"] == "int" else name)
+    return " | ".join(out)
+
+
+def _v971_lane_fix(render_method, lanes):
+    """The way OUT of a lane refusal, per lane.
+
+    Kept per-lane because v959 already proved a single generic "declare the
+    swap trio instead" is a road a movie-section scene cannot take: it renders
+    from images and can never grow a swap source. Same fault, different exit.
+    """
+    if tuple(lanes) == ("charswap",):
+        if (render_method or "").strip().lower() == MOVIE_SECTION_RENDER_METHOD:
+            return ("A movie-section scene has no swap source either — drop "
+                    "the bullet (v959).")
+        return ("Remove the bullet, or declare render_method / "
+                "swap_source_video / swap_mode too (v943.1).")
+    return f"Remove the bullet, or move it to a {' / '.join(lanes)} scene."
+
+
+def parse_audio_source(raw, scene_index, render_method, speaker_mode=None):
+    """(source, arg) for this clip's audio, or None when nothing is declared.
+
+    `arg` is the integer after the colon for a source that takes one, else
+    None. Absent is NOT the same as `render`: absent means the build predates
+    this rule and every downstream default stands untouched, which is what
+    keeps all 348 existing builds byte-identical in behaviour.
+
+    Both legality axes are checked here and NOWHERE else, so "where is this
+    source real" has exactly one answer to read.
+    """
+    if raw is None:
+        return None
+    # Same first-token read v943.1 has always done, so a value carrying a
+    # parenthetical suffix keeps parsing exactly as it did.
+    _parts = str(raw).strip().split()
+    if not _parts:
+        return None
+    s = _parts[0].strip().lower()
+    if not s:
+        return None
+    name, _, arg = s.partition(":")
+    spec = V971_AUDIO_SOURCES.get(name)
+    if spec is None:
+        raise ValueError(
+            f"Scene {scene_index}: audio {raw!r} is not a known source. "
+            f"Legal: {_v971_legal_forms()} (v971)")
+    lanes = spec["lanes"]
+    if lanes is not None and (render_method or "").strip().lower() not in lanes:
+        raise ValueError(
+            f"Scene {scene_index}: `- **audio:** {name}` only means something "
+            f"on a {' / '.join(lanes)} scene — this scene's render_method is "
+            f"{render_method!r}, and nothing on this path would read the "
+            f"value, so it would import cleanly and then do nothing. "
+            f"{_v971_lane_fix(render_method, lanes)} (v971)")
+    speakers = spec["speakers"]
+    if speakers is not None and (speaker_mode or "").strip().lower() not in speakers:
+        raise ValueError(
+            f"Scene {scene_index}: audio {name!r} is only legal on a "
+            f"{' / '.join(speakers)} scene — this scene's speaker mode is "
+            f"{speaker_mode!r}, and `audio_from_scene` is forwarded for "
+            f"{' / '.join(speakers)} lines only. It would import cleanly and "
+            f"be dropped (v971)")
+    if spec["arg"] == "int":
+        if not arg.isdigit():
+            raise ValueError(
+                f"Scene {scene_index}: audio {raw!r} must name a scene as "
+                f"`{name}:N` with a whole number (v971)")
+        n = int(arg)
+        if n == scene_index:
+            raise ValueError(
+                f"Scene {scene_index}: audio {raw!r} points at itself — a "
+                f"clip cannot borrow its own track (v971)")
+        return name, n
+    if arg:
+        raise ValueError(
+            f"Scene {scene_index}: audio {name!r} takes no argument, got "
+            f"{raw!r} (v971)")
+    return name, None
+
+
 def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict[str, Any]]:
     """New format: parse ``### Scene N`` headers as storyboard scenes.
 
@@ -6553,36 +6692,49 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # its own audio and there is no stored source to take a track from — so
         # declaring it anywhere else stops the import instead of being quietly
         # ignored, and an unrecognised value stops it too.
+        # v971 — one bullet, routed to the columns that already hold these
+        # answers. No new column: `source-original` / `none` are what
+        # swap_audio has always meant, and `scene:N` is what audio_from_scene
+        # has always meant. A row in V971_AUDIO_SOURCES that needs a NEW
+        # destination is the moment to add one, and not before.
+        #
+        # Forward-only: `source-original` and `none` keep exactly their v943.1
+        # values and their charswap-only legality, so every build that ever
+        # declared the bullet parses to the same column value it did before.
         swap_audio: Optional[str] = None
-        _sa_raw = _parse_bullet_field(block, "audio")
-        if _sa_raw:
-            _sa = _sa_raw.strip().split()[0].strip().lower()
-            if _sa not in ("source-original", "none"):
-                raise ValueError(
-                    f"Scene {scene_index}: audio {_sa_raw!r} is not "
-                    f"'source-original' or 'none' (v943.1)"
-                )
-            if render_method != "charswap":
-                # v959 — a movie-section scene can never grow the swap trio, so
-                # sending its author off to declare one is a road that does not
-                # exist. Same fault, different way out.
-                if render_method == MOVIE_SECTION_RENDER_METHOD:
-                    _audio_fix = (
-                        "a movie-section scene has no swap source either — "
-                        "drop the bullet (v959)"
+        _v971 = parse_audio_source(
+            _parse_bullet_field(block, "audio"),
+            scene_index, render_method, speaker_mode=speaker_mode,
+        )
+        if _v971:
+            _v971_src, _v971_arg = _v971
+            if _v971_src in ("source-original", "none"):
+                swap_audio = _v971_src           # v943.1's column, same values
+            elif _v971_src == "scene":
+                # The mutual-exclusion rule lives inside the OLD bullet's parse
+                # above, which runs earlier and never sees this spelling.
+                # Re-check it here or the new syntax is a way around a rule the
+                # old syntax obeys — a second spelling must inherit EVERY
+                # refusal the first one carries, not just some.
+                if voiceover_anchor_image is not None:
+                    raise ValueError(
+                        f"Scene {scene_index}: declares both `audio: "
+                        f"scene:{_v971_arg}` and voiceover_anchor_image="
+                        f"image_{voiceover_anchor_image} — an anchor means "
+                        f"'mint an audio twin' and borrowing a scene's audio "
+                        f"means 'do not' (v971, same rule as v698A)"
                     )
-                else:
-                    _audio_fix = (
-                        "Remove the bullet, or declare render_method / "
-                        "swap_source_video / swap_mode too (v943.1)"
+                if (audio_from_scene is not None
+                        and audio_from_scene != _v971_arg):
+                    raise ValueError(
+                        f"Scene {scene_index}: `audio: scene:{_v971_arg}` and "
+                        f"`audio_from_scene: {audio_from_scene}` disagree — "
+                        f"declare one (v971)"
                     )
-                raise ValueError(
-                    f"Scene {scene_index}: `- **audio:**` only means something "
-                    f"on a charswap scene — it re-muxes the swap source's own "
-                    f"audio track onto the exported segment, and a scene with "
-                    f"no swap_source_video has no track to take. {_audio_fix}"
-                )
-            swap_audio = _sa
+                audio_from_scene = _v971_arg
+            # `render` writes nothing: it IS the absence of an override, and
+            # storing a sentinel for it would make every downstream reader
+            # learn a new value to mean what NULL already means.
 
         # v959 — a text_card is drawn by ffmpeg, not rendered as a clip, so a
         # render method on one has nothing to act on. Raised here, ahead of the
