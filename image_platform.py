@@ -6702,9 +6702,20 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # values and their charswap-only legality, so every build that ever
         # declared the bullet parses to the same column value it did before.
         swap_audio: Optional[str] = None
+        _v971_raw = _parse_bullet_field(block, "audio")
+        # A text_card is drawn by ffmpeg and never reaches a renderer, so it has
+        # no audio to source. Refused for exactly the reason v970 refuses
+        # resolution/variants/aspect there, and said in the same words --
+        # without this, `- **audio:** render` was ACCEPTED on a card (measured
+        # 2026-09-11) while its three sibling bullets were refused, and gate 7
+        # could not refuse it either without becoming stricter than the parser.
+        if is_text_card and _v971_raw:
+            raise ValueError(
+                f"Scene {scene_index}: text_card scenes take no audio — a card "
+                f"is drawn by ffmpeg and never reaches the composer (v971)"
+            )
         _v971 = parse_audio_source(
-            _parse_bullet_field(block, "audio"),
-            scene_index, render_method, speaker_mode=speaker_mode,
+            _v971_raw, scene_index, render_method, speaker_mode=speaker_mode,
         )
         if _v971:
             _v971_src, _v971_arg = _v971
@@ -6804,6 +6815,15 @@ def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict
         # are held here as bare ints (`image_index`, `end_frame_image`, the
         # entries of `face_refs`), so they are put back into the author's
         # `image_N` spelling — that is what the attach line is written in.
+        # Same text_card refusal as v970 and v971, and said the same way. It
+        # WAS already refused — but as a mismatch against an empty derived
+        # list ("the build says ``"), which sends the author hunting for a
+        # missing image on a scene that can never have one.
+        if is_text_card and _parse_bullet_field(block, "attach"):
+            raise ValueError(
+                f"Scene {scene_index}: text_card scenes take no attach — a card "
+                f"is drawn by ffmpeg and never reaches the composer (v969)"
+            )
         _v969_declared = parse_attach_line(
             block, scene_index,
             derive_attach_tokens(

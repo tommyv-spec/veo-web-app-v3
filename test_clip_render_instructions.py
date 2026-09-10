@@ -585,3 +585,48 @@ def test_render_writes_no_override_at_all():
     s = ip._parse_scene_blocks_new(_build_with("- **audio:** render\n"),
                                    known_image_indexes={1})[0]
     assert s["swap_audio"] is None and s["audio_from_scene"] is None
+
+
+# --- the three sibling rules refuse a text_card the same way ---------------
+#
+# v970 already did. v971 did NOT -- `- **audio:** render` was ACCEPTED on a
+# card (measured 2026-09-11) -- and v969 refused it only as a confusing
+# mismatch against an empty derived list. A card is drawn by ffmpeg and never
+# reaches the composer, so all three are meaningless there, and gate 7 cannot
+# refuse what the parser accepts without becoming stricter than the parser.
+
+_TEXT_CARD = """CLIP CONTRACT: v1
+### Scene 1
+- **scene_type:** text_card
+- **caption:** hello there
+- **bg_color:** #000000
+"""
+
+
+def _parse_card(extra=""):
+    import io, contextlib
+    md = _TEXT_CARD + (extra + "\n" if extra else "")
+    with contextlib.redirect_stdout(io.StringIO()):
+        return ip._parse_scene_blocks_new(md, known_image_indexes={1})
+
+
+def test_a_bare_text_card_still_parses():
+    """The guard below must refuse the BULLET, never the card itself."""
+    assert len(_parse_card()) == 1
+
+
+@pytest.mark.parametrize("bullet,rule", [
+    ("- **attach:** image_1:start_frame", "v969"),
+    ("- **audio:** render", "v971"),
+    ("- **audio:** source-original", "v971"),
+    ("- **resolution:** 1080p", "v970"),
+    ("- **variants:** 2", "v970"),
+    ("- **aspect_ratio:** 9:16", "v970"),
+])
+def test_a_render_bullet_on_a_text_card_is_refused_by_name(bullet, rule):
+    with pytest.raises(ValueError) as exc:
+        _parse_card(bullet)
+    msg = str(exc.value)
+    assert "text_card" in msg, msg
+    assert rule in msg, msg
+    assert "ffmpeg" in msg, msg
