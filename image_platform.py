@@ -5923,6 +5923,80 @@ def _v965_declaration_json(scene_index, input_modes, isolate_projects,
     ).model_dump_json()
 
 
+# v969 — the ATTACH LINE. Readable, and unable to lie.
+#
+# `- **attach:** image_1:start_frame, image_2:face, image_3:face`
+#
+# This is a MIRROR, never a source. The build already says what attaches, in
+# `image:` / `end_frame_image:` / `face_refs:` / the swap bullets, and the
+# platform resolves those into the contract's asset list at hand-out
+# (`main._v965_resolve_assets`). A second authoritative list would be a second
+# thing to drift, which is the whole disease v965 exists to cure.
+#
+# So the rule is: it must MATCH, and on an in-scope build it must be THERE.
+# Order is significant because attach order is normative (CONTRACT.md §2.4) --
+# a face list authored `image_3, image_2` attaches in that order, and a mirror
+# that ignored order could not tell the two apart.
+#
+# BOTH DIRECTIONS, exactly like v965's three bullets: an in-scope shot scene
+# that omits it is refused, and a text_card that carries it is refused. A rule
+# that is only checked when present teaches authors to omit it.
+V969_ATTACH_ROLES = ("start_frame", "end_frame", "face", "avatar", "swap_source")
+
+
+def _v969_format(pairs):
+    return ", ".join(f"{tok}:{role}" for tok, role in pairs)
+
+
+def parse_attach_line(block, scene_index, derived, in_scope=False):
+    """The declared attach list, checked against the derived one, or None.
+
+    `derived` is the list the build itself implies, as (token, role) pairs in
+    attach order. `in_scope` is the build's `CLIP CONTRACT: v1` opt-in — the
+    same predicate that decides whether the v965 bullets are required, read
+    from the same place, so the two can never disagree about what "in scope"
+    means. Returns the parsed pairs on a match; raises on any disagreement or
+    on an in-scope omission; returns None when the bullet is absent and the
+    build is out of scope.
+    """
+    raw = _parse_bullet_field(block, "attach")
+    if not raw:
+        if in_scope:
+            raise ValueError(
+                f"Scene {scene_index}: this build declares `CLIP CONTRACT: v1`, "
+                f"so every shot scene declares what it attaches. Add "
+                f"`- **attach:** {_v969_format(derived)}` (v969)")
+        return None
+    pairs = []
+    for entry in [e.strip() for e in raw.split(",") if e.strip()]:
+        if entry.count(":") != 1:
+            raise ValueError(
+                f"Scene {scene_index}: attach entry {entry!r} is not "
+                f"`image_N:role` (v969)")
+        tok, role = (p.strip() for p in entry.split(":"))
+        if role not in V969_ATTACH_ROLES:
+            raise ValueError(
+                f"Scene {scene_index}: attach role {role!r} is not one of "
+                f"{' | '.join(V969_ATTACH_ROLES)} (v969)")
+        pairs.append((tok, role))
+    want = [(str(t), str(r)) for t, r in derived]
+    if pairs != want:
+        # Same multiset, different sequence, is its own message: the author
+        # named the right files and the wrong order, and "does not match" would
+        # send them hunting for a missing image that is right there.
+        if sorted(pairs) == sorted(want):
+            raise ValueError(
+                f"Scene {scene_index}: attach is in the wrong ORDER. "
+                f"Declared `{_v969_format(pairs)}`; the build attaches "
+                f"`{_v969_format(want)}`. Attach order is normative (v969)")
+        raise ValueError(
+            f"Scene {scene_index}: attach does not match what this scene "
+            f"actually attaches. Declared `{_v969_format(pairs)}`; the build "
+            f"says `{_v969_format(want)}`. Fix the bullet or fix the scene "
+            f"(v969)")
+    return pairs
+
+
 def _parse_scene_blocks_new(md_text: str, known_image_indexes: set) -> List[Dict[str, Any]]:
     """New format: parse ``### Scene N`` headers as storyboard scenes.
 
