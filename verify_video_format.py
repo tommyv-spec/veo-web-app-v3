@@ -40,6 +40,39 @@ except ImportError:  # pragma: no cover - standalone lint
         "Veo 3.1 - Lite [Lower Priority]",
     )
 
+# v969 / v971 — the attach roles and the audio-source legality, taken from the
+# ONE place they live. `clip_contract` is a LEAF: its only project import is
+# `veo_models`, deliberately, so the parser, the API and the linters can all
+# read it. Asking it costs nothing. Asking `image_platform` for the same two
+# answers would drag the whole app in — config, auth, the DB layer — and print
+# its startup banners into this linter's output.
+#
+# NO literal fallback, on purpose. A hand-written second copy is exactly what
+# went stale here: the v959 check below used to hard-fail ANY `- **audio:**`
+# bullet on a movie-section scene, which stopped being true the moment v971
+# made `render` legal on every lane. If the leaf cannot be imported the two
+# gates say so as a FAIL on any build that uses them, rather than passing
+# quietly — a gate that is always open is not a gate.
+try:
+    from clip_contract import V969_ATTACH_ROLES as _V969_ATTACH_ROLES
+    from clip_contract import parse_audio_source as _v971_parse_audio_source
+    _V969_V971_IMPORT_ERROR = None
+except Exception as _e:  # pragma: no cover - checkout without pydantic
+    _V969_ATTACH_ROLES = ()
+    _v971_parse_audio_source = None
+    _V969_V971_IMPORT_ERROR = _e
+
+# The three v970 composer bullets and the v969 attach line. Named here so the
+# text_card and out-of-scope sweeps below read as one rule each.
+_V970_BULLETS = ("aspect_ratio", "variants", "resolution")
+_V969_V970_V971_RENDER_BULLETS = (
+    ("attach", "v969"),
+    ("aspect_ratio", "v970"),
+    ("variants", "v970"),
+    ("resolution", "v970"),
+    ("audio", "v971"),
+)
+
 
 def lint_promptb_gate(clips):
     """v821 — reworded Prompt B mandatory on every dialogue clip.
@@ -273,12 +306,109 @@ def lint(path: str) -> int:
         if is_section and _swaps:
             fails.append(f"v959: Scene {sn} render_method=movie-section does not take "
                          f"swap_source_video / swap_mode (found {_swaps})")
-        # Same reason for `- **audio:**` — it re-muxes the swap source's OWN
-        # track onto the exported segment, and a section scene has no swap
-        # source to take one from (image_platform.py :6022-6041).
-        if is_section and re.search(r"^-\s+\*\*audio:\*\*", blk, re.M):
-            fails.append(f"v959: Scene {sn} `- **audio:**` only means something on a charswap "
-                         f"scene — a movie-section scene has no swap source either, so drop the bullet")
+        # --- v969 / v970 / v971 — the clip block as a full render instruction.
+        #
+        # This block REPLACES the old v959 audio check, which hard-failed ANY
+        # `- **audio:**` bullet on a movie-section scene. That was right while
+        # `audio:` meant only `source-original | none`; v971's `render` is
+        # legal on every lane, so the old check would now FAIL a build the
+        # parser accepts — and a linter stricter than the parser is a false
+        # FAIL (the same argument this file already makes about the text_card
+        # render_method check a few lines below).
+        #
+        # Legality is DERIVED, never re-listed: the roles come from
+        # `clip_contract.V969_ATTACH_ROLES` and every audio answer from
+        # `clip_contract.parse_audio_source`, whose refusals are reported here
+        # verbatim. Adding an audio source is a row in that table and this gate
+        # follows it with no edit.
+        #
+        # WHAT THIS GATE CANNOT DO: it cannot check that the attach line
+        # MATCHES the scene. Only the parser can — matching means resolving
+        # `image_N` tokens against the `### Image N` blocks, the face_refs and
+        # the swap bullets, in attach order, which is
+        # `image_platform.derive_attach_tokens` plus `parse_attach_line`. This
+        # gate checks SHAPE and PLACEMENT only. Do not "fix" the omission by
+        # re-deriving the list here: a second derivation is a second thing to
+        # drift, which is the whole disease v969 exists to cure.
+        _v969_attach = re.search(r"^-\s+\*\*attach:\*\*\s*(.+?)\s*$", blk, re.M)
+        _v971_audio = re.search(r"^-\s+\*\*audio:\*\*\s*(.+?)\s*$", blk, re.M)
+        if is_text_card:
+            # A card is drawn by ffmpeg and never reaches the composer, so it
+            # attaches nothing, picks no composer setting and has no audio to
+            # source. The parser raises on each of these by name.
+            for _b, _rule in _V969_V970_V971_RENDER_BULLETS:
+                if re.search(r"^-\s+\*\*" + _b + r":\*\*\s*\S", blk, re.M):
+                    fails.append(
+                        f"{_rule}: Scene {sn} — text_card scenes take no {_b} "
+                        f"(a card is drawn by ffmpeg and never reaches the "
+                        f"composer)")
+        else:
+            # v970 — the three composer bullets ride the SAME opt-in as the
+            # v965 trio: on a build with no `CLIP CONTRACT: v1` they would be
+            # parsed, validated and thrown away. They are OPTIONAL on an
+            # in-scope build, so there is no presence check here.
+            if not v965_in_scope:
+                _v970_stray = [_b for _b in _V970_BULLETS
+                               if re.search(r"^-\s+\*\*" + _b + r":\*\*\s*\S",
+                                            blk, re.M)]
+                if _v970_stray:
+                    fails.append(
+                        f"v970: Scene {sn} carries {', '.join(_v970_stray)} but "
+                        f"the build has no `CLIP CONTRACT: v1` line at column 0 "
+                        f"in §0, so the bullet would be ignored and the clip "
+                        f"would render at the job's setting")
+            # v969 — BOTH DIRECTIONS, like v965 above: an in-scope shot scene
+            # that omits the line is refused at import too.
+            if v965_in_scope and not _v969_attach:
+                fails.append(
+                    f"v969: Scene {sn} — this build declares CLIP CONTRACT: v1, "
+                    f"so every shot scene declares what it attaches "
+                    f"(`- **attach:** image_N:role[, ...]`, in attach order)")
+        if _v969_attach and not is_text_card:
+            if not _V969_ATTACH_ROLES:
+                fails.append(
+                    f"v969: Scene {sn} declares `attach:` but the role set could "
+                    f"not be read from clip_contract ({_V969_V971_IMPORT_ERROR}) "
+                    f"— this gate cannot judge the line, so it refuses it")
+            else:
+                # The token before the colon is NOT checked against `image_N`:
+                # a charswap attaches its source VIDEO by filename
+                # (`clip.mp4:swap_source`), so demanding `image_N` would be a
+                # false FAIL. Exactly the parser's two shape rules and no more.
+                for _entry in [e.strip() for e in _v969_attach.group(1).split(",")
+                               if e.strip()]:
+                    if _entry.count(":") != 1:
+                        fails.append(
+                            f"v969: Scene {sn} attach entry {_entry!r} is not "
+                            f"`image_N:role`")
+                        continue
+                    _role = _entry.split(":")[1].strip()
+                    if _role not in _V969_ATTACH_ROLES:
+                        fails.append(
+                            f"v969: Scene {sn} attach role {_role!r} is not one "
+                            f"of " + " | ".join(_V969_ATTACH_ROLES))
+        if _v971_audio and not is_text_card:
+            if _v971_parse_audio_source is None:
+                fails.append(
+                    f"v971: Scene {sn} declares `audio:` but the source table "
+                    f"could not be read from clip_contract "
+                    f"({_V969_V971_IMPORT_ERROR}) — this gate cannot judge the "
+                    f"bullet, so it refuses it")
+            else:
+                _sp_raw = re.search(r"^-\s+\*\*speaker:\*\*\s*(.+)$", blk, re.M)
+                try:
+                    # int(sn), not sn: the table's self-reference refusal
+                    # compares `scene:N` against the scene index, and a string
+                    # would never equal it — the gate would pass a clip trying
+                    # to borrow its own track.
+                    _v971_parse_audio_source(
+                        _v971_audio.group(1), int(sn), rm_val,
+                        speaker_mode=(_speaker_mode(_sp_raw.group(1))
+                                      if _sp_raw else None))
+                except ValueError as _v971_err:
+                    # The table's own words, so the author reads the same
+                    # sentence here and at import.
+                    fails.append(f"v971: {_v971_err}")
         # A text_card is drawn by ffmpeg, never rendered as a clip, so a render
         # method on one has nothing to act on. Said FIRST and alone, the way the
         # parser raises it (image_platform.py :6048), so the author reads the

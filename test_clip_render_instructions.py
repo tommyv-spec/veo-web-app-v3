@@ -630,3 +630,274 @@ def test_a_render_bullet_on_a_text_card_is_refused_by_name(bullet, rule):
     assert "text_card" in msg, msg
     assert rule in msg, msg
     assert "ffmpeg" in msg, msg
+
+
+# ---------------------------------------------------------------------------
+# The gates. A rule with no gate is a suggestion.
+#
+# Two programs read a build before it ships: the authoring auditor
+# (`.claude/skills/build-video/audit_build.py`, run as gate 6 of
+# `tools/run_build_checks.py`) and the pre-ship platform linter
+# (`code/verify_video_format.py`, gate 7). Neither can check that the attach
+# line MATCHES -- only the parser resolves image tokens -- so both check
+# placement, and gate 7 also checks shape and role because it can import the
+# leaf table. These tests prove each refusal FIRES, and that a legal build
+# still passes: a gate that cannot fail is not a gate, and one that fails a
+# legal build is worse than none.
+# ---------------------------------------------------------------------------
+
+def _load_auditor():
+    import importlib.util
+    import pathlib
+    path = (pathlib.Path(__file__).resolve().parents[1]
+            / ".claude" / "skills" / "build-video" / "audit_build.py")
+    spec = importlib.util.spec_from_file_location("audit_build_under_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _audit_v969(md, tmp_path):
+    """Run ONLY c_v969_attach_line over `md`, via a real Build object."""
+    audit = _load_auditor()
+    p = tmp_path / "b.md"
+    p.write_text(md, encoding="utf-8")
+    return audit, audit.c_v969_attach_line(audit.Build(str(p)))
+
+
+def test_auditor_flags_an_attach_line_on_a_text_card(tmp_path):
+    md = ("## Storyboard\n\n### Scene 1\n\n"
+          "- **scene_type:** text_card\n"
+          "- **caption:** the end\n"
+          "- **attach:** image_1:start_frame\n")
+    audit, (status, msg) = _audit_v969(md, tmp_path)
+    assert status == audit.FAIL, msg
+    assert "v969" in msg and "text_card" in msg, msg
+
+
+def test_auditor_flags_an_in_scope_shot_scene_with_no_attach_line(tmp_path):
+    md = ("CLIP CONTRACT: v1\n\n## Storyboard\n\n### Scene 1\n\n"
+          "- **scene_type:** shot\n- **image:** image_1\n")
+    audit, (status, msg) = _audit_v969(md, tmp_path)
+    assert status == audit.FAIL, msg
+    assert "1" in msg and "v969" in msg, msg
+
+
+def test_auditor_passes_an_opted_in_build_that_declares_the_line(tmp_path):
+    md = ("CLIP CONTRACT: v1\n\n## Storyboard\n\n### Scene 1\n\n"
+          "- **scene_type:** shot\n- **image:** image_1\n"
+          "- **attach:** image_1:start_frame\n")
+    audit, (status, msg) = _audit_v969(md, tmp_path)
+    assert status == audit.PASS, msg
+
+
+def test_auditor_leaves_every_existing_build_alone(tmp_path):
+    """347 of 348 builds declare no opt-in and no attach line. The check must
+    PASS them, not WARN and not FAIL -- a gate that fires on the whole corpus
+    teaches everyone to ignore it."""
+    md = ("## Storyboard\n\n### Scene 1\n\n"
+          "- **scene_type:** shot\n- **image:** image_1\n")
+    audit, (status, msg) = _audit_v969(md, tmp_path)
+    assert status == audit.PASS, msg
+
+
+def test_the_auditor_registers_the_check(tmp_path):
+    audit = _load_auditor()
+    assert any(row[0] == "v969_attach_line" for row in audit.CHECKS)
+
+
+# --- gate 7: code/verify_video_format.py -----------------------------------
+
+_GATE7_BUILD = """# t
+## Pre-Flight Checklist
+### 1. x
+## Images
+### Image 1
+- **Image prompt:**
+```
+wide shot of a sunlit kitchen, she stands at the counter
+```
+## Storyboard
+{scenes}
+## Google Omni Final Prompts
+### Clip 1.1
+**Text prompt:**
+```
+she lifts the jar and says "american men over sixty are doing this"
+```
+**Prompt B (policy fallback):**
+```
+she lifts the jar and says "men in america past sixty do this"
+```
+"""
+
+_GATE7_SHOT = """### Scene 1
+
+- **image:** image_1
+- **speaker:** on-camera
+- **line:** american men over sixty are doing this every morning
+- **clip_duration_s:** 6
+- **action_note:** she lifts the jar [Start beat]
+"""
+
+_GATE7_SECTION = """### Scene 1
+
+- **image:** image_1
+- **render_method:** movie-section
+- **face_refs:** image_2, image_3
+- **speaker:** on-camera
+- **line:** wow if my husband looked like you i would never leave the house then he should do what i do
+- **clip_duration_s:** 10
+- **action_note:** she watches him lift the sack [Start beat]
+"""
+
+_GATE7_CARD = """### Scene 1
+
+- **scene_type:** text_card
+- **caption:** the end
+- **bg_color:** black
+"""
+
+
+def _gate7(scenes, tmp_path, header=""):
+    """Run gate 7 in-process and return only its WARN / FAIL findings.
+
+    The report's first line is the file path and pytest names the temp folder
+    after the test, so reading the whole report finds a rule number in the path
+    itself. Read the findings.
+    """
+    import contextlib
+    import io
+    import verify_video_format as v
+    p = tmp_path / "b.md"
+    p.write_text(header + _GATE7_BUILD.format(scenes=scenes), encoding="utf-8")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = v.lint(str(p))
+    findings = "\n".join(ln for ln in buf.getvalue().splitlines()
+                         if ln.strip().startswith(("WARN", "FAIL")))
+    return code, findings
+
+
+def test_gate7_leaves_a_build_that_declares_none_of_the_new_bullets_alone():
+    """Every one of the 348 existing builds is this shape."""
+    import pathlib
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        _, findings = _gate7(_GATE7_SHOT, pathlib.Path(d))
+    for rule in ("v969", "v970", "v971"):
+        assert rule not in findings, findings
+
+
+@pytest.mark.parametrize("bullet,rule", [
+    ("- **attach:** image_1:start_frame", "v969"),
+    ("- **aspect_ratio:** 9:16", "v970"),
+    ("- **variants:** 2", "v970"),
+    ("- **resolution:** 1080p", "v970"),
+    ("- **audio:** render", "v971"),
+])
+def test_gate7_refuses_a_render_bullet_on_a_text_card(bullet, rule, tmp_path):
+    code, findings = _gate7(_GATE7_CARD + bullet + "\n", tmp_path)
+    assert code != 0
+    assert rule in findings and "text_card" in findings, findings
+
+
+def test_gate7_refuses_an_unknown_attach_role(tmp_path):
+    code, findings = _gate7(_GATE7_SHOT + "- **attach:** image_1:scene\n",
+                            tmp_path)
+    assert code != 0
+    assert "v969" in findings and "'scene'" in findings, findings
+    assert "start_frame" in findings, findings   # the legal set is named
+
+
+def test_gate7_refuses_a_malformed_attach_entry(tmp_path):
+    code, findings = _gate7(_GATE7_SHOT + "- **attach:** image_1\n", tmp_path)
+    assert code != 0
+    assert "v969" in findings and "image_N:role" in findings, findings
+
+
+def test_gate7_accepts_a_swap_source_filename_in_the_attach_line(tmp_path):
+    """A charswap attaches its SOURCE VIDEO by filename, so demanding
+    `image_N` on the left of the colon would be a false FAIL."""
+    code, findings = _gate7(
+        _GATE7_SHOT + "- **attach:** image_1:avatar, curls.mp4:swap_source\n",
+        tmp_path)
+    assert "v969" not in findings, findings
+
+
+def test_gate7_refuses_an_in_scope_shot_scene_with_no_attach_line(tmp_path):
+    code, findings = _gate7(_GATE7_SHOT, tmp_path, header="CLIP CONTRACT: v1\n")
+    assert code != 0
+    assert "v969" in findings and "Scene 1" in findings, findings
+
+
+def test_gate7_refuses_a_v970_bullet_on_a_build_that_never_opted_in(tmp_path):
+    code, findings = _gate7(_GATE7_SHOT + "- **resolution:** 1080p\n", tmp_path)
+    assert code != 0
+    assert "v970" in findings and "CLIP CONTRACT: v1" in findings, findings
+
+
+def test_gate7_refuses_an_unknown_audio_source(tmp_path):
+    code, findings = _gate7(_GATE7_SHOT + "- **audio:** ambient\n", tmp_path)
+    assert code != 0
+    assert "v971" in findings, findings
+    for legal in ("render", "source-original", "scene:N", "none"):
+        assert legal in findings, findings
+
+
+def test_gate7_refuses_source_original_off_a_charswap_scene(tmp_path):
+    code, findings = _gate7(_GATE7_SHOT + "- **audio:** source-original\n",
+                            tmp_path)
+    assert code != 0
+    assert "v971" in findings and "charswap" in findings, findings
+
+
+def test_gate7_refuses_a_scene_reference_outside_voiceover(tmp_path):
+    code, findings = _gate7(_GATE7_SHOT + "- **audio:** scene:4\n", tmp_path)
+    assert code != 0
+    assert "v971" in findings and "voiceover" in findings, findings
+
+
+def test_gate7_refuses_a_scene_reference_to_itself(tmp_path):
+    """`sn` is a STRING in this linter. Passed through as one, the table's
+    self-reference check compares 1 to '1' and never fires."""
+    scene = _GATE7_SHOT.replace("- **speaker:** on-camera",
+                                "- **speaker:** voiceover")
+    code, findings = _gate7(scene + "- **audio:** scene:1\n", tmp_path)
+    assert code != 0
+    assert "v971" in findings and "itself" in findings, findings
+
+
+def test_gate7_no_longer_fails_audio_render_on_a_movie_section_scene(tmp_path):
+    """THE REGRESSION THIS TASK FIXES. The old v959 line hard-failed ANY
+    `- **audio:**` bullet on a movie-section scene. v971's `render` is legal on
+    every lane, so the parser accepts this build — and a linter stricter than
+    the parser is a false FAIL."""
+    code, findings = _gate7(_GATE7_SECTION + "- **audio:** render\n", tmp_path)
+    assert "v971" not in findings, findings
+    assert "audio" not in findings, findings
+
+
+def test_gate7_still_refuses_audio_none_on_a_movie_section_scene(tmp_path):
+    """The half of the old check that was RIGHT. `none` is v943.1's
+    charswap-only value and a section scene has no swap source."""
+    code, findings = _gate7(_GATE7_SECTION + "- **audio:** none\n", tmp_path)
+    assert code != 0
+    assert "only means something on a charswap scene" in findings, findings
+
+
+def test_gate7_reads_the_roles_and_the_audio_table_from_the_leaf_module():
+    """Not a literal copy in this file. The whole argument for the move: a
+    hand-written second list is what went stale when `render` became legal on
+    every lane."""
+    import clip_contract
+    import verify_video_format as v
+    assert v._V969_ATTACH_ROLES is clip_contract.V969_ATTACH_ROLES
+    assert v._v971_parse_audio_source is clip_contract.parse_audio_source
+    assert v._V969_V971_IMPORT_ERROR is None
+
+
+def test_the_parser_and_the_linter_share_one_audio_table():
+    import clip_contract
+    assert ip.V971_AUDIO_SOURCES is clip_contract.V971_AUDIO_SOURCES
+    assert ip.V969_ATTACH_ROLES is clip_contract.V969_ATTACH_ROLES
