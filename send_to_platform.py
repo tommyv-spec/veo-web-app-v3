@@ -26,6 +26,7 @@ Usage:
   python send_to_platform.py autoedit 1234 --trim-start 0.3 --music-output bed.mp3
   python send_to_platform.py autoedit --list-styles              # show templates, no job needed
   python send_to_platform.py update-finishing 1234 videos/build.md  # v947 ## Finishing -> live job
+  python send_to_platform.py update-contract 1234 videos/build.md   # v965 CLIP CONTRACT -> live job
   python send_to_platform.py approve-clip 14661        # v949 — operator-gated
   python send_to_platform.py reject-clip 14661,14662   # comma-list works
 
@@ -33,6 +34,17 @@ update-finishing pushes an updated build's `## Finishing` section onto a job
 that is ALREADY promoted, so the v947 auto-finish chain can run on clips the
 operator has already approved without a re-import. No section in the file
 means the job's stored finishing is cleared.
+
+update-contract (v965) is the same idea for the CLIP CONTRACT declarations: it
+re-parses the build and stamps each scene's contract onto the matching clip
+rows of a job that is ALREADY promoted. A clip only ever gets its contract when
+its row is first written, and a redo does not rebuild it, so a job promoted
+before the build declared `CLIP CONTRACT: v1` has none and no way to get one
+short of a re-import that discards the approved clips. Unlike update-finishing,
+a build with NO opt-in is REFUSED rather than cleared — un-stamping is silent
+and the likeliest cause of a missing declaration is the wrong file. The server
+proves the scene-to-clip mapping before it writes anything and refuses the
+whole job if it cannot.
 
 approve-clip / reject-clip (v949) move a clip's approval from the CLI via the
 same endpoints the review UI clicks, under the operator's own token. They are
@@ -1617,6 +1629,65 @@ def cmd_update_finishing(client, args, report):
     return EXIT_OK
 
 
+def cmd_update_contract(client, args, report):
+    """v965 — push a build's CLIP CONTRACT declarations onto a job that is
+    ALREADY promoted. The contract half of `update-finishing`.
+
+    A clip row receives its contract at exactly one moment: when the row is
+    written from the dialogue payload at job creation. A redo does not rebuild
+    it and the from-batch promote path never wrote one at all, so every job
+    promoted before its build declared `CLIP CONTRACT: v1` has clips with
+    clip_contract_json NULL, and the only other way to change that is a
+    re-import, which throws away the operator's approved clips.
+
+    The server re-parses with the import parser, so a bad declaration fails
+    here the same way it would fail at import. It also PROVES the
+    scene-to-clip mapping (count, scene boundaries, ordering) before writing
+    anything and refuses the whole job if any part of it is unprovable — a
+    mapping that is wrong by one is silent and it renders.
+
+    Unlike update-finishing, an absent opt-in is REFUSED, not applied. Clearing
+    a job's contracts un-stamps every clip and drops it back to legacy
+    inference with nothing on screen to say so; the likeliest cause of a
+    missing declaration is the wrong build file.
+    """
+    if not args.job_id:
+        raise PlatformError(
+            EXIT_UNKNOWN,
+            "update-contract needs a job id and a build: "
+            "send_to_platform.py update-contract <job-id> <path/to/build.md>")
+    if not args.contract_md:
+        raise PlatformError(
+            EXIT_UNKNOWN,
+            "update-contract needs the build markdown: "
+            "send_to_platform.py update-contract <job-id> <path/to/build.md>")
+
+    try:
+        md_text = open(args.contract_md, encoding="utf-8").read()
+    except OSError as exc:
+        raise PlatformError(EXIT_PARSE, f"cannot read {args.contract_md}: {exc}")
+
+    resp = client.post(f"/api/jobs/{args.job_id}/clip-contracts",
+                       {"markdown": md_text})
+    report["clip_contracts"] = resp
+    report["stages"].append("clip-contracts:updated")
+
+    if args.as_json:
+        print(json.dumps(resp, indent=2))
+        return EXIT_OK
+
+    print(f"job {args.job_id} clip contracts updated from {args.contract_md}:")
+    print(f"  scenes parsed:   {resp.get('scenes')}")
+    print(f"  clip rows matched: {resp.get('clips_matched')}")
+    print(f"  stamped:         {resp.get('stamped')}")
+    print(f"  cleared (text_card): {resp.get('cleared')}")
+    print(f"  already identical:   {resp.get('unchanged')}")
+    skipped = resp.get("skipped_spawned") or 0
+    if skipped:
+        print(f"  skipped (audio_pair / composite_plate rows): {skipped}")
+    return EXIT_OK
+
+
 def cmd_clip_approval(client, args, report, action):
     """v949 — approve or reject clips from the CLI, operator-gated.
 
@@ -1676,13 +1747,15 @@ def main(argv=None):
     p.add_argument("md_file", help="path to videos/<build>.md, or one of: "
                                     "list-uploads, upload, set-token, set-alias, "
                                     "set-job-config, autoedit, "
-                                    "update-finishing, approve-clip, reject-clip")
+                                    "update-finishing, update-contract, "
+                                    "approve-clip, reject-clip")
     p.add_argument("token_value", nargs="?",
                     help="the token (set-token) / alias name (set-alias) / "
-                         "job id (autoedit, update-finishing) / "
+                         "job id (autoedit, update-finishing, update-contract) / "
                          "clip id(s), comma-separated (approve-clip, reject-clip)")
     p.add_argument("extra_value", nargs="?",
-                   help="node id (set-alias) / path to the build .md (update-finishing)")
+                   help="node id (set-alias) / path to the build .md "
+                        "(update-finishing, update-contract)")
     p.add_argument("--avatar", help="persona upload by NAME or alias (instead of --subject id)")
     p.add_argument("--product", help="product upload by NAME or alias (instead of --product-node id)")
     p.add_argument("--subject", type=int, help="upload node id of the persona (see list-uploads)")
@@ -1824,6 +1897,11 @@ def main(argv=None):
             args.job_id = args.token_value
             args.finishing_md = args.extra_value
             return cmd_update_finishing(client, args, report)
+
+        if args.md_file == "update-contract":
+            args.job_id = args.token_value
+            args.contract_md = args.extra_value
+            return cmd_update_contract(client, args, report)
 
         if args.md_file in ("approve-clip", "reject-clip"):
             return cmd_clip_approval(client, args, report, args.md_file.split("-")[0])

@@ -16099,6 +16099,289 @@ async def update_job_finishing(
             "auto_finish_fired": auto_finish_fired}
 
 
+class ClipContractUpdate(BaseModel):
+    markdown: str
+
+
+def _v965_scene_per_clip(scenes):
+    """One entry per clip row a build produces, in clip_index order.
+
+    Returns `[(scene_ordinal, scene_dict), ...]` where `scene_ordinal` is the
+    scene's POSITION in the markdown, not the number in its `### Scene N`
+    header. Position is the only thing the two promote paths agree on (see the
+    endpoint's docstring), so it is what the mapping is built out of.
+
+    The expansion copies `prepare_batch_for_video` exactly
+    (`image_platform.py`, the scene loop that fills `scenes_metadata_flat`):
+
+      * a scene with lines contributes ONE entry per line — the four parallel
+        arrays are padded/truncated to `len(lines)` right before the zip, so
+        the count is `len(lines)` and nothing else;
+      * a scene with NO lines that is a text_card or `speaker: silent`
+        contributes exactly ONE entry (the synthetic flat row);
+      * any other lineless scene contributes NOTHING, which is what the
+        per-line loop does when `lines` is empty.
+
+    The last case is the one place the two promote paths differ — the
+    from-batch path falls back to the node's denormalised line and writes one
+    clip. That divergence is not resolved here on purpose: it shows up as a
+    count mismatch and the endpoint refuses the whole job, which is the right
+    answer for a build whose clip count cannot be predicted.
+    """
+    out = []
+    for pos, s in enumerate(scenes):
+        n_lines = len(s.get("lines") or [])
+        if n_lines:
+            n_clips = n_lines
+        elif ((s.get("scene_type") or "").lower() == "text_card"
+              or (s.get("speaker_mode") or "").lower() == "silent"):
+            n_clips = 1
+        else:
+            n_clips = 0
+        out.extend((pos, s) for _ in range(n_clips))
+    return out
+
+
+def _v965_runs(values):
+    """`[1, 1, 2, 2, 2]` -> `[(1, 2), (2, 3)]` — value + how many in a row."""
+    runs = []
+    for v in values:
+        if runs and runs[-1][0] == v:
+            runs[-1][1] += 1
+        else:
+            runs.append([v, 1])
+    return [(v, n) for v, n in runs]
+
+
+@app.post("/api/jobs/{job_id}/clip-contracts")
+async def update_job_clip_contracts(
+    job_id: str,
+    req: ClipContractUpdate,
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """v965 — re-parse a build's CLIP CONTRACT declarations onto an EXISTING job.
+
+    The contract equivalent of v947's `update-finishing`. A clip row gets its
+    contract at ONE moment, when the row is written from the dialogue payload
+    (`:3135`); a redo does not rebuild it and the from-batch promote path
+    (`image_platform.promote_batch_to_video`) never wrote one at all. So every
+    job promoted before its build declared `CLIP CONTRACT: v1` — and every job
+    promoted from a batch, contract or not — has `clip_contract_json = NULL` on
+    every clip, and the only other way to change that is a re-import, which
+    throws away the operator's chosen images and approved clips. This edits the
+    rows in place instead. `STATE.md` decision B1 contemplates exactly this: a
+    pre-contract clip "keeps legacy behaviour until backfilled or drained".
+
+    Same parser as import (`parse_scene_table`), so a bad declaration 400s here
+    exactly as it would die at import, with the `Parse error:` prefix the
+    send_to_platform CLI classifies as EXIT_PARSE.
+
+    HOW A SCENE MAPS TO A CLIP ROW
+    ------------------------------
+    By POSITION, verified against `scene_index`. Not by `scene_index` alone,
+    and the reason is that `Clip.scene_index` does not mean the same thing on
+    the two paths that write it:
+
+      * the import path (`create_job`, `:3002`) copies `scene_index` off the
+        dialogue line, which carries the markdown's `### Scene N` integer all
+        the way from `_parse_scene_blocks_new` (`scene_index = int(header
+        .group(1))`) through the assignment row — `prepare_batch_for_video`
+        joins the two with `reparsed_scenes.get(a.scene_index)`, which only
+        works because they are the same number;
+      * `promote_batch_to_video` writes `scene_index=scene_pos`, the 0-based
+        ENUMERATE POSITION over its scene plan.
+
+    So on one path scene "3" is the header number and on the other it is the
+    third scene, and a build whose scenes start at `### Scene 1` has every
+    clip off by one between them. Keying on the number would hand clip 3 clip
+    4's contract on half the jobs in the database.
+
+    What BOTH paths do guarantee is ORDER: `clip_index` is the running
+    position over the flat dialogue list, and that list is built scene by
+    scene in document order, lines in order, on both paths. So the expansion
+    above is compared against the rows positionally, and then PROVED before
+    anything is written:
+
+      1. the count of primary clip rows equals the count the build predicts;
+      2. grouping the rows' `scene_index` values into runs gives the same
+         number of groups, in the same order, with the same sizes as the
+         build's scenes — i.e. the scene boundaries fall at the same clip
+         positions;
+      3. those group values are non-NULL and ascending, which is true of both
+         numbering schemes and of neither shuffled one;
+      4. the markdown's own `### Scene N` numbers are unique. The parser sorts
+         its scenes by that number (`image_platform.py:7327`), so document
+         order and the `ORDER BY scene_index` every promote path uses agree by
+         construction — UNLESS two scenes carry the same number, and then the
+         sort picks between them arbitrarily and nothing downstream can say
+         which clip belongs to which. (The ascending half of the same check is
+         belt-and-braces against that sort ever being dropped.)
+
+    Any of the four failing REFUSES THE WHOLE JOB (409) and writes nothing.
+    A wrong mapping is worse than no mapping: it is silent, and it renders.
+
+    Rows with `clip_role` 'audio_pair' or 'composite_plate' are SKIPPED. They
+    are spawned later by Phase 3a at `clip_index` 100000+/200000+ from their
+    partner, and the import path gives them no contract either; stamping them
+    here would invent a state import cannot produce.
+
+    WHAT AN ABSENT OPT-IN DOES — it is REFUSED, not applied
+    ------------------------------------------------------
+    `update_job_finishing` CLEARS on an absent section and that is right for
+    it: the finishing spec is one job-level value, and removing the section
+    has to be able to mean "stop auto-finishing" rather than "finish the old
+    way forever". This route deliberately does the opposite, for two reasons.
+
+    First, the PARSER already fixes the meaning of a missing opt-in, and it is
+    not "clear". A build with no `CLIP CONTRACT: v1` line is OUT OF SCOPE:
+    `_parse_scene_blocks_new` imports it "exactly as it did before this rule
+    existed" and never judges it. Mirroring the parser is closer parity than
+    mirroring the finishing route.
+
+    Second, the failure modes are not symmetric. Pointing the CLI at the wrong
+    file — an older version of the build, a neighbouring one — is the likeliest
+    mistake either route can suffer. On finishing it lands a visible wrong
+    finish. Here it would un-stamp every clip and hand the job back to legacy
+    inference with nothing on screen to say so, and the next render would be
+    wrong in a way no one is looking for. So: nothing to stamp -> 400, nothing
+    written.
+
+    The ONE clearing that does happen is inside an in-scope build: a text_card
+    scene parses to a NULL declaration (ffmpeg draws it, Flow never sees it),
+    so its clip is written NULL — the same value import writes. It is counted
+    and reported separately.
+    """
+    from image_platform import parse_scene_table
+    import clip_contract as _cc_mod
+
+    job = get_user_job(db, job_id, current_user)  # 404/403 if not the caller's
+
+    try:
+        parsed = parse_scene_table(req.markdown or "")
+    except ValueError as exc:
+        # "Parse error:" prefix = the send_to_platform CLI classifies this as
+        # EXIT_PARSE (2), same as every other parse failure it can receive.
+        raise HTTPException(status_code=400, detail=f"Parse error: {exc}")
+    scenes = parsed.get("scenes") or []
+    if not scenes:
+        raise HTTPException(
+            status_code=400,
+            detail="Parse error: the build has no `### Scene N` storyboard blocks")
+
+    # ---- the opt-in ------------------------------------------------------
+    # Derived from the parse output, not from a second copy of the parser's
+    # `^CLIP CONTRACT: v1$` regex — a duplicated opt-in test is one more thing
+    # to drift. All-None also catches the degenerate in-scope build whose every
+    # scene is a text_card, and there is genuinely nothing to stamp there.
+    if not any(s.get("clip_contract_version") for s in scenes):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This build declares no clip contract — no `CLIP CONTRACT: v1` "
+                "line at column 0, or every scene is a text_card. This endpoint "
+                "only STAMPS contracts; it never clears them, because the "
+                "likeliest cause of an absent opt-in is the wrong file. "
+                "Check the path, or re-import to un-stamp. (v965)"))
+
+    # ---- the markdown's own scene numbering has to be unambiguous ---------
+    order = [s.get("scene_index") for s in scenes]
+    if any(v is None for v in order) or len(set(order)) != len(order) \
+            or list(order) != sorted(order):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Refusing the whole job: the build's `### Scene N` numbers are "
+                f"{order} — not unique and ascending. The parser sorts scenes by "
+                f"that number, so a duplicate or an out-of-order one makes "
+                f"document order ambiguous and the scene-to-clip mapping cannot "
+                f"be proved. (v965)"))
+
+    expected = _v965_scene_per_clip(scenes)
+
+    # ---- the clip rows ---------------------------------------------------
+    all_rows = db.query(Clip).filter(
+        Clip.job_id == job_id).order_by(Clip.clip_index).all()
+    # clip_role is NULL on an ordinary clip, so this filter is written in
+    # Python: a SQL `notin_` drops NULL rows silently.
+    rows = [r for r in all_rows
+            if (r.clip_role or "") not in ("audio_pair", "composite_plate")]
+
+    if len(rows) != len(expected):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Refusing the whole job: the build predicts {len(expected)} "
+                f"clip(s) and the job has {len(rows)} (plus "
+                f"{len(all_rows) - len(rows)} spawned pair/plate row(s), which "
+                f"are never stamped). The build does not describe this job, or "
+                f"its storyboard was edited after promote. Nothing written. "
+                f"(v965)"))
+
+    exp_runs = _v965_runs([pos for pos, _s in expected])
+    row_runs = _v965_runs([r.scene_index for r in rows])
+    row_values = [v for v, _n in row_runs]
+    if [n for _v, n in exp_runs] != [n for _v, n in row_runs]:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Refusing the whole job: the build's scenes hold "
+                f"{[n for _v, n in exp_runs]} clip(s) each and the job's rows "
+                f"group as {[n for _v, n in row_runs]}. The scene boundaries "
+                f"fall at different clip positions, so a positional stamp would "
+                f"give a clip another scene's contract. Nothing written. (v965)"))
+    if any(v is None for v in row_values) \
+            or row_values != sorted(v for v in row_values):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Refusing the whole job: the clip rows' scene_index values run "
+                f"{row_values} — a NULL or an out-of-order value means the rows "
+                f"are not in storyboard order and the mapping cannot be proved. "
+                f"Nothing written. (v965)"))
+
+    # ---- write -----------------------------------------------------------
+    stamped = cleared = unchanged = 0
+    for row, (_pos, scene) in zip(rows, expected):
+        decl = scene.get("clip_contract_json")
+        version = scene.get("clip_contract_version")
+        if decl is not None:
+            # Belt-and-braces, mirroring DialogueLineInput's validator: the
+            # parser builds this THROUGH the model so it cannot be unreadable,
+            # and a value the platform cannot read back must still fail here
+            # rather than on a render slot.
+            try:
+                _cc_mod.ClipContractDeclaration.model_validate_json(decl)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"Parse error: Scene {scene.get('scene_index')}: "
+                            f"clip_contract_json is not a readable clip "
+                            f"contract declaration — {exc}"))
+        before = _v965_read_json(row)          # through the accessor (v965 §5.3)
+        after = decl if version is not None else None
+        row.clip_contract_json = decl
+        row.clip_contract_version = version
+        if after is not None:
+            stamped += 1
+        elif before is not None:
+            cleared += 1
+        if before == after:
+            unchanged += 1
+    db.commit()
+
+    print(f"[v965] job={job_id[:8]} clip contracts updated via API: "
+          f"{len(scenes)} scene(s) -> {len(rows)} clip row(s); "
+          f"{stamped} stamped, {cleared} cleared (text_card), "
+          f"{unchanged} already identical; "
+          f"{len(all_rows) - len(rows)} spawned row(s) skipped", flush=True)
+
+    return {"job_id": job_id, "scenes": len(scenes),
+            "clips_matched": len(rows), "stamped": stamped,
+            "cleared": cleared, "unchanged": unchanged,
+            "skipped_spawned": len(all_rows) - len(rows)}
+
+
 @app.get("/api/autoedit/templates")
 async def autoedit_templates():
     """Style menu for the UI. Local templates + pycaps builtins."""
