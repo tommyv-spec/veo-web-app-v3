@@ -81,10 +81,23 @@ class JobScopeWiring(unittest.TestCase):
             SOURCE)
 
     def test_the_clip_proof_run_guard_is_untouched(self):
-        """FLOW_ONLY_CLIP_IDS keeps its redo-only semantics; this is additive."""
+        """FLOW_ONLY_CLIP_IDS keeps its redo-only semantics; this is additive.
+
+        The guard grew ONE opt-in door (FLOW_CLIP_SCOPE_FIRSTGEN, 2026-09-11),
+        which is why this no longer reads a fixed window of characters after the
+        comment. What it pins is the part that matters and has not changed: with
+        the allowlist set and firstgen NOT asked for, get_pending_job returns
+        None, so every existing caller of FLOW_ONLY_CLIP_IDS behaves as before.
+        The firstgen door's own behaviour is covered in
+        tests/test_flow_clip_scope_firstgen.py.
+        """
         self.assertIn("A clip-scoped proof run must never claim a regular job.", SOURCE)
         idx = SOURCE.index("A clip-scoped proof run must never claim a regular job.")
-        self.assertIn("if FLOW_ONLY_CLIP_IDS:\n        return None", SOURCE[idx:idx + 400])
+        window = SOURCE[idx:idx + 900]
+        self.assertIn(
+            "if FLOW_ONLY_CLIP_IDS:\n        if not FLOW_CLIP_SCOPE_FIRSTGEN:\n"
+            "            return None",
+            window)
 
     def test_the_scope_announces_itself_at_startup(self):
         """A silent scope is unverifiable in a log after the fact."""

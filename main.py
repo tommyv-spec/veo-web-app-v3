@@ -18426,19 +18426,27 @@ async def local_worker_get_pending_job(
     worker_id: Optional[str] = Query(None, description="Worker ID for claiming"),
     exclude: Optional[str] = Query(None, description="Comma-separated job IDs to exclude (already being processed)"),
     arms: Optional[str] = Query(None, description="v959: comma-separated render arms this worker build carries"),
+    clip_ids: Optional[str] = Query(None, description="Exact comma-separated clip allowlist for a scoped first-generation run"),
     db: DBSession = Depends(get_db_session),
     authorized: bool = Depends(verify_local_worker_key)
 ):
     """Get next pending Flow job with all clips.
-    
+
     If worker_id is provided, atomically claims the job for that worker.
     Jobs claimed more than 10 minutes ago without completion are released.
     Pass exclude=id1,id2,... to skip jobs already being processed by this worker.
+    Pass clip_ids=a,b,c to claim the ONE job those clips belong to and receive
+    only those clips (see _scoped_firstgen_claim). A scoped request never falls
+    back to the queue head.
     """
     from sqlalchemy import or_, and_
-    
+
     # Parse exclude list
     exclude_ids = [eid.strip() for eid in exclude.split(",") if eid.strip()] if exclude else []
+    # Raises 422 on malformed input — a bad allowlist must never widen to "no scope".
+    allowed_clip_ids = _parse_worker_clip_ids(clip_ids)
+    _scoped_clips = None
+    _scope_total = None
     
     # Release stale claims (claimed > 10 minutes ago and not started)
     claim_timeout = datetime.utcnow() - timedelta(minutes=10)
@@ -18557,11 +18565,24 @@ async def local_worker_get_pending_job(
         print(f"[Worker] v825 reaper error (non-fatal): {_reap_err}", flush=True)
         db.rollback()
 
+    # Scoped first generation: the job is an OUTPUT of the clip list, never the
+    # queue head. Taking the head is exactly what spent a render on clip 14907
+    # on 2026-09-10. Any failure returns the named error and stops here.
+    if allowed_clip_ids is not None:
+        job, _scoped_clips, _scope_total, _scope_err = _scoped_firstgen_claim(
+            db, allowed_clip_ids, worker_id, "local-worker")
+        if _scope_err is not None:
+            return _scope_err
+    else:
+        job = None
+
     # Build query for available jobs
     # Either: unclaimed, OR claimed by this same worker
     # Exclude any jobs the worker is already processing
     _age_cutoff = job_age_cutoff()
-    if worker_id:
+    if allowed_clip_ids is not None:
+        pass  # already resolved above — never touch the queue on a scoped poll
+    elif worker_id:
         query = db.query(Job).filter(
             Job.backend == 'flow',
             Job.status.in_(['pending', 'queued_for_flow']),
@@ -18636,8 +18657,13 @@ async def local_worker_get_pending_job(
         return {"job": None, "aborted_jobs": aborted_jobs}
     
     print(f"[LocalWorker] Found job {job.id[:8]}, querying clips...", flush=True)
-    clips = db.query(Clip).filter(Clip.job_id == job.id).order_by(Clip.clip_index.asc()).all()
-    print(f"[LocalWorker] Found {len(clips)} clips for job {job.id[:8]}", flush=True)
+    if _scoped_clips is not None:
+        clips = _scoped_clips
+    else:
+        clips = db.query(Clip).filter(Clip.job_id == job.id).order_by(Clip.clip_index.asc()).all()
+        _scope_total = len(clips)
+    print(f"[LocalWorker] Found {len(clips)} clips for job {job.id[:8]} "
+          f"(authoritative total {_scope_total})", flush=True)
     
     # DEBUG: If no clips, check if they exist at all
     if not clips:
@@ -18723,6 +18749,12 @@ async def local_worker_get_pending_job(
             "prefix_short_word": config.get("prefix_short_word", "only"),
             "prefix_short_threshold": config.get("prefix_short_threshold", 15),
             "clips": clips_data,
+            # The job's REAL clip count, from the DB, before any filtering. Under
+            # a scoped run `clips` holds only the allowlisted subset, so every
+            # completion test must read this instead of len(clips).
+            "authoritative_total_clips": _scope_total,
+            "scope_firstgen": allowed_clip_ids is not None,
+            "scoped_clip_ids": list(allowed_clip_ids) if allowed_clip_ids else None,
             "claimed_by": job.claimed_by_worker
         },
         "aborted_jobs": aborted_jobs,
@@ -18745,6 +18777,230 @@ def _parse_worker_clip_ids(raw: Optional[str]):
     if not values:
         raise HTTPException(status_code=422, detail="clip_ids contained no clip IDs")
     return sorted(set(values))
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# EXACT-CLIP FIRST GENERATION — scoped claim + scoped release.
+#
+# Why this exists: FLOW_ONLY_CLIP_IDS could only ever reach the redo endpoint,
+# so a clip that had never generated was unreachable, and FLOW_ONLY_JOB_IDS
+# runs the WHOLE job. Rendering 4 clips of an 80-clip job (per-clip model
+# comparison) had no route at all.
+#
+# Two things here are safety-critical, and both are about the OTHER 76 clips:
+#
+#   1. `authoritative_total_clips` is counted from the DB BEFORE filtering.
+#      The worker's completion tests compare a completed-count against "the
+#      job's clip count"; if that count came from the FOUR-item filtered array,
+#      four finished clips anywhere in the eighty would end the whole job.
+#
+#   2. `_scoped_release_job` hands the parent back. The claim path marks the
+#      job `processing`, and the job-status endpoints clear the claim ONLY for
+#      completed/failed/cancelled — so without an explicit release a scoped run
+#      strands the job either claimed-forever (`pending`) or invisible to the
+#      poll (`processing`).
+#
+# Both routes (local-worker, user-worker) call these same two helpers, so the
+# lanes cannot drift apart.
+# ──────────────────────────────────────────────────────────────────────────
+
+# The statuses the pending poll actually selects. Checked against BOTH pending
+# endpoints' queries (`Job.status.in_([...])`), not assumed.
+_SCOPE_CLAIMABLE_JOB_STATUSES = ('pending', 'queued_for_flow')
+
+# What a scoped run may release: the claimable pair plus `processing`, which is
+# what the worker sets on itself the moment it starts the job.
+_SCOPE_RELEASABLE_JOB_STATUSES = ('pending', 'queued_for_flow', 'processing')
+
+
+def _scope_error(code: str, message: str, **detail):
+    """One shape for every named scoped-claim failure.
+
+    Carried on HTTP 200 with `job: None` deliberately. The worker's
+    `api_request_ex` throws away the body of any non-200, so a 409 would reach
+    it as an unnamed `None` and it could not tell UNKNOWN_CLIP_ID from
+    CLAIM_RACE_LOST. `job` is None in every one of them, which is the part that
+    matters: there is no queue-head fallback on any failure.
+    """
+    print(f"[Scope] scoped firstgen claim refused — {code}: {message}", flush=True)
+    return {
+        "job": None,
+        "aborted_jobs": [],
+        "scope_error": code,
+        "scope_error_message": message,
+        "scope_error_detail": detail,
+    }
+
+
+def _scoped_release_job(db, job_id: str, worker_id: Optional[str],
+                        user_id: Optional[str] = None, lane: str = "local-worker"):
+    """Put a scoped run's parent job back in the queue, atomically.
+
+    Conditional on the claim STILL belonging to `worker_id`, so a claim-race
+    loser cannot release the winner's job. Returns the number of rows changed:
+    0 means "not ours (any more)" and is a normal, non-fatal outcome.
+    """
+    if not worker_id:
+        return 0
+    now = datetime.utcnow()
+    q = db.query(Job).filter(
+        Job.id == job_id,
+        Job.claimed_by_worker == worker_id,
+        Job.status.in_(list(_SCOPE_RELEASABLE_JOB_STATUSES)),
+    )
+    if user_id is not None:
+        q = q.filter(Job.user_id == user_id)
+    changed = q.update(
+        {
+            Job.status: 'pending',
+            Job.claimed_by_worker: None,
+            Job.claimed_at: None,
+            Job.updated_at: now,
+        },
+        synchronize_session=False,
+    )
+    db.commit()
+    # TEMP DIAG (remove once operator-side evidence lands): proves the release
+    # actually reached a row, and on which lane.
+    print(f"[Scope] [{lane}] scoped release of job {str(job_id)[:8]} by {worker_id}: "
+          f"{changed} row(s) changed", flush=True)
+    return changed
+
+
+def _scoped_firstgen_claim(db, allowed_clip_ids, worker_id: Optional[str],
+                           lane: str, user_id: Optional[str] = None):
+    """Resolve an exact clip allowlist to ONE job and claim that job.
+
+    Returns `(job, clips, authoritative_total_clips, error)`. On any failure the
+    first three are None and `error` is a `_scope_error` body — the caller
+    returns it unchanged and NEVER falls through to the queue head.
+    """
+    from sqlalchemy import or_
+
+    if not worker_id:
+        return None, None, None, _scope_error(
+            "SCOPED_CLAIM_REQUIRES_WORKER_ID",
+            "a clip-scoped first-generation claim must name its worker",
+            clip_ids=list(allowed_clip_ids),
+        )
+
+    rows_q = db.query(Clip).join(Job, Clip.job_id == Job.id).filter(
+        Clip.id.in_(list(allowed_clip_ids)),
+        Job.backend == 'flow',
+    )
+    if user_id is not None:
+        rows_q = rows_q.filter(Job.user_id == user_id)
+    rows = rows_q.all()
+
+    found = {c.id for c in rows}
+    missing = [cid for cid in allowed_clip_ids if cid not in found]
+    if missing:
+        return None, None, None, _scope_error(
+            "UNKNOWN_CLIP_ID",
+            f"clip id(s) {missing} do not exist on a Flow job this caller owns",
+            missing_clip_ids=missing,
+        )
+
+    job_ids = sorted({str(c.job_id) for c in rows})
+    if len(job_ids) != 1:
+        return None, None, None, _scope_error(
+            "CLIPS_SPAN_MULTIPLE_JOBS",
+            f"the clip allowlist spans {len(job_ids)} jobs: {job_ids}",
+            job_ids=job_ids,
+        )
+
+    job_id = job_ids[0]
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if job is None:
+        return None, None, None, _scope_error(
+            "JOB_NOT_CLAIMABLE",
+            f"job {job_id} behind the clip allowlist no longer exists",
+            job_id=job_id,
+        )
+
+    status = (job.status or '')
+    if status not in _SCOPE_CLAIMABLE_JOB_STATUSES:
+        return None, None, None, _scope_error(
+            "JOB_NOT_CLAIMABLE",
+            f"job {job_id} is '{status}', not one of {list(_SCOPE_CLAIMABLE_JOB_STATUSES)}",
+            job_id=job_id, job_status=status,
+            claimed_by_worker=job.claimed_by_worker,
+        )
+    if job.claimed_by_worker not in (None, worker_id):
+        return None, None, None, _scope_error(
+            "JOB_NOT_CLAIMABLE",
+            f"job {job_id} is already claimed by {job.claimed_by_worker}",
+            job_id=job_id, job_status=status,
+            claimed_by_worker=job.claimed_by_worker,
+        )
+
+    # The authoritative count, taken from the DB BEFORE any filtering. This is
+    # the number the worker's completion arithmetic must use; deriving it from
+    # the filtered `clips` array is the bug this whole design exists to stop.
+    authoritative_total_clips = db.query(Clip).filter(Clip.job_id == job.id).count()
+
+    now = datetime.utcnow()
+    claimed = db.query(Job).filter(
+        Job.id == job.id,
+        Job.status.in_(list(_SCOPE_CLAIMABLE_JOB_STATUSES)),
+        or_(Job.claimed_by_worker.is_(None), Job.claimed_by_worker == worker_id),
+    ).update(
+        {Job.claimed_by_worker: worker_id, Job.claimed_at: now, Job.updated_at: now},
+        synchronize_session=False,
+    )
+    db.commit()
+    if not claimed:
+        return None, None, None, _scope_error(
+            "CLAIM_RACE_LOST",
+            f"job {job_id} was claimed by another worker between the check and the claim",
+            job_id=job_id,
+        )
+    db.refresh(job)
+
+    clips = db.query(Clip).filter(
+        Clip.job_id == job.id,
+        Clip.id.in_(list(allowed_clip_ids)),
+    ).order_by(Clip.clip_index.asc()).all()
+
+    # Fail CLOSED. If the filter did not produce exactly the requested set, or
+    # the authoritative count is impossible, refuse the job and hand it back —
+    # never serve an unfiltered or half-filtered list.
+    if (len(clips) != len(set(allowed_clip_ids))
+            or authoritative_total_clips < len(clips)):
+        _scoped_release_job(db, job.id, worker_id, user_id=user_id, lane=lane)
+        return None, None, None, _scope_error(
+            "SCOPE_FILTER_FAILED",
+            f"job {job_id} filter returned {len(clips)} of "
+            f"{len(set(allowed_clip_ids))} requested clip(s); job released untouched",
+            job_id=job_id,
+            returned=len(clips),
+            requested=len(set(allowed_clip_ids)),
+            authoritative_total_clips=authoritative_total_clips,
+        )
+
+    print(f"[Scope] [{lane}] scoped firstgen claim OK — job {job_id[:8]} "
+          f"clips {[c.id for c in clips]} of {authoritative_total_clips} total", flush=True)
+    return job, clips, authoritative_total_clips, None
+
+
+class ScopedReleaseRequest(BaseModel):
+    worker_id: Optional[str] = None
+
+
+@app.post("/api/local-worker/jobs/{job_id}/scoped-release")
+async def local_worker_scoped_release_job(
+    job_id: str,
+    payload: ScopedReleaseRequest,
+    db: DBSession = Depends(get_db_session),
+    authorized: bool = Depends(verify_local_worker_key)
+):
+    """Hand a scoped run's parent job back to the queue (see _scoped_release_job)."""
+    changed = _scoped_release_job(db, job_id, payload.worker_id, lane="local-worker")
+    return {
+        "released": bool(changed),
+        "job_id": job_id,
+        "reason": None if changed else "CLAIM_NOT_OURS",
+    }
 
 
 @app.get("/api/local-worker/clips/redo-pending")
@@ -21034,13 +21290,23 @@ async def user_worker_get_pending_job(
     worker_id: Optional[str] = Query(None),
     exclude: Optional[str] = Query(None),
     arms: Optional[str] = Query(None, description="v959: comma-separated render arms this worker build carries"),
+    clip_ids: Optional[str] = Query(None, description="Exact comma-separated clip allowlist for a scoped first-generation run"),
     db: DBSession = Depends(get_db_session),
     user_id: str = Depends(verify_user_worker_token)
 ):
-    """Get next pending Flow job for THIS user only."""
+    """Get next pending Flow job for THIS user only.
+
+    Mirrors the local-worker endpoint's scoped first-generation contract: pass
+    clip_ids=a,b,c to claim the ONE job those clips belong to and receive only
+    those clips, with no queue-head fallback on any failure.
+    """
     from sqlalchemy import or_
-    
+
     exclude_ids = [eid.strip() for eid in exclude.split(",") if eid.strip()] if exclude else []
+    # Raises 422 on malformed input — a bad allowlist must never widen to "no scope".
+    allowed_clip_ids = _parse_worker_clip_ids(clip_ids)
+    _scoped_clips = None
+    _scope_total = None
     
     # Release stale claims
     claim_timeout = datetime.utcnow() - timedelta(minutes=10)
@@ -21090,9 +21356,21 @@ async def user_worker_get_pending_job(
     if stranded_jobs:
         db.commit()
 
+    # Scoped first generation — mirror of the local-worker branch. The job is an
+    # OUTPUT of the clip list; the queue is never consulted.
+    if allowed_clip_ids is not None:
+        job, _scoped_clips, _scope_total, _scope_err = _scoped_firstgen_claim(
+            db, allowed_clip_ids, worker_id, "user-worker", user_id=user_id)
+        if _scope_err is not None:
+            return _scope_err
+    else:
+        job = None
+
     # Query for available jobs - SCOPED TO USER
     _age_cutoff = job_age_cutoff()
-    if worker_id:
+    if allowed_clip_ids is not None:
+        pass  # already resolved above — never touch the queue on a scoped poll
+    elif worker_id:
         query = db.query(Job).filter(
             Job.user_id == user_id,
             Job.backend == 'flow',
@@ -21164,8 +21442,12 @@ async def user_worker_get_pending_job(
     
     # Build response (same format as local-worker)
     base_url = str(request.base_url).rstrip('/')
-    clips = db.query(Clip).filter(Clip.job_id == job.id).order_by(Clip.clip_index).all()
-    
+    if _scoped_clips is not None:
+        clips = _scoped_clips
+    else:
+        clips = db.query(Clip).filter(Clip.job_id == job.id).order_by(Clip.clip_index).all()
+        _scope_total = len(clips)
+
     job_config = {}
     if job.config_json:
         try:
@@ -21225,6 +21507,11 @@ async def user_worker_get_pending_job(
             "prefix_short_word": job_config.get("prefix_short_word", "only"),
             "prefix_short_threshold": job_config.get("prefix_short_threshold", 15),
             "clips": clips_data,
+            # See the local-worker endpoint: the job's REAL clip count, from the
+            # DB, before any filtering. Completion tests read this, not len(clips).
+            "authoritative_total_clips": _scope_total,
+            "scope_firstgen": allowed_clip_ids is not None,
+            "scoped_clip_ids": list(allowed_clip_ids) if allowed_clip_ids else None,
             "claimed_by": job.claimed_by_worker,
         },
         "aborted_jobs": aborted_jobs,
@@ -21675,9 +21962,30 @@ async def user_worker_update_job_status(
     if update.flow_project_url:
         job.flow_project_url = update.flow_project_url
     job.updated_at = datetime.utcnow()
-    
+
     db.commit()
     return {"success": True, "job_id": job_id, "status": job.status}
+
+
+@app.post("/api/user-worker/jobs/{job_id}/scoped-release")
+async def user_worker_scoped_release_job(
+    job_id: str,
+    payload: ScopedReleaseRequest,
+    db: DBSession = Depends(get_db_session),
+    user_id: str = Depends(verify_user_worker_token)
+):
+    """Mirror of the local-worker scoped release, scoped to this user's jobs.
+
+    Lives down here rather than beside its twin only because
+    `verify_user_worker_token` is defined in this section of the file.
+    """
+    changed = _scoped_release_job(db, job_id, payload.worker_id,
+                                  user_id=user_id, lane="user-worker")
+    return {
+        "released": bool(changed),
+        "job_id": job_id,
+        "reason": None if changed else "CLAIM_NOT_OURS",
+    }
 
 
 # v701-prefix-fix — user-worker policy-violation endpoint mirrors the

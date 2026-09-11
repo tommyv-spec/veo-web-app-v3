@@ -5495,6 +5495,146 @@ if FLOW_ONLY_CLIP_IDS:
         flush=True,
     )
 
+
+def _parse_flow_clip_scope_firstgen(raw, clip_ids):
+    """The opt-in that lets an exact clip allowlist reach FIRST generation.
+
+    A SEPARATE variable on purpose. FLOW_ONLY_CLIP_IDS carries a documented
+    guarantee — redo-endpoint only, so it "can never render a clip that has
+    never generated" — and callers rely on it. Widening that variable in place
+    would take the guarantee away from every existing invocation with no way to
+    ask for the old behaviour. Absent this second variable, nothing changes.
+
+    Fails closed: an unrecognised value raises, and asking for firstgen without
+    an allowlist raises rather than becoming an unscoped worker.
+    """
+    value = str(raw or "").strip().lower()
+    if not value or value in ("0", "false", "no", "off"):
+        return False
+    if value not in ("1", "true", "yes", "on"):
+        raise RuntimeError(
+            "FLOW_CLIP_SCOPE_FIRSTGEN must be 1/0 (true/false, yes/no, on/off)"
+        )
+    if not clip_ids:
+        raise RuntimeError(
+            "FLOW_CLIP_SCOPE_FIRSTGEN was set without FLOW_ONLY_CLIP_IDS — "
+            "a first-generation scope with no allowlist is an unscoped worker"
+        )
+    return True
+
+
+FLOW_CLIP_SCOPE_FIRSTGEN = _parse_flow_clip_scope_firstgen(
+    os.environ.get("FLOW_CLIP_SCOPE_FIRSTGEN"), FLOW_ONLY_CLIP_IDS)
+if FLOW_CLIP_SCOPE_FIRSTGEN:
+    print(
+        "[Scope] Exact clip FIRST-GENERATION run active: the parent job is derived "
+        "from the clip list, only these clips render, and the job is released "
+        "(never completed) when the subset finishes",
+        flush=True,
+    )
+
+
+def _scoped_firstgen_active():
+    """True only for an exact-clip run that is allowed to first-generate."""
+    return bool(FLOW_ONLY_CLIP_IDS) and bool(FLOW_CLIP_SCOPE_FIRSTGEN)
+
+
+# Parent jobs this scoped run has claimed. Every terminal AND abort path hands
+# them back — see _scoped_firstgen_release_parent_jobs.
+_SCOPED_FIRSTGEN_CLAIMED_JOBS = set()
+_SCOPED_FIRSTGEN_RELEASE_LOCK = threading.Lock()
+
+
+def _scoped_firstgen_note_claim(job_id):
+    if not job_id:
+        return
+    with _SCOPED_FIRSTGEN_RELEASE_LOCK:
+        _SCOPED_FIRSTGEN_CLAIMED_JOBS.add(str(job_id))
+
+
+def _scoped_firstgen_release_parent_jobs(reason="exit"):
+    """Hand every claimed parent job back to the queue. Idempotent.
+
+    This is the other half of "never mark the job completed". The worker sets
+    the job to `processing` on claim, and the job-status endpoints clear the
+    claim ONLY for completed/failed/cancelled — so a scoped run that just walks
+    away strands the job: `pending` keeps the claim forever, `processing` hides
+    it from the pending poll. Either way the other clips become unreachable.
+
+    Conditional server-side on the claim still being ours, so a claim-race loser
+    cannot release the winner's job.
+    """
+    with _SCOPED_FIRSTGEN_RELEASE_LOCK:
+        pending = sorted(_SCOPED_FIRSTGEN_CLAIMED_JOBS)
+        _SCOPED_FIRSTGEN_CLAIMED_JOBS.clear()
+    for job_id in pending:
+        try:
+            result = api_request(
+                "POST", f"/jobs/{job_id}/scoped-release", {"worker_id": WORKER_ID})
+            released = bool((result or {}).get("released"))
+            print(f"[Scope] parent job {job_id[:8]} release ({reason}): "
+                  f"{'released' if released else 'NOT ours — left alone'}", flush=True)
+        except Exception as exc:
+            print(f"[Scope] parent job {job_id[:8]} release ({reason}) FAILED: {exc}",
+                  flush=True)
+    return pending
+
+
+def _job_authoritative_total_clips(job, clips):
+    """The job's REAL clip count — never the length of a filtered list.
+
+    Under a scoped run the worker holds four of eighty clips, and the completion
+    tests compare a completed-count taken across the WHOLE job against "the clip
+    count". Read that from the filtered array and four finished clips anywhere
+    in the eighty end the job and strand seventy-six.
+    """
+    for key in ("authoritative_total_clips", "_authoritative_total_clips"):
+        try:
+            value = int((job or {}).get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return len(clips or [])
+
+
+def _scoped_firstgen_signal_handler(signum, _frame):
+    """Release the parent job on Ctrl+C / SIGTERM, then exit normally.
+
+    Raising SystemExit unwinds the main thread, so the atexit hook below still
+    runs — release is idempotent, so the double call costs one no-op.
+    """
+    print(f"[Scope] signal {signum} — releasing the parent job before exit", flush=True)
+    _scoped_firstgen_release_parent_jobs(reason=f"signal-{signum}")
+    raise SystemExit(128 + int(signum))
+
+
+def _install_scoped_firstgen_release_hooks():
+    """Cover every terminal AND abort path with one release.
+
+    atexit covers the three that end the process from inside Python — the subset
+    finishing (SystemExit(0)), a clip failure that ends the run, and an unhandled
+    worker exception. The signal handlers cover SIGINT (Ctrl+C) and SIGTERM.
+    What it cannot cover is SIGKILL / os._exit; those are left to the server's
+    existing stale-claim and v921 stranded-job sweeps.
+    """
+    import atexit as _atexit
+    import signal as _signal
+
+    _atexit.register(_scoped_firstgen_release_parent_jobs, "atexit")
+    for _sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        _sig = getattr(_signal, _sig_name, None)
+        if _sig is None:
+            continue
+        try:
+            _signal.signal(_sig, _scoped_firstgen_signal_handler)
+        except (ValueError, OSError, RuntimeError) as _exc:
+            print(f"[Scope] could not install {_sig_name} release hook: {_exc}", flush=True)
+
+
+if FLOW_CLIP_SCOPE_FIRSTGEN:
+    _install_scoped_firstgen_release_hooks()
+
 # Base directory for the worker
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -8761,7 +8901,17 @@ def mark_clip_downloaded(cache, job_id, clip_index):
 
 
 def mark_job_completed(cache, job_id):
-    """Mark job as fully completed"""
+    """Mark job as fully completed.
+
+    Refused on a scoped first-generation run for the same reason as the server
+    side: the cache is CONSULTED by the main loop (`is_job_completed` → skip),
+    and it outlives the run, so a four-clip proof run writing 'completed' here
+    would make a later GENERAL worker on this machine skip the other clips.
+    """
+    if _scoped_firstgen_active():
+        print(f"[Scope] REFUSED to cache job {str(job_id)[:8]} as completed — "
+              f"this run only saw {len(FLOW_ONLY_CLIP_IDS)} of its clips", flush=True)
+        return
     if job_id in cache['jobs']:
         cache['jobs'][job_id]['status'] = 'completed'
         cache['jobs'][job_id]['completed_at'] = datetime.now().isoformat()
@@ -11589,6 +11739,128 @@ def _scoped_flow_work_is_terminal():
     return True
 
 
+# A scoped firstgen run that keeps being told JOB_NOT_CLAIMABLE is waiting on
+# something that may never free up (e.g. the job already ended). Bounded, so it
+# stops instead of polling forever.
+_SCOPED_FIRSTGEN_UNCLAIMABLE_LIMIT = 60
+_scoped_firstgen_unclaimable_polls = [0]
+
+# Failures there is no point retrying — the request itself can never be
+# satisfied. Everything else is left to the poll loop.
+_SCOPED_FIRSTGEN_FATAL_ERRORS = (
+    "UNKNOWN_CLIP_ID",
+    "CLIPS_SPAN_MULTIPLE_JOBS",
+    "SCOPED_CLAIM_REQUIRES_WORKER_ID",
+    "SCOPE_FILTER_FAILED",
+)
+
+# A scoped firstgen run claims ONE job, ONCE. The poll loop re-enters
+# get_pending_job after the subset is submitted, and the server's scoped branch
+# does not honour `exclude` (the job is derived from the clips, not the queue),
+# so without this the same job would be re-claimed and re-submitted in a tight
+# loop until its clips went terminal. One-shot is also the fail-closed choice:
+# a scoped run that went wrong stops rather than retrying by itself.
+_SCOPED_FIRSTGEN_JOB_TAKEN = [None]
+
+
+def _get_scoped_firstgen_job(exclude_ids=None):
+    """Claim the ONE job the exact clip allowlist resolves to, filtered.
+
+    Belt-and-braces, exactly like get_redo_clips: the server filters, and then
+    the worker re-filters and LOGS anything unexpected. The log line is not
+    decoration — it is how a server-side filter regression becomes visible
+    instead of silent.
+
+    Fails CLOSED throughout. If the filter cannot be applied for any reason, the
+    job is released and the run stops; it is never worked with an unfiltered or
+    part-filtered list.
+    """
+    if _SCOPED_FIRSTGEN_JOB_TAKEN[0] is not None:
+        return None
+    if exclude_ids and any(str(e) == str(_SCOPED_FIRSTGEN_JOB_TAKEN[0])
+                           for e in exclude_ids):
+        return None
+
+    url = (f"/jobs/pending?worker_id={WORKER_ID}&{_worker_arms_q()}"
+           f"&clip_ids={_url_quote(_flow_only_clip_ids_q())}")
+    result = api_request("GET", url)
+
+    if not isinstance(result, dict):
+        # Network/HTTP failure — the poll loop retries. No fallback happens
+        # anywhere on this path, so there is nothing unsafe about waiting.
+        return None
+
+    for jid in result.get("aborted_jobs", []) or []:
+        if not is_job_aborted(jid):
+            print(f"[API] 🛑 Abort signal for job {jid[:8]}... — will stop processing", flush=True)
+        mark_job_aborted(jid)
+
+    scope_error = result.get("scope_error")
+    if scope_error:
+        print(f"[Scope] scoped firstgen claim refused: {scope_error} — "
+              f"{result.get('scope_error_message')}", flush=True)
+        if scope_error in _SCOPED_FIRSTGEN_FATAL_ERRORS:
+            raise SystemExit(1)
+        _scoped_firstgen_unclaimable_polls[0] += 1
+        if _scoped_firstgen_unclaimable_polls[0] >= _SCOPED_FIRSTGEN_UNCLAIMABLE_LIMIT:
+            print(f"[Scope] parent job stayed unclaimable for "
+                  f"{_scoped_firstgen_unclaimable_polls[0]} polls — giving up", flush=True)
+            raise SystemExit(1)
+        return None
+    _scoped_firstgen_unclaimable_polls[0] = 0
+
+    job = result.get("job")
+    if not isinstance(job, dict) or not job.get("id"):
+        return None
+
+    job_id = str(job["id"])
+    # Note the claim BEFORE any validation below: once the server has claimed
+    # the job for us, every exit path from here on owes it a release.
+    _scoped_firstgen_note_claim(job_id)
+
+    def _refuse(why):
+        print(f"[Scope] REFUSING job {job_id[:8]} — {why}; releasing it untouched",
+              flush=True)
+        _scoped_firstgen_release_parent_jobs(reason="refused")
+        raise SystemExit(1)
+
+    clips = job.get("clips")
+    if not isinstance(clips, list) or not clips:
+        _refuse("the response carried no clip list")
+    if any(not isinstance(c, dict) or c.get("id") is None for c in clips):
+        _refuse("a returned clip carried no id, so the allowlist cannot be applied")
+
+    allowed = set(FLOW_ONLY_CLIP_IDS)
+    unexpected = [c.get("id") for c in clips if c.get("id") not in allowed]
+    if unexpected:
+        print(f"[Scope] BLOCKED {len(unexpected)} unlisted clip(s) returned by server: "
+              f"{unexpected}", flush=True)
+    clips = [c for c in clips if c.get("id") in allowed]
+    if {c.get("id") for c in clips} != allowed:
+        _refuse(f"the filtered list is {sorted(c.get('id') for c in clips)}, "
+                f"not the requested {sorted(allowed)}")
+
+    total = job.get("authoritative_total_clips")
+    try:
+        total = int(total)
+    except (TypeError, ValueError):
+        total = 0
+    if total <= 0 or total < len(clips):
+        _refuse(f"authoritative_total_clips is {job.get('authoritative_total_clips')!r}, "
+                f"which cannot be the real size of a job holding {len(clips)} clip(s)")
+
+    job["clips"] = clips
+    job["_authoritative_total_clips"] = total
+    job["_scope_firstgen"] = True
+    _SCOPED_FIRSTGEN_JOB_TAKEN[0] = job_id
+    print(f"[Scope] scoped firstgen job {job_id[:8]}: rendering clip ids "
+          f"{[c.get('id') for c in clips]} "
+          f"(indices {[c.get('clip_index') for c in clips]}) "
+          f"of {total} clip(s) in the job — the other {total - len(clips)} are not touched",
+          flush=True)
+    return job
+
+
 def get_pending_job(exclude_ids=None):
     """Get next pending job from API and claim it for this worker.
 
@@ -11597,8 +11869,15 @@ def get_pending_job(exclude_ids=None):
     """
     # A clip-scoped proof run must never claim a regular job. Its only input is
     # the server-filtered redo endpoint below.
+    #
+    # FLOW_CLIP_SCOPE_FIRSTGEN is the one exception, and it does NOT take the
+    # queue head: it asks the server to resolve the allowlist to the ONE job
+    # those clips belong to and claim THAT. Taking the head is precisely what
+    # spent a render on clip 14907 on 2026-09-10.
     if FLOW_ONLY_CLIP_IDS:
-        return None
+        if not FLOW_CLIP_SCOPE_FIRSTGEN:
+            return None
+        return _get_scoped_firstgen_job(exclude_ids=exclude_ids)
 
     # FLOW_ONLY_JOB_IDS — the PRODUCTION job scope (2026-09-07).
     #
@@ -11851,7 +12130,17 @@ def update_job_status(job_id, status, error_message=None, retries=3):
     (so processing loops exit cleanly at their next check_abort) and
     return without retrying. Retrying a deleted job's endpoint is
     pointless and would cause the HOT-account spiral we saw pre-v455.
+
+    A scoped first-generation run may NEVER mark a job completed. This is the
+    choke point on purpose: seven call sites in this file end a job, and every
+    one of them reasons from the clip list the worker holds — which under a
+    scope is four of eighty. Guarding here means a new call site cannot miss it.
     """
+    if status == 'completed' and _scoped_firstgen_active():
+        print(f"[Scope] REFUSED to mark job {str(job_id)[:8]} completed — this run "
+              f"only ever saw {len(FLOW_ONLY_CLIP_IDS)} clip(s) of it and has no "
+              f"authority to end it", flush=True)
+        return None
     data = {"status": status, "error_message": error_message}
     for attempt in range(retries):
         result, code = api_request_ex("POST", f"/jobs/{job_id}/status", data)
@@ -27923,8 +28212,17 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                   f"{[c.get('clip_index') for c in _generating_clips]}", flush=True)
 
         if not _generating_clips:
-            # All confirmed complete in DB — mark done and exit
-            print(f"[Flow] ✅ All {len(clips)} clips confirmed completed in DB — marking job done.", flush=True)
+            # All confirmed complete in DB — mark done and exit.
+            # _generating_clips is built by matching the FRESH job-wide statuses
+            # back onto the clip list this worker holds, so under a scope it can
+            # only ever see the scoped subset. update_job_status refuses the
+            # 'completed' below on a scoped run; this line says so out loud.
+            _total = _job_authoritative_total_clips(job if isinstance(job, dict) else {}, clips)
+            if _scoped_firstgen_active():
+                print(f"[Scope] scoped subset ({len(clips)} of {_total} clip(s)) is done — "
+                      f"NOT marking job {job_id[:8]} completed", flush=True)
+            else:
+                print(f"[Flow] ✅ All {len(clips)} clips confirmed completed in DB — marking job done.", flush=True)
             update_job_status(job_id, 'completed')
             mark_job_completed(cache, job_id)
             try:
@@ -32208,10 +32506,14 @@ def main_multi_coordinator(accounts):
                         if job_status:
                             all_clips = job_status.get('clips', [])
                             completed = sum(1 for c in all_clips if c.get('status') in ('completed', 'approved'))
-                            if completed >= len(clips):
+                            # `completed` counts the WHOLE job; `clips` may be a
+                            # filtered subset. Comparing the two is how four
+                            # finished clips anywhere in eighty would end the job.
+                            _total = _job_authoritative_total_clips(job, clips)
+                            if completed >= _total:
                                 update_job_status(job_id, 'completed')
                                 mark_job_completed(cache, job_id)
-                                print(f"  All {len(clips)} clips completed!")
+                                print(f"  All {_total} clips completed!")
                     except Exception as check_err:
                         print(f"[Coordinator] ⚠ Error checking job completion: {check_err}", flush=True)
                 
