@@ -304,7 +304,18 @@ def build_index_buckets(text: str) -> tuple[dict[str, dict[str, int]], dict[str,
 
     c0 = pos.get("C")
     if b0 is not None:
-        prose(b0, (c0 if c0 is not None else end), "B")
+        b_stop = (c0 if c0 is not None else end)
+        # §B became a ROUTER TABLE on 2026-09-11. Read the first cell of each row, the
+        # way §A has always been read; fall back to the '·'-prose form for an older
+        # copy of the file. Reading the whole section instead would pull ids out of the
+        # pointer column and invent rules the table never listed.
+        rows_b = [l for l in lines[b0:b_stop]
+                  if l.lstrip().startswith("|") and l.count("|") >= 2]
+        if rows_b:
+            for l in rows_b:
+                add_cell(l.lstrip().split("|")[1], "B")
+        else:
+            prose(b0, b_stop, "B")
     if c0 is not None:
         c_stop = sup_i if (sup_i is not None and c0 < sup_i < end) else end
         prose(c0, c_stop, "C")
