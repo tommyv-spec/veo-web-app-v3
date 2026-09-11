@@ -46,6 +46,11 @@
         "what": "four APPLY lines that described a DIFFERENT rule than the section they sat in: v736h.1 (short-prompt economy) carried the face-placement instruction while v736.1 (the DNA restatement and 7 invariants) carried the prompt-economy one - the two were SWAPPED; v751 (the Veo-to-Image semantic consistency gate) repeated v750's formatting rule almost verbatim; v833.1 (the 2026-07-25 relaxation allowing dated day stamps) carried a crop-and-framing instruction and never mentioned the relaxation it exists to record",
         "superseded_by": "corrected in place 2026-09-11, each line rewritten from its own section's content (the length gate and six-block order for v736h.1; the seven invariants read as the spectacle-prop family's contract per the 2026-08-30 F3 amendment for v736.1; the banned-drift rule for v751; the day-stamp relaxation for v833.1)",
         "why": "this is the v736a class - the error found during phase 4, where an APPLY line about keeping the hands active was written under the Anti-Sense Metaphor Ban. No amendment is involved, so check_apply_amendments.py cannot see it; the only way to find these is to read the section and ask whether the instruction is about THAT rule. Found by checking every APPLY line that claims to cover a sub-rule which turns out to carry its own APPLY line, which is a contradiction. An instruction under the wrong subject is worse than a missing one, because it reads as authoritative. Rule coverage unchanged: no heading moved, and check_rule_index.py stays PASS."
+      },
+      {
+        "what": "four base-rule APPLY lines whose \"(covers X)\" parenthetical named a sub-rule that carries its OWN APPLY line — v698A, v736, v750 and v833",
+        "superseded_by": "the same lines rewritten 2026-09-11 as POINTERS instead of cover-claims",
+        "why": "a wrong cover-claim makes a reader skip a rule that has its own instruction. v751 is a separate gate (the Veo prompt's actions must match the start and end frames) and v750 claimed to cover it; v833.1 is the 2026-07-25 relaxation allowing dated day stamps and v833 claimed to cover it; v698A.1 and v698A.2 each carry their own line and v698A claimed both; v736's parenthetical named v736h.1 and v736.1, whose lines had just been corrected and now stand on their own. Each replacement says explicitly that the sub-rules carry their own instructions and must be read. Rule coverage unchanged; check_rule_index.py stays PASS."
       }
     ],
     "retired_line_sha256_16": [
@@ -179,7 +184,11 @@
       "62e8e8b7eabc1d55",
       "88a73b0c62fad944",
       "e3f466d13ed51626",
-      "9f4dae297355097f"
+      "9f4dae297355097f",
+      "86be03d21952acba",
+      "29ec38a243285164",
+      "6ebd62983263957b",
+      "17a728f45c2f0bdb"
     ]
   },
   "template_new_format.md": {

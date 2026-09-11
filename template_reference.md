@@ -6004,7 +6004,7 @@ print('ALL v696 + v697 GATES PASS' if not errors else 'FAIL:\n  - ' + '\n  - '.j
 
 ### v698A — per-scene clip-pair for voiceover-over-b-roll
 
-**APPLY:** (covers v698a.1, v698a.2 and v698a.3) author a voiceover scene as a clip PAIR — the visual clip renders silent and its `voiceover_anchor` sibling carries the voice — and place any cutaway on the words actually heard.
+**APPLY:** author a voiceover scene as a clip PAIR — the visual clip renders silent and its `voiceover_anchor` sibling carries the voice. v698A.1 (author BOTH halves; the pair is made at render time) and v698A.2 (cutaways land on the words actually heard) carry their own instructions — read them, this line does not replace them.
 
 **Surfaced 2026-05-10** as the lift-side companion to v681's deferred voiceover handling. Since v681, scenes where the persona's face is NOT visible at clip-start (recipe b-roll, VFX overlays, hands-only close-ups) had to be authored as `speaker: silent` and the source's voiceover was DROPPED in our re-creation. The snapinsta donut-recipe decode (2026-05-09) made the cost obvious — 8 silent b-roll scenes lost ~40s of voiceover narration that's central to the source's hook + recipe pacing + cortisol-mechanism framing.
 
@@ -11805,7 +11805,7 @@ if len(request_to_node) > REQUEST_TO_NODE_CAP:
 
 ### v736 — Spectacle-over-logic discipline (v736a + v736b + v736c + v736d umbrella)
 
-**APPLY:** (covers v736h, v736h.1 and v736.1; v736a is the metaphor ban, below) UNIVERSAL and machine-enforced is v736h.1 - prompt economy, the six-block render order, the three-layer depth limit, the detail budget, the meta-ban and the beat-ban. Those are RENDERER mechanics and hold whatever the hook is about. The composition invariants - symptom DEAD CENTRE, hands active, face above or beside rather than behind - are the one-glance contract of the SPECTACLE-PROP family; another hook family declares its own one-glance read instead of inheriting these.
+**APPLY:** (v736h.1, v736.1 and v736a each carry their OWN instruction below — read them; this line does not replace them) UNIVERSAL and machine-enforced is v736h.1 - prompt economy, the six-block render order, the three-layer depth limit, the detail budget, the meta-ban and the beat-ban. Those are RENDERER mechanics and hold whatever the hook is about. The composition invariants - symptom DEAD CENTRE, hands active, face above or beside rather than behind - are the one-glance contract of the SPECTACLE-PROP family; another hook family declares its own one-glance read instead of inheriting these.
 
 LLMs default to safe / logical / probable when authoring HOOK ideas; viral hooks need the opposite. v600 cartoon-physics + v598 power-test enforce FORMAT but leave the loophole of "safe" metaphor selection (prostate = garden hose, digestion = clogged drain, heart = engine). Operator diagnosis 2026-05-14: *"if the visual metaphor makes logical sense in a middle-school biology class, REJECT IT. Viral hooks rely on Spectacle Disconnect — the prop should be viscerally interesting first, and a metaphor second."*
 
@@ -13955,7 +13955,7 @@ Storyboard scene count drops from 6 (Option B paired pattern) → 5 (Option C si
 
 ### v750 + v751 — Veo Final Prompts section structural format + Veo↔Image semantic consistency (NEW 2026-05-18)
 
-**APPLY:** (covers v751) write the Veo Final Prompts as `Clip N.M` headers with bolded fields and NO beat brackets. The beat markers belong in `action_note`, never in a Veo prompt.
+**APPLY:** write the Veo Final Prompts as `Clip N.M` headers with bolded fields and NO beat brackets. The beat markers belong in `action_note`, never in a Veo prompt. v751 is a SEPARATE gate on the same section — the prompt's actions must match the start and end frames — so read it too.
 
 **Surfaced 2026-05-18** from operator review of Gemini's pasted Scene 5 CTA Veo prompt example. Two distinct findings:
 
@@ -15902,7 +15902,7 @@ Second half of the bug: even if the retry HAD fired, the old backoff was `[2, 5,
 
 ## v833 — Transformation-meme grammar (started/going panels): full-health transform, tight crop, proxy bound to the zone
 
-**APPLY:** (covers v833.1) build a started/going transformation panel as a FULL-HEALTH transform with a tight crop and the proxy bound to its zone.
+**APPLY:** build a started/going transformation panel as a FULL-HEALTH transform with a tight crop and the proxy bound to its zone. Dated day stamps are ALLOWED again — that relaxation is v833.1, and it is not carried by this line.
 
 **Where it came from**: the 13.07 plan Video 1 lane (day1dayx couch/bed memes, v1-v4) — three operator corrections in one exchange: *"the transformation shouldn't be only the banana, but the overall health of the man with previous symptoms"* · *"apply the classic hook prompt rules"* · (on a weak render) *"is not really powerful, his composition, compared to the original video"*.
 
