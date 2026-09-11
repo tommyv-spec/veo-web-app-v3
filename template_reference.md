@@ -275,6 +275,8 @@ The pipeline is reusable for any future video. The user's whisper.cpp GGML model
 
 ## Decode-side description grammar parity (v586)
 
+**APPLY:** write each image prompt as field-order natural sentences (Composition, Subject, Action, Location, Style, Tech), ending at "Aspect ratio". No bracket tags, no negatives block.
+
 **Extends v579 Stage 4.** Every decoded image description MUST follow the canonical Nano Banana 2 six-block grammar, and every action_note MUST follow the canonical Veo 3.1 five-block grammar. This is the **same vocabulary the platform's prompt-builder emits at generation time** — decode-side and generate-side speak one language.
 
 ### Why this rule exists
@@ -1210,6 +1212,8 @@ Existing `code/v589_video_understanding.py` cascade (LM Studio → Gemini → hu
 
 ## Hook-image power test (v598) — the single biggest viral lever
 
+**APPLY:** build the hook from the four-mechanism stack — shame proxy · violent act or spectacle · agent of change · taboo direct address — and name which mechanism each hook beat carries.
+
 **Source: 2026-05-06 ChatGPT-output audit.** A bundle-driven create produced a menopause hot-flash video titled "When The Heat Hits At Night" with a generic woman-in-dim-bedroom HOOK image. No prop. No motion. No visual pun. No taboo trigger. No physical evidence. The 430KB of upstream rules were technically respected but the HOOK had zero scroll-stop power. **The hook image is the variable that decides 50 views vs 5M views.** Every other rule (chain-binding, action_note grammar, M ≤ N cardinality, persona consistency) is a ZERO-multiplier if the HOOK doesn't stop the scroll.
 
 ### The test (8 questions, all must answer YES before locking the HOOK image)
@@ -1461,6 +1465,8 @@ This is a **decoder-side mindset enforcement**, not a parser-required field. The
 
 ### v621b — Caption ban (decode + create + lift)
 
+**APPLY:** never describe caption or overlay text inside the image-prompt body. Overlay text belongs in the storyboard `caption:` field.
+
 Image prompts must NEVER describe caption text that appears in the source video.
 
 **FORBIDDEN phrases in any image prompt body**:
@@ -1653,7 +1659,7 @@ Lift side / generate side: when authoring a transformation montage from scratch,
 
 ## Symptom-feature exaggeration on non-persona characters (v622)
 
-**APPLY:** describe the diagnostic feature the scene is ABOUT at its observed intensity, and record `PARENT SYMPTOM INTENSITY: <1/5-5/5> | anchor: <literal comparison> | headroom: YES|NO`. Never flatten it into generic posture filler.
+**APPLY:** (covers v622b and its extension) describe the diagnostic feature the scene is ABOUT at its observed intensity, exaggerated geometrically into the viral register and stopping short of disgust, and record `PARENT SYMPTOM INTENSITY: <1/5-5/5> | anchor: <literal comparison> | headroom: YES|NO`. Never flatten it into generic posture filler.
 
 **Source: 2026-05-06 owner observation.** Decoded prompt for `amish-house` chin-pointing scene read *"her chin raised slightly and her eyes locked to the camera."* The actual source frame shows a patient with a notably full / sagging lower-jaw + jowl drop, and the practitioner's index finger is pressed firmly into the underside of that chin. The whole rhetorical point of the scene is "IF YOUR CHIN LOOKS [LIKE THIS]" — a C-DIAGNOSTIC-PIVOT lifted on the AUGMENTED-SYMPTOMS lens. The decoder flattened the diagnostic feature into generic posture filler. A lift of that prompt would generate a clean-jawed patient and the diagnostic pivot would have nothing to land on.
 
@@ -2510,6 +2516,8 @@ Before emitting any clip prompt:
 
 ## Dialogue line punctuation (v615)
 
+**APPLY:** no em-dash in any `- **line:**`, voiceover or spoken text. Use a comma or a full stop.
+
 Scene `- **line:**` entries (and `- **pad:**` per v644) use **commas, periods, and sentence breaks** for natural spoken cadence. The same rule covers all spoken text the persona renders through Veo's TTS. Replacement table for typical em-dash uses: aside / parenthetical → comma pair OR new sentence; trailing emphasis → period + new sentence; restatement → period; list intro → colon OR period; pause-for-breath → period.
 
 Mechanical check before emitting any draft: `grep '^- \*\*line:\*\*'` for `—` returns zero matches.
@@ -3308,6 +3316,8 @@ That's what makes the product melt into the scene.
 
 ## Decoder anti-template-bias + prop-tracking matrix + prop-as-subject priority (v605)
 
+**APPLY:** (covers v605b and v605c) FLAG a gap rather than filling it from a corpus prior, place the prop relative to the SUBJECT rather than the frame, and allocate the subject to the symptom before anything else in the composition.
+
 **Source: 2026-05-06 Gemini decode session** (`raw/decode_prompt_accuracy_gemini_2026-05-06.md`) — same `decoded_healthylifesage_DX5jJgeMj30.md` decode that surfaced v604, but a different failure mode: Image 5 placed the Rosabella bottle ON THE DESK (corpus default) when the actual source video shows Dr. Sage HOLDING the bottle up to camera in his blue-gloved left hand.
 
 Gemini's self-diagnosis:
@@ -3437,6 +3447,8 @@ Note the explicit **"NOT standing on the desk — the desk surface in front of h
 ---
 
 ## Decode-prompt accuracy + universal prompt-discipline (v604) — frame-locked, viewer-relative, negative-constrained
+
+**APPLY:** (covers v604b and v604.1) write the structural negative constraints for each image and anchor it with its `frame_anchor`.
 
 **Source: 2026-05-06 ChatGPT decode session** (`raw/decode_prompt_accuracy_chat_2026-05-06.md`) — operator audited a freshly-decoded `decoded_healthylifesage_DX5jJgeMj30.md` and found two failure modes:
 
@@ -3618,6 +3630,8 @@ The user framing: *"these decodes I should check: same person / same clothes / s
 ---
 
 ## Style lock + prose discipline (v603) — corpus iPhone-UGC aesthetic, tight composition
+
+**APPLY:** (covers v603b) use the style-lock package verbatim on every image, and lock the camera framing at the anchor image so every image chained from it keeps that framing.
 
 **Source: 2026-05-06 owner observation** *"the compositing of the images and the style is completely off, what the fuck?"* The menopause-saffron prompts produced wrong composition + wrong style. Diagnosis: missing style-lock package, prose too verbose, rule citations leaked into prompt body, cinematography jargon confused Banana 2.
 
@@ -4796,6 +4810,8 @@ Exception — keep both images when the setup image carries visual information t
 
 ### Recipe / process state-evolution — each step needs its own image (v580)
 
+**APPLY:** declare the inheritance mode per image — STRICT CHAIN, IMAGE-1 ANCHOR or NO CHAIN — and write `- **reference_image:**` to match. A paired START image carries `- **pair_role:** start` only; the END image carries `- **pair_role:** end` plus `- **paired_with:** image_K`.
+
 Companion rule to "Image economy" above. Image economy says **merge two phases of ONE action** into a single image (drop the setup, keep the mid-action). v580 says the OPPOSITE for multi-step processes: **DO NOT merge multiple distinct steps into a single image**. Each step that changes the visible state of a foreground prop needs its own start image showing the cumulative state at that step.
 
 **Why this rule exists.**
@@ -5318,6 +5334,8 @@ Consistent phrasing across prompts helps Nano Banana 2 lock in continuity even w
 
 ### v681 — Multi-character cast model + text-card scene type
 
+**APPLY:** declare the full cast, and give a text_card scene `scene_type: text_card` with NO `### Image N` block of its own.
+
 **What v681 introduces** (decode + lift, plus platform parser/schema/renderer changes):
 1. Two new `Type` values in the `## Ingredients` table — `patient` and `extra`.
 2. Optional per-scene `- **cast:** name1, name2, ...` bullet declaring presence.
@@ -5520,6 +5538,8 @@ If you see `(N, 'other', '...')` in the slot table, the renumber pass skipped th
 
 #### v682 — split-rule body references (persona positional, rest descriptive)
 
+**APPLY:** write the persona's body reference POSITIONALLY and every other character's descriptively.
+
 **Replaces v581's positional `Image K` for non-persona references.** The renumber pass behavior of v681e.8 / v681e.9 stays as a deprecated fallback for legacy artifacts; new artifacts MUST follow the split rule below.
 
 **Why this rule exists:** the renumber pass works correctly for chain edges, but its `\bImage K\b` regex is aggressive — every `Image K` in body gets rewritten if any chain edge happens to land at flow slot N where md_image_num=K. Authors can't easily predict the rewrite at write-time. The split rule eliminates positional ambiguity for everything except the persona, and uses the description-based prompting pattern that Nano Banana 2's official docs explicitly recommend for "high-fidelity detail preservation" (citation: ai.google.dev/gemini-api/docs/image-generation §"High-fidelity detail preservation").
@@ -5690,6 +5710,8 @@ Multi-speaker dialogue (2+ characters BOTH speaking — interviews, sketches) is
 
 ### v696 — pre-output validation gates (consolidate the recurring parser-abort + chain-break failures)
 
+**APPLY:** run the five hard-fail pre-output gates before saving. A build that fails one does not ship.
+
 **Surfaced 2026-05-09** from a snapinsta donut-recipe decode that hit
 `Parse error: Image 4: no fenced 'Image prompt:' block found` on import
 to the platform — the LLM had written `### Image 4` + `scene_type: text_card`
@@ -5829,6 +5851,8 @@ should reference v696 as item [21] in the pre-output validation checklist.
 ---
 
 ### v697 — explicit force-verb action arc + non-persona body-prose detail
+
+**APPLY:** give every shot scene an explicit force-verb `action_arc`, and mark it transformative or non-transformative.
 
 **Surfaced 2026-05-09** from a snapinsta donut-recipe decode where the HOOK action arc was misread by the decoder. Original decode (pre-v697) said: *"the donut box drops slightly out of frame as the main character steps forward."* The actual source HOOK was a SLAM-AWAY spectacle: the persona's hand visibly STRIKES the box out of the bystander's hands, donuts SCATTER to the floor, the bystander BENDS DOWN to gather them. The v588 mandatory walk lists only start/mid/end; the SLAM peak sat at the q3 frame which was extracted but not viewed. Result: the hook's spectacle (Q8 violent-act per v598) was downgraded to "box drops slightly" — psychologically dead. Veo would then render a gentle handover, killing the hook.
 
@@ -6530,6 +6554,8 @@ def gate_v737(text):
 
 ### v699 — text_card detection discipline (don't promote karaoke captions to scene_type=text_card)
 
+**APPLY:** do not promote karaoke captions to `scene_type: text_card`. A text card is an authored card, not burned-in captions.
+
 **Surfaced 2026-05-10** from the snapinsta donut-recipe decode. The decoder (Claude in-session per v595) viewed shot 4's END frame, saw "golden" white text on a near-black backdrop, and emitted a `### Scene 5 — scene_type: text_card` between shots 4 and 5. The actual source had NO text_card transition — the "golden" rendering was the source's karaoke caption fading IN at shot 4's tail (the final ~0.3s) as the live-action frame faded to black during the cut to shot 5. PySceneDetect didn't even split it as a separate shot; it was contained inside shot 4. Promoting it to a text_card scene inflated the artifact by one fake scene + reserved an image slot the platform would never render + propagated a "text_card" tag into v681/v682 inventory + downstream broke the lift's scene → image numbering until the user caught it manually.
 
 **Rule.** A `scene_type: text_card` MUST satisfy ALL FIVE criteria below. Failing any single one means the visual is something else (karaoke caption / fade / flicker) and the decoder MUST NOT emit a text_card scene.
@@ -6581,6 +6607,8 @@ Result: NOT a text_card. The "golden" caption is the source's karaoke-style word
 ---
 
 ### v702 — Image-prompt vocabulary safety (GENERATE-side only) — RELAXED to clinical register 2026-05-15
+
+**APPLY:** clinical terms are allowed in an image prompt; sexual-action verbs and sexualized adjectives are not.
 
 **Scope.** GENERATE-side authoring only (`videos/*.md` produced by `lift_bundle.sh` / `create_bundle.sh` / `innovate_bundle.sh` workflows). DECODE-side artifacts (`raw/decoded_*.md`) preserve source observation faithfully per v614/v615 decode-fidelity rule — decoded prose may describe what the source IS in plain terms even when those terms would be unsafe to ship to a generator.
 
@@ -7187,6 +7215,8 @@ When walking the v738 Pre-Flight Checklist Section 5 OUTPUT-TYPE branch on Gener
 
 ```
 ### 5. Vocabulary safety check (v702 + v615 + v693 + v722) — output-type branch
+
+**APPLY:** write the `- **line:**` field FULLY lowercase.
 [...]
 - LIFT / INNOVATE / CREATE → APPLY v702 RELAXED clinical-register carve-out PLUS:
   - For sensitive-anatomy HOOK images (testicles / prostate / penis / uterus / breast / etc.):
@@ -7324,6 +7354,8 @@ Both verified passing on commit landing v703.
 ---
 
 ### v704 — Clip-transition discipline + line-length target (FRESH / BLEND only, ~20 words per line)
+
+**APPLY:** declare the clip transition as fresh or blend, and keep each line near the ~20-word target.
 
 **Scope.** Generate-side authoring only (`videos/*.md` lift / create / innovate). Decoded artifacts in `raw/decoded_*.md` keep verbatim source dialogue and the observed transition the source actually used — decoder is observation; v704 is authoring discipline.
 
@@ -7494,6 +7526,8 @@ Files known to need re-audit: `videos/nuri-clinic-energy-drinks-saffron-pour-exp
 
 ### v707 — Ingredients `Attached to` column + deprecate v604 verbose body-line form
 
+**APPLY:** bind every reference through the Ingredients `Attached to:` column, not through verbose body lines.
+
 **Scope.** Both decode-side and generate-side authoring (`raw/decoded_*.md` + `videos/*.md`). Single rule covering two paired changes: (a) Ingredients table gains an `Attached to` column declaring per-image binding scope; (b) v604's verbose body-line form `Use image_K as the exact base frame. Keep everything from image_K identical. Only change: ...` is DEPRECATED — chained Image bodies use the v589.1 semantic chain line ONLY, with the delta carried by the frontmatter `visual_delta:` field.
 
 **Surfaced** 2026-05-12 from operator observation of re-decoded JUPI gut-health video: decoder dutifully emitted 3-line binding stack (v609 persona line + v589.1 chain line + v604 verbose body line). The v604 line contradicted v589.1's lowercase-image-in-body-prose ban AND duplicated information already declared in the frontmatter `visual_delta:` field AND overlapped with v703's worker-injected manifest. Three rules pulling in different directions = decoder + Banana 2 receive contradictory signals.
@@ -7641,6 +7675,8 @@ After apply_vad writes _vad_out:
 ---
 
 ### v708 — Zero word loss contract (Whisper-VAD retry chain + final-export audit)
+
+**APPLY:** check each line fits its clip against the Whisper-VAD floor before export — the contract is ZERO word loss, so a line that overruns gets shortened at authoring time.
 
 **Scope.** Export-side only (`code/video_processor.py`). Supersedes v706's floor-guard as the dominant safety contract for the per-clip Whisper-VAD path. v706 protected against sub-floor durations; v708 protects against ALL word-loss modes regardless of duration. No markdown contract change, no parser change, no authoring discipline change. Operator-visible via export stats + log markers.
 
@@ -8615,6 +8651,8 @@ ONLY THEN claim v713 reproduces composition faithfully on Banana 2.
 ---
 
 ### v714 — Emotional payoff discipline (non-persona AFTER-state expression)
+
+**APPLY:** give a non-persona character a visible emotional payoff in the AFTER state, not just the persona.
 
 **Problem.** v541 (outfit change for Day 1 → Day 14) + v580 (recipe / process state-evolution) + v589 (absolute-magnitude state arcs) + v622 (symptom-feature exaggeration in HOOK frames) collectively force decoders + lift authors to update the non-persona character's PHYSICAL state across a transformation arc (wrinkles smoothed, belly flat, varicose veins faded, jaw lifted). NONE of these rules mandate updating the EMOTIONAL state. Chain-inheritance (v512 / v669) carries identity forward, and decoders / lift LLMs implicitly assume expression inherits with identity. Result: the AFTER frame shows the resolved physical symptom on a still-distressed face — wrinkles gone but expression still embarrassed, belly flat but face still ashamed, varicose veins faded but eyes still wincing. Emotional payoff missing. The transformation arc collapses because the AFTER frame doesn't FEEL like resolution.
 
@@ -9632,6 +9670,10 @@ ONLY THEN claim v716 bypasses Banana 2 normalization bias faithfully.
 ---
 
 #### v622b-extension — Geometric + Metaphor Forcing (extends v716/v622b)
+
+**APPLY:** exaggerate the symptom GEOMETRICALLY - change its shape and scale, not just its adjective - into the viral-exaggerated register, and stop short of disgust.
+
+**APPLY:** force the metaphor as well as the geometry when the symptom alone will not carry the shot.
 
 **Rule.** Geometric descriptors alone are insufficient on Banana 2. Add INANIMATE-OBJECT METAPHOR FORCING alongside measurements. Banana 2 has strong visual priors for inanimate-object shapes (`balloon` / `melted wax` / `corduroy` / `porcelain` / `bowling ball`) that lock the visual character of the symptom in ways measurements alone don't.
 
@@ -16946,6 +16988,8 @@ No `--external-refs` flag means no external file is read, uploaded, or bound. Tu
 
 ## v927 — ONE BUILD, ONE DISTINCTIVE SHELL: the setting bank is a menu, never a global lock
 
+**APPLY:** write the full `SETTING SHELL: … | source: <bank row | UNLISTED — name> | de-wooded: YES | unique-vs: <prior build path> → <its shell> | why different: <line>` in §0, and OPEN the named prior build to confirm your shell is not its shell.
+
 Sources: operator 2026-08-10 on the fourth straight lawnmower build in the same room — *"didn't we say to have an attic or a penthouse or whatever, but also here we should have the generic rule to have unique backgrounds that look good, not just one"* · `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` §"Distinctive premium background" clause 4 (2026-07-24: choose PER VIDEO, the bank is a menu) · `wiki/concepts/script-adaptation/visual-hook-construction-rules.md` Rule 26, whose hook-killer list names *"generic office with supplement jars background, reused every video"* · §v870 (where the load-bearing content sits) · root `CLAUDE.md` §13 (the ONE case where repetition is correct).
 
 **The rule.** Every build picks a setting that is its own place, and it may not be the same place the previous build in that family used. The background is a scroll factor, not filler: a room the viewer has already seen four times carries no information and reads as an AI default. Two rules were already on the books and still failed to stop it — the bank said "choose per video" and §8 named a go-forward shell — because a *go-forward shell* was read as a *permanent shell*. It is not. §8 names the shell to reach for FIRST; v927 says a build still has to earn it against what already shipped.
@@ -17147,11 +17191,15 @@ Three pieces inside `promote_batch_to_video`, because Phase 3a/3b do not exist o
 
 ### v889.1 — THE AUTHORED DURATION WAS PARSED, LOGGED "AUTHORITATIVE", THEN DROPPED AT THE ROW (2026-09-03)
 
+**APPLY:** (covers v889) declare `- **target_duration_s:**` on every scene whose cut must follow the script. The authored value WINS over any anchor-gap arithmetic, which image reuse makes meaningless.
+
 v889 says the build's `- **target_duration_s:**` bullet outranks the v667 anchor gap (next image's `frame_anchor` minus this one's), because image reuse makes the gap meaningless. The parser honoured it — `[v889/parse] scene_N target_duration_s=8.0 (explicit, authoritative)` — into `explicit_target_s` in the parsed scene dict. But `ImageSceneAssignment` had no such column, the constructor never stored it, and `prepare_batch_for_video`'s `scene.get("explicit_target_s")` read `a.to_dict()` — always `None`. So the anchor gap won every time. Measured on `ef5ff43b` → job `15333490`: nine spoken sentences share one image (anchor 0.0, next anchor 1.1s), so a 22-word line stored `target_duration_s = 1.1`; the cutaways stored the gaps `6.3, 2.6, 2.2, 1.3, 0.9 …`; 124s authored vs 50.5s stored. `veo_render_duration_s` (v861) travels a different route and was right throughout. **Blast radius:** with `cut_mode: auto` the export ignores `target_duration_s` (only `timeline` hard-trims, `video_processor.py` `_trim_one`), so that export was unharmed; the review badge showed 1.1s per clip, and a `timeline` build would have been cut to the gap. **Fix:** the field now crosses every hop — column (both migration lists), constructor kwarg, `to_dict()`, both `scenes_metadata_flat` rows — and `check_field_plumbing.py` CHECK 6 walks the parsed-dict → constructor boundary so the next field cannot fall off the same way; `tests/check_explicit_target_plumbing.py` round-trips it through sqlite. A batch imported before the column existed still holds NULL; `--resync-batch` rebuilds its rows through the fixed constructor with picks kept. **Status: PROVEN on production 2026-09-03** — after `--resync-batch ef5ff43b`, the prepare log printed `[TEMP v889.1] scene_1 explicit_target_s=8.0 anchor_derived=1.1` … `scene_24 explicit_target_s=6.0 anchor_derived=None` (the authored value winning on all 24), and job `d74ab616`'s clip rows carry `target_duration_s` equal to the build's bullet on every one of the 24 scenes — 124.0s stored against 124.0s authored, where job `15333490` that morning had stored 50.5s.
 
 ---
 
 ## v930 — IMAGE READ + IMAGE PROMPT GRAMMAR: the benchmark-settled way to read a frame and to write one (2026-08-18)
+
+**APPLY:** for each `### Image N`, fill the form in field order, overwrite only our fields, POSE the person at a named body landmark with the lens locked to it, keep the fixed tail last and end at "Aspect ratio". Never camera-position language; name the room and stop.
 
 **Where it comes from.** 300+ blind-scored renders across nine benchmark rounds (2026-08-14→17), scored by the operator against real source frames. Full evidence and numbers: `wiki/concepts/prompting/image-requirements-contract.md` (the frozen requirements) and `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` §"HOW TO BUILD AN IMAGE PROMPT FROM A SOURCE FRAME" + §"THE WINNING PROMPT GRAMMAR". This section is the production-facing summary; the wiki pages are canonical for the measurements.
 
