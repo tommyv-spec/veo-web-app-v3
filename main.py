@@ -1144,8 +1144,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
     # "/korella" = the bio short links (2026-09-04): /korella, /korella/nuri,
     # /korella/noemi, /korella/martha — the same deep-link page as /g/, with
     # the product name in the URL customers see. Public for the same reason.
+    # "/v/" = the PUBLISHED link (v972): /v/<persona>/<post-id>. It carries the
+    # post, not the tracking id, so a video can be measured on its own id for 21
+    # days and then fall back to the persona tag without touching a published
+    # post. Public for exactly the same reason as "/g/" — a customer tapping it
+    # from a comment has no account here.
     PUBLIC_PREFIXES = {"/static/", "/auth/", "/api/local-worker/", "/api/user-worker/",
-                       "/api/images/worker/", "/g/", "/korella"}
+                       "/api/images/worker/", "/g/", "/korella", "/v/"}
     
     async def dispatch(self, request: Request, call_next):
         # Skip auth if Google OAuth is not configured
@@ -1329,6 +1334,58 @@ def korella_bio_link(who: str):
         return HTMLResponse("Not found", status_code=404,
                             headers={"Cache-Control": "no-store"})
     return amazon_deeplink(KORELLA_ASIN, tag, p=f"bio-{who.lower()}")
+
+
+@app.get("/v/{persona}/{post_id}", response_class=HTMLResponse, include_in_schema=False)
+def video_deeplink(persona: str, post_id: str):
+    """The link we PUBLISH. Carries the post, never the tag.
+
+    A tag in the URL is frozen the moment the link lands in a live comment. This
+    route resolves the tag at click time from `link_assignments`, so a video can
+    be measured on its own tracking id for 21 days and then fall back to the
+    persona tag — changing one row instead of 50 published posts.
+
+    Resolution, in order:
+      1. an assignment row whose measurement window is still open -> its own tag
+      2. anything else, INCLUDING an unknown post -> the persona tag
+
+    Rule 2 is deliberate. An unknown post means we lose the per-VIDEO split, not
+    the sale; a 404 here would lose the sale outright. Same reasoning as the
+    stdout-only click log below: attribution is worth less than the order.
+    """
+    who = (persona or "").lower()
+    tag = BIO_TAGS.get(who)
+    if not tag:
+        return HTMLResponse("Not found", status_code=404,
+                            headers={"Cache-Control": "no-store"})
+
+    asin = KORELLA_ASIN
+    measured = False
+    try:
+        from models import LinkAssignment as _LA, get_db as _get_db
+        with _get_db() as _db:
+            row = _db.query(_LA).filter(_LA.post_id == str(post_id)[:64]).first()
+            if row:
+                asin = row.asin or KORELLA_ASIN
+                if (row.measure_tag and row.measure_until
+                        and datetime.utcnow() < row.measure_until):
+                    tag, measured = row.measure_tag, True
+    except Exception as exc:
+        # NEVER let a lookup fault cost a sale: fall through on the persona tag.
+        try:
+            print(json.dumps({"evt": "deeplink_lookup_failed", "post": str(post_id)[:32],
+                              "err": f"{type(exc).__name__}: {exc}"[:200]}), flush=True)
+        except Exception:
+            pass
+
+    # v972 diagnostic — remove once a real click has been seen resolving both ways.
+    try:
+        print(json.dumps({"evt": "deeplink_resolved", "post": str(post_id)[:32],
+                          "persona": who, "tag": tag, "measured": measured}), flush=True)
+    except Exception:
+        pass
+
+    return amazon_deeplink(asin, tag, p=str(post_id)[:32])
 
 
 @app.get("/g/{asin}/{tracking_id}", response_class=HTMLResponse, include_in_schema=False)

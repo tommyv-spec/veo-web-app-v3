@@ -812,6 +812,32 @@ class BlacklistEntry(Base):
     job = relationship("Job", back_populates="blacklist")
 
 
+class LinkAssignment(Base):
+    """Which Amazon tracking id a published video's link resolves to, RIGHT NOW.
+
+    Why this table exists. A published link is frozen the moment it lands in a
+    live comment, so any tracking id baked into the URL can never be changed.
+    The operator's attribution design needs the opposite: measure a video on its
+    own tracking id for 21 days, then fall back to the persona tag and give that
+    id to the next video. That is only possible if the URL carries the POST, not
+    the tag, and the tag is resolved here at click time. Flipping a video to the
+    persona tag is then one row, and every already-published link follows.
+
+    Rows are written at publish. `measure_tag` + `measure_until` define the
+    window; after it passes, resolution falls back to the persona tag with no
+    write needed, so a missed cron cannot strand a video on a recycled id.
+    """
+    __tablename__ = "link_assignments"
+
+    post_id = Column(String(64), primary_key=True)
+    asin = Column(String(20), nullable=False)
+    persona = Column(String(32), nullable=False)          # nuri | noemi | martha
+    measure_tag = Column(String(64), nullable=True)       # dedicated id, while measuring
+    measure_until = Column(DateTime, nullable=True)       # publish + 21 days
+    released_at = Column(DateTime, nullable=True)         # when the id went back to the pool
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class GenerationLog(Base):
     """Persistent log of generation parameters for each video"""
     __tablename__ = "generation_logs"
