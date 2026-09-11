@@ -2093,6 +2093,8 @@ All four constants live at the top of the v611 / v616 blocks in `code/video_proc
 
 ## Dialogue lip-sync trigger and voice qualifier syntax (v642)
 
+**APPLY:** (covers v644 and v665) a quoted line triggers Veo lip-sync, and the subject is ALWAYS "The main AI generated character" — never a name or a pronoun.
+
 **Source: 2026-05-07 owner review** + cross-reference against Google Vertex AI docs (`Clippings/Veo on Vertex AI video generation prompt guide.md`) + project wiki (`wiki/generation/veo-prompting.md`, `wiki/generation/kaveno-veo-bridge.md`).
 
 The pre-v642 canonical rule was:
@@ -6419,6 +6421,8 @@ for m in re.finditer(r'^### Image (\d+)(.*?)(?=^### Image|\Z)', text, re.MULTILI
 
 ### v737 — Green-screen / PiP decoupling (decode-side composite-layout discipline)
 
+**APPLY:** for a green-screen or PiP shot, declare the composite layout and keep the layers decoupled rather than describing one merged picture.
+
 **Surfaced 2026-05-15** from operator-run lift authoring test on the "Comment HEALTH if you're an American" male-detox script. Operator authored 8 of 10 scenes as composite shots — persona in lower-third foreground inset + b-roll (boiling pot / honey pour / biological tunnel / anatomical hologram) dominating the upper two-thirds — and marked all 8 as `speaker: on-camera`. Per pre-v737 v698A.1 Q2 binary face-visible test, `face_visible: true` triggered the on-camera branch and bypassed the v698A paired-clip path. Banana 2 would have fought the composite (small persona vs dominant b-roll), Veo would have failed to lip-sync the corner face while rendering complex b-roll motion behind, composition would have collapsed. v737 closes the loophole at the decode-grammar level: composite PiP / green-screen layouts MUST be decoupled at the visual-prompt level and routed through v698A.1 voiceover-paired protocol.
 
 **The rule**: when the source video uses a composite layout (the practitioner is keyed into the lower-third corner / side-inset overlay while a recipe boils or an anatomical VFX plays in the background), NEVER transcribe both elements into a single `### Image N` prompt. Decoupling is mandatory.
@@ -7210,6 +7214,8 @@ Negatives: No desk visible. No top-down camera angle. No prop sinking to the low
 Patterns active (8 of 18): #1 anatomical-model framing + #3 material spec ("silicone" / "demonstration models") + #4 educational-purpose tag ("for clinical varicocele teaching reference") + #6 persona-holding-model + #7 dual-contrast composition + #8 chest-level handling + #9 clinical setting reinforcement + #10 background blur + #11 persona-attention discipline + #12 medical-jargon anchor ("visible epididymis and vas deferens") + #13 anti-sexualization negatives stack. Historical ~340w body with 11 negative clauses: it passed the old ceiling but FAILS v736h.1 and must not be copied into a new/modified prompt.
 
 #### v738 Pre-Flight Checklist Section 5 amendment
+
+**APPLY:** (covers v738.1 and v738.2) fill all seven Pre-Flight Checklist sections before output, including the per-axis State-Delta declaration at t=0 and t=end and the per-scene morphology audit.
 
 When walking the v738 Pre-Flight Checklist Section 5 OUTPUT-TYPE branch on Generate-side artifacts containing sensitive anatomical content, the Lift / Innovate / Create branch now requires explicit pattern-stack declaration:
 
@@ -8833,6 +8839,8 @@ ONLY THEN claim v714 delivers emotional payoff faithfully.
 
 ### v715 — Elevated prop composition discipline (v605b + v713f + v603b umbrella)
 
+**APPLY:** (covers v715f) raise the prop into the composition and, on a two-shot, thrust the named body part toward the lens rather than letting it sit flat in frame.
+
 **Problem.** v604 (per-video camera anchors) + v605 (PROP-LED format for product reveals) + v606 (compositing — surface contact / grip / occlusion) + v712 (subject-anchored prop positioning) collectively describe HOW a prop is held / lit / shadowed / occluded. They are silent on WHERE in the frame the prop lands. In practice the corpus default reads "on the counter / on the desk / on the table / on the side counter / on the prep surface" — every desk-anchored description sinks the prop into the bottom 20% of a 9:16 vertical frame. The hero prop (bladder model / banana / saffron bottle / honey jar / anatomical demo / before-after card) becomes a footer instead of the focal point. The viewer's eye lands on the patient's face by default and the prop registers only as background detail. Worse: when Banana 2 plans the image (v713(b) front-loaded composition), it places the prop where the prose anchors it — desk-anchored prose = lower-third prop, every time.
 
 **Surfaced 2026-05-13** via Gemini 3.1 Pro analysis after a Nuri bladder-model diagnostic-hook generation collapsed the prop to lower-third floor-level: prose anchored the bladder to "the desk in the immediate foreground"; Banana 2 rendered the bladder at desk height bottom-of-frame; patient's distressed face floated above empty space; persona's pointing hand crossed empty air to reach the bladder; the diagnostic-pointer hook lost its visual center. The corpus has a "desk gravity" bias — operators inherit "on the desk / counter / table" from decoded competitor videos that themselves chose desk-anchoring, and the bias propagates through lifts. Gemini's diagnosis: *"v604 / v605 / v712 heavily rely on desk-anchoring. In a 9:16 vertical, anything on a desk sinks to the bottom 20%. We need an Elevated Prop rule that bans desk-anchoring for hero props, forces Z-axis depth layering instead of Y-axis height stacking, and locks the camera to chest-level eye-level so the perspective doesn't drift downward."*
@@ -9412,6 +9420,8 @@ ONLY THEN claim v715 elevates hero props faithfully on Banana 2.
 
 ### v716 — Banana 2 normalization-bias countermeasures (v622b + v715f umbrella)
 
+**APPLY:** (covers v622b and v715f under this umbrella) counter Banana 2's pull toward the average: state the abnormal magnitude explicitly, because an unstated one renders normal.
+
 **Problem.** Two failure modes surfaced from Gemini 3.1 Pro generation cycles after v715 shipped:
 
 1. **Symptoms render too normal.** v622 mandates "specific exaggerated terms" for symptom features on non-persona characters, but the corpus uses ADJECTIVES (`"sagging"`, `"loose"`, `"puffy"`, `"distended"`, `"thinning"`). Banana 2 treats adjectives as soft suggestions and applies normalization bias — renders a mild realistic out-of-shape 50-year-old's arm instead of the scroll-stopper exaggeration the HOOK needs. The AUGMENTED-SYMPTOMS rhetorical lens collapses.
@@ -9652,6 +9662,8 @@ ONLY THEN claim v716 bypasses Banana 2 normalization bias faithfully.
 ---
 
 ### v717 — Anti-normalization intensification stack (v622b-extension + v605c + v604b umbrella)
+
+**APPLY:** (covers v604b, v605c and v622b-extension) stack the anti-normalization declarations for the shot — geometry, volume and lateral spread — instead of relying on one adjective.
 
 **Problem.** v716 shipped geometric symptom descriptors + Mode 6 framing. Banana 2 still hits normalization on some AUGMENTED-SYMPTOMS HOOK frames because:
 
@@ -9963,6 +9975,8 @@ Applied in order: see structure (Z-depth) → attribute correctly (kinematic) �
 ---
 
 #### v718a — Kinematic Tracing (cures misattribution)
+
+**APPLY:** run the morphology diagnostics on each image: kinematics, z-depth, VFX recognition, intrinsic state and action-consequence.
 
 **Rule.** Before attributing any body part, symptom, or held prop to a character, VISUALLY TRACE THE LIMB back to its origin shoulder / torso. Five-step protocol:
 
@@ -10489,6 +10503,8 @@ ONLY THEN claim v718 cures Stage 4d perceptual failures.
 
 ### v719 — Solid-volume topology discipline (v719a + v719b + v719c umbrella)
 
+**APPLY:** give the symptom SOLID-VOLUME topology in the prompt: it occupies space and casts its own shadow, never a surface texture painted on.
+
 **Problem.** v716/v622b + v717/v622b-extension mandated geometric descriptors with shape anchors ("deep U-shape sagging", "U-shape sagging skin"). Surfaced after shipping: Banana 2 reads "U-shape" as topology-with-negative-space and renders a literal U-shaped HOLE / OPENING in the flesh that doesn't exist in the source. Same hallucination class as v718c's original direction (impossible VFX) but in REVERSE — the prompt's geometric vocabulary CREATES impossible VFX in renders where the source has solid unbroken volume.
 
 **Surfaced 2026-05-13** from saffron-saggy-arm lift attempt: source frame shows a CONTINUOUS solid drape of flesh hanging from the tricep; v716/v622b prose used "deep U-shape" geometric anchor; Banana 2 rendered an actual U-shaped hole in the arm flesh that wasn't in the source. The U-shape vocabulary leaked topology into Banana 2's plan.
@@ -10691,6 +10707,8 @@ ONLY THEN claim v719 prevents hallucinated topology on Banana 2.
 ---
 
 ### v720 — Lateral X-axis composition (v720a + v720b + v720c umbrella)
+
+**APPLY:** name the lateral spread of the symptom so it reads across the body, not only at its centre.
 
 **Problem.** v713f Z-axis stacking + v715 anchor modes (1-6) all assume the hero prop / symptom occupies a DEPTH plane (foreground / midground / background). Source videos OFTEN have the symptom extended LATERALLY (to the side, parallel to the camera plane) instead of toward the camera. When v713f Z-axis grammar is applied to lateral-extension sources, Banana 2 forces depth layering — interprets "extended arm" as forward-toward-camera or crossing-the-chest (the two most common Banana 2 defaults for ambiguous arm extension), neither matching the source.
 
@@ -11012,6 +11030,8 @@ ONLY THEN claim v721 prevents v698A auto-misuse.
 ---
 
 ### v722 — Persona wardrobe ban (strict extension of v553.1 + v609 + v610)
+
+**APPLY:** NEVER describe the persona's clothing, accessories, hair, race, age or build in an image prompt — the uploaded reference carries all of it. Describe those only for characters with no reference.
 
 **Problem.** v553.1 ("never describe the persona inline — uploaded ref handles it. Refer to them as 'the main character'") + v609 (concise binding line) + v610 (gender-neutral persona refs) collectively mandate persona descriptions stay minimal. LLMs (Gemini 3.1 Pro / GPT / Claude) under attention pressure (long task prompt, multi-rule stack, recipe-led patterns) still leak persona wardrobe descriptors into Image prompt bodies: `"She wears her crisp white doctor's coat"` / `"the main character in her blue scrub top"` / `"with a stethoscope around her neck"`. Effect: redundant text fights with the uploaded reference image (per Banana 2 docs: "long text + photos fight each other"), wastes input tokens, and creates wardrobe drift when the upload's actual wardrobe differs from the prose. Decode side has the same leak: Stage 4d VLM captures persona wardrobe and writes it into `static_composition.subject` instead of confining it to the Ingredients table metadata.
 
@@ -11718,6 +11738,8 @@ if len(request_to_node) > REQUEST_TO_NODE_CAP:
 
 
 ### v736 — Spectacle-over-logic discipline (v736a + v736b + v736c + v736d umbrella)
+
+**APPLY:** put the symptom DEAD CENTRE, keep the hands active, place the face above or beside rather than behind, and keep the prompt short — spectacle beats logic in the opening frame.
 
 LLMs default to safe / logical / probable when authoring HOOK ideas; viral hooks need the opposite. v600 cartoon-physics + v598 power-test enforce FORMAT but leave the loophole of "safe" metaphor selection (prostate = garden hose, digestion = clogged drain, heart = engine). Operator diagnosis 2026-05-14: *"if the visual metaphor makes logical sense in a middle-school biology class, REJECT IT. Viral hooks rely on Spectacle Disconnect — the prop should be viscerally interesting first, and a metaphor second."*
 
@@ -13350,6 +13372,8 @@ Option C — Veo Native End-Frame Interpolation (v718h-C, deferred until v718i p
 
 ### v580.2 — Paired-image authoring discipline for Structural/Volume morphology
 
+**APPLY:** (covers v718j and v718j.1) a paired START image carries `- **pair_role:** start` ONLY; the END image carries `- **pair_role:** end` PLUS `- **paired_with:** image_K` back-referencing its start. The parser HARD-FAILS `paired_with` on a non-end image.
+
 When v738 Section 6 declares Delta Axis ∈ {Structural Integrity, Volume/Shape} for a hero prop, the decoder / lift author / innovator / creator MUST:
 
 1. **Author Image K (t=0 BEFORE state)** per existing rules:
@@ -13415,6 +13439,8 @@ When v738 Section 6 declares `Carry Mode: multi-clip-blend` (Option B) OR `withi
 Annotation discipline allows operator + downstream lift author to immediately see the paired Image relationship without parsing Section 6 morphology block separately.
 
 ### v718i — `end_frame_image:` formal Scene-block field (NEW 2026-05-17, DEFERRED parser support)
+
+**APPLY:** for a native end-frame interpolation, put `- **end_frame_image:** image_K+1` on the Scene block.
 
 **Status: DEFERRED to follow-up commit.** Rule is codified here; parser support + DB schema + Veo generator hook are pending implementation.
 
@@ -13847,6 +13873,8 @@ Storyboard scene count drops from 6 (Option B paired pattern) → 5 (Option C si
 
 ### v750 + v751 — Veo Final Prompts section structural format + Veo↔Image semantic consistency (NEW 2026-05-18)
 
+**APPLY:** (covers v751) write the Veo Final Prompts as `Clip N.M` headers with bolded fields and NO beat brackets. The beat markers belong in `action_note`, never in a Veo prompt.
+
 **Surfaced 2026-05-18** from operator review of Gemini's pasted Scene 5 CTA Veo prompt example. Two distinct findings:
 
 **Finding 1 (v750, GOOD structure to codify)**: Gemini's Clip 5.1 example surfaced a cleaner Veo prompt format than the current artifact convention:
@@ -14065,6 +14093,8 @@ Pre-output mechanical gate: when Scene declares `end_frame_image:` field, search
 
 
 ### v752 — Catalyst Reaction Pacing (NEW 2026-05-18, render-test validated on tongue HOOK Clip 1.1)
+
+**APPLY:** make the catalyst react INSTANTLY on contact and hold the terminal state — no wind-up, no delay between contact and consequence.
 
 **Surfaced 2026-05-18** from operator render-test on tongue HOOK Clip 1.1 (v718h-C Option C native end-frame interpolation). First render with v718h-C correctly anchored Image 1 (coated tongue BEFORE) + Image 2 (clean tongue AFTER) — but Veo interpolated the cleanse GRADUALLY across the full 8-second clip duration, producing a sluggish "slow dissolve" effect that lost the satisfying-spectacle scroll-stop payoff. Operator: "the action of the revealing of the healthy tongue takes too long to take place... it should be immediate reaction of the pouring."
 
@@ -14628,6 +14658,8 @@ Single-frame snapshot reading guesses motion, geometry, and identity. The fix is
 
 ## v782 — clip_mode / transition platform DEFAULT flipped to fresh / cut (no more silent blend)
 
+**APPLY:** emit `- **clip_mode:** fresh` and `- **transition:** cut` unless the scene has a declared reason to differ.
+
 **Shipped 2026-06-09.** Runtime change (`code/main.py` + `code/worker.py`). Auto-deploys to Render.
 
 ### The bug it fixes
@@ -14758,6 +14790,8 @@ Dead Ingredients branches are kept in place. If Flow drops Omni-on-Frames, flip 
 
 ## v789 — Operator-authored audio-twin prompts (`### Clip S.L.audio`) + .audio header collision fix
 
+**APPLY:** author an audio twin as its own `### Clip S.L.audio` block rather than folding the audio into the visual clip's prompt.
+
 **The problem (2 layers).** (1) FEATURE GAP: v698A audio-twin clips (the Omni anchor clip that carries the voice for a silent b-roll visual) always got an AUTO-BUILT prompt at Phase 3b (`build_prompt` on the anchor frame + voiceover_line) — the authored `### Clip S.L.audio` blocks the builds append after the Veo section were never read. Operator 2026-06-11: "the prompt for the voice clips are still empty and the platform does them, but we can pass them." (2) BUG: `_CLIP_HEADER_RE` swallowed the `.audio` suffix via `\b[^\n]*$`, so `### Clip 4.1.audio` parsed as key (4,1) — the SAME key as the visual `### Clip 4.1` — and, being later in the section, OVERWROTE the visual clip's authored prompt (dict last-wins). Every shipped build with audio-twin blocks (storytelling family + walkout v5) had its silent b-roll visuals rendering with the AUDIO prompt.
 
 **The rule (build side).** Author the audio twin as a `### Clip S.L.audio — ...` block with `**Start frame:**` + `**Text prompt:**` (fenced or unfenced), either inside `## Veo 3.1 Final Prompts` or under a separate `## Audio twin anchor clips` heading. S.L = the scene + line of the VISUAL sibling. The platform uses the authored text VERBATIM as the audio_pair Clip prompt; no block = auto-build fallback (pre-v789 behavior).
@@ -14775,6 +14809,8 @@ Dead Ingredients branches are kept in place. If Flow drops Omni-on-Frames, flip 
 **Touched**: `code/veo_prompt_overrides.py`, `code/image_platform.py`, `code/main.py`, `code/static/index.html` (commits 386f08f + 291abdd), this deep-dive, `wiki/patterns/conventions.md` row, `wiki/meta/generate-video-checklist.md` note, root `CLAUDE.md` gotcha row, `wiki/log.md`.
 
 ## v790 — Decode-vs-build dialect gate + frames-are-ground-truth authoring
+
+**APPLY:** never copy a decode's field VALUES or prompt text into a build. Decode is an observation dialect; write the build's image prompts from the FRAMES this turn.
 
 **The two incidents (2026-06-12, costco-secret-podcast v1).** (1) IMPORT FAILS ×2: the build carried `- **role:** broll` on a b-roll image and `- **speaker:** voiceover` + `voiceover_anchor_image: none` on a diegetic hook scene — both copied from the source DECODE doc. The platform importer rejected both (role vocabulary = `voiceover_anchor` only; Gate 9 requires an anchor on every voiceover scene). (2) WRONG RENDERS: the podcast-studio image prompts were copied from the decode doc's own `Image prompt` text, which had drifted from the frames it described ("full-body scale seated, about two meters" while the decode's own §0 notes said chest-up). Nano Banana filled every vague word with its default → renders looked nothing like the viral source (wrong crop, tiny far mic, flat bright light, chair square to camera, talking into the lens instead of to the host).
 
@@ -14806,6 +14842,8 @@ Give every visible process step and every meaningful on-screen object its own or
 **Touched by the 2026-07-22 shown-beats amendment (Half C)**: `code/verify_decode_format.py`, `code/template_new_format.md`, `code/decode_bundle.sh`, `wiki/meta/decode-grammar-checklist.md`, `wiki/concepts/script-adaptation/script-adaptation-workflow.md`, both decode/build skills, both authoring auditors, and the v790 index/checklist rows. Root `CLAUDE.md` was NOT changed for the amendment.
 
 ## v791 — HOOK safe-area composition grammar (camera-first + layered foreground + scale cheat)
+
+**APPLY:** on the HOOK, write camera-first safe-area grammar: name the lens, use ultra-wide 0.5x, keep the lens level with the raised hand, and foreshorten toward the camera.
 
 **Surfaced 2026-06-12** from the operator's safe-area brief: on Reels/TikTok the app UI covers the top ~14%, the bottom ~35% and the right ~12% of the screen — the HOOK's focal action must land in the central band, big and immediate. Three rounds of test prompts on 6 corpus hooks (Costco lift / pills-on-balloon / Walmart-selfie banana / shelf smash / porch sunflower / restaurant CCTV) found what does and does not move Nano Banana 2's composition. Operator verdict on the final grammar: "I like this style for the hook."
 
@@ -14866,6 +14904,8 @@ Caught on the car-exit v1 build: image_1 was authored as Nuri close to the lens 
 
 ## v793 — Abstract-material substitution: filter-safe organic-shape reveals (Veo + NB2)
 
+**APPLY:** when the Veo filter rejects an organic-shape reveal, drop the biological nouns and describe the abstract material instead; do not resubmit the same wording.
+
 **What broke**: a Veo HOOK clip — main character lowers an "encrusted pink organ model" into a glass tank of saffron tonic, the dark crust dissolves and a "clean smooth pink anatomy model" is REVEALED — got rejected by the Veo content filter. The clinical-framing bypass (v702 / `[[nano-banana-prompting]]` §"Anatomical model") clears NB2's STILL-image filter, but Veo's video+TTS filter is stricter: biological nouns (`anatomy`, `organ`, `flesh`, `tissue`) — especially next to a color word like `pink` — trip it even in an educational frame. And the clinical frame has a second cost: it reads MEDICAL in the final video → collides with `CLAUDE.md` §8.
 
 **The rule (a SECOND bypass strategy — prefer it for on-screen reveals)**: when an organic-LOOKING shape (anatomy proxy, organ-shape prop, fleshy reveal object) trips the filter, swap the BIOLOGICAL nouns for INORGANIC crafted-material nouns. The rendered pixels still read organic/pink/smooth; the WORDS describe an inanimate object, so the filter passes — and nothing reads medical, so §8 is satisfied too.
@@ -14894,6 +14934,8 @@ Caught on the car-exit v1 build: image_1 was authored as Nuri close to the lens 
 
 ## v794 — Veo action + speech happen AT THE SAME TIME (no sequence-gating)
 
+**APPLY:** end the immediate-action sentence with "...as she delivers the line" so action and speech run CONCURRENTLY. Ban `then`, `after` and `once` between them.
+
 **What broke**: the fizz-pour HOOK Veo prompt read *"...the fizzing reaction holding; Nuri glances down at the foaming ginger **then up to the lens as she delivers the line**."* Veo rendered it literally as a SEQUENCE — pour → fizz → glance down → look back up → **then** start talking. The clip burns its short budget on the action first and the spoken line second. Operator 2026-06-22: *"first it does the pouring and then it does the talking while it should always happen at the same time."*
 
 **The rule**: in a Veo Text prompt the catalyst ACTION and the spoken LINE are SIMULTANEOUS, not sequential. The character does the action WHILE delivering the line — pour + fizz + speak overlap from the start. Write the action and the `as <they> deliver(s) the line` together; never gate the speech behind a completed motion or a look-away→back camera move.
@@ -14911,6 +14953,8 @@ Caught on the car-exit v1 build: image_1 was authored as Nuri close to the lens 
 **Touched**: `code/template_reference.md` §v794 (canonical), `wiki/concepts/prompting/veo-prompting.md` (§UGC delivery bullet), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (note), root `CLAUDE.md` (gotcha quickref), `wiki/log.md` (timeline), memory `feedback_veo-prompt-action-only`. First fix: `videos/nuri-korella-ed-fizz-pour-baking-soda-ginger-soldier-saffron-v1.md` Clip 1.1.
 
 ## v795 — No pointing fingers; hands always hold a prop (images + Veo prompts)
+
+**APPLY:** nothing to apply — SUPERSEDED. The no-pointing ban is retired (operator 2026-07-16) and the auditor check is a no-op PASS.
 
 > ### ⚠️ v795.1 — RELAXED 2026-07-16 (operator): POINTING IS ALLOWED AGAIN. FORWARD-ONLY.
 >
@@ -14950,6 +14994,8 @@ Caught on the car-exit v1 build: image_1 was authored as Nuri close to the lens 
 
 ## v796 — Dialogue vocabulary: drop deceptive-claim trigger phrasings (Veo/Omni native-audio text classifier)
 
+**APPLY:** drop deceptive-claim vocabulary — "[authority] don't want you to know", "the truth about", medical-secret framing — from every line and caption.
+
 **What broke**: a Veo/Omni clip with the dialogue *"american pharmacies don't want you to know this. if you're an american man over 40, just listen."* failed generation — surfaced as a `PROMINENT_PEOPLE` / image error, but the real trigger was the TEXT. Omni Flash + Veo generate native audio FROM the dialogue, so the spoken line is scanned by the content classifier as aggressively as the image. The "forbidden-knowledge / an-authority-is-hiding-it" framing trips Google's deceptive-health-claim filter. The recipe clip *"in a glass, add one tablespoon of turmeric..."* passed — factual/descriptive dialogue clears it. (Operator A/B 2026-06-22.)
 
 **The rule**: fix the WORDING (not split-audio, not retreat from native audio). Drop the deception-frame trigger phrasings; keep the curiosity + objection-kill FUNCTION via safe phrasing.
@@ -14970,6 +15016,8 @@ Caught on the car-exit v1 build: image_1 was authored as Nuri close to the lens 
 
 ## v797 — Veo dialogue line uses a colon before the quote
 
+**APPLY:** write the Veo dialogue with a COLON before the quote: `...voice (American accent): "<line>"`.
+
 **The rule**: the spoken-line sentence in every `### Clip N.M` Veo Text prompt uses a COLON after `(American accent)`, before the opening quote — not a comma.
 
 ```
@@ -14984,6 +15032,8 @@ The <speaker> says in a <register> voice (American accent): "<verbatim line>"
 **Touched**: `code/template_reference.md` §v797 (canonical), memory `feedback_veo-prompt-action-only` (canonical working shape), `wiki/concepts/prompting/veo-prompting.md` (§UGC delivery), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (note), root `CLAUDE.md` (gotcha quickref), `wiki/log.md` (timeline). First applied: `videos/nuri-korella-ed-organ-shockprop-twostate-resin-cortisol-soldier-saffron-v1.md` (9 clips). Operator 2026-06-22.
 
 ## v798 — Split the CTA across two clips (Veo policy)
+
+**APPLY:** split the CTA across TWO clips — the comment piece and the follow-gate piece — reusing the same CTA image. Combined in one clip it trips the limit.
 
 **What broke**: a full CTA clip — *"comment soldier and i'll send it to you personally. just make sure you're following me first so i can reach you."* — tripped Veo's policy classifier. The SAME two halves, each in its OWN clip, both passed: (1) *"comment soldier and i'll send it to you personally."* + (2) *"just make sure you're following me first so i can reach you."* The combined comment-keyword + follow-gate reads as engagement-bait / platform-manipulation; each piece alone is benign. (Operator A/B 2026-06-22.)
 
@@ -15001,6 +15051,8 @@ The <speaker> says in a <register> voice (American accent): "<verbatim line>"
 **Touched**: `code/template_reference.md` §v798 (canonical), `wiki/concepts/prompting/veo-prompting.md` (§Content-filter bypass), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (note), root `CLAUDE.md` (gotcha quickref), memory `feedback_cta-split-two-clips`, `wiki/log.md` (timeline). Operator 2026-06-22.
 
 ## v805 — Prompt B policy fallback per clip (authoring shape + worker auto-retry)
+
+**APPLY:** nothing to apply — SUPERSEDED by v821. New builds use the v821 prompt shape, not the voice-only Prompt B.
 
 **What broke**: the SAME dialogue line rendered fine as a voice-only prompt but tripped a Veo policy/SEXUAL violation when paired with the `IMMEDIATE ACTION: <action> ... as she delivers the line.` sentence (operator evidence 2026-07-01, cloves builds). The action+voice COMBO is the trigger; the dialogue alone passes. Before v805 the only automatic recovery was the v763 model swap — same prompt on the other model, which often re-blocks — then terminal fail; the safe voice-only variant was a manual operator paste.
 
@@ -15129,6 +15181,8 @@ Prompt B (voice-only) = the dialogue sentence + the post-speech sentence, no IMM
 **Touched**: this deep-dive, `wiki/patterns/conventions.md` (row), `wiki/meta/build-rule-index.md` §A (row), root `CLAUDE.md` (quickref row), the build-video skill Step-5, memory `feedback_veo-fast-line-delivery` (amended → say-exactly+silence), `wiki/log.md`. Operator 2026-07-04.
 
 ## v786 — Fully-silent builds: storyboard pre-fill + scene-level action_note (no dialogue lines anywhere)
+
+**APPLY:** on a fully-silent build, pre-fill the storyboard, write a scene-level `action_note`, and set `speaker: silent`.
 
 **What broke**: the Rovellaro grandma build (2026-06-12) is fully silent — `speaker: silent` on all 19 scenes, ZERO `- **line:**` bullets, natural sounds only, captions in CapCut. Import parsed fine, but on promote-to-video the storyboard editor collapsed to ONE mega-scene ("Scene 1 (Image 1) Clips #1-19", default blend) AND the note chips showed a DIFFERENT build's beats. Cause: the frontend pre-fill gate (`static/index.html`, prepare flow step 6.5) required `hasAnyVoiceover` — meant to skip legacy pre-v432 no-metadata batches — so a zero-line build skipped the whole pre-fill: `sceneBreaks` never assigned, and the previous batch's `window._actionNotes` / `_veoPromptOverrides` leaked into the new editor render. Second gap: the markdown bullet parser attached `action_note` only to a preceding `line:` bullet, so a silent scene's note was silently dropped ("malformed") — empty chips even with pre-fill fixed.
 
