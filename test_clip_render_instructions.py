@@ -901,3 +901,463 @@ def test_the_parser_and_the_linter_share_one_audio_table():
     import clip_contract
     assert ip.V971_AUDIO_SOURCES is clip_contract.V971_AUDIO_SOURCES
     assert ip.V969_ATTACH_ROLES is clip_contract.V969_ATTACH_ROLES
+
+
+# ---------------------------------------------------------------------------
+# tools/stamp_clip_contract.py -- the stamper (spec:
+# docs/superpowers/plans/2026-09-11-clip-contract-stamper.md)
+#
+# One tool, one promise: a build is never momentarily invalid. Writing the §0
+# opt-in puts the build in scope and an in-scope shot scene missing a contract
+# bullet is a hard FAIL in the parser AND in build-checks gate 7, so the opt-in
+# and every bullet land in ONE write, or none.
+# ---------------------------------------------------------------------------
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+_REPO = Path(__file__).resolve().parents[1]
+if str(_REPO / "tools") not in sys.path:
+    sys.path.insert(0, str(_REPO / "tools"))
+
+import stamp_clip_contract as stamper  # noqa: E402
+
+# A real movie-section build: seven shot scenes, every one of them carrying
+# `face_refs`, so the attach mirror has a non-trivial order to get right.
+_REAL_BUILD = (
+    _REPO / "videos"
+    / "nuri-korella-ed-farmers-market-pumpkin-crate-farmer64-shopper-admires-"
+      "healer-stall-handoff-morning-shot-movie-section-comment-growth-v1.md"
+)
+
+_CONTRACT_BULLETS = ("input_mode", "isolate_project", "policy_fallback", "attach")
+
+
+def _read(path):
+    with open(path, "r", encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
+def _unstamped(text):
+    """The same build with every contract declaration removed.
+
+    Task 10 will stamp a real build for real. These tests must keep testing the
+    STAMPER rather than quietly turning into no-ops the day that lands, so the
+    fixture is always taken back to its pre-contract state first.
+    """
+    out = []
+    bullet = re.compile(
+        r"^\s*[-*]\s*\*\*(?:%s)\s*:\*\*" % "|".join(_CONTRACT_BULLETS))
+    for line in text.splitlines(keepends=True):
+        if line.rstrip("\r\n").strip() == stamper.CONTRACT_LINE:
+            continue
+        if bullet.match(line):
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+@pytest.fixture()
+def real_build_text():
+    if not _REAL_BUILD.is_file():
+        pytest.skip("the movie-section fixture build is gone")
+    return _unstamped(_read(_REAL_BUILD))
+
+
+# --- §7 invariant snapshots. Cheap text captures; none of them needs the parser.
+
+def _scene_headers(t):
+    return re.findall(r"^###\s+Scene\s+\d+\s*$", t, re.M)
+
+
+def _image_headers(t):
+    return re.findall(r"^###\s+Image\s+\d+", t, re.M)
+
+
+def _clip_headers(t):
+    return re.findall(r"^###\s+Clip\s+\d+\.\d+", t, re.M)
+
+
+def _line_fields(t):
+    return re.findall(r"^\s*[-*]\s*\*\*line:\*\*", t, re.M)
+
+
+def _target_duration_sum(t):
+    return sum(int(v) for v in re.findall(
+        r"^\s*[-*]\s*\*\*target_duration_s:\*\*\s*(\d+)", t, re.M))
+
+
+def _scene_to_image(t):
+    """Every scene's `- **image:** image_N`, in scene order. The ORDERED
+    mapping, not a set -- a swap between two scenes keeps every count equal."""
+    out = []
+    for block in re.split(r"(?=^###\s+Scene\s+\d+\s*$)", t, flags=re.M)[1:]:
+        m = re.search(r"^\s*[-*]\s*\*\*image:\*\*\s*(\S+)", block, re.M)
+        out.append(m.group(1) if m else None)
+    return out
+
+
+def _s0_declarations(t):
+    """The `## §0` block's column-0 declaration lines."""
+    m = re.search(r"^##\s*§0\b", t, re.M)
+    assert m, "the fixture has no §0 section"
+    rest = t[m.end():]
+    end = re.search(r"^##\s", rest, re.M)
+    body = rest[:end.start()] if end else rest
+    return [ln for ln in body.splitlines()
+            if ln[:1] not in ("", " ", "\t", "-", "*", "#", "`", ">")]
+
+
+# --- S-1.1 -----------------------------------------------------------------
+
+def test_stamping_a_real_build_opts_in_at_column_0(real_build_text):
+    out, notes = stamper.plan_file(real_build_text, "fixture")
+    assert notes, "the unstamped fixture should need work"
+    assert "\nCLIP CONTRACT: v1\n" in out
+    assert "\n CLIP CONTRACT: v1" not in out      # never indented
+    assert len(re.findall(r"^CLIP CONTRACT:\s*v1\s*$", out, re.M)) == 1
+
+
+def test_every_shot_scene_gets_all_four_bullets(real_build_text):
+    out, _ = stamper.plan_file(real_build_text, "fixture")
+    blocks = re.split(r"(?=^###\s+Scene\s+\d+\s*$)", out, flags=re.M)[1:]
+    assert len(blocks) == 7
+    for block in blocks:
+        for name in _CONTRACT_BULLETS:
+            assert re.search(r"^\s*[-*]\s*\*\*%s:\*\*" % name, block, re.M), (
+                name, block[:120])
+
+
+def test_the_attach_mirror_is_the_production_derivation(real_build_text):
+    """Never re-derived locally. A movie-section scene lists the scene chip and
+    then the faces IN THE AUTHOR'S ORDER, and nothing after them."""
+    out, _ = stamper.plan_file(real_build_text, "fixture")
+    block = re.split(r"(?=^###\s+Scene\s+\d+\s*$)", out, flags=re.M)[4]
+    assert "- **attach:** image_4:start_frame, image_5:face, image_2:face" in block
+
+
+# --- S-1.2 -----------------------------------------------------------------
+
+def test_stamping_is_idempotent(real_build_text):
+    once, _ = stamper.plan_file(real_build_text, "fixture")
+    twice, notes = stamper.plan_file(once, "fixture")
+    assert notes == []
+    assert twice == once
+
+
+# --- S-1.3 -- all SEVEN §7 invariants, not five ----------------------------
+
+def test_the_five_counted_invariants_are_unchanged(real_build_text):
+    out, _ = stamper.plan_file(real_build_text, "fixture")
+    assert _scene_headers(out) == _scene_headers(real_build_text)
+    assert _image_headers(out) == _image_headers(real_build_text)
+    assert _clip_headers(out) == _clip_headers(real_build_text)
+    assert _line_fields(out) == _line_fields(real_build_text)
+    assert _target_duration_sum(out) == _target_duration_sum(real_build_text)
+
+
+def test_the_ordered_scene_to_image_mapping_is_unchanged(real_build_text):
+    out, _ = stamper.plan_file(real_build_text, "fixture")
+    before = _scene_to_image(real_build_text)
+    assert before and all(before)
+    assert _scene_to_image(out) == before
+
+
+def test_section0_gains_exactly_the_opt_in_and_nothing_else(real_build_text):
+    """A verbatim compare cannot pass -- stamping necessarily adds the opt-in to
+    §0, so the test would fail on its own success. Remove exactly that ONE line
+    from the after-snapshot, then require the two to be identical."""
+    out, _ = stamper.plan_file(real_build_text, "fixture")
+    before = _s0_declarations(real_build_text)
+    after = _s0_declarations(out)
+    assert after.count(stamper.CONTRACT_LINE) == 1
+    assert before.count(stamper.CONTRACT_LINE) == 0
+    after.remove(stamper.CONTRACT_LINE)
+    assert after == before
+
+
+# --- S-1.4 -----------------------------------------------------------------
+
+_MINIMAL = """## §0 Citations Check
+
+SCAFFOLD CONTRACT: v1
+
+## Images
+
+### Image 1
+- **Image prompt:**
+
+```
+a jar on a counter
+```
+
+## Storyboard
+
+### Scene 1
+- **image:** image_1
+- **scene_type:** shot
+- **speaker:** on-camera
+- **line:** the words of this clip in order lowercase
+- **target_duration_s:** 8
+- **action_note:** [Start beat] hands enter [End beat] jar held
+
+### Scene 2
+- **scene_type:** text_card
+- **caption:** the card says this
+- **bg_color:** #000000
+- **duration_s:** 1.5
+"""
+
+
+def test_a_text_card_gains_nothing():
+    out, _ = stamper.plan_file(_MINIMAL, "fixture")
+    card = re.split(r"(?=^###\s+Scene\s+\d+\s*$)", out, flags=re.M)[2]
+    assert "text_card" in card
+    for name in _CONTRACT_BULLETS:
+        assert ("**%s:**" % name) not in card
+
+
+# --- S-1.5 -----------------------------------------------------------------
+
+def test_no_emitted_line_carries_an_inline_annotation(real_build_text):
+    """`_parse_bullet_field` keeps everything after the value, so a trailing
+    `# ...` becomes part of it and the build stops importing. The skeleton's
+    Scene 7 documents every bullet that way; its lines must never be copied."""
+    before = set(real_build_text.splitlines())
+    out, _ = stamper.plan_file(real_build_text, "fixture")
+    added = [ln for ln in out.splitlines() if ln not in before]
+    assert added
+    for line in added:
+        assert "#" not in line, line
+
+
+def test_the_emitted_bullets_survive_the_production_parser(real_build_text):
+    """Not a shape check: every emitted value goes back through the checker
+    that would refuse it at import."""
+    import clip_contract
+    out, _ = stamper.plan_file(real_build_text, "fixture")
+    modes = re.findall(r"^\s*[-*]\s*\*\*input_mode:\*\*\s*(.+?)\s*$", out, re.M)
+    assert modes
+    for m in modes:
+        clip_contract.check_input_mode(m)
+    for lad in re.findall(
+            r"^\s*[-*]\s*\*\*policy_fallback:\*\*\s*(.+?)\s*$", out, re.M):
+        clip_contract.check_ladder([r.strip() for r in lad.split(",")])
+    for iso in re.findall(
+            r"^\s*[-*]\s*\*\*isolate_project:\*\*\s*(.+?)\s*$", out, re.M):
+        assert iso in ("true", "false")
+
+
+def test_no_v970_and_no_audio_bullet_is_ever_written(real_build_text):
+    before = set(real_build_text.splitlines())
+    out, _ = stamper.plan_file(real_build_text, "fixture")
+    added = [ln for ln in out.splitlines() if ln not in before]
+    for line in added:
+        for banned in ("aspect_ratio", "variants", "resolution", "audio"):
+            assert ("**%s:**" % banned) not in line, line
+
+
+# --- S-1.6 -----------------------------------------------------------------
+
+def test_a_half_stamped_build_converges(real_build_text):
+    """The state a two-pass stamper would ship. Re-running must land on exactly
+    the fully stamped bytes, not beside them."""
+    full, _ = stamper.plan_file(real_build_text, "fixture")
+    victim = re.search(r"^\s*[-*]\s*\*\*attach:\*\*.+?\n", full, re.M).group(0)
+    half = full.replace(victim, "", 1)
+    assert half != full
+    again, notes = stamper.plan_file(half, "fixture")
+    assert notes, "the missing attach line should be reported"
+    assert again == full
+
+
+# --- S-1.7 -----------------------------------------------------------------
+
+def _run(args, tmp_path):
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(_REPO / "code")
+    return subprocess.run(
+        [sys.executable, str(_REPO / "tools" / "stamp_clip_contract.py")] + args,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(_REPO), env=env)
+
+
+def test_check_mode_changes_no_bytes_and_exits_1(tmp_path):
+    target = tmp_path / "build.md"
+    with open(target, "w", encoding="utf-8", newline="") as fh:
+        fh.write(_MINIMAL)
+    before = target.read_bytes()
+    proc = _run(["--check", str(target)], tmp_path)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert target.read_bytes() == before
+    assert "WOULD STAMP" in proc.stdout
+
+
+def test_check_mode_on_a_stamped_build_exits_0(tmp_path):
+    target = tmp_path / "build.md"
+    stamped, _ = stamper.plan_file(_MINIMAL, "fixture")
+    with open(target, "w", encoding="utf-8", newline="") as fh:
+        fh.write(stamped)
+    proc = _run(["--check", str(target)], tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "already fully stamped" in proc.stdout
+
+
+# --- input_mode: the derivation that must not change what a clip DOES -------
+
+def _with(bullets, base=_MINIMAL):
+    return base.replace(
+        "- **target_duration_s:** 8",
+        "\n".join(bullets) + "\n- **target_duration_s:** 8", 1)
+
+
+def test_a_veo_clip_with_an_end_frame_stamps_frames_not_ingredients():
+    """The shipped inference needs an OMNI model AND an end frame. A Veo clip
+    with an end frame runs on Frames today, and a stamp must not move it."""
+    text = _with(["- **end_frame_image:** image_2",
+                  "- **veo_model:** Veo 3.1"])
+    out, _ = stamper.plan_file(text, "fixture")
+    assert "- **input_mode:** frames" in out
+    assert "ingredients" not in out
+
+
+def test_an_omni_clip_with_start_and_end_frames_stamps_ingredients():
+    text = _with(["- **end_frame_image:** image_2",
+                  "- **veo_model:** Omni Flash"])
+    out, _ = stamper.plan_file(text, "fixture")
+    assert "- **input_mode:** ingredients" in out
+    assert "- **attach:** image_1:start_frame, image_2:end_frame" in out
+
+
+def test_an_end_frame_with_no_declared_model_refuses_the_file_by_scene():
+    """The effective model is then a JOB setting the markdown does not carry,
+    and the two candidates disagree. Refuse; do not invent a default."""
+    text = _with(["- **end_frame_image:** image_2"])
+    with pytest.raises(stamper.Refusal) as exc:
+        stamper.plan_file(text, "fixture")
+    joined = " ".join(exc.value.reasons)
+    assert "Scene 1" in joined
+    assert "veo_model" in joined
+
+
+def test_a_clip_with_no_end_frame_stamps_frames_without_a_declared_model():
+    """Both candidate models agree here, so there is nothing to refuse."""
+    out, _ = stamper.plan_file(_MINIMAL, "fixture")
+    assert "- **input_mode:** frames" in out
+
+
+# --- PREFLIGHT: never promote an existing bad value -------------------------
+
+def test_an_invalid_existing_input_mode_refuses_the_whole_file():
+    """The half-stamped danger: a bad value sitting inert becomes ACTIVE the
+    moment the opt-in lands beside it. Refuse the FILE, before a byte is
+    written -- not the one scene."""
+    text = _with(["- **input_mode:** Ingredient"])
+    with pytest.raises(stamper.Refusal) as exc:
+        stamper.plan_file(text, "fixture")
+    joined = " ".join(exc.value.reasons)
+    assert "Scene 1" in joined and "input_mode" in joined
+    assert "'Ingredient'" in joined or '"Ingredient"' in joined
+    assert "frames" in joined and "ingredients" in joined       # what was expected
+
+
+def test_an_existing_attach_that_disagrees_refuses_the_whole_file():
+    text = _with(["- **attach:** image_2:start_frame"])
+    with pytest.raises(stamper.Refusal) as exc:
+        stamper.plan_file(text, "fixture")
+    joined = " ".join(exc.value.reasons)
+    assert "attach" in joined and "image_1:start_frame" in joined
+
+
+def test_a_ladder_that_cannot_end_refuses_the_whole_file():
+    text = _with(["- **policy_fallback:** prompt_b"])
+    with pytest.raises(stamper.Refusal) as exc:
+        stamper.plan_file(text, "fixture")
+    assert "fail" in " ".join(exc.value.reasons)
+
+
+def test_a_yes_isolate_project_refuses_the_whole_file():
+    text = _with(["- **isolate_project:** yes"])
+    with pytest.raises(stamper.Refusal) as exc:
+        stamper.plan_file(text, "fixture")
+    assert "isolate_project" in " ".join(exc.value.reasons)
+
+
+def test_the_v970_preflight_accepts_v826s_x2_spelling():
+    """The MARKDOWN validator, not the leaf checker. `clip_contract.check_variants`
+    takes an int; calling it on raw markdown rejects `x2` or raises TypeError."""
+    text = _with(["- **variants:** x2"])
+    out, _ = stamper.plan_file(text, "fixture")
+    assert "- **variants:** x2" in out          # untouched, and not refused
+
+
+def test_a_bad_variants_value_still_refuses():
+    text = _with(["- **variants:** x9"])
+    with pytest.raises(stamper.Refusal) as exc:
+        stamper.plan_file(text, "fixture")
+    assert "variants" in " ".join(exc.value.reasons)
+
+
+def test_a_refused_file_is_left_untouched_on_disk(tmp_path):
+    target = tmp_path / "build.md"
+    text = _with(["- **input_mode:** Ingredient"])
+    with open(target, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+    before = target.read_bytes()
+    proc = _run([str(target)], tmp_path)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "REFUSED" in proc.stdout
+    assert target.read_bytes() == before
+
+
+def test_a_contract_bullet_above_the_first_line_is_refused_not_duplicated():
+    """The parser discards a contract bullet written before the scene's first
+    `- **line:**`, so the scene would read as undeclared the moment the opt-in
+    lands. Say so instead of stamping a second copy beside it."""
+    text = _MINIMAL.replace(
+        "- **speaker:** on-camera",
+        "- **speaker:** on-camera\n- **input_mode:** frames", 1)
+    with pytest.raises(stamper.Refusal) as exc:
+        stamper.plan_file(text, "fixture")
+    assert "BEFORE the first" in " ".join(exc.value.reasons)
+
+
+# --- the write itself -------------------------------------------------------
+
+def test_crlf_is_preserved_and_no_bare_newline_is_introduced():
+    """A Python read/write pair renormalises CRLF silently and the diff becomes
+    the whole file. This repo has been caught by that before."""
+    text = _MINIMAL.replace("\n", "\r\n")
+    out, _ = stamper.plan_file(text, "fixture")
+    assert "\r\n" in out
+    assert re.search(r"(?<!\r)\n", out) is None
+
+
+def test_the_stamp_is_one_write_and_leaves_no_temp_file(tmp_path):
+    target = tmp_path / "build.md"
+    with open(target, "w", encoding="utf-8", newline="") as fh:
+        fh.write(_MINIMAL)
+    changed, notes = stamper.stamp_file(target)
+    assert changed and notes
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["build.md"]
+    assert "CLIP CONTRACT: v1" in target.read_text(encoding="utf-8")
+
+
+def test_multiple_clips_in_one_scene_each_get_their_own_trio():
+    """A two-line scene is two clips, and a contract bullet attaches to the
+    closest PRECEDING line. One trio for the scene would leave clip 1
+    undeclared and fail the import."""
+    text = _MINIMAL.replace(
+        "- **action_note:** [Start beat] hands enter [End beat] jar held",
+        "- **action_note:** [Start beat] hands enter [End beat] jar held\n"
+        "- **line:** and the second clip says this\n"
+        "- **action_note:** [Start beat] she turns [End beat] she smiles", 1)
+    out, _ = stamper.plan_file(text, "fixture")
+    scene = re.split(r"(?=^###\s+Scene\s+\d+\s*$)", out, flags=re.M)[1]
+    assert len(re.findall(r"^\s*[-*]\s*\*\*input_mode:\*\*", scene, re.M)) == 2
+    assert len(re.findall(r"^\s*[-*]\s*\*\*attach:\*\*", scene, re.M)) == 1
+    # each trio sits BELOW its own line, never above the first one
+    order = re.findall(r"\*\*(line|input_mode)\b", scene)
+    assert order == ["line", "input_mode", "line", "input_mode"]
