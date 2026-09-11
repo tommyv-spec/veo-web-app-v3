@@ -1336,6 +1336,10 @@ def korella_bio_link(who: str):
     return amazon_deeplink(KORELLA_ASIN, tag, p=f"bio-{who.lower()}")
 
 
+class _SkipAssignment(Exception):
+    """Do not consult link_assignments for this request; serve the persona tag."""
+
+
 @app.get("/v/{persona}/{post_id}", response_class=HTMLResponse, include_in_schema=False)
 def video_deeplink(persona: str, post_id: str):
     """The link we PUBLISH. Carries the post, never the tag.
@@ -1361,15 +1365,52 @@ def video_deeplink(persona: str, post_id: str):
 
     asin = KORELLA_ASIN
     measured = False
+    pid = str(post_id or "")
+
+    def _note(evt, **kw):
+        try:
+            print(json.dumps({"evt": evt, "post": pid[:32], "persona": who, **kw}),
+                  flush=True)
+        except Exception:
+            pass
+
     try:
+        # NEVER query on a truncated identity: a longer id sharing its first 64
+        # characters would match — and be served — another video's assignment.
+        if len(pid) > 64:
+            _note("deeplink_postid_too_long", length=len(pid))
+            raise _SkipAssignment
         from models import LinkAssignment as _LA, get_db as _get_db
         with _get_db() as _db:
-            row = _db.query(_LA).filter(_LA.post_id == str(post_id)[:64]).first()
-            if row:
-                asin = row.asin or KORELLA_ASIN
+            # Scope by persona too. The post id alone would let
+            # /v/nuri/<martha-post> borrow martha's measurement tag and then fall
+            # back to nuri's — two different accounts credited for one video.
+            row = (_db.query(_LA)
+                   .filter(_LA.post_id == pid, _LA.persona == who)
+                   .first())
+            if row is None:
+                # Is it a real post filed under a DIFFERENT persona? Say so
+                # loudly — that is a publishing bug, not a stranger's URL.
+                other = _db.query(_LA).filter(_LA.post_id == pid).first()
+                if other is not None:
+                    _note("deeplink_persona_mismatch", stored=other.persona)
+            else:
+                # Validate anything we take from the row. amazon_deeplink 404s on
+                # a malformed asin/tag, and a 404 here costs the order — the one
+                # outcome this route exists to prevent.
+                if row.asin:
+                    if _valid_asin(row.asin):
+                        asin = row.asin
+                    else:
+                        _note("deeplink_bad_stored_asin", stored=str(row.asin)[:32])
                 if (row.measure_tag and row.measure_until
                         and datetime.utcnow() < row.measure_until):
-                    tag, measured = row.measure_tag, True
+                    if _valid_tag(row.measure_tag):
+                        tag, measured = row.measure_tag, True
+                    else:
+                        _note("deeplink_bad_stored_tag", stored=str(row.measure_tag)[:40])
+    except _SkipAssignment:
+        pass
     except Exception as exc:
         # NEVER let a lookup fault cost a sale: fall through on the persona tag.
         try:
@@ -1379,13 +1420,9 @@ def video_deeplink(persona: str, post_id: str):
             pass
 
     # v972 diagnostic — remove once a real click has been seen resolving both ways.
-    try:
-        print(json.dumps({"evt": "deeplink_resolved", "post": str(post_id)[:32],
-                          "persona": who, "tag": tag, "measured": measured}), flush=True)
-    except Exception:
-        pass
+    _note("deeplink_resolved", tag=tag, measured=measured)
 
-    return amazon_deeplink(asin, tag, p=str(post_id)[:32])
+    return amazon_deeplink(asin, tag, p=pid[:32])
 
 
 @app.get("/g/{asin}/{tracking_id}", response_class=HTMLResponse, include_in_schema=False)
