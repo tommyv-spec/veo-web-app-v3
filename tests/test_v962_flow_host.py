@@ -220,10 +220,14 @@ def test_v962_3_video_settings_branch_precedes_the_legacy_retry_loop():
     # v962.7 — the input mode is critical again (Video type radio), Model for Omni
     assert "critical = ['Video', mode_key, 'Portrait']" in res
     assert 'if target_model == "Omni Flash":' in res
-    # Ingredients is a DELIBERATE hold on the new host, said in the log line and
-    # stashed where v945.15 records it (the sentence lives in a module constant)
-    assert "UNMEASURED on" in src and "deliberate hold" in src
-    assert "_V962_INGREDIENTS_HOLD" in res
+    # v963.10 — the Ingredients HOLD IS LIFTED. Both modes are measured end to
+    # end, so the resolver picks whichever mode the clip needs instead of
+    # hardcoding Frames and stashing a refusal sentence. (This assertion used to
+    # require `_V962_INGREDIENTS_HOLD`; that constant was deleted with the hold,
+    # which left this test red at HEAD from v963.10 until 2026-09-11.)
+    assert "_V962_INGREDIENTS_HOLD" not in src, \
+        "the Ingredients hold was lifted in v963.10 — a reintroduced constant needs a new decision"
+    assert 'mode_key = ' in res and "_omni_ingredients_mode(page)" in res
     # and the legacy path is still there, untouched in shape
     assert "button.flow_tab_slider_trigger" in body
     assert "button:has-text('x{n}')" in body
@@ -362,13 +366,13 @@ def test_v962_7_frames_prompt_and_generate_branch_on_the_new_host():
     assert "flow-rich-text-editor [contenteditable='true']" in src
     assert "button[aria-label='Start generation']" in src
     assert "expect_file_chooser(" in _func_body(src, "_v962_pick_asset_in_picker")
-    # the resolver picks the Video type radio and keeps the mode critical again
+    # the resolver picks the Video type radio and keeps the mode critical again.
+    # v963.10 — the mode is DYNAMIC (`mode_key`), not the hardcoded "Frames" this
+    # test asserted while Ingredients was held; the hold and its constant are gone.
     res = _func_body(src, "_v962_material_video_settings")
-    assert '_v962_pick_radio(page, "Frames", "Video type", prefix)' in res
+    assert '_v962_pick_radio(page, mode_key, "Video type", prefix)' in res
     assert "critical = ['Video', mode_key, 'Portrait']" in res
-    # Ingredients is still a deliberate hold, with its sentence where v945.15 reads it
-    assert "UNMEASURED on" in src and "deliberate hold" in src
-    assert "page._model_apply_debug = _V962_INGREDIENTS_HOLD" in res
+    assert "_V962_INGREDIENTS_HOLD" not in res
     # the four legacy sites branch BEFORE their Radix/dialog work
     for fn, marker in (("upload_both_frames_with_policy_check", "_v962_attach_frame(page, start_image, 'start'"),
                        ("click_frame_and_upload_with_policy_check", "_v962_attach_frame(page, image_path, which"),

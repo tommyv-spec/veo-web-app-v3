@@ -2045,12 +2045,57 @@ def spa_navigate_to_flow_home(page, label=""):
 # FLOW UI HELPERS (from flow_worker.py)
 # ============================================================
 
+def _v962_type_prompt(page, prompt, prefix=""):
+    """Type the prompt into the rich-text editor. True when the text landed.
+
+    v962.7 — ported from static/flow_worker.py. flow.google.com renders an
+    Angular Material rich-text editor, NOT the Slate div[role=textbox] the
+    legacy path below looks for, so on the new host that path found nothing,
+    returned False, and the caller reported "Failed to fill prompt" (the
+    node 5395 failure, 2026-09-11).
+    """
+    ed = page.locator(_V962_PROMPT_EDITOR).first
+    ed.wait_for(state="visible", timeout=15000)
+    ed.click(timeout=5000)
+    time.sleep(0.3)
+    try:
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Delete")
+    except Exception:
+        pass
+    page.keyboard.insert_text(prompt or "")
+    time.sleep(0.6)
+    try:
+        got = (ed.inner_text(timeout=2000) or "").strip()
+    except Exception:
+        got = ""
+    ok = len(got) >= int(min(len((prompt or "").strip()), 60) * 0.8)
+    print(f"{prefix}{'✓' if ok else '⚠'} [v962.7] prompt in the editor: {len(got)} chars", flush=True)
+    return ok
+
+
+def _v962_generate_enabled(page):
+    """v962.7 — Generate button state on flow.google.com (mat-icon, aria-label)."""
+    try:
+        b = page.locator(_V962_GENERATE_BTN).first
+        if b.count() == 0 or not b.is_visible():
+            return False
+        if b.is_disabled() or b.get_attribute("aria-disabled") == "true":
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def fill_prompt_textarea(page, prompt):
     """Fill the prompt textbox (Slate contenteditable div).
 
     Returns True on success, False if the textbox couldn't be found or
     the prompt couldn't be entered.
     """
+    if _v962_on_new_host(page):  # v962.7 — rich-text editor, no role=textbox
+        return _v962_type_prompt(page, prompt)
+
     textbox = page.locator('div[role="textbox"]').first
     if textbox.count() == 0:
         print("⚠ Prompt textbox not found on page", flush=True)
@@ -2319,6 +2364,11 @@ _V962_OVERLAY_GROUP = ".cdk-overlay-container [role='radiogroup']"
 _V962_MODEL_BTN = (".cdk-overlay-container button[aria-label='Select model family'], "
                    "button[aria-label='Select model family']")
 _V962_MENU_ITEMS = ".cdk-overlay-container [role='menuitem'], [role='menuitem']"
+# v962.7 — composer controls on flow.google.com. Ported from static/flow_worker.py,
+# where they were measured on the new host; the Radix-era equivalents below
+# (div[role=textbox], the arrow_forward icon button) do not exist there at all.
+_V962_PROMPT_EDITOR = "flow-rich-text-editor [contenteditable='true']"
+_V962_GENERATE_BTN = "button[aria-label='Start generation']"
 
 
 def _v962_on_new_host(page):
@@ -2957,6 +3007,268 @@ def _normalize_model_label(s):
     return _r.sub(r"\s+", " ", s).strip()
 
 
+_V962_ADD_MENU_BTN = "button[aria-label='Add ingredients to the prompt box']"
+_V962_PICKER = (".cdk-overlay-container [role='listbox'], .cdk-overlay-container [role='option'], "
+                ".cdk-overlay-container button:has-text('Upload media'), "
+                ".cdk-overlay-container flow-add-menu, "
+                ".cdk-overlay-container .cdk-overlay-pane")
+# Page-wide chip count is DIAGNOSTIC only. Proof that an attach landed is the
+# image leaf chips inside the one active composer's ingredient bar — picker and
+# history chips elsewhere on the page cannot show that the composer changed.
+_V962_ANY_CHIP = "flow-image-ingredient-chip, flow-ingredient-chip"
+_V962_ACTIVE_PROMPT_BOX = "flow-base-prompt-box:visible"
+_V962_COMPOSER_IMAGE_CHIP = (
+    "flow-image-ingredient-chip:visible:not(:has(flow-image-ingredient-chip))"
+)
+
+
+def _v962_composer_chips(page):
+    """Visible image leaf chips in the one active composer's ingredient bar.
+
+    None means the composer/bar could not be identified uniquely, and it is
+    deliberately NOT zero: an unreadable count cannot prove an attach landed.
+    """
+    try:
+        boxes = page.locator(_V962_ACTIVE_PROMPT_BOX)
+        if boxes.count() != 1:
+            return None
+        bars = boxes.first.locator("flow-ingredient-bar:visible")
+        bar_count = bars.count()
+        if bar_count == 0:
+            return 0
+        if bar_count != 1:
+            return None
+        return bars.first.locator(_V962_COMPOSER_IMAGE_CHIP).count()
+    except Exception:
+        return None
+
+
+def _v962_pagewide_chips(page):
+    """Diagnostic only — every ingredient-like chip anywhere on the page."""
+    try:
+        return page.locator(_V962_ANY_CHIP).count()
+    except Exception:
+        return -1
+
+
+def _v962_asset_selected(item):
+    """Is this add-menu asset already selected? True / False / None if unknown.
+
+    None means the page did not say, and the caller must not read that as
+    "selected" — an unclicked asset never attaches.
+    """
+    for attr in ("aria-selected", "aria-checked"):
+        try:
+            v = item.get_attribute(attr)
+        except Exception:
+            v = None
+        if v is not None:
+            return str(v).strip().lower() == "true"
+    try:
+        btn = item.locator("button").first
+        if btn.count():
+            for attr in ("aria-selected", "aria-checked"):
+                v = btn.get_attribute(attr)
+                if v is not None:
+                    return str(v).strip().lower() == "true"
+    except Exception:
+        pass
+    return None
+
+
+def _v962_attach_reference(page, image_path, prefix="", clear_existing=True):
+    """v962.9 — attach one reference on flow.google.com. Returns (ok, reason).
+
+    The legacy path below opens an 'add_2' Create control, waits for
+    [role=dialog], sets a file input and clicks Add to Prompt. On the new host
+    step one does not exist, which is how this lane died on 2026-09-11:
+
+        Locator.wait_for: Timeout 5000ms exceeded waiting for
+        div[aria-haspopup="dialog"], button[aria-haspopup="dialog"]:has(span:text('Create'))
+
+    What the composer actually does (ported from flow_worker._v962_attach_ingredient,
+    measured there on project b226b464):
+
+      1. `Add ingredients to the prompt box` opens the add menu (project assets
+         plus 'Upload media')
+      2. an asset already in the project is a flow-add-menu-asset-item carrying
+         its file name as inner text
+      3. clicking one marks it SILENTLY — aria-selected stays "false" and the
+         composer stays empty, so a run that stops here looks like a dead end
+      4. 'Add to prompt' is the commit; the chip lands ~2s later
+      5. there is no input[type=file], but 'Upload media' opens a REAL file
+         chooser, so new files go in that way
+
+    DIFFERENCE FROM THE VIDEO WORKER, and it is the whole reason this is a
+    separate function: the video path first forces the composer onto
+    INGREDIENTS via `flow-toggles[aria-label='Video type']`. **The image
+    composer has no such control.** Measured 2026-09-11 with
+    tools/flow_probe_controls.py on a live image project (781579a9), signed in
+    as the worker itself: `video_type_group 0 · video_type_radios 0 ·
+    any_radio 0`, while `settings_trigger_aria 1 · rich_text_editor 1 ·
+    add_menu 2`. Porting the gate would have refused every attach with
+    `ingredients_mode_unverified` — a new silent wall in place of the old one.
+    So there is no mode gate here, by measurement rather than by omission.
+
+    Success is a chip-count INCREASE, keeping the v881 pair rule: the second
+    image of a set must not be "confirmed" by the first one already sitting
+    there.
+    """
+    name = os.path.basename(image_path) if image_path else None
+    if not (image_path and os.path.isfile(image_path)):
+        print(f"{prefix}⚠ [v962.9] no image file to attach: {image_path}", flush=True)
+        return (False, 'no_buttons')
+
+    if clear_existing:
+        # Each chip carries its own 'cancel' control inside the composer.
+        try:
+            for _ in range(6):
+                x = page.locator("flow-prompt-box button:has-text('cancel'), "
+                                 "flow-base-prompt-box button:has-text('cancel')").first
+                if x.count() == 0:
+                    break
+                x.click(timeout=2500)
+                time.sleep(0.5)
+        except Exception:
+            pass
+
+    chips_before = _v962_composer_chips(page)
+    if chips_before is None:
+        print(f"{prefix}⚠ [v962.9] attach stopped: composer chip count unreadable "
+              f"(pagewide={_v962_pagewide_chips(page)})", flush=True)
+        return (False, 'attachment_unverified')
+
+    picker_state = 'not_opened'
+    try:
+        add_btn = page.locator(_V962_ADD_MENU_BTN).first
+        add_btn.wait_for(state="visible", timeout=10000)
+    except Exception:
+        print(f"{prefix}⚠ [v962.9] add-ingredients button not on the composer", flush=True)
+        return (False, 'no_buttons')
+    human_click_locator(page, add_btn, f"{prefix}[v962.9] open add menu")
+    time.sleep(1.5)
+
+    try:
+        page.locator(_V962_PICKER).first.wait_for(state="visible", timeout=10000)
+    except Exception:
+        print(f"{prefix}⚠ [v962.9] add menu did not open", flush=True)
+        return (False, 'no_buttons')
+    picker_state = 'open'
+
+    def _item():
+        try:
+            loc = page.locator(".cdk-overlay-container flow-add-menu-asset-item",
+                               has_text=name).first
+            return loc if loc.count() else None
+        except Exception:
+            return None
+
+    def _item_readiness(item):
+        """Compact UI proof that a filename match is an actual ready asset."""
+        if item is None:
+            return False, '', 0
+        text_read = False
+        try:
+            text = ' '.join((item.inner_text(timeout=500) or '').split())[:120]
+            text_read = True
+        except Exception:
+            text = ''
+        progress_read = False
+        try:
+            uploading = item.locator("mat-spinner, [role='progressbar']").count() > 0
+            progress_read = True
+        except Exception:
+            uploading = False
+        if not text_read and not progress_read:
+            return None, '', -1
+        uploading = uploading or 'uploading' in text.lower()
+        try:
+            count = page.locator(".cdk-overlay-container flow-add-menu-asset-item",
+                                 has_text=name).count()
+        except Exception:
+            count = -1
+        return not uploading, text, count
+
+    picked = _item()
+    fresh_upload = picked is None
+    upload_deadline = None
+    picker_state = 'uploading' if fresh_upload else 'existing_asset_seen'
+    item_ready = False
+    clicked_add = False
+    commit_visible = False
+    commit_enabled = False
+    item_text = ''
+    item_count = 0
+    ui_category = 'not-observed'
+
+    try:
+        if fresh_upload:
+            up = page.locator(".cdk-overlay-container button:has-text('Upload media'), "
+                              "button:has-text('Upload media')").first
+            if up.count() == 0:
+                print(f"{prefix}⚠ [v962.9] no 'Upload media' in the add menu", flush=True)
+                return (False, 'no_buttons')
+            with page.expect_file_chooser(timeout=15000) as fc:
+                up.click(timeout=8000)
+            fc.value.set_files(image_path)
+            # One budget covers processing, the enabled commit and chip proof.
+            upload_deadline = time.monotonic() + 90
+            print(f"{prefix}✓ [v962.9] uploading {name}", flush=True)
+
+        polls_left = 24  # existing project assets keep the established ~36s path
+        while ((fresh_upload and time.monotonic() < upload_deadline)
+               or (not fresh_upload and polls_left > 0)):
+            if not fresh_upload:
+                polls_left -= 1
+
+            now = _v962_composer_chips(page)
+            if now is not None and now > chips_before:
+                print(f"{prefix}✓ [v962.9] {name} attached ({chips_before} → {now}, "
+                      f"pagewide={_v962_pagewide_chips(page)}, picker={picker_state}, "
+                      f"item_count={item_count}, item={item_text!r}, "
+                      f"commit visible={commit_visible}, enabled={commit_enabled}, "
+                      f"clicked={clicked_add}, ui={ui_category})", flush=True)
+                return (True, None)
+
+            picked = _item()
+            ready_now, item_text, item_count = _item_readiness(picked)
+            if ready_now is True and not item_ready:
+                item_ready = True
+                picker_state = ('uploaded_asset_ready' if fresh_upload
+                                else 'existing_asset_ready')
+                sel = _v962_asset_selected(picked)
+                if sel is not True:
+                    picked.click(timeout=8000)
+
+            if not clicked_add:
+                try:
+                    atp = page.locator(
+                        ".cdk-overlay-container button:has-text('Add to prompt'), "
+                        "button:has-text('Add to prompt')").first
+                    commit_visible = bool(atp.count() and atp.is_visible())
+                    commit_enabled = bool(commit_visible and atp.is_enabled())
+                    if item_ready and commit_enabled:
+                        clicked_add = bool(human_click_locator(
+                            page, atp, f"{prefix}[v962.9] Add to prompt"))
+                except Exception as exc:
+                    ui_category = f"ui-{type(exc).__name__}"
+            time.sleep(1.5)
+
+        chips_after = _v962_composer_chips(page)
+        print(f"{prefix}⚠ [v962.9] {name}: attachment not verified "
+              f"(composer chips {chips_before} → {chips_after}, "
+              f"pagewide={_v962_pagewide_chips(page)}, picker={picker_state}, "
+              f"item_count={item_count}, item={item_text!r}, "
+              f"uploading={not item_ready}, commit visible={commit_visible}, "
+              f"enabled={commit_enabled}, clicked={clicked_add}, "
+              f"ui={ui_category})", flush=True)
+        return (False, 'attachment_unverified')
+    except Exception as exc:
+        print(f"{prefix}⚠ [v962.9] attachment failed ({type(exc).__name__}, "
+              f"picker={picker_state}, ui={ui_category})", flush=True)
+        return (False, 'attachment_unverified')
+
+
 def upload_reference_images(page, image_paths, context="", already_uploaded=None):
     """Upload reference image(s) with gallery-reuse optimization.
 
@@ -2988,6 +3300,38 @@ def upload_reference_images(page, image_paths, context="", already_uploaded=None
     for p in image_paths:
         if not os.path.exists(p):
             raise FileNotFoundError(f"Reference image not found: {p}")
+
+    if _v962_on_new_host(page):  # v962.9 — the legacy dialog does not exist here
+        # THE LOOP CONTRACT IS EXACT, and getting it wrong destroys references
+        # silently rather than crashing.
+        #
+        # 1. `clear_existing` wipes the composer's chips. It must be True for the
+        #    FIRST image only — wiping leftovers from the previous job — and
+        #    False for every later one, or each attach deletes the reference
+        #    that the previous attach just added and only the last survives.
+        # 2. `_v962_attach_reference` returns a TUPLE `(ok, reason)`, while this
+        #    function's contract is a bare bool and both callers test it with
+        #    `if not upload_reference_images(...)` (see L7247 and L10517).
+        #    A non-empty tuple is truthy in Python, so returning it unchanged
+        #    would make `(False, 'attachment_unverified')` read as SUCCESS and
+        #    generate an image with no references attached. Destructure it.
+        # Both defects were caught by Codex reviewing the plan for this port
+        # before it was written (docs/audits/codex-loop/, findings 1 and 5).
+        for _idx, _path in enumerate(image_paths):
+            _ok, _reason = _v962_attach_reference(
+                page, _path, prefix=prefix, clear_existing=(_idx == 0))
+            if not _ok:
+                print(f"{prefix}⚠ [v962.9] reference {os.path.basename(_path)} "
+                      f"failed to attach ({_reason}) — not attempting the "
+                      f"remaining {len(image_paths) - _idx - 1}", flush=True)
+                return False
+            if already_uploaded is not None:
+                try:
+                    already_uploaded.add(os.path.basename(_path))
+                except Exception:
+                    pass
+        print(f"{prefix}✓ [v962.9] {len(image_paths)} reference(s) attached", flush=True)
+        return True
 
     print(f"{prefix}Processing {len(image_paths)} reference image(s)...", flush=True)
 
@@ -3852,9 +4196,16 @@ def click_generate_image(page, context="", max_retries=3):
             time.sleep(0.5)
             
             # Check if button is enabled — wait up to 60s
-            arrow_btn = page.locator(
-                "button:has(i:text('arrow_forward')), i:text('arrow_forward')"
-            ).first
+            # v962.7 — only the LOCATOR changes on the new host. The retry count,
+            # the popup dismissal, the 60s readiness wait below and the final
+            # raise all stay exactly as they are; an early-return branch here
+            # would silently drop every one of those safeguards.
+            if _v962_on_new_host(page):
+                arrow_btn = page.locator(_V962_GENERATE_BTN).first
+            else:
+                arrow_btn = page.locator(
+                    "button:has(i:text('arrow_forward')), i:text('arrow_forward')"
+                ).first
             
             if not _is_generate_enabled(page):
                 print(f"{prefix}⚠ Generate button disabled — waiting...", flush=True)
@@ -3898,6 +4249,8 @@ def click_generate_image(page, context="", max_retries=3):
 
 def _is_generate_enabled(page):
     """Check if the Generate (arrow_forward) button is clickable."""
+    if _v962_on_new_host(page):  # v962.7 — mat-icon, no <i>; the button has an aria-label
+        return _v962_generate_enabled(page)
     try:
         btn = page.locator("button:has(i:text('arrow_forward'))").first
         if btn.count() == 0:
@@ -6749,6 +7102,42 @@ def snapshot_generated_image_urls(page, exclude_uploads=True):
       new = after - before
     """
     urls = set()
+
+    if _v962_on_new_host(page):
+        # v962.11 — the new app renders finished generations as
+        #   <img alt="Tile displaying a user's image" src="https://flow.google.com/asb/AB-nOU...">
+        # There is no `alt='Generated image'`, no getMediaUrlRedirect and no
+        # /edit/ anchor, so every criterion the legacy path below tests for is
+        # absent and it always returned an empty set. That is why a run that
+        # generated perfectly well reported `tile_id capture was empty at
+        # submit` and then `STUCK (91s)` — measured on node 5402, 2026-09-11.
+        #
+        # The reference/ingredient image is distinguishable and must NOT be
+        # counted as a result: it carries alt="Ingredient image" and is served
+        # from flow-content.google/image/<uuid>, not /asb/.
+        try:
+            srcs = page.evaluate("""
+                () => {
+                    const out = [];
+                    const imgs = document.querySelectorAll(
+                        "img[alt=\\"Tile displaying a user's image\\"], img[src*='/asb/']");
+                    for (const img of imgs) {
+                        const src = img.src || '';
+                        if (!src) continue;
+                        if (src.indexOf('/asb/') < 0) continue;      // results only
+                        if ((img.alt || '') === 'Ingredient image') continue;
+                        out.push(src);
+                    }
+                    return out;
+                }
+            """)
+            for s in (srcs or []):
+                if s:
+                    urls.add(s)
+        except Exception as e:
+            print(f"⚠ [v962.11] tile snapshot failed: {str(e)[:120]}", flush=True)
+        return urls
+
     try:
         base = page.evaluate("window.location.origin")
     except Exception:
@@ -7216,6 +7605,16 @@ def _process_image_job_multi_once(page, input_paths, prompt, output_dir,
                 print(f"{prefix}✓ [flow_api] saved {len(api_saved)} variant(s) to: {output_dir}", flush=True)
                 return True, api_saved, None
             return False, [], "FLOW_API_REQUIRED is enabled and API generation failed"
+
+        # 0) Dismiss the cookie banner BEFORE the settings pass.
+        # Parity with the Flow queue worker, which dismisses before its own
+        # settings pass. On 2026-09-11 the single-shot clip tool failed all day
+        # because it was the one path that skipped this call: the settings chip
+        # resolved "visible, enabled and stable" while
+        # <div id="glue-cookie-notification-bar-1"> ate every click for the whole
+        # timeout (HANDOFF rev 878). The image worker had no such call anywhere
+        # near its settings pass either.
+        check_and_dismiss_popup(page)
 
         # 1) Select Image mode
         if not select_image_mode(page, context=context):
@@ -8323,7 +8722,44 @@ def create_new_flow_project(page, context=""):
                 # path ran the HAR-replay init). Force Agent OFF here too, or the
                 # new project opens in Agent mode → Settings gear hidden →
                 # "Settings button not found". Matches the video worker.
-                force_agent_off(page, context=context)
+                #
+                # v962.8 — but call it ONLY when the chip is genuinely absent.
+                # Unconditional was the bug: force_agent_off PATCHes and then
+                # RELOADS the page, and this function returned immediately, so
+                # the settings pass ran against a page still re-rendering and
+                # timed out on a control that was there all along. Measured on
+                # this worker 2026-09-11: project 781579a9 failed with
+                # "[v962.3] settings chip not found" one line after
+                # "[agent-off] reload done", while flow_session_guard reported
+                # the profile's session OK (composer present, 38 flow-*
+                # elements) — so the page was fine and the reload was the
+                # problem. Its own log line ("Settings gear missing → forcing
+                # Agent OFF") prints unconditionally, which is how this reads
+                # as a diagnosis when it is only an announcement; that wording
+                # already sent two sessions after "Agent mode", which
+                # docs/handoff-archive/2026-09.md:6126 refuted.
+                # Same fix the Flow lane proved in tools/flow_clip_section.py
+                # (HANDOFF rev 878, the run that finally rendered a clip).
+                if _v962_on_new_host(page):
+                    try:
+                        page.wait_for_selector(_V962_SETTINGS_CHIP, state="visible",
+                                               timeout=20000)
+                        print(f"{prefix}[v962.8] settings chip present — skipping "
+                              f"force_agent_off (its reload is what broke the "
+                              f"settings pass)", flush=True)
+                    except Exception:
+                        print(f"{prefix}[v962.8] settings chip absent — forcing "
+                              f"Agent OFF, then waiting for the reload to settle",
+                              flush=True)
+                        try:
+                            force_agent_off(page, context=context)
+                            page.wait_for_selector(_V962_SETTINGS_CHIP,
+                                                   state="visible", timeout=45000)
+                        except Exception as _ae:
+                            print(f"{prefix}[v962.8] force_agent_off did not restore "
+                                  f"the chip: {str(_ae)[:120]}", flush=True)
+                else:
+                    force_agent_off(page, context=context)
                 return project_url
 
             last_url = project_url
@@ -9640,7 +10076,13 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
               submission with tagged_count < expected_count
         """
         try:
-            if 'batchGenerateImages' not in request.url:
+            _u = request.url or ''
+            # v962.14 — on flow.google.com the generate submit is a boq RPC,
+            # `rpcids=ogiZ0b` on /_/AiSandboxAngularFrontend/data/batchexecute,
+            # one call per variant. Tag those too, or the response handler has
+            # no node to attribute its image to.
+            if ('batchGenerateImages' not in _u
+                    and not ('batchexecute' in _u and 'ogiZ0b' in _u)):
                 return
             if request.method != 'POST':
                 return
@@ -9681,6 +10123,141 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             request_to_node[id(request)] = p['node_id']
             p['tagged_count'] += 1
             break
+
+    # v962.10 TEMPORARY DIAGNOSTIC — remove once the new-host submit is parsed.
+    # The v624 listener above watches `batchGenerateImages` on
+    # aisandbox-pa.googleapis.com. On flow.google.com that request never fires
+    # (measured 2026-09-11: the listener attached and captured NOTHING all run,
+    # while the composer chain completed and clicked Generate), because the new
+    # app submits over a boq RPC — static/flow_worker.py:2616 records
+    # "flow.google.com submits over /_/FlowUi/data/batchexecute". This records
+    # what the page REALLY sends so the parser is written against evidence
+    # instead of a guess.
+    _BX_DUMP = os.path.expanduser("~/.kaveno/image_submit_capture.txt")
+
+    def _bx_dump(tag, url, method, body):
+        try:
+            os.makedirs(os.path.dirname(_BX_DUMP), exist_ok=True)
+            with open(_BX_DUMP, "a", encoding="utf-8", errors="replace") as fh:
+                fh.write(f"\n===== {tag} {method} {time.strftime('%H:%M:%S')}\n{url}\n")
+                fh.write((body or "")[:4000] + "\n")
+        except Exception:
+            pass
+
+    def _on_submit_probe_request(request):
+        try:
+            url = request.url or ""
+            if request.method != 'POST':
+                return
+            if not any(k in url for k in ('batchexecute', 'GenerateImages',
+                                          'generateImage', 'flowMedia')):
+                return
+            try:
+                post = request.post_data
+            except Exception:
+                post = ''
+            print(f"[API:v962.10] submit-candidate REQUEST {url[:120]}", flush=True)
+            _bx_dump("REQUEST", url, request.method, post)
+        except Exception:
+            pass
+
+    def _on_submit_probe_response(response):
+        try:
+            url = response.url or ""
+            if not any(k in url for k in ('batchexecute', 'GenerateImages',
+                                          'generateImage', 'flowMedia')):
+                return
+            try:
+                text = response.text()
+            except Exception:
+                text = ''
+            print(f"[API:v962.10] submit-candidate RESPONSE {response.status} "
+                  f"{url[:120]} len={len(text or '')}", flush=True)
+            _bx_dump(f"RESPONSE {response.status}", url, "", text)
+        except Exception:
+            pass
+
+    # v962.14 — THE NEW-HOST RESULT CAPTURE.
+    #
+    # Measured 2026-09-11 from this worker's own traffic: every variant is one
+    # `rpcids=ogiZ0b` POST to /_/AiSandboxAngularFrontend/data/batchexecute, and
+    # its 200 response carries THAT variant's finished image as a signed URL:
+    #
+    #   https://flow-content.google/image/<uuid>?Expires=...&KeyName=...&Signature=...
+    #
+    # 24 such responses were captured across the evening's runs — one distinct
+    # uuid each, none of them the reference image. So the result is handed to us
+    # at submit time, per variant, already attributable.
+    #
+    # This replaces DOM scraping for attribution, and it is why the DOM route
+    # could never work here: the `/asb/` gallery tiles the page renders are a
+    # separate, lazily-rendered view that stayed pinned at 28 entries while
+    # `page_tiles` was logged on every scan pass. Same shape as the Flow
+    # worker's video capture, which binds submit responses to media ids rather
+    # than reading the page (operator, 2026-09-11: "you can see the flow worker
+    # to see how we capture the videos generated, it should be similar").
+    # The body is JSON nested inside a JSON string, so the query separators
+    # arrive DOUBLE-escaped — measured in the real capture, the bytes are
+    #   ...?Expires\\u003d1789163144\\u0026KeyName\\u003dlabs-flow-prod-cdn-key...
+    # (two literal backslashes). An alternation written for the single-escaped
+    # form matched only up to "?Expires" and produced a URL with no signature,
+    # which would 403 on download. So: take everything up to a delimiter that
+    # cannot appear inside a URL, then unescape both depths.
+    _FLOW_CONTENT_RE = re.compile(
+        r'https://flow-content\.google/image/[0-9a-f\-]{36}[^"\s,\]]*'
+    )
+
+    def _v962_extract_image_urls(text):
+        """Signed image URLs out of a batchexecute body, JSON-unescaped."""
+        out = []
+        for m in _FLOW_CONTENT_RE.finditer(text or ""):
+            # A URL never contains a backslash, and the escaping arrives at one
+            # OR two depths depending on how deeply the payload is nested. So
+            # drop every backslash first, then decode the two separators. Doing
+            # it by alternation instead left a stray "\" before each "=" — a URL
+            # that looks right in a log and 403s on download.
+            u = m.group(0).replace("\\", "")
+            u = u.replace("u003d", "=").replace("u0026", "&")
+            if u not in out:
+                out.append(u)
+        return out
+
+    def _on_v962_submit_response(response):
+        try:
+            url = response.url or ""
+            if 'batchexecute' not in url or 'ogiZ0b' not in url:
+                return
+            if response.status != 200:
+                print(f"[API:v962.14] submit RPC returned {response.status}",
+                      flush=True)
+                return
+            text = response.text()
+        except Exception:
+            return
+        urls = _v962_extract_image_urls(text)
+        if not urls:
+            print("[API:v962.14] ogiZ0b response carried NO image url "
+                  f"(len={len(text or '')}) — not attributing", flush=True)
+            return
+        try:
+            nid = request_to_node.pop(id(response.request), None)
+        except Exception:
+            nid = None
+        if nid is None:
+            nid = listener_state.get('current_submitting_node_id')
+        if nid is None:
+            print(f"[API:v962.14] {len(urls)} image url(s) with NO node to "
+                  f"attribute them to — dropping rather than guessing",
+                  flush=True)
+            return
+        bucket = captured_urls_by_node.setdefault(nid, [])
+        added = 0
+        for u in urls:
+            if u not in bucket:
+                bucket.append(u)
+                added += 1
+        print(f"[API:v962.14] node {nid}: +{added} image url(s) from ogiZ0b "
+              f"(bucket now {len(bucket)})", flush=True)
 
     def _on_image_response(response):
         try:
@@ -9741,6 +10318,18 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     try:
         page.on('request', _on_image_request)
         page.on('response', _on_image_response)
+        # v962.10 TEMPORARY DIAGNOSTIC — see _on_submit_probe_request above.
+        page.on('response', _on_v962_submit_response)   # v962.14 — the real capture
+        # v962.10 submit-capture: OFF unless asked for. It is what identified
+        # `rpcids=ogiZ0b` as the generate submit and proved the response carries
+        # the signed image URL, so it is kept — but it logs a line per request
+        # and appends every body to a file that grows without bound, which has
+        # no place in a normal run. Re-arm with IMAGE_SUBMIT_CAPTURE=1 the next
+        # time this host changes shape.
+        if os.environ.get("IMAGE_SUBMIT_CAPTURE", "").strip().lower() in ("1", "true", "yes"):
+            page.on('request', _on_submit_probe_request)
+            page.on('response', _on_submit_probe_response)
+            print(f"[API] ✓ v962.10 submit-capture armed → {_BX_DUMP}", flush=True)
         listener_state['attached'] = True
         print(f"[API] ✓ v624 network-listener attached (batchGenerateImages → fife URL capture)", flush=True)
         print(f"[API] ✓ v627 request-tag attribution enabled (request → node_id mapping survives prompt collisions)", flush=True)
@@ -10738,8 +11327,22 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
     # Banana 2 stuck SSE state), and resubmits via _submit_one_job using
     # the preserved original-job dict. After STUCK_MAX_RETRIES exhaustion
     # OR age past STUCK_TIMEOUT, the job is failed for real.
-    STUCK_RETRY_TIMEOUT = 90   # seconds — trigger reload+resubmit at this age
-    STUCK_TIMEOUT = 300         # seconds — final give-up after retries exhausted
+    # v962.13 — 90s was tuned for the OLD host and is shorter than a Nano
+    # Banana 2 job takes on flow.google.com. Measured 2026-09-11 on node 5402:
+    # the composer chain completed, four `rpcids=ogiZ0b` submits fired and
+    # returned 200, and then every scan pass read
+    #     [v962.12] pending=1 page_tiles=28 — node 5402: 0 new
+    # for the whole 90s, so the worker reloaded and resubmitted. Meanwhile the
+    # project had accumulated 28 finished tiles — about seven runs x four
+    # variants — i.e. OUR OWN earlier attempts, every one of which landed AFTER
+    # the worker had given up. The generations were never failing; the deadline
+    # was expiring first, and each retry started another one.
+    #
+    # Raised so the window is longer than the work. A too-long wait costs idle
+    # seconds on a genuinely dead job; a too-short one costs the whole job AND
+    # queues another render, which is how one node burned an evening.
+    STUCK_RETRY_TIMEOUT = 300  # seconds — trigger reload+resubmit at this age
+    STUCK_TIMEOUT = 900         # seconds — final give-up after retries exhausted
     STUCK_MAX_RETRIES = 2       # max reload+resubmit attempts before failing
     SCAN_INTERVAL = 4    # seconds between scan passes when busy
     IDLE_POLL = API_POLL_INTERVAL  # seconds when nothing in flight
@@ -10784,7 +11387,7 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
         # PARTIAL_TIMEOUT to elapse (90s after submit).
         ids_resolved_jobs = set()
         cookies_v521, user_agent_v521 = None, None
-        PARTIAL_TIMEOUT = 90  # seconds after submit before accepting partial result
+        PARTIAL_TIMEOUT = 240  # v962.13 — must exceed a real Banana 2 render, see STUCK_RETRY_TIMEOUT
 
         def _enqueue_for_job(job, ready_urls, source_label, batch_count=None):
             nonlocal cookies_v521, user_agent_v521
@@ -10827,6 +11430,80 @@ def api_pull_mode_parallel(page, api_url, api_key, worker_id=None,
             partial = " (partial — timeout reached)" if len(ready_urls) < need_count else ""
             extra = f", aggregated from {batch_count} batch(es)" if batch_count is not None else ""
             print(f"[API:scan] ✓ Node {job.node_id} matched → {len(ready_urls)}/{need_count} variant(s){partial} → enqueue ({source_label}{extra})", flush=True)
+
+        # v962.12 — FEED TIER A FROM THE DOM ON flow.google.com.
+        #
+        # Tier A attributes from `captured_urls_by_node`, which the v624
+        # listener fills from `batchGenerateImages` responses. That request does
+        # not exist on the new host: measured 2026-09-11, the listener attached
+        # and captured NOTHING for a whole run while the page submitted four
+        # `rpcids=ogiZ0b` calls to /_/AiSandboxAngularFrontend/data/batchexecute
+        # and produced real images. The legacy fallback below is no better — it
+        # walks `[data-index]` containers and the new app renders none
+        # (`dataIndexCount: 0` in this worker's own scan diagnostic). So every
+        # route to attribution was dead and the job sat until `STUCK (91s)`.
+        #
+        # The images themselves are plainly in the DOM:
+        #   <img alt="Tile displaying a user's image" src="https://flow.google.com/asb/AB-nOU...">
+        # (measured on project 781579a9 — 286x512 tiles, i.e. the 9:16 variants)
+        # so this fills the SAME bucket Tier A already reads, and every guard
+        # Tier A applies — the v731 baseline-overlap check, the claimed-URL
+        # dedup, the expected-count gate at the upload — still runs unchanged.
+        #
+        # FAIL-CLOSED ON AMBIGUITY. A DOM delta cannot say WHICH pending job a
+        # new tile belongs to. With one unattributed job the answer is certain;
+        # with two it would be a guess, and a wrong guess here does not fail
+        # loudly — it saves another node's images onto this one (the exact
+        # cross-attribution bug v671/v732 exist to prevent). So: attribute only
+        # when exactly one job is waiting, otherwise say so and leave it.
+        if _v962_on_new_host(page):
+            # THIS BLOCK PRINTS ON EVERY PASS, INCLUDING WHEN IT DOES NOTHING.
+            # The first cut only logged success, so when it failed it produced
+            # SILENCE — and silence is indistinguishable from "never ran". That
+            # cost a five-minute worker cycle to learn nothing, which is the
+            # exact failure this project already has a rule about: a check that
+            # is quiet on failure is not a check.
+            try:
+                _waiting = [j for j in pending
+                            if not captured_urls_by_node.get(j.node_id)]
+                _current = snapshot_generated_image_urls(page)
+                _why = ""
+                if not _waiting:
+                    _why = "no job awaiting attribution"
+                elif len(_waiting) > 1:
+                    _why = (f"{len(_waiting)} jobs awaiting — a DOM delta cannot "
+                            f"tell them apart, not guessing")
+                else:
+                    _job = _waiting[0]
+                    _base = set(_job.baseline_urls or set())
+                    if not _base:
+                        # Fail closed. With no baseline every tile on the page
+                        # looks new, so this would hand a job expecting 4
+                        # variants the whole gallery — the cross-attribution bug
+                        # v671/v732 exist to prevent. Refuse and say so.
+                        _why = (f"node {_job.node_id} has an EMPTY baseline "
+                                f"({len(_current)} tiles on the page) — refusing "
+                                f"to attribute, every tile would look new")
+                    else:
+                        _new = [u for u in _current
+                                if u not in _base and u not in _claimed_tile_urls]
+                        if _new:
+                            _bucket = captured_urls_by_node.setdefault(
+                                _job.node_id, [])
+                            for _u in _new:
+                                if _u not in _bucket:
+                                    _bucket.append(_u)
+                            _why = (f"node {_job.node_id}: {len(_new)} NEW tile(s) "
+                                    f"→ Tier A")
+                        else:
+                            _why = (f"node {_job.node_id}: 0 new "
+                                    f"(page {len(_current)}, baseline {len(_base)}, "
+                                    f"claimed {len(_claimed_tile_urls)})")
+                print(f"[API:scan] [v962.12] pending={len(pending)} "
+                      f"page_tiles={len(_current)} — {_why}", flush=True)
+            except Exception as _e:
+                print(f"[API:scan] [v962.12] DOM delta FAILED: "
+                      f"{type(_e).__name__}: {str(_e)[:140]}", flush=True)
 
         # Tier A: request-tag attribution (v627)
         for job in pending:
