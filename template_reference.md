@@ -104,6 +104,8 @@ Image prompt text goes here
 
 ## Speaker mode — explicit-only (v538)
 
+**APPLY:** voiceover fires ONLY on `- **speaker:** voiceover`. Write that exact token — vo, narrator and off-screen do not trigger it.
+
 The `speaker` field controls whether the dialogue line is delivered by the on-camera main character (lip-sync ON) or by an off-screen voiceover narrator (lip-sync OFF; visible subjects keep their lips closed).
 
 **v538 rule (current)**: voiceover fires **only** when the markdown explicitly says `**speaker:** voiceover`. There is no auto-detection. There is no phrase-match fallback. There is no implicit voiceover behavior. If you don't write `voiceover`, you get on-camera — every time.
@@ -356,6 +358,8 @@ v586 is the canonical proof of bidirectionality:
 ---
 
 ## Generate-side chain optionality — parallel-generation enablement (v590)
+
+**APPLY:** chain only the scenes that need it — state evolution, before/after, or a declared chain. Chaining everything compounds drift.
 
 **ASYMMETRIC RULE — applies to GENERATE-SIDE only.** This is the first v-rule that breaks the bidirectional-cycle symmetry (v589.1 was about the chain-binding-line wording — same-grammar-both-sides). v590 is about chain TOPOLOGY — which scenes need chains at all — and the right answer differs between observation (decode) and execution (generate).
 
@@ -862,6 +866,8 @@ The wiki's lint pass can flag pre-v587 decoded scripts that lack the structured 
 
 ## Novelty-gate before HOOK lock (v591)
 
+**APPLY:** run the novelty gate before locking a HOOK: reject one whose exact visual already ran on LiB Inspire or another account in the corpus.
+
 **Source: Milen Stanchev 2026-04-23 LiB innovation call.** The cheapest freshness filter.
 
 Before authoring locks the HOOK, answer one question:
@@ -882,6 +888,8 @@ Generate-side rule. The decode side observes whatever the source filmed; freshne
 ---
 
 ## Motion-text-match in HOOK (v592)
+
+**APPLY:** make the hook's verb land on a visible motion beat at the second it is spoken. A static talking head under a motion verb fails the match.
 
 **Source: Milen Stanchev 2026-04-23 LiB innovation call (~00:23:35).** The verb-object in the voiceover at second N must be matched by a visible motion in-frame at second N.
 
@@ -990,6 +998,8 @@ Pre-v594 decoded artifacts (1:1 shot-to-image) are valid as historical record. N
 ---
 
 ## Hybrid clip cutting — whisper vs timeline (v668)
+
+**APPLY:** set `cut_mode` per scene — whisper for spoken scenes, timeline for montage, SFX and silent ones.
 
 **Source: 2026-05-08 owner directive** *"some cutted according to what is said in the markdown and some according to silence or whisper... we have transformation scenes, and then spoken scenes."*
 
@@ -1513,6 +1523,8 @@ Before emitting any decoded artifact OR any videos/*.md draft:
 
 ## Non-persona character identity prose is mandatory (v669) — close the v602 over-application loophole
 
+**APPLY:** a non-persona character has NO upload, so their identity prose is MANDATORY: write race, age and build for the patient, customer or bystander.
+
 **Source: 2026-05-08 owner directive.** Decoder/author over-applied v602 (persona description ban) and stripped identity descriptors from a non-persona patient ("Josh" — visible Black male in source). Result: Nano Banana 2 hallucinated the patient's identity differently across the 4 transformation frames; the patient's race / build / face drifted between Day 1 and Day 120, killing the transformation continuity.
 
 ### The misread
@@ -1580,6 +1592,8 @@ Before emitting any image-prompt body containing a non-persona character:
 ---
 
 ## Mechanism in active use across transformation montages (v670)
+
+**APPLY:** show the mechanism in ACTIVE use across a transformation montage — drinking mid-tilt, mid-scoop — never a still product next to a result.
 
 **Source: 2026-05-08 owner directive.** Decoded prompt for a 4-frame transformation montage (Day 1 → Day 30 → Day 67 → Day 120) had the patient HOLDING the juice glass in static poses across all 4 frames. The actual rhetorical mechanism of a transformation video is *the patient consuming the cure WHILE the transformation happens*. By defaulting to a static "holding" pose, the decoded action_note flattened the scene's mechanism — the visual causal chain (drink → result) was lost.
 
@@ -2347,6 +2361,8 @@ Convergence ≥2 sources for each rule prevents single-source over-fitting.
 
 ## Audio-padding suffix for short dialogue lines (v644)
 
+**APPLY:** write the voice qualifier in the canonical syntax; a quoted line is what triggers lip-sync, so an unquoted line renders as narration.
+
 **Source: 2026-05-07 owner observation** + Veo 3.1 audio-experimental tier behaviour confirmed via web audit (LaoZhang Flow guide, veo3ai.io 2026 native-audio guide, Google Flow help docs).
 
 ### Problem
@@ -2456,6 +2472,8 @@ Before emitting any `videos/*.md` clip prompt:
 
 ## Speaker-subject normalization (v665) — "the main AI generated character"
 
+**APPLY:** keep the dialogue sentence syntax exact — the subject is always "The main AI generated character", never a name or pronoun.
+
 **Source: 2026-05-07 owner directive** *"in the prompt that we generate, both in the platform and in the rules for the decode, lift etc... we have to say that 'the main AI generated character says'..."*
 
 ### Rule
@@ -2531,6 +2549,8 @@ Em-dashes are still natural in `action_note` prose, image-prompt bodies, frontma
 ---
 
 ## Cross-corpus retrieval coverage (v614) — derive from the full current corpus, not a frozen menu
+
+**APPLY:** run the cross-corpus structural survey and write the per-scene adaptation map; every line lifts from a named corpus source.
 
 **Source: 2026-05-06 owner observation** *"also the script doesn0t make any sense... you have plenty of amazing examples and winning case... adapt and innovate those... not just the ones from korella saffron but all, to see how they structure the video and script."*
 
@@ -2648,6 +2668,8 @@ The cross-corpus survey was the bigger fix. Pre-v614, the LLM would read the nic
 ---
 
 ## Product-mention-binding parity + corpus-grounding (v613) — script must come from corpus, every product reference must be bound
+
+**APPLY:** every product mention binds to the product, and the script comes from a NAMED corpus parent rather than invented.
 
 **Source: 2026-05-06 owner observation** *"we have to review how we compose a new video... the script doesn't make any sense... you have plenty of examples in raw and clippings folders, base and adapt the script on those ones. sometime when teh product is mentione is not referenced as image. review those rules and make them stronger and reflect it also in the wiki. this is bery important."*
 
@@ -2902,6 +2924,8 @@ If a user finds v611 too aggressive, the four constants are at the top of the v6
 
 ## Gender-neutral main-character references (v610) — never gender the persona in prose
 
+**APPLY:** never gender the persona in prose — no she, he, her or him. Identity comes from the upload.
+
 **Source: 2026-05-06 owner directive** *"also when creating a video never assign a gender to the main carchter, always refer as the healer, the main carchter, or anything else that you can think of."*
 
 v602 established that the persona's identity (face, hair, clothing, build) comes from the uploaded reference image — body prose says "the main character" generically rather than the persona's full name. v610 extends that to **gendered pronouns**: prose must NOT use "she / her / hers / he / him / his" to refer to the main character. Identity attributes flow from the upload; prose attributes flow from the prose. When prose says "she lifts her left hand," it's asserting a gender attribute that should come from the upload, and that assertion conflicts with the upload-bound identity model whenever the persona's actual presentation differs from what the prose names. Under attention pressure, Banana 2 may choose either signal — leading to face/body drift between images that all reference the same upload.
@@ -3007,6 +3031,8 @@ Same scene. Same composition. Zero gender claim. Reusable across persona library
 ---
 
 ## Concise reference-binding form (v609) — drop the redundant "match X, Y, Z exactly" clause
+
+**APPLY:** drop the redundant "match X, Y, Z exactly" clause from a reference binding; the upload already carries it.
 
 **Source: 2026-05-06 owner observation** *"`Use the uploaded product reference image for the Korella saffron` — for the images prompt when the product is needed this above is the right format, no this one: `Use the uploaded product reference image for the Rosabella Beetroot bottle — match its label, packaging, color, and proportions exactly.` nano bana match automatically the info, packaging, color and proportions."*
 
@@ -3181,6 +3207,8 @@ Even with v607 force-binding the character at import, body prose should mention 
 ---
 
 ## Product compositing / lighting integration (v606) — make the product melt into the scene
+
+**APPLY:** composite the product into the scene — matched light, shadow and grain — so it does not read as pasted on top.
 
 **Source: 2026-05-06 owner observation** *"we need to improve the prompting according to nano bana prompting rules to make the product melt into the image and not look like it's photoshopped."* The first generated frame from the menopause-saffron HOOK had the Korella saffron bottle visibly photoshopped-in: oversized (~12-15 inches vs real ~5-inch supplement), self-lit (product-shot lighting on label that didn't match cool-clinical room ambient), floating-flat (no cast shadow on desk, hard edges), color-pop saturated, no foreground occlusion. The bottle read as a separate product render dropped onto the scene, not as an object IN the scene.
 
@@ -3723,6 +3751,8 @@ The user framing: *"we use rules and not a list to pick from."* v603 is a rule (
 
 ## Persona body-prose generic-reference rule (v602) — identity comes from upload, not from prose
 
+**APPLY:** identity comes from the UPLOAD, never from prose. No race, ethnicity, age or build words for the persona in an image prompt.
+
 **Source: 2026-05-06 owner observation** *"when we create a new video, we keep the main subject generic, because it's retrieved by the image in the prompt when creating it with nano banana."* The menopause-saffron video had body prose describing the persona as "The Black-female-practitioner persona" with archetype-label + ethnic descriptor baked in. That fights with the v581 upload-binding because Banana 2 reads body prose as INSTRUCTIONS — and a redundant identity description in prose creates identity-drift between scenes (the upload says X, the prose says Y, the model splits the difference and produces Z that matches neither).
 
 The corpus pattern (verified in `videos/nuri-saffron-ed-anatomy-clinic.md` — the canonical reference): body prose refers to the persona as **"the main character"** generically. No archetype labels, no ethnic descriptors, no age ranges, no facial feature descriptors. Identity is upload-authoritative.
@@ -3810,6 +3840,8 @@ Pre-v602 markdowns that reference the persona by archetype label in body prose r
 ---
 
 ## Healer-patient active-interaction rule (v601) — symptom videos require active clinical demonstration
+
+**APPLY:** a symptom video needs active clinical demonstration ON a patient, not the healer talking about the symptom.
 
 **Source: 2026-05-06 owner observation** *"we need to show the healer showing the symptoms and interacting with the patient... check what the other decoded are doing when there's a patient with a symptom (example varicose veins) but more in general we need the healer doing something actively to the patient (of course depending on the video, different actions, that's why we use rules and not a list to pick from). when we have symptoms, usually there's the healer, or we have a different type of video content (transformation, which will come later)."*
 
@@ -3967,6 +3999,8 @@ The user's framing: *"we use rules and not a list to pick from."* v601 is a rule
 
 ## Exaggeration-magnitude discipline (v600) — cartoon-physics or boring
 
+**APPLY:** write exaggeration at cartoon-physics magnitude — cascading force verbs and exaggerated quantities. A hedged magnitude renders as nothing.
+
 **Source: 2026-05-06 owner observation** *"the pillow would needed to be held higher and sweat running down while is about to smack it or throw it on the desk."* The first soaked-pillow-on-marble hook (v598 Q1-Q8 compliant) was rejected as STILL too weak. Diagnosis: the spectacle was at **realistic** magnitude, not **viral** magnitude. A soaked pillow placed gently on a counter is what a real tired wife does. A drenched pillow held HIGH OVERHEAD with sweat streaming DOWN her forearms while she winds up to SMACK it onto the desk — that's what the corpus does. Real-life = scroll-by. Cartoon-physics = scroll-stop.
 
 The 24-decoded-corpus is built on **magnitude that exceeds reality**:
@@ -4080,9 +4114,13 @@ v598 Q8 (ii) said "violent-act / spectacle" but that was too soft — LLMs inter
 
 ## Product-image presence discipline + LLM-omission audit (v599)
 
+**APPLY:** the product MUST appear in product frames AND be bound in the Ingredients. Audit for the LLM quietly omitting it.
+
 **Source: 2026-05-06 owner observation** *"chatgpt earlier didn't include the product in the images that needed the product. check the rules, for you and for other LLM. don't miss anything."* v581 documented the explicit-binding contract (product_image field + binding line + product visual in prompt body), but LLMs (ChatGPT, Gemini, Claude API) consistently OMIT one or more of the three required parts when authoring videos/*.md from a bundle. v599 elevates v581's three-part requirement from "implicit per-scene judgment" to "explicit per-scene matrix + pre-output gate."
 
 ### v581 product binding has THREE required parts (LLMs skip one or more)
+
+**APPLY:** write every reference binding explicitly — PERSONA always, PRODUCT on product frames. Never rely on an auto-prepend.
 
 For every image where the product is named in voiceover, visible in frame, or referenced for the platform to bind the product upload, ALL THREE of the following MUST be present (LLMs typically include one, sometimes two, almost never all three):
 
@@ -4437,6 +4475,8 @@ Post-fix expected: ~95-100/116 (~85-90%) — recovers ~9-14 stranded script word
 
 ## Strict-header platform contract (v593)
 
+**APPLY:** use integer `### Scene N` and `### Image N` headers with the mandatory field grammar. The parser is silent on failure — a malformed header is skipped, not reported.
+
 **The platform parser (`code/image_platform.py`) uses STRICT regexes — silent on failure.** Bad headers don't error, they're skipped, and you get `Parse error: No scenes found in the markdown` at import.
 
 ### Strict header regexes
@@ -4541,6 +4581,8 @@ The persona's character reference image is passed externally to Nano Banana 2 on
 Other characters in the scene (scene-specific one-offs — a patient being treated, a customer, an extra) have NO external reference, so describe them fully in the first image they appear in. Subsequent images can then reference them via *"same [patient/subject] as image X"*.
 
 ### Product — referenced by name in product frames (v573)
+
+**APPLY:** keep the Ingredients upload set isolated — persona plus the one brand asset the scene needs. Do not attach references a frame does not use.
 When the video has a branded product whose label/packaging must render correctly, that product is uploaded as a clean isolated reference at Flow slot 1 (positionally, Flow's "Image 2"). Image prompts in **product frames** invoke the product BY NAME — same convention as persona — and the platform's name-binding logic attaches the upload to those scenes.
 
 **Naming convention.** Use a descriptive name that uniquely identifies the product, capitalized normally:
@@ -4630,6 +4672,8 @@ Over-describing backgrounds is counterproductive because:
 **For non-establishing images:** just write "same [setting type] as image N" — the visual parent does the work. Don't re-enumerate the background elements you already described once.
 
 ### Transitions and clip_mode — cut + fresh by default, blend only on tiny visual deltas (v544)
+
+**APPLY:** default to `transition: cut` and `clip_mode: fresh`. Use blend ONLY when the visual delta between the two frames is tiny.
 
 **The two fields and what they actually control.**
 - **`clip_mode`** is how Veo gets the **first frame** for this clip:
@@ -4730,6 +4774,8 @@ Same image, same held pose. These are TWO scenes doing the work of ONE.
 
 ### Line granularity within a scene — don't over-split short scenes (v577)
 
+**APPLY:** set clip and scene boundaries from the VISUAL production, not from outline labels: merge adjacent beats that share an image and a speaker.
+
 Companion rule to "Scene granularity" above. Same idea applied one level down: each `- **line:**` becomes ONE Veo clip = ONE 8-second generation. If a whole scene's dialogue fits inside one clip's word budget, it should be ONE line — not 2-4 short fragments.
 
 **The word budget.** At natural clinical-authority pacing the math is straightforward: ~158 words/min = ~2.6 words/sec, so an 8-second clip with ~2 seconds of margin (opening pause + closing breath) holds **~21 words comfortably, ±2 words tolerance**. Past ~23 words the line either rushes (no breath room, reads as auctioneer) or runs over and Veo trims the tail.
@@ -4812,7 +4858,7 @@ Exception — keep both images when the setup image carries visual information t
 
 ### Recipe / process state-evolution — each step needs its own image (v580)
 
-**APPLY:** declare the inheritance mode per image — STRICT CHAIN, IMAGE-1 ANCHOR or NO CHAIN — and write `- **reference_image:**` to match. A paired START image carries `- **pair_role:** start` only; the END image carries `- **pair_role:** end` plus `- **paired_with:** image_K`.
+**APPLY:** (covers v580.1, v580.2 and v580.4) declare the inheritance mode per image — STRICT CHAIN, IMAGE-1 ANCHOR or NO CHAIN — and write `- **reference_image:**` to match. A paired START image carries `- **pair_role:** start` only; the END image carries `- **pair_role:** end` plus `- **paired_with:** image_K`.
 
 Companion rule to "Image economy" above. Image economy says **merge two phases of ONE action** into a single image (drop the setup, keep the mid-action). v580 says the OPPOSITE for multi-step processes: **DO NOT merge multiple distinct steps into a single image**. Each step that changes the visible state of a foreground prop needs its own start image showing the cumulative state at that step.
 
@@ -4929,6 +4975,8 @@ For HOOK before-state shots where the script is showing the patient's defeat/exh
 
 ### HOOK weird-action requirement (v539) — every HOOK needs a concrete physical event
 
+**APPLY:** open every HOOK on a concrete physical action performed on a prop, inside the first ~3s of clip 1. A talking head stating the hook is not an opening action.
+
 > **SCOPE STAMP (2026-08-30, forward-only — repair matrix F12, `docs/audits/f12-catalyst-gate-verdict-2026-08-30.md` + the implementation spec `docs/audits/f12-hook-carrier-addendum-2026-08-30.md`).** **Everything below is the contract of the CATALYST hook family, not a law of every hook.** The evidence this rule was built on is one family — the ≥9 corpus instances in the table below are all prop-reveal spectacles. Proven counterexamples open static from at least two other producer chains: the burned age-pair over a held pose (`raw/videos/decoded_agegap-couple-71-52-nyc-venice-montage-menopause-readcaption-salvora-rhodiola-marianna-fb.md`, replicated in-house six times) and the caption card over a collage (`raw/videos/decoded_5signs-sugar-dranaka-labcoat-apothecary-comment-yes-ig.md` — cited as falsifying evidence ONLY; its lab-coat persona is §8-banned and nothing in it may be staged). **What IS universal is the §v598 CARRIER TEST:** frame one carries a deliberate, immediately legible attention device, declared before the hook is locked. A physical catalyst is ONE way to build that device. **What stays hard inside this family:** a build whose declared carrier IS the catalyst stages the action INSIDE clip 1's start beat — present-prop-now/act-in-clip-2 is a hard FAIL with no wording escape, which is the drift this rule was written to catch. **Reconciling the multi-beat HOOK paragraph at the end of this section:** that allowance ("the SMASH/THROW scene typically lands at scene 2 of a 3-scene HOOK") describes a HOOK BLOCK that runs several scenes before the body, not a licence to open clip 1 static — clip 1 still carries a carrier of its own, and the clip-1 demand applies to whichever clip opens cold. **Enforcement:** `c_catalyst_first_clip` in `.claude/skills/build-video/audit_build.py` routes off the declared `family:` segment; `family: catalyst` or no declaration runs this check, other families are checked for the declared carrier being staged in the Scene 1 zone instead.
 
 The "violence first" rule above isn't enough on its own. Most HOOK before-states default to **emotional/posture beats** — patient slumped, eyes downcast, sighing into hands, slow chewing, dejected look at a scale. Those are character beats, not visual events. The viewer's eye doesn't pin to a slumped shoulder; it pins to a prop being **smashed, thrown, dunked, snapped, slammed, ripped, or otherwise weird-actioned**.
@@ -5027,6 +5075,8 @@ When writing prop-as-subject scenes:
 This is the explicit version of a rule that's been implicit. When in doubt: ask "what's the viewer actually watching here?" If the answer is "the persona's face" → persona-as-subject (default). If the answer is "the thing the persona is doing TO something else" → prop-as-subject (flip the priority).
 
 ### Outfit-change rule on time-jump cuts (v541) — Day 1 vs Day 14 must look different
+
+**APPLY:** on a time-jump cut, change the outfit so Day 1 and Day 14 are visibly different, and carry it through a chained image pair.
 Whenever a video has a Day 1 → Day 14 (or any other before/after time-jump) transformation cut on the same secondary character in the same setting, the patient's **outfit must change** between the two timestamps. This is a hard rule, not a stylistic preference.
 
 **Why.** When the only thing that changes between two clips is the body itself (back smooth, belly flat, hair restored, etc.), the brain reads it as a render trick — "they just photoshopped the same image twice." When the outfit also changes, the brain reads it as a chronological skip — "she changed clothes, two weeks went by, this is what happened in those two weeks." This is the same psychological mechanism behind every legitimate before/after photo on social media: the subject wears different clothes in the after shot. Same-outfit before/after is the signature of fake before/afters; different-outfit before/after carries the implicit credibility marker of real time having passed.
@@ -5136,6 +5186,8 @@ The action_note is what the video pipeline sends to Veo as the text prompt for t
 That's it. Eight seconds of video gets generated from those three inputs. Everything you've written elsewhere in the markdown is invisible to Veo.
 
 #### Veo start-frame rule (v540) — describe the motion, NOT the start state
+
+**APPLY:** write `action_note` for Veo: motion only, describe the MOTION and not the start state, one continuous move per note.
 The start frame already shows Veo the starting composition: where the subject sits, what they hold, how the room looks, what their expression is at t=0. **Re-stating that information in the action_note wastes prompt budget and can actively confuse the model** — it competes with what Veo already sees in the image, and Veo may try to reconcile contradictions instead of just animating from the frame.
 
 Per the official Veo prompting guidance: the prompt should not waste words describing the empty room (start frame) or the decorated room (end frame); its entire focus should be on detailing the transformation process that connects them. This guidance is specifically for first-and-last-frame mode but applies just as strongly to single-start-frame mode — Veo can SEE the starting state.
@@ -5487,6 +5539,8 @@ Slot ordering (v573 priority sort at `image_platform.py:4943`):
 3. Verify in the platform UI: hover the per-image card → "Parents" lists the bound parents in slot order; Flow's "Image 1" = first parent, "Image 2" = second, etc.
 
 #### v681e.9 — generic cast composition matrix (every future video type)
+
+**APPLY:** give a text_card scene `scene_type: text_card` and NO `### Image N` block — the card is authored text, not a rendered frame.
 
 The slot-ordering contract is **deterministic** and works for any cast combination. This matrix enumerates every realistic composition so authors never need to guess what `Use Image N` will become at submission.
 
@@ -5950,6 +6004,8 @@ print('ALL v696 + v697 GATES PASS' if not errors else 'FAIL:\n  - ' + '\n  - '.j
 
 ### v698A — per-scene clip-pair for voiceover-over-b-roll
 
+**APPLY:** (covers v698a.1, v698a.2 and v698a.3) author a voiceover scene as a clip PAIR — the visual clip renders silent and its `voiceover_anchor` sibling carries the voice — and place any cutaway on the words actually heard.
+
 **Surfaced 2026-05-10** as the lift-side companion to v681's deferred voiceover handling. Since v681, scenes where the persona's face is NOT visible at clip-start (recipe b-roll, VFX overlays, hands-only close-ups) had to be authored as `speaker: silent` and the source's voiceover was DROPPED in our re-creation. The snapinsta donut-recipe decode (2026-05-09) made the cost obvious — 8 silent b-roll scenes lost ~40s of voiceover narration that's central to the source's hook + recipe pacing + cortisol-mechanism framing.
 
 v698A lifts the v681 limitation by rendering TWO Veo clips per voiceover scene:
@@ -6121,6 +6177,8 @@ Migration: existing artifacts are valid as-is; new artifacts from this commit fo
 
 ### v580.1 — Decode→generate carry-over discipline (chain re-evaluation mandate, NEW 2026-05-16)
 
+**APPLY:** declare the inheritance mode on the image itself; a chain hop is a decision per image, not a default for the build.
+
 **Surfaced 2026-05-16** from operator-run innovate port of the male-detox decode to a puffy-face niche video. The decoded source artifact declared `v580 chain NOT APPLICABLE — recipe scenes are discrete stock-footage clips, not state-evolution of a single glass/pot`. The decoder correctly observed this — the source video happened to use disconnected stock clips per recipe step. The lift / innovate LLM then COPIED the Pre-Flight Checklist Section 2 verbatim from the decode into the generate-side artifact AND set `reference_image: none` on all recipe scenes — producing a generate-side video with 4 disconnected pots across the recipe sequence. Banana 2 rendered 4 different-looking pots; viewer would read "4 different recipes" instead of "one recipe progressively built". Visual continuity broken.
 
 **Root cause**: decode-fidelity bled into generate-side authoring. The decoder's observation of source-side discrete clips is correct (v614/v615 decode-fidelity carve-out). The generate-side lift / innovate port should have re-evaluated v580 against the NEW authored recipe sequence, not the source's pattern.
@@ -6226,6 +6284,8 @@ For each scene in the new authored sequence:
 
 ### v698A.2 — Cutaways land on the words heard in the shipped file (the export reuses v825's master-audio alignment)
 
+**APPLY:** place each cutaway on the words actually heard at that moment, not on the sentence it belongs to.
+
 **Status (2026-09-04): DEPLOYED `d777e9d` — production proof PENDING on `d74ab616`'s first export.** Plan: `docs/superpowers/plans/2026-09-04-cutaways-via-v825-master-alignment.md` (Codex loop: 2 passes, 5 findings applied). Operator direction: *"don't we already check each word anyway at export? don't reinvent the wheel"* and *"like we do in assemble we use the final audio to match the brolls"*.
 
 **Status update (2026-09-04 12:05): PROVEN for placement on `d74ab616` export `f17fd655`** (`method=words`, 7/7 sentences, 0 fallbacks; the server's fragment boundaries match an independent Whisper run within 0.15 s) — the delivered b-roll still drifts up to +0.35 s late by the end of the video because the assembler's concat accumulates a frame per fitted clip; that is v698A.2.2 (frame budgeting from absolute boundaries), planned the same day.
@@ -6263,6 +6323,8 @@ For each scene in the new authored sequence:
 **Open (UI, operator 2026-09-04 03:18):** the review page still draws each cutaway as a "🎙️ paired" card with the same voice clip repeated per cutaway; a many-to-one sentence should show ONE voice clip with its cutaways underneath, each labelled by the words it covers — separate change, not part of this rule.
 
 ### v698A.1 — Decode-side positive-detection procedure (amendment to v698A)
+
+**APPLY:** the voiceover pair is created at render time, so author BOTH halves — the visual clip and the anchor — rather than one clip you expect to be split.
 
 v698A documents the platform render mechanism (paired clip = audio swap at export) and the markdown contract. v721 is the activation GATE (anti-misuse — block voiceover when persona is on-camera lip-syncing). v698A.1 is the missing piece: the **decode-side POSITIVE detection procedure** — the per-shot decision tree the decoder runs against a source video to determine WHEN to mark a scene as voiceover-paired AND HOW to select / author the anchor image.
 
@@ -8443,6 +8505,8 @@ ONLY THEN claim v712 reproduces decode-side composition faithfully.
 
 ### v713 — Banana 2 attached-reference composition discipline (extends v712)
 
+**APPLY:** (covers v713f) compose an attached reference along the CENTRAL Z-axis: the referenced subject stacks toward the lens rather than spreading across the frame.
+
 **Problem.** v712 switched decode-side composition prose to relational grammar. Verified to produce correct images on text-only image models (GPT image gen, etc.) where no character reference is attached. **Banana 2 with persona reference attached has a different failure mode**: the reference image (full identity = full face) FIGHTS the prompt's composition instruction whenever the source frame shows the persona only PARTIALLY (cropped at frame edge, only part of face visible, behind another subject dominating the frame). Banana 2's default behavior is "render the referenced character fully visible at balanced composition" — when the prompt asks for partial visibility, Banana 2's planner conflicts and reverts to balanced two-shot. Reference wins by default.
 
 **Surfaced 2026-05-13** from the same Dr. Kim Image 1 source frame as v712: extreme face-macro with doctor face partial in upper-right corner only (~25% area), patient face dominating lower-left + center (~60% area). After applying v712 relational grammar correctly, GPT image gen reproduced the composition faithfully. Banana 2 with `Use the uploaded character reference image for the main character.` binding line attached rendered a balanced chest-up two-shot every time — the reference image's full-face identity pulled the composition away from the prompt's partial-visibility instruction.
@@ -9954,7 +10018,7 @@ ONLY THEN claim v717 forces extreme-symptom rendering faithfully on Banana 2.
 
 ### v718 — VLM forensic-perception protocol (Stage 4d pre-grammar)
 
-**APPLY:** check each shot for the three VLM perceptual failures - hand/face misattribution by proximity, invented spatial relations, anatomy errors - and correct them BEFORE writing any prose about the shot.
+**APPLY:** (v718j and v718j.1 are the paired-image half: a START image carries `- **pair_role:** start` ONLY, the END image carries `- **pair_role:** end` PLUS `- **paired_with:** image_K`, and the parser hard-fails `paired_with` on a non-end image) check each shot for the three VLM perceptual failures - hand/face misattribution by proximity, invented spatial relations, anatomy errors - and correct them BEFORE writing any prose about the shot.
 
 **Problem.** v712 + v713 + v715 + v716 + v717 are all PROSE-GRAMMAR rules — they govern what the decoded markdown SAYS once the VLM has perceived the frame. None of them recover from VLM PERCEPTUAL FAILURES upstream — when the VLM looks at the source frame and gets the spatial / attributional / anatomical facts wrong before writing a single word. Three observed VLM perceptual failure classes:
 
@@ -10898,6 +10962,8 @@ ONLY THEN claim v720 prevents Z-axis defaults on lateral-extension sources.
 
 ### v721 — v698A activation gate (anti-auto-voiceover on on-camera persona scenes)
 
+**APPLY:** the v698A voiceover path activates only on the explicit gate. An on-camera persona speaking does NOT get an auto-voiceover.
+
 **Problem.** v698A spec: voiceover-anchor pair fires when persona's face is NOT visible at t=0 OR persona is NOT lip-syncing the line (recipe b-roll, VFX overlays, hands-only). LLMs (Gemini 3.1 Pro / GPT / Claude) apply the v698A pattern aggressively from corpus prior — "recipe scene = voiceover" — even when the scene's Image body explicitly says persona is on-camera lip-syncing. Result: scenes that should be `speaker: on-camera` get `speaker: voiceover` + `voiceover_anchor_image:` declared. Platform correctly renders TWO Veo clips per scene per v698A spec (silent b-roll + audio twin), but the b-roll is REDUNDANT — persona is already on-camera lip-syncing in the image. Operator gets paired clips on scenes that didn't need them, doubling Veo cost + creating audio-swap artifacts at export.
 
 **Surfaced 2026-05-13** from nuri-prostate-health-hose-blast-safe lift: scenes 2-7 were recipe-prep scenes with persona seated behind clinical counter "eyes locked to the lens, mouth open mid-word" — persona on-camera lip-syncing in every recipe scene. LLM marked all 6 scenes `speaker: voiceover` + `voiceover_anchor_image: image_2`. Platform created PAIRED voice-anchor + b-roll for every scene; operator saw "VOICE FAILED — RETRY PAIRED" labels on 6 scenes that should have been single-clip on-camera.
@@ -11739,7 +11805,7 @@ if len(request_to_node) > REQUEST_TO_NODE_CAP:
 
 ### v736 — Spectacle-over-logic discipline (v736a + v736b + v736c + v736d umbrella)
 
-**APPLY:** put the symptom DEAD CENTRE, keep the hands active, place the face above or beside rather than behind, and keep the prompt short — spectacle beats logic in the opening frame.
+**APPLY:** (covers v736h, v736h.1 and v736.1; v736a is the metaphor ban, below) put the symptom DEAD CENTRE, keep the hands active, place the face above or beside rather than behind, and keep the prompt short — spectacle beats logic in the opening frame.
 
 LLMs default to safe / logical / probable when authoring HOOK ideas; viral hooks need the opposite. v600 cartoon-physics + v598 power-test enforce FORMAT but leave the loophole of "safe" metaphor selection (prostate = garden hose, digestion = clogged drain, heart = engine). Operator diagnosis 2026-05-14: *"if the visual metaphor makes logical sense in a middle-school biology class, REJECT IT. Viral hooks rely on Spectacle Disconnect — the prop should be viscerally interesting first, and a metaphor second."*
 
@@ -11748,6 +11814,8 @@ LLMs default to safe / logical / probable when authoring HOOK ideas; viral hooks
 **v736 packages four sub-rules**:
 
 #### v736a — Anti-Sense Metaphor Ban
+
+**APPLY:** reject a hero prop whose mapping to the physiology would pass a middle-school biology class - no garden hose for prostate, no plunger for gut, no engine for circulation. The cleaner the metaphor, the deader the hook.
 
 Reject hero props whose mapping to the underlying physiology would pass a middle-school biology class. The cleaner the metaphor, the deader the hook. Banned-by-default mappings (the LLM's first-instinct trap):
 
@@ -11888,6 +11956,8 @@ The HOOK image then renders the soaked-sponge concept; v720c body-pose + v716 an
 
 ### v736.1 — DNA-first restatement + sub-rules e/f/g/h (amendment to v736)
 
+**APPLY:** keep the short-prompt economy: every extra clause costs detail on the one thing that must read.
+
 **Surfaced 2026-05-14** from corpus DNA extraction across 6 viral hooks (chicken-in-pot / honeycomb-mass / dual-prostate-models / shirtless-strain / pickle-vs-belly / hanging-peanut-sack). Original v736 spec (a/b/c/d) covered the loophole but buried the structural DNA in 4 enforcement gates. This amendment restates v736 around 7 universal invariants extracted from the corpus + adds 4 sub-rules (e/f/g/h) surfaced from the DNA extraction.
 
 **The 7 invariants** (every viral hook in the 80/20 corpus satisfies all 7):
@@ -11972,6 +12042,8 @@ Required `[Composition]` block phrase: `the main character's face is sharply vis
 Required Negatives: `No persona crop on the face` + `No persona-hidden-behind-prop` + `No persona-displaced-to-corner`.
 
 #### v736h.1 — Short-prompt economy (Banana 2 attention budget; operator 2026-07-21)
+
+**APPLY:** put the face above or beside the symptom, never behind it, so both read in the same glance.
 
 **Forward-only update.** The old v736h target of 200-350 words and 400-word ceiling is superseded for every new or modified Image prompt. Existing shipped prompts are not migrated in bulk.
 
@@ -12726,6 +12798,8 @@ Semantic shift: `rejected` is now "this clip is completed but user marked it rej
 
 ### v738.1 — Pre-Flight Section 6 rewrite (State-Delta Mandate, REPLACES Anti-Platonic Gate single-state check, NEW 2026-05-17)
 
+**APPLY:** write the State-Delta declaration per axis for t=0 and t=end — all four axes individually, not one combined sentence.
+
 **Failure surfaced 2026-05-17** from Claude-in-session decode of `raw/follow_me_health_remedies_us_ai.mp4` (oversized tongue + ginger-turmeric mouth-wash). Decoder walked 18 dense PNG frames + caught coated tongue at t=0.6s + pour at t=2.1s + scrub at t=4.5s + clean tongue at t=5.7s. Despite seeing every frame of the within-HOOK cleanse arc, decoder wrote Image 1 anchored at t=5.5s (END state) + set `visual_delta: n/a (HOOK base frame)` + wrote static action_arc `HOLD-STEADY → GESTURE-FORWARD → LIFT-PRE → STICK-OUT → END-HOLD` with zero TRANSFORMATIVE force-verbs (POUR / SCRUB absent). Pre-Flight Section 6 Anti-Platonic Gate passed because the coated tongue deviated from the healthy baseline on all 4 axes — but Section 6's binary "is current state Platonic? YES/NO" question only forces the decoder to declare deviation from baseline; it does NOT force declaration of t=0 vs t=end DELTA.
 
 **Root cause**: existing Section 6 is single-state diagnostic (snapshot Anti-Platonic Gate). v718d already provides 4-axis morphological-delta vocabulary; v718e already enforces action-consequence coupling at action_note level. Gap = Pre-Flight Section 6 doesn't force the decoder to WRITE OUT both endpoint states side-by-side BEFORE markdown body locks in. LLM contrast-recognition kicks in when both states are committed to context window in close proximity; with only one state declared, second state gets glossed.
@@ -12832,6 +12906,8 @@ print('v738.1 PASS')
 **Verification mandatory before claiming v738.1 correctly applied**: re-run decode bundle on the surfacing case (`raw/follow_me_health_remedies_us_ai.mp4`); confirm Pre-Flight Section 6 is now "Morphological Delta Declaration" (not "Anti-Platonic Gate"); confirm decoder emits per-prop t=0 + t=end declarations for tongue + tea + cauldron + book; confirm v738.1 Python gate PASSES on the corrected artifact.
 
 ### v738.2 — Pre-Flight Section 8 NEW (per-scene morphology audit table, NEW 2026-05-17)
+
+**APPLY:** run the per-scene morphology audit as part of Pre-Flight, scene by scene, before any output.
 
 Adds NEW Section 8 after the existing Section 7 (Image cardinality + use audit). Section 8 is per-SCENE morphology audit (mirror of Section 6's per-PROP audit). Catches the failure class where individual props passed Section 6 but a Scene's action_arc or End beat doesn't actually deliver the declared transformation.
 
@@ -12955,6 +13031,8 @@ print('v586.1/v717.1 audit complete')
 
 ### v604.1 — frame_anchor anchoring discipline for morphology scenes (NEW 2026-05-17)
 
+**APPLY:** annotate a paired image's `frame_anchor` on both halves, so the pair reads as one moment rather than two unrelated frames.
+
 **Rule**: when scene's hero prop has within-clip morphological delta (v738 Section 6 Delta Axis != NONE for this scene's hero prop), `frame_anchor:` MUST point at t=0 (BEFORE state) of the within-clip transformation, NOT t=end (AFTER state).
 
 **Why**: Banana 2 renders the static Image from frame_anchor as the FIRST FRAME of the Veo clip. Veo then animates motion forward from that first frame across the clip duration. If frame_anchor points at t=end, Banana 2 renders the AFTER state, and Veo cannot animate backward to undo the transformation — the cleanse / pour / smash / dissolve never happens on-clip because the start frame already shows the resolved state.
@@ -13003,6 +13081,8 @@ print('v604.1 audit complete')
 **Touched**: `code/template_reference.md` (this section). `code/decode_bundle.sh` + 3 generate bundles (V604 anchor discipline added to relevant blocks). `wiki/patterns/conventions.md` (v604.1 row). `CLAUDE.md` (quickref). `wiki/log.md` (timeline). **Migration**: pre-v604.1 artifacts with frame_anchor at t=end on morphology scenes — Veo renders static; can be retroactively fixed by editing frame_anchor + re-rendering. v604.1 prevents the same bug on future authoring.
 
 ### v697.1 — TRANSFORMATIVE vs NON-TRANSFORMATIVE force-verb subclass tags (NEW 2026-05-17)
+
+**APPLY:** mark each `action_arc` transformative or non-transformative; a non-transformative arc still needs its force verb.
 
 **Composes with v697 8-class force-verb taxonomy.** v697 catalogs force-verbs (LIFT / SLAM / POUR / CASCADE / GRIP / PULL-APART / TILT / KNEAD / WHISK / DIP / STEP-FORWARD / GESTURE-FORWARD / POINT-TO-LENS / etc.) but doesn't distinguish verbs that ACT ON a prop with morphological consequence from verbs that don't. v697.1 adds two subclass tags so v718e + v718f + v738.2 gates can scope correctly.
 
@@ -13130,6 +13210,8 @@ else:
 **Touched**: `code/template_reference.md` (this section). `code/template_new_format.md` (Scene block schema gains the optional `- **visual_delta_within_clip:**` field). `code/decode_bundle.sh` + 3 generate bundles (V718G instruction block referencing the new field). `wiki/patterns/conventions.md` (v718g row). `CLAUDE.md` (quickref). `wiki/log.md` (timeline). **Migration zero required**: pre-v718g artifacts without the field remain valid (Banana 2 + Veo still render; within-clip morphology just lives in action_note + Veo prompt body without the structured field anchor). New artifacts MUST satisfy v718g gate when Section 6 declares within-clip morphology.
 
 ### v718h — Veo 3.1 I2V Temporal Consistency Override (NEW 2026-05-17, render-test validated)
+
+**APPLY:** run the intrinsic-state four-axis read on the shot before writing it: what the state IS at t=0, what it becomes, what forced it, and what remains.
 
 **Surfaced 2026-05-17** from operator render-test iterations on tongue-cleanse HOOK after v738.1 + v738.2 codified (see v738.1 surfacing case). v738.1 forced the author to declare t=0 + t=end side-by-side; v718e enforced action-consequence coupling in action_note prose; v718g required visual_delta_within_clip field. Despite all four gates passing, the rendered Veo clip still failed to show the morphological transformation — Veo rendered the oil pouring + splashing realistically but the 3D blisters + grey crust on the tongue persisted unchanged through clip-end. Multiple prompt rewrites (delta-only with WASH AWAY, then structural verbs DISSOLVE/MELT, then temporal forcing with IMMEDIATE ACTION) all failed to defeat the persistence. Only the "VFX Wipe Override" pattern (describing the catalyst's leading edge as a digital wipe that ERASES + REPLACES geometry pixel-for-pixel) successfully forced the transformation.
 
@@ -13993,6 +14075,8 @@ else:
 
 ### v751 NEW — Veo prompt ↔ Image body semantic consistency gate
 
+**APPLY:** write the Veo Final Prompts with bolded fields under each `Clip N.M` header and NO beat brackets — the beat markers live in `action_note`.
+
 **Rule**: Veo text prompt body's action descriptions MUST be semantically consistent with start_frame Image's body prose at t=0 AND end_frame Image's body prose at t=end (when Option C set).
 
 **Banned drift class**: Veo text prompt introduces a state (open book / pour cascade / smashed prop) that NEITHER start_frame NOR end_frame Image describes → Veo gets confused, render either ignores the text-prompt action OR transforms mid-clip in unpredictable ways.
@@ -14843,7 +14927,7 @@ Give every visible process step and every meaningful on-screen object its own or
 
 ## v791 — HOOK safe-area composition grammar (camera-first + layered foreground + scale cheat)
 
-**APPLY:** on the HOOK, write camera-first safe-area grammar: name the lens, use ultra-wide 0.5x, keep the lens level with the raised hand, and foreshorten toward the camera.
+**APPLY:** (covers v791.2) on the HOOK, write camera-first safe-area grammar: name the lens, use ultra-wide 0.5x, keep the lens level with the raised hand, and foreshorten toward the camera.
 
 **Surfaced 2026-06-12** from the operator's safe-area brief: on Reels/TikTok the app UI covers the top ~14%, the bottom ~35% and the right ~12% of the screen — the HOOK's focal action must land in the central band, big and immediate. Three rounds of test prompts on 6 corpus hooks (Costco lift / pills-on-balloon / Walmart-selfie banana / shelf smash / porch sunflower / restaurant CCTV) found what does and does not move Nano Banana 2's composition. Operator verdict on the final grammar: "I like this style for the hook."
 
@@ -14954,7 +15038,7 @@ Caught on the car-exit v1 build: image_1 was authored as Nuri close to the lens 
 
 ## v795 — No pointing fingers; hands always hold a prop (images + Veo prompts)
 
-**APPLY:** nothing to apply — SUPERSEDED. The no-pointing ban is retired (operator 2026-07-16) and the auditor check is a no-op PASS.
+**APPLY:** (covers v795.1) nothing to apply — SUPERSEDED. The no-pointing ban is retired (operator 2026-07-16) and the auditor check is a no-op PASS.
 
 > ### ⚠️ v795.1 — RELAXED 2026-07-16 (operator): POINTING IS ALLOWED AGAIN. FORWARD-ONLY.
 >
@@ -15717,6 +15801,8 @@ Every DEFAULT flipped to v782 values (`clip_mode: fresh`, `transition: cut`):
 
 ## v832 — Detail-level innovation moves: PROXY-OBJECT FUSION, ROLE FLIP, MEME-GRAMMAR OPENER
 
+**APPLY:** when a lever is detail-level, name which move it is — PROXY-OBJECT FUSION, ROLE FLIP or MEME-GRAMMAR OPENER — rather than calling it a step-up.
+
 **Where it came from**: operator 2026-07-12, after the 5-signs banana-mic build — *"these are the type of details and type of innovation we need to add to the rules."* The step-up that worked was not a new format or a new setting: it was a PROP DETAIL (the mic is a banana) and a ROLE DETAIL (the healer joins the press side) and a QUESTION DETAIL (the meme compliment). Innovation lives in details grafted onto the proven skeleton, not in new skeletons.
 
 **The three named moves** (compose freely; each is one step-up layer per `innovation-moves.md` §"Step up vs differentiate"):
@@ -15815,6 +15901,8 @@ Second half of the bug: even if the retry HAD fired, the old backoff was `[2, 5,
 **Touched**: this deep-dive (canonical), `code/image_worker.py`, `code/tests/test_image_worker_upload_retry.py`, `code/tests/test_image_worker_health_retry.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
 
 ## v833 — Transformation-meme grammar (started/going panels): full-health transform, tight crop, proxy bound to the zone
+
+**APPLY:** (covers v833.1) build a started/going transformation panel as a FULL-HEALTH transform with a tight crop and the proxy bound to its zone.
 
 **Where it came from**: the 13.07 plan Video 1 lane (day1dayx couch/bed memes, v1-v4) — three operator corrections in one exchange: *"the transformation shouldn't be only the banana, but the overall health of the man with previous symptoms"* · *"apply the classic hook prompt rules"* · (on a weak render) *"is not really powerful, his composition, compared to the original video"*.
 
@@ -15970,6 +16058,8 @@ Expected after v856: a 3-ref node ~98s → **~45s**. Tests: `code/test_v856_ref_
 
 ## v859 — Multi-reference chain: two parents on one image (pose+objects | body)
 
+**APPLY:** when one image takes two parents, NAME every reference and say what each contributes — pose and objects from one, body from the other.
+
 **What it solves**: a frame that must inherit TWO different things from TWO different frames. Worked case (add-the-third v3, 2026-07-16): each "fit" frame needs the POSE + the HELD OBJECTS from its own beat's fat base frame, and the BODY from the one fit anchor. With a single chain parent you must pick one and re-describe the other in text. Operator: *"the fit should reference the previous fat and the overall fit — it gets the posing and the objects from the previous fat and the body of the fit."*
 
 **The rule**: `- **reference_image:**` accepts one OR two `image_N` entries, comma-separated. Order is authoritative:
@@ -16017,6 +16107,8 @@ Per `feedback_rule-changes-forward-only`.
 ---
 
 ## v861 — Per-clip render duration from the line's word count
+
+**APPLY:** give each line its own `- **clip_duration_s:**` from its word count (4/6/8/10s), not one duration for the whole job.
 
 **Where it came from**: operator 2026-07-16 — *"we need to adapt the video markdown and the platform to also use the clip duration setting. so if we have around 28 words we 10 seconds, less than 12 words is 4 seconds and 16 is 6 seconds and 24 is 8 seconds."*
 
@@ -16156,6 +16248,8 @@ The whole implementation of OFF is one line in the Clip writer (`main.py`): stor
 
 ## v833.1 — RELAXED 2026-07-25: dated day stamps allowed again (§14.2.1)
 
+**APPLY:** hold the meme panels to the same crop and framing so the started/going comparison is the only thing that changes.
+
 **Operator 2026-07-25: "we can use days."** The §14.2 / v833-clause-1 hard ban on dated day stamps (2026-07-01) is RETIRED. "Day 1 vs Day 30", D1-DX checkpoint ladders, and before/after over time are ALLOWED again. Driver: mentor content plans actively push them — "definitely test this day 1, day 30, they grow accounts very fast" (2026-07-23 call) and transformations run >50% direct-sale ratio (2026-07-19 call).
 
 **All three time framings are now legal, per-test choices** (checkpoint COUNT is its own test axis — 2 vs 3 waypoints, `wiki/synthesis/video-variable-taxonomy.md`):
@@ -16168,6 +16262,8 @@ The whole implementation of OFF is one line in the Clip writer (`main.py`): stor
 **Touched**: this deep-dive (canonical), root `CLAUDE.md` §14.2 quickref, `wiki/concepts/script-adaptation/synthetic-disclosure-and-cta-rules.md` (canonical §14 page), `~/.claude/skills/build-video/audit_build.py` (no-op), `wiki/patterns/conventions.md` (row note), `wiki/synthesis/video-variable-taxonomy.md` (time-anchor + checkpoint rows), memory `feedback_synthetic-disclosure-and-improved-cta`, `wiki/log.md`. Operator directive 2026-07-25.
 
 ## v869 — Real+mannequin dual-carrier comparison hook: the comparison sits at frame CENTER (operator 2026-07-25)
+
+**APPLY:** on a dual-carrier comparison hook the MANNEQUIN carries the failing state and the REAL person carries the working one, in the same frame.
 
 **The step-up this encodes (operator, on the DAY0/DAY30 torso decode):** the saturated mannequin-pair format shows two dummies; the step-up puts a MANNEQUIN and a REAL PERSON in the same frame. The real-vs-fake gap is the LIFE axis: mannequin carrier = the failing state, real person = the restored state. Second attestation family: Day-0/Day-X dual-proxy held-comparison (`decoded_day0_day7_geoduck_bear_ed` + `decoded_mannequin-day0-day30-torsos-cowboy-cabin-belly-comment-yes-ig`).
 
@@ -16187,6 +16283,8 @@ The whole implementation of OFF is one line in the Clip writer (`main.py`): stor
 **Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (workflow note), `wiki/log.md` (timeline), gbrain `rules/v869`. Origin: operator direction + sketch 2026-07-25 on `decoded_mannequin-day0-day30-torsos-cowboy-cabin-belly-comment-yes-ig`.
 
 ## v870 — UPPER-CENTER SAFE-ZONE COMPOSITION (generic, every image; operator 2026-07-25)
+
+**APPLY:** compose every image in the upper-centre safe zone: the avatar's face, the hero prop and the key action all sit there, not low or edge-of-frame.
 
 **The rule (applies to EVERY `### Image N`, not just the hook).** The load-bearing content of a frame — the avatar's FACE, the hero PROP, and the key ACTION / contact point — must sit in the **upper two thirds** of the vertical 9:16 frame, **centered high**. The **lower third is reserved dead space** and must carry nothing story-relevant.
 
@@ -17053,6 +17151,8 @@ A trial reel goes only to **non-followers** until it graduates, which makes it a
 
 ## v909 — EXTERNAL IMAGE REFERENCES ARE OPTIONAL, ROLE-BOUND, AND NEVER TRUNCATED
 
+**APPLY:** outside image references are OFF by default and role-bound. Turn one on only for a named role, and say which role it serves.
+
 **Protected function.** Keep the proven image-generation path unchanged while allowing a scene to use any helpful outside image as a narrow role plate. A fetched Pinterest candidate never becomes an input merely because it exists on disk.
 
 **Evidence trigger.** Use this path only when an `### Image N` needs visual evidence that its normal character, product, or continuity references do not supply: a background, pose, object, outfit, lighting look, texture, camera relationship, or an unlisted scene-specific need.
@@ -17138,6 +17238,8 @@ Present → the same-shell FAIL becomes a PASS that names the parent it delibera
 ---
 
 ## v892 — COMPOSITE SCENE = ONE SCENE, TWO CLIPS (the video-axis twin of v698A)
+
+**APPLY:** a composite frame (green-screen key, subject over a still) is ONE scene rendered as TWO clips — author it that way rather than as one clip describing an assembled picture.
 
 **Protected function.** A frame that was ASSEMBLED — a green-screen key, a subject over a still, a picture-in-picture inset, a split screen — cannot be produced by one render. v890d says the decode and the build must emit TWO `### Image N` blocks for it. v892 is the platform half: the scene stays ONE scene with ONE line, and the platform renders the second layer for you.
 
@@ -18182,6 +18284,8 @@ The earlier lines above stay verbatim because this master is append-only. They a
 
 ## v945 — CHARSWAP RENDER METHOD: the build says a clip is a character swap (2026-08-26)
 
+**APPLY:** a clip rendered by swapping the avatar into a REAL source video declares the charswap render method on the scene — it is not a normal Veo clip.
+
 **Read the number before anything else.** The shipped code says **`v943`** everywhere — the parser's own error text (*"see template_reference.md §v943"*), the column comments, the function names (`_v943_maybe_charswap`, `_v943_swap_source_response`), the test file, and HANDOFF revs 471-494. That number was already spent: `§v943 — PROVE A LIVE SESSION` was written into this master on 2026-08-25 by a session running in parallel, hours before the swap feature landed. **One v-number cannot hold two unrelated rules here.** `check_rule_index.py` folds `v943.1` onto `v943`, and `wiki/meta/build-rule-index.md` gives a rule exactly ONE bucket — but the swap rule is a build-authoring rule (§A, the author must write bullets) while the session rule is platform-internal (§C, no artifact action). Both cannot be v943. This master is append-only, so the earlier claim keeps the number and **the swap family is canonically v945 / v945.1**.
 
 Nothing in `code/` was renamed. A `(v943)` in a parser error, a log line, a column comment or a test name means **this section**. Do not "fix" the strings — they are deployed and live, and renaming them is a separate, deliberate job with its own deploy.
@@ -18328,6 +18432,8 @@ A build with none of these bullets parses to all-None on every new field and its
 
 ## v944 — THE FINISHING SECTION: the build declares its own captions and overlay (2026-08-26)
 
+**APPLY:** decide the job-level `## Finishing` block — captions, music and the export fields — rather than letting it default. It is validated at import against the real models.
+
 **The failure that caused it.** The first swap pilot came back with captions nobody asked for and none of the agreed overlays. Measured, not guessed: the auto-edit ran with a default `AutoEditRequest` — template `korella`, `captions_enabled=True` — because **nothing in the job said anything about finishing**. `captions_enabled=False` already existed as a field. The read-caption overlay engine already existed, with its whole doctrine, in `tools/readcaption_overlay.py`. The gap was declaration and wiring, nothing else.
 
 So the build now says how it finishes, in one job-level section.
@@ -18404,6 +18510,8 @@ A build that declares no `## Finishing` parses to `None`, is stored as SQL NULL 
 ---
 
 ## v947 — AUTO-FINISH: the build declares the whole finish, and the last approval runs it (2026-08-27)
+
+**APPLY:** set `- **auto_finish:** on` only when the job should finish with no human at the Export dialog; otherwise leave it off and review.
 
 **What v944 left undone.** v944 got the build talking about its own finish, but it only ever said two things: the captions and the overlay. Every other knob that shapes the delivered video — whether silence is cut, which music bed rides under it, the transition, the beat pins, whether the picture-in-picture is on — was still decided by whoever happened to click, from whatever the platform's defaults were that day. And nothing ran by itself. A job could sit with all its clips approved for hours because the person who approved the last one did not know they were also the person who had to press export, and then press auto-edit.
 
@@ -18508,6 +18616,8 @@ A build with no `## Finishing` still parses to `None` and behaves byte-for-byte 
 
 ## v948 — THE SILENCE-HOLE SWEEP: dead air is cut on the ASSEMBLED timeline, not per clip (2026-08-27)
 
+**APPLY:** let the export sweep dead air on the ASSEMBLED timeline; do not try to fix a silence hole per clip, where it is invisible.
+
 **The complaint that made it.** The operator watched an axe selling final and said the quiet stretches were disturbing — and, importantly, rejected the excuse I had used to leave them in: *"the actions that you decided to leave are not really relevant and the silence is disturbing at that time."* Visible action on screen is NOT a licence for dead air. In this format the ear carries retention as much as the eye, and a second of nothing reads as a broken video on a phone.
 
 **Why the existing VAD could never fix it.** `apply_vad` runs on each clip **in isolation**, so it only ever trims that clip's own head and tail. Two kinds of dead air walk straight past it:
@@ -18605,6 +18715,8 @@ So a change to any `autoedit_*` module is deployed twice or not at all: push to 
 
 ## v949 — THE MAP MUST BE TRUE, NOT JUST WELL-FORMED: the SCRIPT DECISION MAP is checked against the parent and the build (2026-08-27)
 
+**APPLY:** write the `SCRIPT DECISION MAP` from the declared PARENT and the BUILD in front of you, and re-read it after any line edit. The gate checks the map against both, not just its shape.
+
 Sources: operator complaint 2026-08-27 (*"we really need to improve the scripting skills you have on how to adapt a script — you don't follow what's in the raw files and what's said by the mentors"*) · Codex diagnosis HANDOFF rev 595 · the measurement that corrected the first hypothesis, rev 597 · back-test record `docs/experiments/script-map-backtest-2026-08-27.md`.
 
 **Why this rule exists.** §6.9 requires a beat-by-beat `SCRIPT DECISION MAP` before drafting an adapt, and the authoring auditor enforced it — but only its SHAPE. `audit_build.py:2182-2264` checks that the map exists and that its header carries the seven column names, then returns PASS. **It never reads a row.** So a map whose cells quote lines nobody ever says reached 0 FAIL and looked audited.
@@ -18654,6 +18766,8 @@ Both wordings are kept here on purpose, the same way §8.1.1 keeps its wrong ver
 **Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/meta/generate-video-checklist.md`, root `CLAUDE.md` §9, `wiki/log.md`.
 
 ## v950 — SEGMENTED SWAP: one start frame PER SEGMENT, and the previous segment carries the identity (2026-08-28)
+
+**APPLY:** a charswap cut into N clips anchors EACH clip's start frame on THAT clip's own source frame, never all of them on the first.
 
 **The mistake this exists to stop, measured.** `raw/decode_work/martha-reformer-DZVTwnbN72v/martha-reformer-swap-v1.md`
 is a 15.4s reformer routine cut into two 8s segments (§v943 charswap, video-led). Scene 2's start
@@ -18746,6 +18860,8 @@ scenes are cut from ONE continuous source take.
 memory `swap-image-two-ref-method`.
 
 ## v951 — THE EXPORT DIALOG OPENS ON THE BUILD'S DECLARED SETTINGS, NOT THE BROWSER'S (2026-08-29)
+
+**APPLY:** declare the export settings in the build's `## Finishing` block; do not pick them in the dialog at export time.
 
 **The complaint, verbatim.** Operator, on the Export Settings modal: *"this video should already contain
 all the info to extract automatically when i click export final (the whole process)."* He was right, and
@@ -18869,6 +18985,8 @@ file onto everything it creates — the cache is for callers that don't have the
 
 ## v952 — THE OVERLAY STOPS COVERING THE BODY, AND THE MUSIC STOPS CUTTING OUT (2026-08-29)
 
+**APPLY:** keep a read-caption overlay off the body, and make the source audio fill the clip — a tall block over the subject or a short audio bed both break the read.
+
 Three defects on one delivered file (job `bb159509`, `noemi-cablefly` — a 6s
 `speaker: silent` / `audio: source-original` character swap). Operator: *"the overlays
 they cover completely the body… if the big block of text was splitted and moved up and
@@ -18948,6 +19066,8 @@ its own copy, which must be refreshed and restarted or the old placement keeps s
 `wiki/meta/build-rule-index.md`.
 
 ## v953 — A SCHEDULED POST IS RECORDED BEFORE IT EXISTS, AND NOTHING EVER CAME BACK FOR IT (2026-08-29)
+
+**APPLY:** `publish_reel --schedule-at` writes the ledger BEFORE the post exists, so the record of an irreversible act survives a crash between scheduling and posting.
 
 Operator: *"two of those 'unpublished' jobs — cupping and v13 — are already live…
 platform 'unpublished' ≠ actually unpublished, and anything reading that field
@@ -19147,6 +19267,8 @@ instruction there governs the strings already shipped, not new ones.
 
 ## v954 — VERIFY BY ANCESTRY, PUBLISH BY LANE, AND THE DEFAULT THAT STAYS PUT (2026-08-29)
 
+**APPLY:** ask the right question in a gate: deploy verification checks whether YOUR change is live, not whether the page returns 200.
+
 **Number note:** the shipped code comments, commit messages and test filenames all say `v953`. That
 number was claimed the same day by the scheduled-post rule (§v953 above) in a concurrent session, and
 this master is append-only, so **canon is v954**. Same convention as §v945. Do not "fix" the strings
@@ -19244,6 +19366,8 @@ the safety net you are relying on actually fires for them.
 `wiki/meta/build-rule-index.md`, and the four swap builds' `## Finishing` blocks.
 
 ## v953.1 / v953.2 — THE REVIEW LOOP ON v953: WHAT THREE ROUNDS OF ADVERSARIAL READING FOUND (2026-08-29)
+
+**APPLY:** check a fix does not re-introduce what it was fixing; two of v953's worst findings were regressions v953 itself created.
 
 v953 shipped and was then read by six independent reviewers, each finding
 adversarially refuted by a second agent. Round 1 raised 36 findings (34 survived
@@ -19356,6 +19480,8 @@ Three lenses found different pieces of one story.
 
 ## v953.4 — THE SYNC IS REASON-DRIVEN, NOT TIMED (2026-08-30)
 
+**APPLY:** drive the Instagram sync by REASON — a publisher nudge, a fresh unpublished post — not by a timer. A gate that is always open is not a gate.
+
 Operator: *"the check should be smart, not timed."* Correct, and the timer was the
 weakest thing v953 shipped.
 
@@ -19429,6 +19555,8 @@ and told us nothing. Scoped to the freshness window it inverts completely:
 
 ## v956 — THE OVERLAY DENIALS ANSWER THE FEAT ON SCREEN, AND THE AUTHOR SHOWS THE DERIVATION (2026-08-30)
 
+**APPLY:** write each `No X / No Y` denial to answer the FEAT visible on screen — the shortcut a viewer would otherwise assume explains it.
+
 **The complaint, verbatim.** Operator, on the published martha reformer reel (job `8eb6b63e`):
 *"the overlays if you check other videos are related to what happens. this one in the same overlays
 doesn't make any sense the sentences."* He is right, and the rule already existed — in prose.
@@ -19487,6 +19615,8 @@ derivation a declared artifact and gate on its existence, not its correctness.
 `wiki/synthesis/readcaption-caption-engine.md`, `wiki/patterns/conventions.md`, `wiki/log.md`.
 
 ## v956.1 — THE OVERLAY STRUCTURE: AGE CLAIM → ONE AMPLIFIER → PROMISE + ROUTE (2026-08-30)
+
+**APPLY:** write the overlay in three slots IN ORDER: big age claim → ONE amplifier → promise plus route.
 
 **The operator's second correction, same day, verbatim:** *"this still doesn't make any sense and it
 can improve further … check other examples of accounts and videos i gave you already … to also change
@@ -19626,6 +19756,8 @@ the video, and pretending otherwise is the §v949 trap.
 
 ## v957 — THE EXPORT DIALOG OPENS LANE-CONFIGURED, AND THE STEP READS AS A SUMMARY (2026-08-30)
 
+**APPLY:** let the Export dialog open from the lane's configured values rather than re-picking them by hand each time.
+
 **The operator ask, verbatim:** *"in the platform the settings goes directly into the right set up
 and i just reclick and proceed … so i can actually see them … we have different settings when we do
 charswap and music and stuff — so we should clean up and reorganize the settings step."* The dialog
@@ -19755,6 +19887,8 @@ as v945.14 — the queue nobody guarded — one layer up).
 
 ## v958 — THE AUTOEDIT STAGE CACHE IS KEYED ON THE INPUT EXPORT (2026-09-01)
 
+**APPLY:** name the autoedit stage cache after everything baked into it — the `.input_export` marker exists because a cache keyed on your own settings still breaks when another stage's input changes.
+
 **The incident.** Martha-stairs job `248198f6`: the operator-side reviewer switched clip 1 to
 variant 2 (the variant-1 take carried ~2s of leaked source text). The re-approve chain re-exported
 correctly — BOTH post-switch exports were frame-probed and carried the new take — yet THREE
@@ -19783,6 +19917,8 @@ forbids ScheduleWakeup-waiting in the headless wrapper (the 08:10 process exits 
 and the wakeup dies with it — the 2026-09-01 three-videos-stranded incident).
 
 ## v959 — MOVIE-SECTION RENDER METHOD: THE MENTOR'S CLIP, DECLARED IN THE BUILD (2026-09-04)
+
+**APPLY:** a clip made the mentor's movie way declares `- **render_method:**` on the scene, so the worker does not treat it as a standard render.
 
 > Corrections dated 2026-09-04 below supersede the sentences they follow; the original lines stay
 > because the masters gate (`check_masters_vs_main.py`) keeps deployed lines.
@@ -20050,6 +20186,8 @@ bundle scripts, `wiki/log.md`, `rules/v959.md` (generated). Plan:
 `docs/superpowers/plans/2026-09-04-movie-section-render-method.md`. Operator 2026-09-04.
 
 ## v960 — THE BUILD DECLARES THE CAPTION WORDS AND THE BURNED OVERLAYS, AND THE CARD OBEYS IT (2026-09-04)
+
+**APPLY:** declare the source look in the `## Finishing` block's `autoedit_*` bullets instead of fixing it by hand after the render.
 
 **The ask, in the operator's words:** make the platform auto-edit produce the full source look on its
 own — the build declares the caption style, the casing rule, the brand word list, and the overlays
@@ -20351,6 +20489,8 @@ Check the mechanism, and if it is wrong, still ask what the instinct was pointin
 ---
 
 ## v961 — PER-CLIP RENDER MODEL: one job, two models (2026-09-04)
+
+**APPLY:** a scene may declare `- **veo_model:**` so ONE job mixes models — put the spoken clips on the stronger model and the silent b-roll on the cheaper one.
 
 **Where it came from**: operator 2026-09-04, on the 80-clip Garnissa copycat-callout build — first
 *"the brolls are animated using lite model"*, then, once told the two-job workaround was blocked,
@@ -20848,6 +20988,8 @@ DailyFinish launch path). Operator 2026-09-06.
 
 ## v965 — THE DECLARED CLIP CONTRACT: the build says what, the worker only does it (2026-09-09)
 
+**APPLY:** opt in with `CLIP CONTRACT: v1` in §0, and then give EVERY shot scene its per-clip contract fields — `input_mode`, `isolate_project`, `policy_fallback`.
+
 **Where it came from.** Operator, 2026-09-09: *"The worker should be arms. The markdown is the brain.
 The worker's only job is to know how to operate this platform... It shouldn't decide what to do. Right
 now it decides a lot, and that's why it keeps breaking in ways that need me."* And, sharper, the same
@@ -21262,6 +21404,8 @@ dangerous job is unreachable even if something does start. One without the other
 
 ## v969 — THE ATTACH LINE: a clip says what goes into the composer, and cannot lie about it (2026-09-11)
 
+**APPLY:** write the readable `- **attach:** image_1:start_frame, image_3:face` mirror on a shot scene. It is DESCRIPTIVE — the worker still attaches in its own order — so it must match what the parser derives or the build is refused.
+
 **Read these three facts before anything else. A future session that reads only this rule still has to know all three.**
 
 1. **It is a MIRROR, never a source.** The build already says what attaches, in `- **image:**`,
@@ -21337,6 +21481,8 @@ function rather than this table whenever either one is touched.
 ---
 
 ## v970 — PER-CLIP COMPOSER SETTINGS: aspect ratio, variants, resolution (2026-09-11)
+
+**APPLY:** a scene may carry `- **aspect_ratio:**`, variants and resolution per clip; all three are optional and fall through to the job level.
 
 Three settings that only ever existed at JOB level now have per-clip bullets:
 
@@ -21419,6 +21565,8 @@ Flow overlay itself uses. One bullet name does not get to carry two grammars.
 ---
 
 ## v971 — ONE GENERIC PER-CLIP AUDIO SOURCE (2026-09-11)
+
+**APPLY:** give each clip ONE audio source — `- **audio:** render | source-original | scene:N | none` — instead of a lane-specific grammar.
 
     - **audio:** render | source-original | scene:N | none
 
