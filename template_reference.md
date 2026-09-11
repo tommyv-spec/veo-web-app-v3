@@ -11956,7 +11956,7 @@ The HOOK image then renders the soaked-sponge concept; v720c body-pose + v716 an
 
 ### v736.1 — DNA-first restatement + sub-rules e/f/g/h (amendment to v736)
 
-**APPLY:** keep the short-prompt economy: every extra clause costs detail on the one thing that must read.
+**APPLY:** build the hook from the seven one-glance invariants and sub-rules e/f/g/h - but read them as the SPECTACLE-PROP family's contract, not a universal law (2026-08-30 amendment). Another hook family declares its own one-glance read instead of inheriting these.
 
 **Surfaced 2026-05-14** from corpus DNA extraction across 6 viral hooks (chicken-in-pot / honeycomb-mass / dual-prostate-models / shirtless-strain / pickle-vs-belly / hanging-peanut-sack). Original v736 spec (a/b/c/d) covered the loophole but buried the structural DNA in 4 enforcement gates. This amendment restates v736 around 7 universal invariants extracted from the corpus + adds 4 sub-rules (e/f/g/h) surfaced from the DNA extraction.
 
@@ -12043,7 +12043,7 @@ Required Negatives: `No persona crop on the face` + `No persona-hidden-behind-pr
 
 #### v736h.1 — Short-prompt economy (Banana 2 attention budget; operator 2026-07-21)
 
-**APPLY:** put the face above or beside the symptom, never behind it, so both read in the same glance.
+**APPLY:** keep the image prompt SHORT - target 80-150 words for a simple one-action hook, 120-200 for a complex two-person or A/B frame; over 200 WARNs and over 250 FAILs. Write it in the six-block render order, and spend the budget on the one thing that must read.
 
 **Forward-only update.** The old v736h target of 200-350 words and 400-word ceiling is superseded for every new or modified Image prompt. Existing shipped prompts are not migrated in bulk.
 
@@ -14075,7 +14075,7 @@ else:
 
 ### v751 NEW — Veo prompt ↔ Image body semantic consistency gate
 
-**APPLY:** write the Veo Final Prompts with bolded fields under each `Clip N.M` header and NO beat brackets — the beat markers live in `action_note`.
+**APPLY:** keep every action in a Veo prompt semantically consistent with the start_frame image at t=0 and the end_frame image at t=end. A Veo prompt may NOT introduce a state that neither frame describes - the render then either ignores the action or transforms mid-clip.
 
 **Rule**: Veo text prompt body's action descriptions MUST be semantically consistent with start_frame Image's body prose at t=0 AND end_frame Image's body prose at t=end (when Option C set).
 
@@ -16248,7 +16248,7 @@ The whole implementation of OFF is one line in the Clip writer (`main.py`): stor
 
 ## v833.1 — RELAXED 2026-07-25: dated day stamps allowed again (§14.2.1)
 
-**APPLY:** hold the meme panels to the same crop and framing so the started/going comparison is the only thing that changes.
+**APPLY:** dated day stamps are ALLOWED again (operator 2026-07-25, "we can use days") - "Day 1 vs Day 30", D1-DX ladders and before/after over time are all legal, per-test choices. v833's other clauses are unchanged; only the 2026-07-01 ban is retired.
 
 **Operator 2026-07-25: "we can use days."** The §14.2 / v833-clause-1 hard ban on dated day stamps (2026-07-01) is RETIRED. "Day 1 vs Day 30", D1-DX checkpoint ladders, and before/after over time are ALLOWED again. Driver: mentor content plans actively push them — "definitely test this day 1, day 30, they grow accounts very fast" (2026-07-23 call) and transformations run >50% direct-sale ratio (2026-07-19 call).
 

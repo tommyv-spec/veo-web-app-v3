@@ -41,6 +41,11 @@
         "what": "two v831 lines that stated the word cap as 25: the section heading, and the **Enforcement** paragraph claiming the auditor HARD-FAILS any line over 25 words",
         "superseded_by": "v861's amendment of 2026-07-16, already standing in this section (\"the cap is now **28 words**, not the 25 named above ... The auditor's `c_line_word_cap` now FAILs above 28\"); corrected in place 2026-09-11 after a corpus sweep, Codex-reviewed over two passes",
         "why": "both lines describe the PRESENT and described it wrongly — `c_line_word_cap` in .claude/skills/build-video/audit_build.py has failed above 28, not 25, since 2026-07-16, so the Enforcement paragraph made a false statement about running code and the heading carried the wrong number into the index and the rule mirror. The APPLY line had the same defect and was corrected with them. The two OTHER places v831 says 25 are deliberately NOT retired, because they record the past rather than the present: the operator's verbatim 2026-07-11 quote, and the dated rule statement whose amendment sits in the very next block — the house convention is that an amendment supersedes rather than rewrites. Rule coverage unchanged: v831 is still one section with one heading, and check_rule_index.py stays PASS."
+      },
+      {
+        "what": "four APPLY lines that described a DIFFERENT rule than the section they sat in: v736h.1 (short-prompt economy) carried the face-placement instruction while v736.1 (the DNA restatement and 7 invariants) carried the prompt-economy one - the two were SWAPPED; v751 (the Veo-to-Image semantic consistency gate) repeated v750's formatting rule almost verbatim; v833.1 (the 2026-07-25 relaxation allowing dated day stamps) carried a crop-and-framing instruction and never mentioned the relaxation it exists to record",
+        "superseded_by": "corrected in place 2026-09-11, each line rewritten from its own section's content (the length gate and six-block order for v736h.1; the seven invariants read as the spectacle-prop family's contract per the 2026-08-30 F3 amendment for v736.1; the banned-drift rule for v751; the day-stamp relaxation for v833.1)",
+        "why": "this is the v736a class - the error found during phase 4, where an APPLY line about keeping the hands active was written under the Anti-Sense Metaphor Ban. No amendment is involved, so check_apply_amendments.py cannot see it; the only way to find these is to read the section and ask whether the instruction is about THAT rule. Found by checking every APPLY line that claims to cover a sub-rule which turns out to carry its own APPLY line, which is a contradiction. An instruction under the wrong subject is worse than a missing one, because it reads as authoritative. Rule coverage unchanged: no heading moved, and check_rule_index.py stays PASS."
       }
     ],
     "retired_line_sha256_16": [
@@ -170,7 +175,11 @@
       "fe414e71ff3c3199",
       "fea1646800696566",
       "b3fbc1435ee0f0a1",
-      "d7e0d32ae408fcc0"
+      "d7e0d32ae408fcc0",
+      "62e8e8b7eabc1d55",
+      "88a73b0c62fad944",
+      "e3f466d13ed51626",
+      "9f4dae297355097f"
     ]
   },
   "template_new_format.md": {
