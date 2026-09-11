@@ -51,6 +51,11 @@
         "what": "four base-rule APPLY lines whose \"(covers X)\" parenthetical named a sub-rule that carries its OWN APPLY line — v698A, v736, v750 and v833",
         "superseded_by": "the same lines rewritten 2026-09-11 as POINTERS instead of cover-claims",
         "why": "a wrong cover-claim makes a reader skip a rule that has its own instruction. v751 is a separate gate (the Veo prompt's actions must match the start and end frames) and v750 claimed to cover it; v833.1 is the 2026-07-25 relaxation allowing dated day stamps and v833 claimed to cover it; v698A.1 and v698A.2 each carry their own line and v698A claimed both; v736's parenthetical named v736h.1 and v736.1, whose lines had just been corrected and now stand on their own. Each replacement says explicitly that the sub-rules carry their own instructions and must be read. Rule coverage unchanged; check_rule_index.py stays PASS."
+      },
+      {
+        "what": "two mechanical APPLY lines that disagreed with the gate they describe: v861 sized a clip \"from its word count\", and v738 said the Pre-Flight Checklist has seven sections",
+        "superseded_by": "corrected 2026-09-11 against the enforcing code and the rule's own sub-rules",
+        "why": "v861: c_v861_clip_duration takes max(word_bucket, char_bucket) and its own docstring says a word count alone cannot tell a fast 10-word line from a slow one - v884 states this and v861's line still said words only, so an author following it would size a 10-word/73-char line at 4s where the gate requires 6s. v738: v738.2 'Adds NEW Section 8 after the existing Section 7', so the count is EIGHT; seven was the pre-2026-05-17 number, and the same line claimed to cover the sub-rule that adds the eighth - the identical shape as the v598 'five questions while EIGHT follow' repair already recorded above. Rule coverage unchanged; check_rule_index.py stays PASS."
       }
     ],
     "retired_line_sha256_16": [
@@ -188,7 +193,9 @@
       "86be03d21952acba",
       "29ec38a243285164",
       "6ebd62983263957b",
-      "17a728f45c2f0bdb"
+      "17a728f45c2f0bdb",
+      "1ec8f64e789235d8",
+      "a795010e5eccf3f7"
     ]
   },
   "template_new_format.md": {

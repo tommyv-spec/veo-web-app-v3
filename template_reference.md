@@ -7277,7 +7277,7 @@ Patterns active (8 of 18): #1 anatomical-model framing + #3 material spec ("sili
 
 #### v738 Pre-Flight Checklist Section 5 amendment
 
-**APPLY:** (covers v738.1 and v738.2) fill all seven Pre-Flight Checklist sections before output, including the per-axis State-Delta declaration at t=0 and t=end and the per-scene morphology audit.
+**APPLY:** fill all EIGHT Pre-Flight Checklist sections before output — v738.2 added Section 8 (per-scene morphology audit) after the existing Section 7, so seven is the pre-2026-05-17 count. Section 6 carries the per-axis State-Delta declaration at t=0 and t=end (v738.1); v738.1 and v738.2 carry their own instructions — read them, this line does not replace them.
 
 When walking the v738 Pre-Flight Checklist Section 5 OUTPUT-TYPE branch on Generate-side artifacts containing sensitive anatomical content, the Lift / Innovate / Create branch now requires explicit pattern-stack declaration:
 
@@ -16108,7 +16108,7 @@ Per `feedback_rule-changes-forward-only`.
 
 ## v861 — Per-clip render duration from the line's word count
 
-**APPLY:** give each line its own `- **clip_duration_s:**` from its word count (4/6/8/10s), not one duration for the whole job.
+**APPLY:** give each line its own `- **clip_duration_s:**`, never one duration for the whole job. Size it as `max(word_bucket, char_bucket)` per v884 — words ≤11=4s, 12-16=6s, 17-24=8s, 25-28=10s; chars ≤59=4s, 60-86=6s, 87-129=8s, 130-151=10s — because a word count alone cannot tell a fast 10-word line from a slow one. The auditor's `c_v861_clip_duration` takes the LONGER of the two.
 
 **Where it came from**: operator 2026-07-16 — *"we need to adapt the video markdown and the platform to also use the clip duration setting. so if we have around 28 words we 10 seconds, less than 12 words is 4 seconds and 16 is 6 seconds and 24 is 8 seconds."*
 
