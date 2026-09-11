@@ -130,7 +130,7 @@ from auth import (
 # =============================================================================
 from fastapi import (
     FastAPI, HTTPException, UploadFile, File, Form, 
-    BackgroundTasks, Depends, Query, Request, Response, Cookie, Header
+    BackgroundTasks, Depends, Query, Request, Response, Cookie, Header, Body
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, RedirectResponse
@@ -148,7 +148,8 @@ from config import (
 )
 from models import (
     init_db, get_db_session, Job, Clip, JobLog, BlacklistEntry,
-    get_job_logs_since, add_job_log, User, UserAPIKey, UserWorkerToken
+    get_job_logs_since, add_job_log, User, UserAPIKey, UserWorkerToken,
+    LinkAssignment
 )
 from clip_duration import (
     ALLOWED_CLIP_DURATIONS_S,
@@ -1603,6 +1604,110 @@ def higgsfield_ping(
         return {"ok": r.status_code < 400, "slug": slug, "status": r.status_code, "body": r.text[:1500], "key_shape": key_shape}
     except Exception as e:
         return {"ok": False, "slug": slug, "error": str(e), "key_shape": key_shape}
+
+
+@app.post("/api/link-assignments")
+async def upsert_link_assignment(
+    payload: dict = Body(...),
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Write the projection the /v/ resolver reads. v972.2.
+
+    The AUTHORITATIVE record is a tracked file in the wiki repo
+    (`docs/ledgers/tracking-id-assignments.jsonl`); this row is a projection so
+    the click path can resolve a tag without reading a git file. That is why the
+    endpoint upserts rather than refusing a duplicate: re-running the allocator
+    after a lost response must converge, not fail.
+
+    It validates everything it stores, because the resolver deliberately falls
+    back rather than 404 on bad data — so a malformed row would degrade
+    attribution silently instead of erroring here, where somebody is watching.
+    """
+    post_id = str(payload.get("post_id") or "").strip()
+    persona = str(payload.get("persona") or "").strip().lower()
+    asin = str(payload.get("asin") or KORELLA_ASIN).strip()
+    measure_tag = str(payload.get("measure_tag") or "").strip()
+    measure_until = str(payload.get("measure_until") or "").strip()
+
+    if not post_id or len(post_id) > 64:
+        raise HTTPException(400, "post_id is required and must be <= 64 chars")
+    if persona not in BIO_TAGS:
+        raise HTTPException(400, f"persona must be one of {sorted(BIO_TAGS)}")
+    if not _valid_asin(asin):
+        raise HTTPException(400, f"asin {asin!r} is malformed")
+    if measure_tag and not _valid_tag(measure_tag):
+        raise HTTPException(400, f"measure_tag {measure_tag!r} is malformed")
+    until = None
+    if measure_until:
+        try:
+            until = datetime.fromisoformat(measure_until.replace("Z", "+00:00"))
+            until = until.replace(tzinfo=None)      # the column is naive UTC
+        except ValueError:
+            raise HTTPException(400, "measure_until must be ISO 8601")
+    if measure_tag and not until:
+        raise HTTPException(400, "measure_tag without measure_until would measure "
+                                 "forever and never release the id")
+
+    row = db.query(LinkAssignment).filter(LinkAssignment.post_id == post_id).first()
+    created = row is None
+    if created:
+        row = LinkAssignment(post_id=post_id)
+        db.add(row)
+    row.asin, row.persona = asin, persona
+    row.measure_tag = measure_tag or None
+    row.measure_until = until
+    db.commit()
+    print(json.dumps({"evt": "link_assignment_upsert", "post": post_id[:32],
+                      "persona": persona, "tag": measure_tag,
+                      "until": measure_until, "created": created}), flush=True)
+    return {"post_id": post_id, "persona": persona, "measure_tag": measure_tag,
+            "measure_until": measure_until, "created": created}
+
+
+@app.get("/api/link-assignments")
+async def list_link_assignments(
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Every assignment, so the allocator can see the pool without the DB."""
+    rows = db.query(LinkAssignment).all()
+    now = datetime.utcnow()
+    return {"assignments": [{
+        "post_id": r.post_id, "persona": r.persona, "asin": r.asin,
+        "measure_tag": r.measure_tag,
+        "measure_until": r.measure_until.isoformat() if r.measure_until else None,
+        "released_at": r.released_at.isoformat() if r.released_at else None,
+        "measuring": bool(r.measure_tag and r.measure_until and now < r.measure_until),
+    } for r in rows]}
+
+
+@app.post("/api/link-assignments/release")
+async def release_link_assignments(
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Return expired tracking ids to the pool. Idempotent by its own predicate.
+
+    This does NOT change how a link resolves — `/v/` already evaluates the window
+    at read time, so a video falls back to the persona tag the moment it expires
+    whether or not this ever runs. The only thing released here is the ID, so it
+    can be given to another video. A missed run delays reuse; it cannot
+    mis-attribute a click.
+    """
+    now = datetime.utcnow()
+    due = db.query(LinkAssignment).filter(
+        LinkAssignment.measure_until != None,          # noqa: E711
+        LinkAssignment.measure_until <= now,
+        LinkAssignment.released_at == None,            # noqa: E711
+    ).all()
+    for r in due:
+        r.released_at = now
+    db.commit()
+    freed = sorted({r.measure_tag for r in due if r.measure_tag})
+    print(json.dumps({"evt": "link_assignment_release", "count": len(due),
+                      "tags": freed}), flush=True)
+    return {"released": len(due), "tags": freed}
 
 
 @app.post("/api/admin/cleanup-stale-redos")
