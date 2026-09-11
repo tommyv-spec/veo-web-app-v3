@@ -36,6 +36,11 @@
         "what": "four lines the Wave-1 rule-applicability repairs corrected in place: the §v598 heading 'The test (5 questions...)' and its 'walk through these five questions' intro; the §v600 'When v600 applies' bullet '**Always** the HOOK (Scenes 1-2)'; and the §v613b example citation line naming raw/dr_kim_belly_burn_male_decoded.md with no caveat",
         "superseded_by": "the three dated 2026-08-30 AMENDMENT blocks in this checkout (§v598 F1, §v600 F2, §v736.1 F3), per docs/audits/repair-matrix-2026-08-30.md §4 Wave 1 items 1-3, operator-acked",
         "why": "each retired line states as universal something the corpus falsifies, or points at a file that does not exist. (1)+(2) the heading and intro said FIVE questions while EIGHT follow — Q6/Q7/Q8 were added later and the count was never updated; the corrected lines say eight and the F1 amendment scopes Q1-Q5 to the spectacle-prop hook family, since four proven hooks from four distinct producer chains (agegap numeral pair, nadja number-vs-body, reaction-duet keyed face, 5signs caption card) open with no manipulated prop at all. (3) '**Always** the HOOK' contradicted the line directly above it ('applies to any image/scene where the corpus rule calls for force-verb spectacle'), the §v601 carve-out already in canon ('the magnitude is in the AUTHORITY of the diagnostic moment, not in physical violence') and the does-not-apply list three lines below; the replacement states the family trigger instead. (4) raw/dr_kim_belly_burn_male_decoded.md is not present anywhere under raw/ (find returns nothing), so the example taught authors to cite a missing file as corpus grounding; the line is KEPT with a '(historical label — source file no longer in raw/)' annotation plus a check-the-path instruction, not deleted. Nothing was removed in any of the four: every table, example and historical sentence stands, and each amendment supersedes in place per the house convention. check_rule_index.py stays PASS."
+      },
+      {
+        "what": "two v831 lines that stated the word cap as 25: the section heading, and the **Enforcement** paragraph claiming the auditor HARD-FAILS any line over 25 words",
+        "superseded_by": "v861's amendment of 2026-07-16, already standing in this section (\"the cap is now **28 words**, not the 25 named above ... The auditor's `c_line_word_cap` now FAILs above 28\"); corrected in place 2026-09-11 after a corpus sweep, Codex-reviewed over two passes",
+        "why": "both lines describe the PRESENT and described it wrongly — `c_line_word_cap` in .claude/skills/build-video/audit_build.py has failed above 28, not 25, since 2026-07-16, so the Enforcement paragraph made a false statement about running code and the heading carried the wrong number into the index and the rule mirror. The APPLY line had the same defect and was corrected with them. The two OTHER places v831 says 25 are deliberately NOT retired, because they record the past rather than the present: the operator's verbatim 2026-07-11 quote, and the dated rule statement whose amendment sits in the very next block — the house convention is that an amendment supersedes rather than rewrites. Rule coverage unchanged: v831 is still one section with one heading, and check_rule_index.py stays PASS."
       }
     ],
     "retired_line_sha256_16": [
@@ -163,7 +168,9 @@
       "fc5e323234ecd237",
       "fdbe670cc6b410b9",
       "fe414e71ff3c3199",
-      "fea1646800696566"
+      "fea1646800696566",
+      "b3fbc1435ee0f0a1",
+      "d7e0d32ae408fcc0"
     ]
   },
   "template_new_format.md": {

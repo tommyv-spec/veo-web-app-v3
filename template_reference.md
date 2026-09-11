@@ -889,7 +889,7 @@ Generate-side rule. The decode side observes whatever the source filmed; freshne
 
 ## Motion-text-match in HOOK (v592)
 
-**APPLY:** make the hook's verb land on a visible motion beat at the second it is spoken. A static talking head under a motion verb fails the match.
+**APPLY:** when the hook's verb names a motion, that motion must be VISIBLE at the second it is spoken - a static talking head under a motion verb fails the match. That test is the SPECTACLE-FAMILY form, not a law of all openings: what every hook owes at 0-3s is the declared `HOOK CARRIER`, and a proven static open passes on a declared `text-card` or `overlay` family, where the readable device does the stopping work.
 
 **Source: Milen Stanchev 2026-04-23 LiB innovation call (~00:23:35).** The verb-object in the voiceover at second N must be matched by a visible motion in-frame at second N.
 
@@ -1222,7 +1222,7 @@ Existing `code/v589_video_understanding.py` cascade (LM Studio → Gemini → hu
 
 ## Hook-image power test (v598) — the single biggest viral lever
 
-**APPLY:** build the hook from the four-mechanism stack — shame proxy · violent act or spectacle · agent of change · taboo direct address — and name which mechanism each hook beat carries.
+**APPLY:** declare `HOOK CARRIER: <what it is> | kind: visible | audible | readable | delivers: … | reads at opening speed because: … | next question opened: … | family: catalyst | text-card | overlay | UNLISTED — <source-derived name>` - THAT declaration is the universal part. The four-mechanism stack (shame proxy · violent act or spectacle · agent of change · taboo direct address) is an EXAMPLE BANK of the spectacle-prop family, never an all-four-or-dead gate; name whichever mechanism a hook beat carries, and use v873's HOOK CONTRACT as the hook decision test.
 
 **Source: 2026-05-06 ChatGPT-output audit.** A bundle-driven create produced a menopause hot-flash video titled "When The Heat Hits At Night" with a generic woman-in-dim-bedroom HOOK image. No prop. No motion. No visual pun. No taboo trigger. No physical evidence. The 430KB of upstream rules were technically respected but the HOOK had zero scroll-stop power. **The hook image is the variable that decides 50 views vs 5M views.** Every other rule (chain-binding, action_note grammar, M ≤ N cardinality, persona consistency) is a ZERO-multiplier if the HOOK doesn't stop the scroll.
 
@@ -2550,7 +2550,7 @@ Em-dashes are still natural in `action_note` prose, image-prompt bodies, frontma
 
 ## Cross-corpus retrieval coverage (v614) — derive from the full current corpus, not a frozen menu
 
-**APPLY:** run the cross-corpus structural survey and write the per-scene adaptation map; every line lifts from a named corpus source.
+**APPLY:** run the cross-corpus structural survey and write the per-scene adaptation map. Every line either lifts from a NAMED corpus source or is declared `UNLISTED — <source-derived name>`; never invent a script from memory while proven speech and body structures exist.
 
 **Source: 2026-05-06 owner observation** *"also the script doesn0t make any sense... you have plenty of amazing examples and winning case... adapt and innovate those... not just the ones from korella saffron but all, to see how they structure the video and script."*
 
@@ -3999,7 +3999,7 @@ The user's framing: *"we use rules and not a list to pick from."* v601 is a rule
 
 ## Exaggeration-magnitude discipline (v600) — cartoon-physics or boring
 
-**APPLY:** write exaggeration at cartoon-physics magnitude — cascading force verbs and exaggerated quantities. A hedged magnitude renders as nothing.
+**APPLY:** grade magnitude ONLY when the hook's job is a physical spectacle - source-derived, or the approved direction chose one. There, write cartoon-physics magnitude (cascading force verbs, exaggerated quantities), because realistic magnitude reads as real life and gets scrolled past. A symptom-demo, talking-head, CTA/outro or Day-1 frame carries its magnitude in the AUTHORITY of the moment, not in physical violence - do not force force-verbs onto it.
 
 **Source: 2026-05-06 owner observation** *"the pillow would needed to be held higher and sweat running down while is about to smack it or throw it on the desk."* The first soaked-pillow-on-marble hook (v598 Q1-Q8 compliant) was rejected as STILL too weak. Diagnosis: the spectacle was at **realistic** magnitude, not **viral** magnitude. A soaked pillow placed gently on a counter is what a real tired wife does. A drenched pillow held HIGH OVERHEAD with sweat streaming DOWN her forearms while she winds up to SMACK it onto the desk — that's what the corpus does. Real-life = scroll-by. Cartoon-physics = scroll-stop.
 
@@ -11805,7 +11805,7 @@ if len(request_to_node) > REQUEST_TO_NODE_CAP:
 
 ### v736 — Spectacle-over-logic discipline (v736a + v736b + v736c + v736d umbrella)
 
-**APPLY:** (covers v736h, v736h.1 and v736.1; v736a is the metaphor ban, below) put the symptom DEAD CENTRE, keep the hands active, place the face above or beside rather than behind, and keep the prompt short — spectacle beats logic in the opening frame.
+**APPLY:** (covers v736h, v736h.1 and v736.1; v736a is the metaphor ban, below) UNIVERSAL and machine-enforced is v736h.1 - prompt economy, the six-block render order, the three-layer depth limit, the detail budget, the meta-ban and the beat-ban. Those are RENDERER mechanics and hold whatever the hook is about. The composition invariants - symptom DEAD CENTRE, hands active, face above or beside rather than behind - are the one-glance contract of the SPECTACLE-PROP family; another hook family declares its own one-glance read instead of inheriting these.
 
 LLMs default to safe / logical / probable when authoring HOOK ideas; viral hooks need the opposite. v600 cartoon-physics + v598 power-test enforce FORMAT but leave the loophole of "safe" metaphor selection (prostate = garden hose, digestion = clogged drain, heart = engine). Operator diagnosis 2026-05-14: *"if the visual metaphor makes logical sense in a middle-school biology class, REJECT IT. Viral hooks rely on Spectacle Disconnect — the prop should be viscerally interesting first, and a metaphor second."*
 
@@ -14927,7 +14927,7 @@ Give every visible process step and every meaningful on-screen object its own or
 
 ## v791 — HOOK safe-area composition grammar (camera-first + layered foreground + scale cheat)
 
-**APPLY:** (covers v791.2) on the HOOK, write camera-first safe-area grammar: name the lens, use ultra-wide 0.5x, keep the lens level with the raised hand, and foreshorten toward the camera.
+**APPLY:** (covers v791.2) UNIVERSAL for every hook, prop or not: the BANNED vocabulary - no thirds/grid talk, no crop-boundary negotiation, no trailing zone-bans, no re-compose force-words. The raised-open-palm grammar (name the lens, ultra-wide 0.5x, lens level with the raised hand, foreshorten toward the camera) is the PROP-PRESENTATION family's contract, because it solves ONE problem: keeping a presented object out of the caption zone. A hook with no presented object declares `CARVE-OUT: v791 raised-hand hero-presentation pose — <declared family>` and names that family's own hero read.
 
 **Surfaced 2026-06-12** from the operator's safe-area brief: on Reels/TikTok the app UI covers the top ~14%, the bottom ~35% and the right ~12% of the screen — the HOOK's focal action must land in the central band, big and immediate. Three rounds of test prompts on 6 corpus hooks (Costco lift / pills-on-balloon / Walmart-selfie banana / shelf smash / porch sunflower / restaurant CCTV) found what does and does not move Nano Banana 2's composition. Operator verdict on the final grammar: "I like this style for the hook."
 
@@ -15776,9 +15776,9 @@ Every DEFAULT flipped to v782 values (`clip_mode: fresh`, `transition: cut`):
 
 **Touched**: this deep-dive (canonical), `code/worker.py`, `code/main.py`, `code/static/index.html`, `code/tests/check_transition_blend_optin.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
 
-## v831 — Spoken-line hard cap: 25 words; longer thoughts split into 2 clips
+## v831 — Spoken-line hard cap: 28 words (25 until v861, 2026-07-16); longer thoughts split into 2 clips
 
-**APPLY:** HARD CAP a spoken line at 25 words. A longer thought splits into two scenes at a sentence boundary — never a run-on line.
+**APPLY:** HARD CAP a spoken line at 28 words - raised from 25 on 2026-07-16 by v861, and the auditor's `c_line_word_cap` FAILs above 28. A longer thought splits into two scenes at a sentence boundary: both halves reuse the SAME start image, and the action is distributed across them so neither half is a static hold. Never a run-on line.
 
 **Where it came from**: operator 2026-07-11, on the 5-signs interview lane — *"never make any line longer than 25 words, if needed split them in 2 clips."* The lane's sign lines ran 28-38 words; v577's word budget only WARNed, so long lines kept shipping.
 
@@ -15793,7 +15793,7 @@ Every DEFAULT flipped to v782 values (`clip_mode: fresh`, `transition: cut`):
 
 **Why**: Veo renders fixed-length clips; a 30+ word line either rushes the delivery or overruns the clip and gets trimmed mid-sentence at export. Two short clips deliver clean speech AND double the visual beats (each half opens on its own action).
 
-**Enforcement**: the authoring auditor (`~/.claude/skills/build-video/audit_build.py` `c_line_word_cap`) HARD-FAILS any line over 25 words. v577's 2.6×duration budget stays as the per-clip fit check.
+**Enforcement**: the authoring auditor (`~/.claude/skills/build-video/audit_build.py` `c_line_word_cap`) HARD-FAILS any line over 28 words — the cap v861 set on 2026-07-16; it was 25 before that. v577's 2.6×duration budget stays as the per-clip fit check.
 
 **Scope / gates**: GENERATE-side authoring, every spoken line on every build. Forward-only for shipped builds; the active 5-signs lane (v2/v3/v4) was split same-day (11 → 17 scenes/clips each, 6 lines split per build). Reference: `videos/nuri-korella-ed-5signs-bloodflow-walmart-sick-vs-healthy-interview-growth-v4.md`.
 
@@ -16447,7 +16447,7 @@ Single-speaker clips take the same shape with one turn (`Dialogue: One speaker, 
 
 ## v873 — HOOK CONTRACT: it shows what it says, it carries a contradiction, it names who it is for
 
-**APPLY:** declare the HOOK CONTRACT in §0 and satisfy all clauses: image_1 SHOWS the object and the change the line names · the line carries `<fact A> BUT <fact B>` · it filters who this is for · fact B names the result the customer is buying.
+**APPLY:** declare the HOOK CONTRACT in §0 and satisfy all clauses: image_1 SHOWS the object and the change the line names · the hook CAN BE PARAPHRASED as `<fact A> BUT <fact B>` - the paraphrase is a test on the §0 declaration, NOT a word required in the spoken line · it filters who this is for · fact B names the result the customer is buying.
 
 Source: the Hooks Masterclass card behind Selling Course Part 9 (`raw/course/hooks-masterclass-tension-2026-07-29.txt`) + its public Loom transcript (`raw/course/hooks-masterclass-loom-2026-07-29.json`) + the course's own "hook coherence" entry in the marketing dictionary. Together they turn "make it strong" into three checkable clauses.
 
@@ -16791,7 +16791,7 @@ Then run the v879 start-frame check separately: every animation starts before th
 
 ## v883 — MOVIE STYLE CONTRACT: keep the emotion engine, age payload, named pain, and body handoff in one ordered chain
 
-**APPLY:** on an interaction scene keep the contract order — trigger → answer → one wrong guess → age denial — and make the trigger line rest on a fact visible in frame.
+**APPLY:** on an interaction scene keep the contract order - trigger → answer → one wrong guess → the payload denial - and make the trigger line rest on a fact VISIBLE in frame. Age is the DEFAULT payload, not the only one: another carrier is legal only as `REPRODUCIBILITY PAYLOAD: <literal spoken words> | carrier: routine | protocol | repeated-process | verified-result | peer-similarity | UNLISTED — <source-derived name> | scene=N | evidence: <path:LINE>`, and a non-age payload names its slot `payload=Scene N`, never `age=Scene N`.
 
 Sources: `raw/docs/salvora-movie-style-playbook-2026-07-31.txt` · `raw/videos/decoded_airplane-aisle-overheadbin-50-cheating-wife-cortisol-chest-salvora-rhodiola-ted-seminar-pip-fb.md` · `raw/videos/decoded_rodeodrive-gucci-two-women-63-jealousy-cortisol-belly-salvora-rhodiola-amish-market-pip-ig.md` · `raw/videos/decoded_homedepot-truckbed-shirtless-wife-cheating-cortisol-chest-salvora-rhodiola-asian-coach-boxinggym-pip-fb.md` · `raw/videos/decoded_boardwalk-betrayal-napkin-throw-comforter-48-cortisol-belly-salvora-rhodiola-amish-barn-lecture-ig.md` · `wiki/patterns/interaction-hook-engine.md`.
 
