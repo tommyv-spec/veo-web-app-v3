@@ -21657,3 +21657,71 @@ told it may declare the trio instead (§v943.1). Same fault, different exit.
 - It adds no silence step. See the `none` row.
 - **It has no text_card refusal.** `- **audio:** render` on a text_card is currently accepted and
   writes nothing, unlike §v965's and §v970's bullets, which are refused there.
+
+## v973 — EXACT-CLIP FIRST GENERATION: render a SUBSET of a job's clips, and never end the job doing it
+
+**What it is.** `FLOW_CLIP_SCOPE_FIRSTGEN=1`, set alongside `FLOW_ONLY_CLIP_IDS`, lets a Flow worker
+render an exact list of clips on FIRST generation. Before it, neither scope could:
+
+| scope | covers | cannot do |
+|---|---|---|
+| `FLOW_ONLY_CLIP_IDS` alone | exact clip list, **redo endpoint only** | a clip that has never generated |
+| `FLOW_ONLY_JOB_IDS` | named jobs, first generation included | anything smaller than the whole job |
+
+So a 4-clip proof run inside an 80-clip job — a per-clip model comparison, for instance — had no path.
+The redo route refuses a `pending` clip (*"Clip is pending initial generation"*) and the job route runs
+all eighty.
+
+**Why it is an opt-in and not a widening.** `FLOW_ONLY_CLIP_IDS`'s redo-only limit is a documented
+guarantee ("can never render a clip that has never generated, which makes it unusable for delivering a
+new video"). Widening it in place would remove that guarantee from every existing caller with no way
+to ask for the old behaviour. Absent `FLOW_CLIP_SCOPE_FIRSTGEN`, every invocation behaves exactly as it
+did.
+
+**The claim is server-side and atomic.** `GET …/jobs/pending?worker_id=…&clip_ids=…` on BOTH the
+local-worker and user-worker routes: validate every id exists and belongs to the caller, refuse a scope
+spanning jobs, claim that job conditionally, return only those clips. Named failures —
+`UNKNOWN_CLIP_ID`, `CLIPS_SPAN_MULTIPLE_JOBS`, `JOB_NOT_CLAIMABLE`, `CLAIM_RACE_LOST`,
+`SCOPE_FILTER_FAILED` — each carrying `job: None`. **No queue-head fallback on any failure.** The job
+is an OUTPUT of the clip list, never an input: taking the queue head is what produced the v963.37
+incident where a pinned worker walked into clip 14907 and spent a render on a protected clip.
+
+**THE TWO WAYS THIS FEATURE CAN DESTROY THE JOB IT IS SCOPED INSIDE.** Both are the opposite of the
+risk it exists to prevent, and both were found in review before a line shipped:
+
+1. **Marking the parent complete.** The worker reasons from the clip list it holds, and one site
+   computed `completed` across ALL the job's clips and compared it to `len(clips)` — four under a
+   filter. Four finished clips anywhere would have ended the job and stranded seventy-six. The scoped
+   response therefore carries **`authoritative_total_clips`**, counted server-side BEFORE filtering,
+   and every completion test reads that. `completed >= len(clips)` no longer appears in the worker.
+   The guard sits inside `update_job_status` rather than at the call sites, because there are SEVEN of
+   them and a new one must not be able to miss it. **`mark_job_completed` carries the same guard**: it
+   writes the worker's LOCAL CACHE, the cache outlives the run, and the main loop reads it to SKIP a
+   job — so a scoped run writing it would make a later GENERAL worker on that machine skip the other
+   seventy-six. Same stranding, third route.
+2. **Leaving the parent unclaimable.** The worker marks a job `processing` on claim, and the status
+   endpoints clear `claimed_by_worker` / `claimed_at` ONLY for `completed` / `failed` / `cancelled`. So
+   setting it back to `pending` leaves it claimed for ever, and leaving it `processing` hides it from
+   the poll. Hence `POST …/jobs/{id}/scoped-release` on both routes: set a claimable status AND clear
+   the claim, conditional on the claim still belonging to this worker so a race loser cannot release
+   the winner's job. Called on EVERY terminal and abort path — success, clip failure, unhandled
+   exception, SIGINT/SIGTERM/SIGBREAK. `SIGKILL` and `os._exit` cannot be covered and are left to the
+   server's stale-claim sweeps.
+
+**Scoping is belt-and-braces, copied from `get_redo_clips`.** The server filters, then the worker
+re-filters and LOGS anything unexpected (`[Scope] BLOCKED N unlisted clip(s) returned by server`). That
+log line is how a server-side filter regression becomes visible instead of silent. The worker fails
+CLOSED: an empty or unshaped clip list, a clip with no id, a filtered set that is not the requested
+set, or a missing total → release the job and exit non-zero rather than proceed unfiltered.
+
+**One job, once.** A scoped run latches the job it claimed. The poll loop re-enters `get_pending_job`
+after submitting and the scoped branch ignores the exclude list by design, so without the latch the
+same job is re-claimed and re-submitted in a loop.
+
+**The hold exception is unchanged.** `worker_lifecycle.scoped_flow_hold_exception()` already admits a
+run carrying a valid `FLOW_ONLY_CLIP_IDS` list while a hold blocks general starts. v973 makes that list
+MORE binding, not less, so the exception stays correct.
+
+Spec + review: `docs/superpowers/plans/2026-09-11-exact-clip-first-generation.md`,
+`docs/audits/codex-loop/2026-09-11-exact-clip-first-generation.md`. Tests:
+`code/tests/test_flow_clip_scope_firstgen.py` (80).
