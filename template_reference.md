@@ -15076,6 +15076,8 @@ Clips WITHOUT a Prompt B keep the exact pre-v805 ladder (swap → fail). Fail th
 
 ## v806 — Image-attached dialogue vocabulary: the frames pipeline scans the spoken line with a STRICTER sexual-content classifier
 
+**APPLY:** every clip has a start frame, so route the spoken line through the image-attached dialogue vocabulary rather than describing the mouth.
+
 **What broke**: the line *"a few mornings in, you wake up harder and everything down there feels alive again"* generated fine as a TEXT-ONLY prompt but tripped a policy violation the moment ANY image was attached — including a completely safe image (older man, high neckline). Operator A/B 2026-07-02 (Omni Flash on Flow): text-only → passes; same text + any start frame → blocked. So the trigger is NOT the image content and NOT only the action sentence (v805's combo case) — it is the euphemism TOKENS in the dialogue, scanned by a stricter pipeline.
 
 **Why**: Flow runs TWO safety pipelines. Text-only generation uses the standard (more lenient) classifier. The moment a user image is attached (frames/animation path), a hyper-sensitive anti-abuse pipeline engages — built to stop deepfake abuse (uploading a real face + making it say sexual things). Its rule is effectively: user-provided face + sexually-suggestive dialogue = automatic block, REGARDLESS of what the image shows. Our whole platform is image-to-video (every clip has a start frame), so every build lives under the STRICT classifier.
@@ -15102,6 +15104,8 @@ Clips WITHOUT a Prompt B keep the exact pre-v805 ladder (swap → fail). Fail th
 
 ## v807 — Veo clip prompts describe ONLY what happens inside that clip (no editing/transition language)
 
+**APPLY:** ban editing and transition language from Veo prompts — no "hard cut", "cut to", "transition". Veo renders each clip in isolation, so a cut instruction becomes something visible inside the shot.
+
 **What broke**: Veo prompts in shipped builds opened with editor language — *"Hard cut: the same monkey is now comically buff..."*, *"Hard cut to the warm home kitchen: ..."*, *"Hard cut back to..."* (operator caught it on `nuri-korella-ed-experiment-vs-product-d1d90-saffron-salesy-v1.md`, 2026-07-02; a grep found the pattern in 31 builds). This reads like instructions for connecting two clips — but **Veo renders each clip in ISOLATION from its start frame; it never sees the previous clip and doesn't care what came before**. The transition between clips is the EDITOR's job (the platform stitches clips per the storyboard `transition:` field), never the prompt's.
 
 **Why it's harmful, not just noise**: (a) "hard cut" in the prompt can make Veo render a cut INSIDE the 8s clip (a mid-clip scene jump); (b) cross-clip references — "the SAME man", "is NOW", "no longer X" — describe a change Veo can't see, so the tokens either get ignored or pull the render toward the wrong (previous) state; (c) wasted prompt budget.
@@ -15118,6 +15122,8 @@ Clips WITHOUT a Prompt B keep the exact pre-v805 ladder (swap → fail). Fail th
 **Touched**: `code/template_reference.md` §v807 (canonical), `code/verify_video_format.py` (lint gate), `videos/nuri-korella-ed-experiment-vs-product-d1d90-saffron-salesy-v1.md` (3 prompts fixed), `wiki/patterns/conventions.md` (row), `wiki/meta/generate-video-checklist.md` (note), `wiki/meta/build-rule-index.md` §A (row), root `CLAUDE.md` (quickref), memory `feedback_veo-no-transition-language`, `wiki/log.md`. Operator 2026-07-02.
 
 ## v808 — NO MINORS anywhere in a build (kids/teens/children/babies)
+
+**APPLY:** no kids, teens, children, sons, daughters or babies anywhere — Ingredients, cast, prompts, background extras, or inside a photo prop. Do NOT write a negative either ("no children" seeds renders); describe the adults present and say no one else is in frame.
 
 **What broke**: the AFTER→BEFORE inversion build (and its v5 parent, plus 8 other corpus builds) rendered the "family restored" payoff with two teenagers in the after-shot — ported from the Salvora reel-5 family-after pattern. Operator 2026-07-02: remove any kids reference.
 
@@ -15137,6 +15143,8 @@ Clips WITHOUT a Prompt B keep the exact pre-v805 ladder (swap → fail). Fail th
 
 ## v809 — Fast-paced line delivery in every Veo dialogue prompt
 
+**APPLY:** nothing to apply — SUPERSEDED by v810. Do not cue rapid or fast-paced delivery; it makes Veo stretch, repeat or invent filler.
+
 **Why**: Veo/Omni render spoken lines at a slow, deliberate default cadence. Slow delivery wastes clip seconds (the clip budget is fixed ~8s), pads the video, and reads low-energy against the fast-cut viral register. Operator directive 2026-07-02: every line has to be delivered FAST. AI video models weight descriptive words placed next to the action/dialogue — so the pacing cue goes INTO the prompt, adjacent to the dialogue sentence, front-loaded.
 
 **The rule (authoring shape — every Veo dialogue clip, Prompt A AND Prompt B AND audio twins):**
@@ -15154,6 +15162,8 @@ Clips WITHOUT a Prompt B keep the exact pre-v805 ladder (swap → fail). Fail th
 **SUPERSEDED 2026-07-04 by v810** — the pacing phrasing below ("rapid, fast-paced … speaking quickly and barely pausing for breath" + "in a fast-paced sequence") BACKFIRES: it makes the model stretch/repeat the line to fill the fixed clip → speech duplication + filler + panicked audio. Use the v810 form instead. v809's GOAL (line fits the clip, no cutoff) is now met by say-exactly + post-speech-silence, not by pace tokens.
 
 ## v810 — Say-exactly + post-speech silence (Veo dialogue anti-duplication; supersedes v809 pacing)
+
+**APPLY:** write `The <speaker> speaks clearly in a <register> voice` and give the clip post-speech silence, so the model has no empty time to fill with duplicated words.
 
 **Why**: Veo/Omni generate native audio for the whole ~8s clip. When the dialogue is SHORT relative to the clip, or the prompt over-specifies speed ("rapid", "fast-paced sequence", "barely pausing for breath"), the model tries to FILL the remaining time — it stretches the line, repeats words, or invents filler ("panicked-sounding" audio). The v809 pacing cue made this WORSE. Operator 2026-07-04: the reliable fix is two prompt changes — (1) anchor the EXACT words with `saying exactly:`, and (2) give an explicit END-OF-SPEECH behavioral cue so the model has something to do after the line instead of looping.
 
@@ -15200,6 +15210,8 @@ Prompt B (voice-only) = the dialogue sentence + the post-speech sentence, no IMM
 **Touched**: `code/static/index.html` + `code/image_platform.py` (commit ab1b694), `code/verify_video_format.py` (commit ed332e9, first tracked), `wiki/patterns/conventions.md` (index row), `wiki/log.md` (timeline). Operator-verified working 2026-06-12.
 
 ## v821 — Prompt B is the FULL Prompt A with only the spoken line reworded (SUPERSEDES the v805 voice-only shape for new builds)
+
+**APPLY:** Prompt B is the FULL Prompt A copied word for word, with ONLY the quoted line reworded. Never a stripped-down voice-only prompt.
 
 **What we now know**: the gen-time `PROMINENT_PEOPLE` block is very often NOT the face — it is the SPOKEN LINE tripping the audio classifier, and the platform mislabels it as prominent-people. So the fix is to change the LINE, not the image, and not to strip the action. v805's voice-only Prompt B threw away the whole visual (IMMEDIATE ACTION + camera) to dodge the action+voice combo; but when the real trigger is the line's wording, a voice-only fallback that keeps the SAME words still trips. What clears it is the SAME clip with the line said in DIFFERENT words.
 
@@ -15386,6 +15398,8 @@ The operator composites the two tracks in post (no overlay/cutaway compositing o
 
 ## §v826 — Per-image framing (aspect ratio) + variant count
 
+**APPLY:** put `- **aspect_ratio:**` and the variant count on the `### Image N` block itself, not at batch level.
+
 **Additive.** Source: operator 2026-07-09 (grounded in `~/Downloads/labs.google.har` + the Flow UI selector). Previously an image build's aspect ratio + variant count were BATCH-level (every `### Image N` shared `req.aspect_ratio` / `req.n_variants`). v826 lets each image declare its own — needed by the v825 support-overlay type, where the stills differ from the 9:16 talking head (16:9 charts/food photos, 3:4 screenshots, 1:1 before/after pairs, 9:16 phone screenshots).
 
 **Format — optional bullets on any `### Image N`:**
@@ -15567,6 +15581,8 @@ A support insert belongs to exactly one spoken line (its `phrase` is a substring
 
 ### Authoring note (updated from v825.8)
 
+**APPLY:** for a timed support-image insert, keep the talking-head master continuous and place each overlay still on the word it belongs to.
+
 Anchors may keep naming the **authored** (Prompt A) words — that is now the correct place to anchor. The platform aligns the actually-spoken line and places the still proportionally when B reworded the anchor. The `placed line-relative … Prompt-B reword tolerated` log line marks a proportional placement.
 
 ### Regression guard
@@ -15576,6 +15592,8 @@ Anchors may keep naming the **authored** (Prompt A) words — that is now the co
 **Touched**: this deep-dive (canonical), `code/video_processor.py`, `code/main.py`, `code/tests/check_support_line_relative.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
 
 ## v828 — Interview builds: the patient LOOKS the symptoms + CARRIES the proxy; the interviewer + patient STOP the healer (F7 refinement)
+
+**APPLY:** on an interview build, open on the interviewer — a visible reporter with a foam mic — before the answer.
 
 **Where it came from**: the 5-signs street-interview lane, three operator corrections in one day (2026-07-11): *"i imagine more the interviewer with a patient stopping nuri"* → *"the patient has the props showing the ED"* → *"not just the banana, but overweight and sad, etc"* + *"the interviewer and the patient stop nuri to ask her the questions"*. Each correction fixed a build that had already passed every gate — so the staging grammar itself becomes the rule.
 
@@ -15592,6 +15610,8 @@ Anchors may keep naming the **authored** (Prompt A) words — that is now the co
 **Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/meta/generate-video-checklist.md` (authoring note), `wiki/concepts/script-adaptation/street-secret-podcast-interview-framework.md` (F7 staging update), memory `feedback_patient-symptom-body-and-props`, `wiki/log.md`.
 
 ## v829 — Branded US retail LOCATIONS: render the real sign + name the store in a spoken line (supersedes the no-logo armor)
+
+**APPLY:** when the scene is a branded US retailer, render the REAL storefront sign and logo in the plate rather than a generic shop.
 
 **Where it came from**: operator 2026-07-11 on the 5-signs Walmart v3 build — *"we actually have to show the brand and mention them"* — correcting a build that had shipped the old armor from the 2026-05-24 walmart-interview-keepup build ("Veo garbles brand text + literal logo is a brand risk" → generic big-box). That armor is SUPERSEDED.
 
@@ -15673,6 +15693,8 @@ Every DEFAULT flipped to v782 values (`clip_mode: fresh`, `transition: cut`):
 **Touched**: this deep-dive (canonical), `code/worker.py`, `code/main.py`, `code/static/index.html`, `code/tests/check_transition_blend_optin.py`, `wiki/patterns/conventions.md` (index row), `wiki/log.md`.
 
 ## v831 — Spoken-line hard cap: 25 words; longer thoughts split into 2 clips
+
+**APPLY:** HARD CAP a spoken line at 25 words. A longer thought splits into two scenes at a sentence boundary — never a run-on line.
 
 **Where it came from**: operator 2026-07-11, on the 5-signs interview lane — *"never make any line longer than 25 words, if needed split them in 2 clips."* The lane's sign lines ran 28-38 words; v577's word budget only WARNed, so long lines kept shipping.
 
@@ -16070,6 +16092,8 @@ The whole implementation of OFF is one line in the Clip writer (`main.py`): stor
 
 ## v865 — Google Omni master prompt is the per-clip body format (SUPERSEDES the v750/v718h-A anchor prose for new builds)
 
+**APPLY:** write every `### Clip N.M` Text prompt as the twelve-block Omni master body; that is the per-clip render body, not a summary of it.
+
 **What we now know**: Omni Flash has been the live render model since v784 put it on Frames mode (`static/flow_worker.py:4999` model pick, `:7418` dropdown selector, `:1421-1422` `abra_t2v_8s` / `abra_r2v_8s`). Its native clip length is 8 seconds — exactly what the operator's master prompt opens with. The section the platform parses did not change; only the prose inside each clip does.
 
 **The new rule**: every `### Clip N.M` Text prompt is the twelve-block Omni master — `Create an 8-second vertical 9:16 realistic UGC video.` then `Quality / Fidelity Lock:`, `Reference:`, `Scene:`, `Camera:`, `Ending Camera Beat:`, `Performance / Action:`, `Voice:`, `Dialogue:`, `Audio:`, `Style:`, `Negative Constraints:`. Canonical fill map: `code/template_omni_master.md`.
@@ -16193,6 +16217,8 @@ Every NEW decode's Comprehension section ends with `### Variable ledger`: walk `
 
 ## v872 — One speaker per SCENE and per CLIP; the prompt says `<descriptor> says, "<line>"` and nothing more
 
+**APPLY:** ONE speaker per scene and per clip. A two-person beat is TWO `### Scene N` blocks with two start frames, decided at design time. Never name the silent mouths — mentioning them seeds them.
+
 **CONFIRMED 2026-07-29 (two first-try renders).** The rule has TWO layers and both are mandatory:
 
 **LAYER 1 — SCENE STRUCTURE (authoring time, before any prompt is written).** A beat where two people speak becomes **TWO scenes**, never one scene with a merged `- **line:**`. One `### Scene N` = one `- **line:**` = one mouth. A question and its answer are two scenes, two clips, two durations, and each speaker gets a start frame that FAVOURS them (the answer scene needs its own reverse-angle image — an image that favours the other speaker cannot be reused for it). This is a design-time constraint: if a decode's source shot holds an exchange in one continuous take, the BUILD still splits it, and the extra image is authored up front rather than discovered at render time. Practical cost: +1 scene, +1 clip, +1 line, +1 image, and the duration sum grows by that clip (recompute per v861 word buckets). Because those are §7 invariants, converting an existing merged build routes as a BUILD → new `vN+1` file (§7.2), not an in-place edit.
@@ -16309,6 +16335,8 @@ Single-speaker clips take the same shape with one turn (`Dialogue: One speaker, 
 
 ## v871 — Render-selectable prompt variant: every build carries BOTH prompt sections; the operator picks which renders (per video)
 
+**APPLY:** emit BOTH prompt sections on every build — the rendered Omni prompts AND the `## Anchor-Format Prompts` reference block.
+
 **What / why**: v865 made the Google Omni block the per-clip render body. Operators want the prior anchor-format (IMMEDIATE ACTION / TERMINAL STATE) prompts KEPT and, per video, selectable as the actual render input. v871 makes every build emit BOTH sections and adds a platform selector. Operator directive 2026-07-25.
 
 **Authoring standard (forward-only)**: every build emits:
@@ -16320,6 +16348,8 @@ Single-speaker clips take the same shape with one turn (`Dialogue: One speaker, 
 **Touched**: `image_platform.py` (column + auto-migrate + anchor parser returns Prompt B + `POST /prompt-variant` endpoint + overview payload), `main.py` (job-prep swap + `[v871]` diagnostic log), `static/index.html` (selector), `template_omni_master.md` + `template_new_format.md` (both-sections standard), `template_reference.md` §v871 (this), `~/.claude/skills/build-video/SKILL.md` (gate line), `wiki/patterns/conventions.md` + `wiki/meta/build-rule-index.md` + `wiki/log.md` (index/timeline). Forward-only.
 
 ## v873 — HOOK CONTRACT: it shows what it says, it carries a contradiction, it names who it is for
+
+**APPLY:** declare the HOOK CONTRACT in §0 and satisfy all clauses: image_1 SHOWS the object and the change the line names · the line carries `<fact A> BUT <fact B>` · it filters who this is for · fact B names the result the customer is buying.
 
 Source: the Hooks Masterclass card behind Selling Course Part 9 (`raw/course/hooks-masterclass-tension-2026-07-29.txt`) + its public Loom transcript (`raw/course/hooks-masterclass-loom-2026-07-29.json`) + the course's own "hook coherence" entry in the marketing dictionary. Together they turn "make it strong" into three checkable clauses.
 
@@ -16359,6 +16389,8 @@ HOOK CONTRACT: coherence — <the object + change shown in image_1> | tension �
 
 ## v874 — ONE MECHANISM PER VIDEO (effects are never promoted to the cause)
 
+**APPLY:** ONE cause per video. Two nouns in cause position is a fail whichever they are; cortisol is the default, and a different one is declared `MECHANISM: <cause> | why: <one line>`.
+
 Source: the Korella brand-DNA doc, all three angle contracts (`raw/marketing/korella-brand-dna-three-angles-2026-07-29.txt`): *"Cortisol is the only named root cause — never name anything else as the mechanism. One reveal per ad."*
 
 **The rule.** A video names exactly ONE root cause. Every other physiological noun in the script is an **effect** and must sit downstream of it, in a one-direction chain: `cortisol → <effects> → the visible symptom`. Effects may be described in as much detail as the beat wants. They may never appear in the sentence that answers "why is this happening".
@@ -16389,6 +16421,8 @@ MECHANISM: <alternate cause> | why: <one line> | effects named: … | surface ca
 
 ## v875 — THE SECONDARY VILLAIN IS AN ANGLE PROPERTY, AND §v796 STILL WORDS IT
 
+**APPLY:** declare `VILLAIN:` with a v796-safe line. Any angle may carry one — the angle supplies a default, not a whitelist — and §8 keeps any doctor off screen.
+
 Source: the same brand-DNA doc, plus an operator correction on 2026-07-30.
 
 **CORRECTED 2026-07-30 — a villain is legal on ANY angle.** Operator: *"that's not true, we can use that also with ED or any other pain point."* The first draft of this rule read the brand DNA's SILENCE on the ED angle as a prohibition ("ED = none by design"). That was wrong twice over: the DNA documents the antagonist that fits each angle best, it does not hand out permissions, and the corpus already ships a pharmacy/pill-company villain in **12+ ED builds** — e.g. *"the pill companies make billions keeping his soldier down"* (`nuri-korella-ed-bigpharma-pour-pills-limp-balloon-pelvis-saffron-v1`, `…-locked-board-pill-dismissal-…`, `…-interview-couple-pills-shelf-…`). The auditor's whitelist would have hard-failed every one of them. Fixed: the angle supplies a **default**, never a whitelist.
@@ -16418,6 +16452,8 @@ VILLAIN: <none | doctor-quiet | big-pharma | pill-companies | other:<name>> → 
 **Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/concepts/script-adaptation/brand-dna-angle-contracts.md`, root `CLAUDE.md` (§12), `wiki/log.md`.
 
 ## v876 — WINNER-DERIVED SELLING CONVERSION must name its parent, its proof, and what improved
+
+**APPLY:** every SELLING build declares `CONVERSION LANE: yes | no`. A yes-lane build names numeric sales proof and answers all six audit questions; a repost is not a conversion.
 
 Source: content plan 28.07.26 (`raw/docs/content-plan-2026-07-28.txt`) — *"Don't repost them… ask: how can I make the hook stronger / improve the visuals / change the symptom / target a different age group / make it more emotional / more direct and sales-focused."*
 
@@ -16450,6 +16486,8 @@ Not derived from a seller: `CONVERSION LANE: no`.
 **Touched:** this deep-dive (canonical), `wiki/patterns/conventions.md`, `wiki/concepts/script-adaptation/winner-to-selling-conversion.md`, `wiki/concepts/script-adaptation/winning-content-system.md`, `~/.claude/skills/build-video/audit_build.py`, root `CLAUDE.md` (§12), `wiki/log.md`.
 
 ## v877 — WINNER DELTA ROUTER: diagnose the gap, pick one primary change, use the smallest route that can fix it
+
+**APPLY:** on a winner-derived build declare the goal, the evidence signal (or `unknown`), ONE primary gap, one exact `from→to` delta, and the smallest route that expresses it. Prefer same-source step-up over innovation.
 
 Sources: content plan 28.07.26 (`raw/docs/content-plan-2026-07-28.txt:12-43`) · Selling Course Part 5 and Part 9 (`raw/course/selling-course-korella-export-2026-07-29.txt:167-178,824-903`) · Script Training (`raw/course/Scripts Training - Google Docs - 10 February 2026.md:80-102,282-350`) · July 21 mentor review (`raw/calls/kaveno-meeting-2026-07-21-transcript.md:215-304`).
 
@@ -16501,6 +16539,8 @@ INNOVATION NEED: none | <second proven source + function + why the parent alone 
 
 ## v879 — START-FRAME-SAFE ACTIONS: animate from what is visibly true, never from an assumed grip or pose
 
+**APPLY:** animate only from what the start frame already shows — the grip, pose, orientation, contact and object position. An action the frame cannot start from will not render.
+
 Sources: operator correction 2026-07-31 on the grandfather/banana build · v750 action-only prompt discipline · v751 Veo-to-image semantic consistency.
 
 **The rule.** Every image-to-video action must be possible from the attached start frame exactly as rendered. The prompt may direct the subject to **continue, move, display, manipulate, or react with** what is visible. It must not silently assume a precise starting grip, hand, pose, orientation, contact point, or object position that the start frame may not contain.
@@ -16522,6 +16562,8 @@ This is not permission to make actions vague. The key action and terminal state 
 **Scope:** GENERATE side, forward-only, every image-to-video clip. Applies to Omni Prompt A/B and Anchor Prompt A/B. Build-time enforcement: the v879 start-frame compatibility read in `wiki/meta/generate-video-checklist.md`; v751 remains the broader semantic-consistency gate.
 
 ## v880 — TWO VOCABULARIES: production prompts name the carrier; dialogue names the customer’s problem
+
+**APPLY:** production fields name the literal visible carrier; spoken lines name what the customer wants. Never let a production label leak into a spoken line.
 
 Sources: operator correction 2026-07-31 on the baking-soda/Vicks build · Selling Course Part 9 specificity pass · Script Training real-customer-language examples · `line-level-substitution-rules.md` proxy-binding and image tests.
 
@@ -16599,6 +16641,8 @@ Flip the helper body back to `return False` — that restores v784 exactly, at e
 
 ## v882 — OBJECT SWAP = SCENE REBUILD: physical truth, dialogue truth, and valence must move together
 
+**APPLY:** declare `OBJECT SWAP: yes | no`. A changed prop, task, failed fix or process is NOT a noun swap unless the pieces, start owner and state, action and contact, end owner and state, dialogue meaning and valence all hold — otherwise rebuild the image→scene→line→motion chain. A rejected object may never be shown as the solution.
+
 Sources: operator correction 2026-07-31 on `nuri-korella-ed-parkinglot-pov-wife-records-grandfather-stops-pills-korella-saffron-selling-v1` · the audited bag parent `nuri-korella-ed-drivethru-pov-wife-records-grandfather-stops-bag-korella-saffron-selling-v1` · `nuri-korella-ed-pharmacy-smack-bluepills-couple-saffron-v1` · `raw/videos/decoded_axe-woodsplit-jealous-wife-cortisol-chest-salvora-rhodiola-podcast-splitscreen-fb.md` · `line-level-substitution-rules.md` §“The beat's FUNCTION survives a pain change; the thing it POINTS AT does not.”
 
 **The rule.** A visible object may be token-swapped only when the replacement has the same physical grammar: the same number of meaningful pieces, the same owner at the start, the same action, the same transfer/contact, the same owner and state at the end, and the same meaning in the dialogue. If any one changes, this is not a noun swap. Rebuild every affected image, scene, line, motion prompt, question/answer beat, and transition as one scene chain.
@@ -16648,6 +16692,8 @@ Then run the v879 start-frame check separately: every animation starts before th
 > A `METHOD:` value that is none of the six (a typo, the retired `STEP-UP: mix-and-match` form, an invented name) is now a fault, not a free pass: **FAIL** when the build declares `EVIDENCE PROGRAM: v1`, **WARN** otherwise. `c_line_sourcing` OWNS that message; `c_object_swap_logic` stays silent on an unrecognized value so one problem never reports twice. **Measured blast radius (whole `videos/` corpus, old vs new):** 156 legacy builds whose `METHOD:` is free prose move from silent PASS to WARN, **none to FAIL** — not one of them declares the evidence program; 4 SELLING builds that already declare `OBJECT SWAP` move SKIP → PASS, 3 legacy ones move SKIP → WARN. No current-program build newly fails on this item.
 
 ## v883 — MOVIE STYLE CONTRACT: keep the emotion engine, age payload, named pain, and body handoff in one ordered chain
+
+**APPLY:** on an interaction scene keep the contract order — trigger → answer → one wrong guess → age denial — and make the trigger line rest on a fact visible in frame.
 
 Sources: `raw/docs/salvora-movie-style-playbook-2026-07-31.txt` · `raw/videos/decoded_airplane-aisle-overheadbin-50-cheating-wife-cortisol-chest-salvora-rhodiola-ted-seminar-pip-fb.md` · `raw/videos/decoded_rodeodrive-gucci-two-women-63-jealousy-cortisol-belly-salvora-rhodiola-amish-market-pip-ig.md` · `raw/videos/decoded_homedepot-truckbed-shirtless-wife-cheating-cortisol-chest-salvora-rhodiola-asian-coach-boxinggym-pip-fb.md` · `raw/videos/decoded_boardwalk-betrayal-napkin-throw-comforter-48-cortisol-belly-salvora-rhodiola-amish-barn-lecture-ig.md` · `wiki/patterns/interaction-hook-engine.md`.
 
@@ -16732,6 +16778,8 @@ The scene numbers are examples. The order and truth checks are mandatory:
 ---
 
 ## v884 — A LINE'S LENGTH IS NOT ITS WORD COUNT: the char table sizes the clip too
+
+**APPLY:** compute the clip length as `max(word_bucket, char_bucket)`, not from the word count alone; a short line with long words still needs the longer clip.
 
 **Where it came from**: operator 2026-08-01, on the axe/neighbor selling build — *"both scene 5 and 6 have 10 words, but scene 6 doesn't fit in the 4 seconds, because the words are longer."*
 
