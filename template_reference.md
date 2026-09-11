@@ -150,6 +150,8 @@ You can use any other register name — the parser just stores whatever you put 
 
 ## Decoding source videos — pipeline-based extraction (v579)
 
+**APPLY:** before writing any markdown, run the four-stage pipeline (PySceneDetect shots -> whisper transcript -> Farneback motion -> dense frames) and write the decode FROM those artifacts. Never reconstruct dialogue from captions or from frame-reading alone.
+
 When the input is a source MP4/MOV file, the decoder MUST run a four-stage extraction pipeline to produce ground truth before writing the markdown. Visual reconstruction from sparse frame samples + caption OCR alone produces inaccurate decodes — wrong dialogue, missed beats, hallucinated brand names, wrong CTA words. This rule supersedes any "look at frames + read captions + reconstruct" approach.
 
 ### Why this rule exists
@@ -453,6 +455,8 @@ This asymmetry is documented explicitly in [[the-cycle]]: grammar is symmetric, 
 
 ## VLM video understanding + state-evolution arc grammar fitted to platform blend + absolute-magnitude grammar (v589)
 
+**APPLY:** write every state-evolution as an absolute magnitude at t=0 and at t=end (never "slightly", "somewhat", "a bit"), and run the Stage-4d structural backstop for the action arc before accepting a static description.
+
 **Three coordinated halves.** v586 codified per-frame description grammar parity. v587 added the comprehension layer + Veo final-prompts symmetry. v588 added dense per-shot frame sampling. v589 closes the remaining gaps: a structural VLM backstop for action-arc detection (with a free local path), state-evolution arc grammar fitted to the platform's existing blend mechanism, and absolute-magnitude grammar that stops prompts from hedging.
 
 ### Why the rule exists
@@ -683,6 +687,8 @@ When `GEMINI_API_KEY` is NOT available in the decode session's environment, the 
 
 ## Dense per-shot frame sampling (v588)
 
+**APPLY:** when a shot shows a prop or body CHANGING STATE, sample start + midpoint + end plus the dense frames and describe the ARC across them. One midpoint frame per shot is not a read.
+
 **Extends v585 Stage 4 (motion capture).** v585 added optical-flow camera-move classification per shot. v586 added the per-frame description grammar parity. But v585 + v586 together still allowed the decoder to inspect ONLY the midpoint frame per shot — and that is insufficient when the shot contains a visible **state-evolution arc within the prop**.
 
 ### The bug v588 prevents
@@ -766,6 +772,8 @@ Pre-v588 decodes that inspected only midpoint frames remain valid as historical 
 ---
 
 ## Reproduction-ready decode artifact (v587)
+
+**APPLY:** emit BOTH `## Comprehension` with all five subsections filled AND `## Veo 3.1 Final Prompts`. A decode missing either is not reproduction-ready and does not ship.
 
 **Extends v586.** v586 ensured that every decoded image description was structurally rich enough for Banana 2 to re-render the source frame. v587 closes the symmetry: every decoded script is now a **complete reproduction package** with the same shape as a generate-side script.
 
@@ -902,6 +910,8 @@ Per-scene action_note must verify v592 — the verb at second N has a visible mo
 ---
 
 ## Image cardinality — universal (v594)
+
+**APPLY:** count the three cardinalities separately - PySceneDetect shots in `manifest.json`, one `### Image M` per distinct composition, dialogue beats in the storyboard / Veo prompts. Reuse an image with `- **image:** image_N` unless setting, camera position or blocking changes, or a state visibly evolves.
 
 **Decoded shots ≠ generated images.** PySceneDetect detects *histogram cuts* (camera nudges, gesture peaks, small zoom shifts) — it does NOT detect compositions. **A producer films N setups; PySceneDetect logs M cuts where M ≥ N.** Image cardinality matches what was actually filmed (the producer's setup count), NOT what PySceneDetect threshold-detected.
 
@@ -1070,6 +1080,8 @@ Decode-side / generate-side / lift-side rules land here NOW (this commit). The p
 
 ## Per-image timestamp + delta metadata (v667) — decode-side first
 
+**APPLY:** give every `### Image N` a `- **frame_anchor:**` (the shot `start_time` from `manifest.json`) and a `- **reference_image:**`, and add `- **visual_delta:**` whenever `reference_image` is not `none`.
+
 **Source: 2026-05-08 owner directive** *"let's optimize the time frame extraction first from the decode, so we can later on learn how to recreate those videos in our system."*
 
 Every `### Image N` block in `raw/decoded_*.md` MUST include two metadata bullets above the image-prompt body:
@@ -1098,6 +1110,8 @@ Optional third bullet: `- **narrative_lens:** <LENS>` — corpus-folklore tag fo
 ---
 
 ## LLM-agnostic Stage 4d decode interface (v595)
+
+**APPLY:** name the Stage-4d provider in the decode, hand it all five contract inputs (`shots.json`, the v588 dense frames, `transcript.json`, `motion.json`, the prompt template), and reject any output that is not the declared `stage4d` schema.
 
 **Generalizes v589 Half A from a fixed cascade to a provider-agnostic interface contract.** Any vision-capable LLM that satisfies the Stage 4d input/output contract is a valid decode provider.
 
@@ -1421,6 +1435,8 @@ Two unrelated additions bundled into one v-rule because both surfaced from the s
 
 ### v621a — Decoder narrative lens (3 categories)
 
+**APPLY:** before writing the scene inventory, state each decoded image's viewer job in one line. Use a listed lens when it fits, otherwise `UNLISTED — <source-derived job>`; when two jobs overlap, name the dominant one and note the second.
+
 > **AMENDMENT (2026-08-09, evidence-to-video Stage 3).** The protected function is the question already stated below: **what is this shot doing for the viewer?** The three lenses are the categories observed in the May source batch, not the allowed universe. **Trigger:** every decoded image needs its viewer job stated before the scene inventory is written. **Decision test:** name the job that decides which visible facts must be preserved for recreation. Use one of the three labels when it fits; otherwise write `UNLISTED — <source-derived job>`. Jobs may overlap; name the dominant one and note the secondary job in plain text. **Boundary:** this is decode observation only; it does not add a cure, symptom, spectacle or sales job the source does not show. **Combination:** the open lens sits after the source-first section read and before the image description; v887's open style/audio/transition fields still describe how that job is delivered.
 
 **Historical May-2026 form (superseded by the open amendment above):** every image description was framed through one of three observed lenses. The lens shapes how the decoder DESCRIBES the image — which details to emphasize, which to skip.
@@ -1637,6 +1653,8 @@ Lift side / generate side: when authoring a transformation montage from scratch,
 
 ## Symptom-feature exaggeration on non-persona characters (v622)
 
+**APPLY:** describe the diagnostic feature the scene is ABOUT at its observed intensity, and record `PARENT SYMPTOM INTENSITY: <1/5-5/5> | anchor: <literal comparison> | headroom: YES|NO`. Never flatten it into generic posture filler.
+
 **Source: 2026-05-06 owner observation.** Decoded prompt for `amish-house` chin-pointing scene read *"her chin raised slightly and her eyes locked to the camera."* The actual source frame shows a patient with a notably full / sagging lower-jaw + jowl drop, and the practitioner's index finger is pressed firmly into the underside of that chin. The whole rhetorical point of the scene is "IF YOUR CHIN LOOKS [LIKE THIS]" — a C-DIAGNOSTIC-PIVOT lifted on the AUGMENTED-SYMPTOMS lens. The decoder flattened the diagnostic feature into generic posture filler. A lift of that prompt would generate a clean-jawed patient and the diagnostic pivot would have nothing to land on.
 
 Owner: *"we need to exagerate the patient characteristics mentioned in the scene."*
@@ -1789,6 +1807,8 @@ This is the FEATURE delivered: from any reasonable markdown, the platform produc
 ---
 
 ## Header-aware ingredients parser + fail-fast upload validation (v618)
+
+**APPLY:** write the Ingredients block with a real header row and bind every reference the images need, the persona included. Never rely on column position.
 
 **Source: 2026-05-06 owner observation** (with screenshot of menopause-saffron Image 7): *"why this image from the menopause saffron video didn't include main character?... check both the image worker, the platform or the video markdown... and find where is best to enforce it. make a future-proof, ondurate decision."*
 
@@ -2180,6 +2200,8 @@ Every element is traceable to a documented source:
 
 ### v643.1 — Camera angle directly affects lip-sync quality
 
+**APPLY:** record the camera angle on every speaking shot, and prefer a front-facing framing on any shot whose line must lip-sync.
+
 | Shot type | Lip-sync quality | When to use |
 |---|---|---|
 | Close-up / Medium Close-Up | **High** | Default for any clip with on-camera dialogue |
@@ -2192,6 +2214,8 @@ Every element is traceable to a documented source:
 
 ### v643.2 — Disambiguate the speaker when multiple humans are in frame
 
+**APPLY:** name the speaker by a visible garment or position whenever more than one person is in frame - never "the woman" when two women are visible.
+
 When the scene has ≥2 visible humans (persona + bystander, persona + customer, etc.), the dialogue cue MUST start with a specific-descriptor identification, not a generic pronoun. Veo otherwise routes the audio to the wrong character's mouth.
 
 | ❌ Wrong (ambiguous) | ✅ Right (disambiguated) |
@@ -2202,6 +2226,8 @@ When the scene has ≥2 visible humans (persona + bystander, persona + customer,
 For solo on-camera scenes (one human visible), `She says…` / `He says…` / `The main character says…` is fine.
 
 ### v643.3 — Multilingual dialogue handling
+
+**APPLY:** record the spoken language per line and keep the transcript in the source language. Do not silently translate.
 
 If the persona's language is non-English, write the spoken text in the target language **inside the quotes**. Veo handles accent + lip-sync automatically. Do NOT append `(Italian)` / `(Spanish)` / etc. as a parenthetical after the quoted line.
 
@@ -2215,6 +2241,8 @@ The `(English) (English):` typo observed in pre-v642 outputs (asian-elder file) 
 
 ### v643.4 — Multi-speaker scenes — prefer one speaker per clip
 
+**APPLY:** split a multi-speaker exchange into one clip per speaker rather than one clip carrying both.
+
 Veo 3.1 can theoretically handle multi-speaker dialogue, but third-party testing (Replicate 2025, skywork.ai, veo3ai) confirms tight lip-sync degrades when two speakers appear in one ≤8s clip. Project rule:
 
 - **One speaker per clip**: each `- **line:**` is its own scene with its own image. The other character (if visible) keeps lips closed (`The bystander stays silent with closed lips` in the action_note).
@@ -2222,6 +2250,8 @@ Veo 3.1 can theoretically handle multi-speaker dialogue, but third-party testing
 - Multi-speaker single-clip is allowed only when both speakers are off-screen voiceovers (no lip-sync target) — uncommon in this project.
 
 ### v643.5 — Audio block ordering inside the Veo prompt body
+
+**APPLY:** place the audio block in the canonical position inside the prompt body - after the action, before the negatives.
 
 Veo parses the audio elements in the order they appear in the prompt. Project canonical order (matches all five sourced guides):
 
@@ -2242,6 +2272,8 @@ Reasoning: Veo gives priority to whatever audio element is mentioned first. Dial
 
 ### v643.6 — Negative-audio additions for clean dialogue takes
 
+**APPLY:** add the negative-audio line to any clip that must deliver clean dialogue.
+
 The canonical 12-element negative prompt block (still mandatory, unchanged from v642 base) handles visual artifacts. Append audio-side negatives **only when the scene's dialogue MUST be the dominant audio** (i.e. all our talking-head Korella/Saffron/etc. videos):
 
 ```
@@ -2252,6 +2284,8 @@ Add as one comma-separated chunk at the end of the canonical 12-element negative
 
 ### v643.7 — The five common mistakes that break native-audio Veo clips
 
+**APPLY:** check the clip against the five listed native-audio mistakes before writing its Veo prompt.
+
 Per veo3ai.io 2026 audio guide, ranked by impact:
 
 1. **Too much audio in too short a clip.** A 5-8s window can NOT hold dialogue + music + SFX + ambient + transition sting. Pick one primary audio focus per clip; everything else stays subtle.
@@ -2261,6 +2295,8 @@ Per veo3ai.io 2026 audio guide, ranked by impact:
 5. **Forgetting silence.** Some payoff/CTA clips work better with very low ambient and zero music. Don't pad every clip with sound.
 
 ### v643.8 — Per-scene review checklist (pre-output gate, supplements v642)
+
+**APPLY:** run the per-scene checklist as a pre-output gate; a scene that fails it does not ship.
 
 Before emitting any `videos/*.md` Veo Final Prompt, run the v642 7-check gate AND these v643 additions:
 
@@ -2274,6 +2310,8 @@ Before emitting any `videos/*.md` Veo Final Prompt, run the v642 7-check gate AN
 - ✅ Word count of spoken line ≤21 (already enforced by v577) — confirms no lip-stop risk (v643.7.3)
 
 ### v643.9 — Sources verified
+
+**APPLY:** no artifact action - this subsection records the external sources behind v643 and changes nothing in a decode or a build.
 
 Every rule above traces to ≥2 of these sources:
 
@@ -8193,6 +8231,8 @@ ONLY THEN claim image-shared replacement-cascade bug resolved.
 
 ### v712 — Decode-side relational composition grammar (Stage 4d reproduction-fidelity fix)
 
+**APPLY:** take every composition value by MEASURING the source frame, not from a corpus default. When a value cannot be measured, say so instead of filling the slot.
+
 **Problem.** Decoded Image prompts written under v586 + v603 + v604 + v521.1 use coordinate-anchored composition grammar ("viewer-left half / upper-third line / chest-up two-shot / cropped at mid-chest / NO floor visible"). The grammar is internally precise. The VALUES the VLM (Gemini Stage 4d / LM Studio vision model / human walker) writes into that grammar are frequently wrong because the VLM picks corpus-default composition slots instead of measuring the source frame. The rigid grammar then locks in the wrong values, so when the decoded prompt is fed back into Banana 2 it produces an image that does not match the source frame.
 
 **Surfaced 2026-05-13** from `raw/decoded_dr_kim_skincare_NMN.md` Image 1. Source frame: extreme face-macro, Dr. Kim's face occupies upper-right corner only (~25% area), patient's face dominates lower-left + center (~60% area), doctor's head positioned BEHIND patient with face inches from her right temple, gloved finger pointing DOWN at her forehead from above. Stage 4d decode wrote: `"Tight chest-up two-shot framing. The patient is on the viewer-left, filling the left half of the frame. The main character stands close beside her on the viewer-right... Heads land near the upper-third line per rule of thirds. Cropped at mid-chest, NO floor visible, NO feet visible."` Every coordinate-anchored claim was wrong. When the operator asked the SAME VLM to describe the frame WITHOUT the Kaveno grammar harness, it produced: `"the man... pointing a purple-gloved finger at the forehead of the middle-aged blonde woman BELOW him, whose deep forehead wrinkles and dark eye circles are clearly visible as she looks forward. The camera close, focusing sharply on their expressions."` — accurate, reproducible, no grid math.
@@ -9859,6 +9899,8 @@ ONLY THEN claim v717 forces extreme-symptom rendering faithfully on Banana 2.
 ---
 
 ### v718 — VLM forensic-perception protocol (Stage 4d pre-grammar)
+
+**APPLY:** check each shot for the three VLM perceptual failures - hand/face misattribution by proximity, invented spatial relations, anatomy errors - and correct them BEFORE writing any prose about the shot.
 
 **Problem.** v712 + v713 + v715 + v716 + v717 are all PROSE-GRAMMAR rules — they govern what the decoded markdown SAYS once the VLM has perceived the frame. None of them recover from VLM PERCEPTUAL FAILURES upstream — when the VLM looks at the source frame and gets the spatial / attributional / anatomical facts wrong before writing a single word. Three observed VLM perceptual failure classes:
 
@@ -12933,6 +12975,8 @@ ANGLE-FORWARD / ANGLE-BACK / LEAN-IN / LEAN-OUT
 
 ### v718.1 — In-session VLM JSON exemption clarification (NEW 2026-05-17)
 
+**APPLY:** when the Stage-4d provider is Claude in-session, `stage4d_vlm.json` may be omitted ONLY if Pre-Flight Section 6 and Section 8 are written in full. Otherwise emit the JSON.
+
 **Composes with v595 LLM-agnostic Stage 4d provider catalog + v597 forensic_perception JSON mandate.**
 
 **Rule**: when Stage 4d provider = Claude in-session (v595 provider #1), the `forensic_perception` JSON file (`stage4d_vlm.json`) output is OPTIONAL. v738 Pre-Flight Checklist Section 6 (State-Delta Declaration per v738.1) + Section 8 (per-scene morphology audit per v738.2) substitute as the human-readable equivalent — same `intrinsic_state_isolation` field semantics, just rendered as markdown prose instead of JSON.
@@ -14458,6 +14502,8 @@ Inserted immediately after the existing `voiceover_line` field per parallel patt
 
 ### v756 — Contact-Sheet-First + Composition & Identity Gate (decode Stage 4, Section 0)
 
+**APPLY:** open a contact sheet of the shot's frames before describing it, and describe the motion ACROSS frames. One frame per scene is not a read.
+
 **Extends v588 (dense-frame walk) + the Pre-Flight Decode Checklist.** Decode-side authoring rule. No platform runtime change, no deploy.
 
 **Problem it fixes.** Decoding the cellulite reel (`raw/videos/decoded_cellulite_coffee_baking_soda_mask_asian_clinic_pair.md`, source DYPUMRkxkwm), the decoder sampled one frame per scene (frames 1 / 20 / 37) and described each as a still picture. That blind spot caused three separate misreads the operator had to correct one at a time:
@@ -14495,6 +14541,8 @@ Single-frame snapshot reading guesses motion, geometry, and identity. The fix is
 ---
 
 ## v758 — Transfer surface (decode the portable abstraction, not just the instance)
+
+**APPLY:** record the portable mechanism separately from the instance it arrived in (niche, prop, cast, pain point), so the decode can be recreated in another niche without carrying the surface.
 
 **Source: 2026-05-21 Salvora 1-1 call (Can Beytut) + principle re-read of `preserve-swap-framework` / `iteration-rule` / `what-matters-most`.** Can, asked "what info from a video makes a good new video?", refused a fixed answer: "there's not one variable you change... for every video, there's 10 variables or more." The goal he named: "keep the framework, because that's the reason it went viral, but change it so it's new for the audience."
 
@@ -15954,6 +16002,8 @@ The whole implementation of OFF is one line in the Clip writer (`main.py`): stor
 
 ## v867 — Test-axis fields: 11 controlled variables on every new decode + build §0
 
+**APPLY:** fill all 11 test-axis keys in the decode's YAML frontmatter, writing `none` where an axis is absent, and append any new enum value to `wiki/synthesis/video-variable-taxonomy.md` in the SAME commit.
+
 **Problem this solves**: 11 axes PROVEN to vary between real videos lived only in filenames + free-text prose — never a structured field. Strongest evidence: the SAME cortisol/chest/Salvora concept exists as 4 decoded shell variants (podcast-splitscreen / gym-seminar-PiP / cowboy-seminar-PiP / gym-seminar-plain) plus chore variants (axe-woodsplit / cement-bag / lawnmower) plus observer variants (wife / new-neighbor / jogger) plus hero-age variants (48 / 63 / 64) — a live A/B family nobody could query or attribute. Single-variable testing needs the axis DECLARED, or the measurement can't say what changed.
 
 **The 11 fields** (kebab-case values; canonical value bank + tier map = `wiki/synthesis/video-variable-taxonomy.md` — open enums, a NEW value is legal but MUST be appended to the taxonomy page in the same commit):
@@ -16040,6 +16090,8 @@ The whole implementation of OFF is one line in the Clip writer (`main.py`): stor
 **Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `wiki/meta/build-rule-index.md` (§A classification), `wiki/meta/generate-video-checklist.md` (workflow note), `wiki/concepts/prompting/realistic-ugc-prompt-templates.md` (§ upper-center safe-zone), memory `feedback_hook-prop-mid-upper-frame` (generalized + v870 pointer), `wiki/log.md`, gbrain `rules/v870`. Forward-only. Operator 2026-07-25 ("the action, the focus of the image needs to be always in the top 2/3 … make it generic for the logic to be applied in the rule").
 
 ## v868 — Decode Variable ledger (anchor; canonical = decode-grammar-checklist)
+
+**APPLY:** end `## Comprehension` with `### Variable ledger` - one `- axis: value` line per axis the video expresses, skipping non-applicable axes. A value not yet in the taxonomy is appended there in the same commit.
 
 Every NEW decode's Comprehension section ends with `### Variable ledger`: walk `wiki/synthesis/video-variable-taxonomy.md` (all tiers + modifier + cross-decode-diff tables) and record one `- axis: value` line per axis the video expresses; skip non-applicable axes; a value missing from the taxonomy MUST be appended there in the same commit (open-enum rule). Complements v867 (the 11 YAML fields stay mandatory). Declaration-only, forward-only. **Canonical detail:** `wiki/meta/decode-grammar-checklist.md` §8-part structure item 7 + `.claude/skills/decode-reel/SKILL.md`; index row `wiki/patterns/conventions.md`. This section exists as the masters heading anchor (operator 2026-07-25; anchor added 2026-07-28 to satisfy `check_rule_index.py`).
 
@@ -16638,6 +16690,8 @@ An older cached frontend that never learns `char_buckets` keeps the pure-word an
 
 ## v887 — UNIVERSAL-SOURCE DECODE OBSERVATION: audio bed, timing effects, style register, fast-cut + long-form protocols
 
+**APPLY:** write the `### Audio design read` block and the `style_register:` / `aspect_source:` frontmatter on EVERY decode whatever the source style; escalate frame sampling on fast cuts and use the segment tiers on sources over 120s.
+
 **The problem.** The rev-231 logic-first pass (2026-08-02) made the decode's STRUCTURE side universal — open-ended section maps, `UNLISTED` labels, `none present` fields, no invented sales bodies. But the OBSERVATION side still assumed a voiced 9:16 UGC health ad: whisper captures speech only (a music-driven montage decodes with its engine missing), no field records a dissolve or a speed-ramp, the image-prompt opener hardcodes "vertical smartphone frame … realistic smartphone look" onto every source, hardcut + fps=2 under-sample sub-second montages, and >120s sources have no walk protocol. v887 closes those five gaps so ANY style / ANY timing decodes into recreate-ready grammar. Decode-side only; no platform parser change (decode artifacts are never imported).
 
 ### v887a — AUDIO DESIGN read (required block on every NEW decode)
@@ -16658,6 +16712,8 @@ Every new `raw/videos/decoded_*.md` emits `### Audio design read` under `## Adap
 Rules: values are OPEN enums — record what is observed, `UNLISTED — <name>` is legal. Never invent a track that is not audible. The **recreation contract** line is the point: it splits what Omni renders natively (dialogue, diegetic sfx — the v865 master's Voice/Dialogue/Audio blocks) from what the operator overlays at edit (music is a post step, attested twice by the operator in v852/v853). A beat-synced source additionally warns the build to pick clip durations near the bar length so the post-overlay lands (cut ON the beat is achievable only if clip lengths cooperate).
 
 ### v887b — Timing-effects vocabulary (decode-side OPEN enums + recreation map)
+
+**APPLY:** on the DECODE, record `- **speed:**` only when the frames prove it (smeared motion for slow-mo, jumping light for a timelapse) and write `- **transition:**` from the open observed vocabulary, `UNLISTED — <name>` included. On the BUILD, translate through the recreation map into the closed `cut | blend` enum — the open decode vocabulary is ILLEGAL in a `videos/*.md`.
 
 Two fields, decode side only:
 
@@ -17122,6 +17178,8 @@ Old `stage4d.v2` artifacts stay valid v2; they are not v3. Reader house rules fo
 ---
 
 ## v934 — THE ACTION READ AND THE VEO DIALECT: two layers, kept apart (2026-08-19)
+
+**APPLY:** on the heavy `ugc-reel` profile give every shot a `performance` block (`action_performed` / `delivery_tone` / `emotion_read` / `intent_subtext` / `attention_target` / `gesture_register`). Record what is DONE and to whom; kinematics are banned and a held pose is written as a state.
 
 **Where it comes from.** The operator on rendered clips of `street-jealousy-belly-v2`: *"these prompts are very wrong especially the first ones in the Hook, very flat, the woman doesn't stop the man while passing"*. The storyboard was already right — Scene 3's `action_note` said *"completes his turn back to face the couple"* — the Veo prompts had dropped it. So the loss was not in the reading and not in the rendering; it was in the step between them, which nothing owned. Measured on two videos over 2026-08-17→19, and validated end to end: job `a9d9895d` rendered three clips from a source's own start frames at 4/6/8s, operator: *"i like the results"*.
 
