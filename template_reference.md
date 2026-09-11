@@ -150,7 +150,7 @@ You can use any other register name — the parser just stores whatever you put 
 
 ## Decoding source videos — pipeline-based extraction (v579)
 
-**APPLY:** before writing any markdown, run the four-stage pipeline (PySceneDetect shots -> whisper transcript -> Farneback motion -> dense frames) and write the decode FROM those artifacts. Never reconstruct dialogue from captions or from frame-reading alone.
+**APPLY:** before writing any markdown, produce the four pipeline artifacts into `raw/decode_work/<id>/` and write the decode FROM them — `python raw/decode_work/batch_extract.py <id>` (frames) and `python raw/decode_work/batch_whisper.py <id>` (transcript), plus the PySceneDetect shot list and the Farneback motion pass. Never reconstruct dialogue from captions or from frame-reading alone.
 
 When the input is a source MP4/MOV file, the decoder MUST run a four-stage extraction pipeline to produce ground truth before writing the markdown. Visual reconstruction from sparse frame samples + caption OCR alone produces inaccurate decodes — wrong dialogue, missed beats, hallucinated brand names, wrong CTA words. This rule supersedes any "look at frames + read captions + reconstruct" approach.
 
@@ -687,7 +687,7 @@ When `GEMINI_API_KEY` is NOT available in the decode session's environment, the 
 
 ## Dense per-shot frame sampling (v588)
 
-**APPLY:** when a shot shows a prop or body CHANGING STATE, sample start + midpoint + end plus the dense frames and describe the ARC across them. One midpoint frame per shot is not a read.
+**APPLY:** when a shot shows a prop or body CHANGING STATE, describe the ARC across start + midpoint + end plus the dense frames in `raw/decode_work/<id>/` (`python raw/decode_work/batch_extract.py <id>`). One midpoint frame per shot is not a read.
 
 **Extends v585 Stage 4 (motion capture).** v585 added optical-flow camera-move classification per shot. v586 added the per-frame description grammar parity. But v585 + v586 together still allowed the decoder to inspect ONLY the midpoint frame per shot — and that is insufficient when the shot contains a visible **state-evolution arc within the prop**.
 
@@ -14502,7 +14502,7 @@ Inserted immediately after the existing `voiceover_line` field per parallel patt
 
 ### v756 — Contact-Sheet-First + Composition & Identity Gate (decode Stage 4, Section 0)
 
-**APPLY:** open a contact sheet of the shot's frames before describing it, and describe the motion ACROSS frames. One frame per scene is not a read.
+**APPLY:** run `python raw/decode_work/make_contact_sheet.py <id>` and `python raw/decode_work/make_shotlist.py <id>`, then READ `contact_full.png`, `contact_hook.png` and `shots.txt` BEFORE describing any scene — and describe the motion ACROSS frames. One frame per scene is not a read.
 
 **Extends v588 (dense-frame walk) + the Pre-Flight Decode Checklist.** Decode-side authoring rule. No platform runtime change, no deploy.
 
