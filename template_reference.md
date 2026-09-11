@@ -2361,7 +2361,7 @@ Convergence ≥2 sources for each rule prevents single-source over-fitting.
 
 ## Audio-padding suffix for short dialogue lines (v644)
 
-**APPLY:** write the voice qualifier in the canonical syntax; a quoted line is what triggers lip-sync, so an unquoted line renders as narration.
+**APPLY:** pad a SHORT dialogue line (about ten words or fewer) with a per-scene `- **pad:**` bullet that brings the Veo prompt's speech to ~20 words — Veo 3.1's audio stage fails on short lines whatever they say. The pad is suffix-only, appended AFTER the line; `- **line:**` stays the keeper the whisper-VAD matches, and the pad is cut from the final video.
 
 **Source: 2026-05-07 owner observation** + Veo 3.1 audio-experimental tier behaviour confirmed via web audit (LaoZhang Flow guide, veo3ai.io 2026 native-audio guide, Google Flow help docs).
 
@@ -4582,7 +4582,7 @@ Other characters in the scene (scene-specific one-offs — a patient being treat
 
 ### Product — referenced by name in product frames (v573)
 
-**APPLY:** keep the Ingredients upload set isolated — persona plus the one brand asset the scene needs. Do not attach references a frame does not use.
+**APPLY:** in a product frame, invoke the branded product BY NAME (`the Salvora Rhodiola Rosea bottle`), the same convention as the persona, and write only its ROLE in the composition — the isolated upload carries the label, colour and typography, so never re-describe the packaging in the prompt body.
 When the video has a branded product whose label/packaging must render correctly, that product is uploaded as a clean isolated reference at Flow slot 1 (positionally, Flow's "Image 2"). Image prompts in **product frames** invoke the product BY NAME — same convention as persona — and the platform's name-binding logic attaches the upload to those scenes.
 
 **Naming convention.** Use a descriptive name that uniquely identifies the product, capitalized normally:
@@ -15677,7 +15677,7 @@ Anchors may keep naming the **authored** (Prompt A) words — that is now the co
 
 ## v828 — Interview builds: the patient LOOKS the symptoms + CARRIES the proxy; the interviewer + patient STOP the healer (F7 refinement)
 
-**APPLY:** on an interview build, open on the interviewer — a visible reporter with a foam mic — before the answer.
+**APPLY:** an interview build owes THREE mandatory parts. (1) The STOP is the hook with every party IN frame: the interviewer (visible foam mic) and the PATIENT stop the healer mid-stride, and SHE is in frame 1 — never the questioners alone. The interviewer never speaks; the patient asks. (2) The PATIENT carries the symptom proxy, in his own hands the whole video, never the healer. (3) The patient's BODY shows the augmented symptoms — he is the walking before-frame, believable-exaggerated and never body-horror; a fit patient wastes the frame.
 
 **Where it came from**: the 5-signs street-interview lane, three operator corrections in one day (2026-07-11): *"i imagine more the interviewer with a patient stopping nuri"* → *"the patient has the props showing the ED"* → *"not just the banana, but overweight and sad, etc"* + *"the interviewer and the patient stop nuri to ask her the questions"*. Each correction fixed a build that had already passed every gate — so the staging grammar itself becomes the rule.
 
