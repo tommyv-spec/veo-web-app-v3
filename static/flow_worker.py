@@ -29325,6 +29325,27 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
     # Ghost clips are already set to flow_redo_queued mid-loop and tracked in ghost_clips.
     # This catches any remaining edge cases (e.g. exception before ghost check ran).
     _submitted_or_done = set(clips_done) | set(clip_submit_times.keys()) | permanently_failed_clips | ghost_clips
+    # v983 — a BOUND MEDIA ID is proof the clip reached Flow, and it outranks
+    # the in-process bookkeeping above.
+    #
+    # Measured 2026-09-13: clip 14911 was submitted, rendered, downloaded and
+    # uploaded by this worker (`[API] Clip 14911 status -> completed`) and the
+    # sweep below then reset it to flow_redo_queued as a "ghost", discarding a
+    # delivered clip and queueing a second paid render. All five clips in that
+    # batch went the same way. The sets above are process state, so anything
+    # that drops a clip out of them -- a reconcile, the parallel download path
+    # finishing, an exception between phases -- makes a delivered clip look
+    # orphaned.
+    #
+    # `bound_media_ids_for_clip` is the same signal delivery itself trusts (it
+    # is what prints `[v700g] clip N uuid-bound`), so this adds no mechanism and
+    # only removes clips that demonstrably submitted.
+    for _c in clips:
+        try:
+            if bound_media_ids_for_clip(job_id, _c['clip_index']):
+                _submitted_or_done.add(_c['clip_index'])
+        except Exception:
+            pass
     _orphaned = [c for c in clips if c['clip_index'] not in _submitted_or_done]
     if _orphaned:
         for _oc in _orphaned:
