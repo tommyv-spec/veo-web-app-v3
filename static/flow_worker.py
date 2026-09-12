@@ -2009,9 +2009,32 @@ def force_agent_off(page, context=""):
                     time.sleep(3)
                 except Exception:
                     pass
-                print(f"{pfx}[agent-off] reload done — editor should show the Settings gear",
-                      flush=True)
-                return True
+                # v975 — READ BACK. The payloads above are POSITIONAL protobuf
+                # ([None]*11 + [0] writes field 12), and a positional index is the
+                # one hardcode here that cannot be removed: the wire format IS
+                # positions. If Google inserts a field they all shift and we
+                # cheerfully write the WRONG setting — agent stays on, the chip
+                # stays hidden, and every clip then fails with "Settings button
+                # not found", a symptom nobody traces back to here.
+                #
+                # So do what v963.10 already does for the input mode: trust the
+                # DOM, not the click. 4/4 accepted means Google took the writes,
+                # not that they meant what we intended.
+                try:
+                    _chip_back = page.locator(_V962_SETTINGS_CHIP).first.is_visible(
+                        timeout=8000)
+                except Exception:
+                    _chip_back = False
+                if _chip_back:
+                    print(f"{pfx}[agent-off] reload done — Settings chip is VISIBLE",
+                          flush=True)
+                else:
+                    print(f"{pfx}⚠ [agent-off] the writes were accepted but the"
+                          f" Settings chip is STILL HIDDEN. Agent is not off."
+                          f" Most likely the positional payload moved — re-read"
+                          f" the HAR (template_reference §v974.2) before"
+                          f" trusting any clip from this run.", flush=True)
+                return _chip_back
         # 1. USER-LEVEL (account-wide) agent toggle — THE real lever. HAR-proven
         #    2026-06-23: manually flipping THIS is what makes the editor + Settings
         #    gear appear. The per-project agentInfo PATCH alone does NOT override the

@@ -192,3 +192,23 @@ def test_project_init_asserts_agent_off_not_just_force_agent_off():
     body = src[start:src.index("\ndef ", start + 10)]
     assert "_v974_agent_off_batchexecute(page, project_id" in body, \
         "project init must assert Agent OFF, not rely on the remembered state"
+
+
+def test_agent_off_reads_back_instead_of_trusting_the_writes():
+    """The agent-off payloads are POSITIONAL protobuf, and a positional index is
+    the one hardcode here that cannot be removed -- the wire format IS positions.
+    If Google inserts a field they shift and we write the WRONG setting: agent
+    stays on, the chip stays hidden, every clip then fails with "Settings button
+    not found", and nobody traces that back to a payload index.
+
+    4/4 accepted means Google took the writes, not that they meant what we
+    intended. So force_agent_off must return what the DOM says, not what the
+    HTTP status said.
+    """
+    src = (_STATIC / "flow_worker.py").read_text(encoding="utf-8")
+    start = src.index("def force_agent_off(")
+    body = src[start:src.index("\ndef ", start + 10)]
+    assert "_V962_SETTINGS_CHIP" in body, (
+        "agent-off must read the chip back, not trust the write")
+    assert "return _chip_back" in body, (
+        "the return value must be the DOM's answer, not the request's")
