@@ -21725,3 +21725,134 @@ MORE binding, not less, so the exception stays correct.
 Spec + review: `docs/superpowers/plans/2026-09-11-exact-clip-first-generation.md`,
 `docs/audits/codex-loop/2026-09-11-exact-clip-first-generation.md`. Tests:
 `code/tests/test_flow_clip_scope_firstgen.py` (80).
+
+---
+
+## v974 — AGENT MODE IS THE GATE, AND THE UPLOADER MOVED (flow.google.com, 2026-09-12)
+
+Two measured facts about `flow.google.com` that between them cost a day. Both were
+discovered by reading a HAR the operator captured on 2026-09-06 and by asking the
+live page, after several confident wrong answers derived from memory.
+
+### v974.1 — AGENT MODE HIDES THE SETTINGS CHIP, SO IT BLOCKS EVERY CLIP
+
+When Agent mode is on, `flow.google.com` renders the agent composer
+(`flow-creative-agent-prompt-box` + `flow-chat-view`). The classic composer
+(`flow-base-prompt-box`) is still in the DOM, but its settings chip is
+**`display:none` with a 0×0 box**:
+
+```
+agent_composer 1 · chat 1 · classic 1 · ingredient_bar 0
+Settings trigger : PRESENT but display:none      <- _V962_SETTINGS_CHIP matches it
+```
+
+`_V962_SETTINGS_CHIP` matches that hidden element, so a DOM **count** returns 1 and
+looks healthy. `_v962_open_settings` waits for VISIBLE and correctly reports
+"settings chip not found". **Do not read the count and conclude the chip is fine —
+that mistake was made and retracted twice on 2026-09-12.**
+
+The consequence is not a frames bug. With no settings overlay the worker cannot set
+Video type, aspect, duration, variants **or model for ANY clip**; the frame attach
+merely fails first and gets the blame.
+
+There is no UI way out: `button[aria-label='Agent']` does not exist on a new project,
+`button[aria-label='Close']` shuts the chat panel without restoring the ingredient
+bar, and the visible `button[aria-label='Settings']` (icon `tune`) opens
+`flow-settings-view` — ACCOUNT-WIDE generation defaults, which *removes* the composer
+and cannot replace the per-clip overlay. Its "Agent settings" section only controls
+"Confirm before generating".
+
+### v974.2 — THE TWO OLD AGENT-OFF CALLS ARE BOTH DEAD; THE APP USES `batchexecute`
+
+`force_agent_off` and `_fa_init_project_best_effort` steps 23-24 tried:
+
+| call | result on flow.google.com, measured 2026-09-12 |
+|---|---|
+| `labs.google/fx/api/trpc/videoFx.updateUserSettings` | `NetworkError` — the frontend moved 09-06; labs.google does not answer |
+| `aisandbox-pa/v1/projects/<id>/agentInfo` PATCH | `AUTH DENIED` — needs a Bearer; this host is COOKIE-authed, so `_fa_attach_token_listener` never sees a `Bearer ya29.` request and `_FA_TOKEN_STORE` stays empty |
+
+A HAR replay therefore reports `denied=12 confirmed=none`, and the worker's own log
+says why — *"the replay runs before a bearer exists"* — which reads as benign and is
+not: on this host **no bearer ever arrives**, so those calls can never land.
+
+What the app really does is four cookie-authed POSTs to
+`/_/AiSandboxAngularFrontend/data/batchexecute`, with `at` = the page's XSRF token
+from `window.WIZ_global_data.SNlM0e` (`bl` = `cfb2h`, `f.sid` = `FdrFJe`):
+
+```
+DA4VGb  [[null*11, 0],        [["is_agent_mode_toggled"]]]      user-level: THE lever
+DA4VGb  [[null*12, 0],        [["is_chat_panel_open"]]]
+Kcr7Ub  ["projects/<id>", [],           [["chat_panel_open"]]]
+Kcr7Ub  ["projects/<id>", [null*4, 2],  [["agent_toggle_state"]]]
+```
+
+`agent_toggle_state`: **1 = ENABLED, 2 = DISABLED**. `is_agent_mode_toggled`:
+1 = on, 0 = off. The index positions ARE the payload — a wrong slot silently leaves
+Agent on. Implemented as `_v974_agent_off_batchexecute`; guarded by
+`test_v962_attach.py::test_agent_off_payloads_match_the_har`.
+
+**ASSERT IT ON EVERY PROJECT INIT.** The user-level flag persists, so a project
+opened after a successful call comes up with the composer already clean — but
+persistence is not a guarantee (a human, a parallel session, or a Google default flip
+can turn it back on). `force_agent_off` is REACTIVE: it fires once the gear is
+already missing, i.e. after a clip has begun failing. Four idempotent POSTs cost
+about a second. Operator, 2026-09-12: *"we always need to make sure it's off."*
+
+### v974.3 — THE UPLOADER IS A NATIVE FILE CHOOSER BEHIND `Add media menu`
+
+There is **no `input[type=file]` anywhere in the document** on this host, and
+`flow-composer` — the first drop target the old code tried — **does not exist at
+all** (it appeared once in 34k lines and was never validated). A synthesised
+`DataTransfer` drop fires Flow's uploader on **no element**: 15 candidates tested in
+isolation with a full reload between, zero `uploadImage`.
+
+The real route is the one the picker already used, with a different control:
+
+```
+button[aria-label='Add media menu']  ->  menu item "Upload"  ->  NATIVE file chooser
+```
+
+driven with Playwright's `expect_file_chooser` + `set_files`, exactly as the old
+`Upload media` button was. Measured: project media tiles 0 → 2 within ~10 s.
+
+**Two traps that produce confident wrong answers here:**
+
+1. **A native chooser leaves no `input[type=file]` to count.** A scan that counts
+   file inputs reports "this host has no uploader" — 17 controls were scanned and
+   that is what it said. The menu item is simply captioned `Upload`.
+2. **The endpoint URL does not contain "upload".** Filtering captured traffic on the
+   string `upload` returns nothing and looks like "the file was never sent"; Flow
+   uses `batchexecute` rpcids. Match the claim to the search.
+
+Also: the frame picker overlay covers the menu, so close the picker, upload, then
+re-open the slot — the picker's existing 60 s wait-then-click finds the new asset.
+
+### v974.4 — AMENDMENT TO v962.6: project creation NAVIGATES now
+
+§v962.6 records (2026-09-06) that clicking "New project" renders the project IN PLACE
+*"while page.url stays https://flow.google.com/"*, and `_v962_project_id_from_dom`
+depends on that. **Measured 2026-09-12: the URL DOES change to `/project/<uuid>`,
+and with Agent mode on `_v962_project_id_from_dom` returns `None`** because it gates
+on a visible settings chip / Start-generation button. Read the id from the URL as
+well as the DOM.
+
+### What this means for probing this host at all
+
+A probe that `goto`s a project URL cold is **not** looking at the page the worker
+works on: the worker arrives through its own startup and drives a composer already in
+position. Three conclusions were withdrawn on 2026-09-12 for exactly this reason
+(picker "empty", chooser "not landing", chip "drifted"). Measure from inside a real
+worker run, or call the worker's own helpers. And an enumeration that CLICKS every
+visible control is not read-only — one of them is labelled `Agent`.
+
+Evidence: `docs/flow-frame-attach-root-cause-2026-09-12.md` — the investigation, with
+its retractions left in, so the wrong turns are visible. **This section is the
+canonical home; that file is the working record, not a second copy of the rule.**
+Source HAR: `flow.google.com_Archive [26-09-08 14-19-43].har` (operator-supplied).
+Code: `_v974_agent_off_batchexecute`, `_v962_pick_asset_in_picker`,
+`_fa_init_project_best_effort` step 25. Tests: `code/test_v962_attach.py` (7).
+
+Proven in a real worker run, clips 14950/14951 on the firstgen path:
+`Successful: 2/2`, against 1/4 before — and that one success only worked because its
+image was already in the project from an earlier run, so the true prior score on a
+new image was 0.
