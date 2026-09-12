@@ -21856,3 +21856,45 @@ Proven in a real worker run, clips 14950/14951 on the firstgen path:
 `Successful: 2/2`, against 1/4 before — and that one success only worked because its
 image was already in the project from an earlier run, so the true prior score on a
 new image was 0.
+
+### v974.5 — A CLIP'S PLATFORM STATUS IS THE WORKER'S OPINION, NOT FLOW'S STATE
+
+`/api/user-worker/clips/<id>/approval-status` reports what the worker last said. It
+is not a reading of Flow. When the worker cannot deliver, the clip sits at
+`generating` with `has_video=False` **forever**, while the render has been finished
+for an hour.
+
+Measured twice on 2026-09-12, on two independent runs (clip 14908, then clips
+14950/14951):
+
+```
+Flow     : videos DONE 2  (1,743,618 and 3,491,899 bytes) · FAILED 0 · generating 0
+platform : 14950 generating has_video=False · 14951 generating has_video=False
+```
+
+**Ask Flow, not the platform:** `python tools/flow_generation_status.py --project <url>`
+lists every media with its live state, and a large int IS the finished byte size
+(~40 s, one call). Reporting "still generating" from the platform field while the
+mp4s sit finished in the project wasted an hour of this session; the operator spotted
+it from the elapsed time alone — *"they should be done by now, the monitoring is
+wrong"*.
+
+**Why delivery stalls, and it is a REAL defect, not a timing fluke.** Both runs
+logged:
+
+```
+[v700] no submit response captured within 40s; downloads will fall back to
+       declared clip_index (legacy tile-position attribution)
+[v700h] tile confirmed; uuid binding missed but DOM proves submit landed
+```
+
+So the submit landed and the render ran, but the uuid → clip binding was never
+captured, and the download leg has nothing to attribute. The worker then parks in
+`[Flow] ⏳ Post-job: waiting for clip(s) [...] to reach 70s` and never exits — 100
+minutes in one run, with NO `flow_worker` frames in the stall stack (it is blocked
+inside a Playwright call), so the stall watchdog cannot name it either.
+
+The data needed to fix it is already in hand: v963.35 says deliver by BYTE SIZE
+rather than ownership, and `flow_generation_status` returns exactly `uuid -> finished
+size`. **Unfixed as of 2026-09-12** — recorded here so the next reader starts from
+"the binding failed, the render is fine" instead of "the render is still going".
