@@ -10384,6 +10384,7 @@ def _v962_upload_into_picker(page, image_path, prefix=""):
             ".cdk-overlay-container .add-menu-popover-container",
             "body",
         ]
+        reached = 0
         for sel in targets:
             hit = page.evaluate(
                 """([b64, fname, sel]) => {
@@ -10405,6 +10406,7 @@ def _v962_upload_into_picker(page, image_path, prefix=""):
                 [blob, name, sel])
             if hit == "missing":
                 continue
+            reached += 1
             # Did anything actually happen? A chip in the frames bar means the
             # drop both uploaded AND attached, and the caller can stop entirely.
             time.sleep(3)
@@ -10416,7 +10418,17 @@ def _v962_upload_into_picker(page, image_path, prefix=""):
             except Exception:
                 pass
             print(f"{prefix}[v962.9] dropped on {sel}, no chip yet", flush=True)
-        return True
+        # v962.9.1 (2026-09-12) -- a drop onto an element with no upload handler
+        # is not an upload. The old unconditional `return True` here told the
+        # caller a file had been delivered when none had; the failure then
+        # surfaced ~80 s later as "picked, but no chip", which the caller
+        # classifies as a transient start_glitch and retries with the SAME image
+        # against a route that cannot work. On 2026-09-12 that cost 3 of 4 clips.
+        # Report the truth and let the caller decide.
+        print(f"{prefix}⚠ [v962.9] no upload route worked "
+              f"({reached}/{len(targets)} target(s) existed, none took the file)",
+              flush=True)
+        return False
     except Exception as exc:
         print(f"{prefix}⚠ [v962.9] upload route failed: {type(exc).__name__}: "
               f"{str(exc)[:110]}", flush=True)
