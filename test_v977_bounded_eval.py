@@ -52,6 +52,12 @@ class _P:
         self.result, self.exc = result, exc
         self.seen = []
 
+    def wait_for_function(self, expr, timeout=None):
+        # v982 — the helper now re-acquires the execution context before
+        # evaluating. A healthy page answers `() => true` immediately, so the
+        # stub just returns; the guard's own behaviour is tested separately.
+        return None
+
     def evaluate(self, expr, arg=None):
         self.seen.append((expr, arg))
         if self.exc:
@@ -219,3 +225,65 @@ def test_the_locator_evaluate_calls_were_left_alone():
     # `page` survives only inside the helper, which is exempted above.
     assert "page" not in receivers, receivers
     assert receivers == {"container", "_gallery_list", "_dl_tab"}, receivers
+
+
+# --- v982: the context guard, which is the root-cause fix --------------------
+
+
+def test_it_settles_the_context_before_evaluating():
+    """THE ROOT CAUSE. An evaluate issued while Flow's SPA replaces its
+    execution context never receives a reply, and `page.evaluate` has no
+    timeout of its own, so it waits forever.
+
+    Traced 2026-09-12 with both instruments verified armed:
+    `leave reload 1.5s` immediately followed by an evaluate that never
+    returned, with the browser idle throughout. The guard must run BEFORE the
+    evaluate, or it guards nothing.
+    """
+    fw = _load()
+    order = []
+
+    class _Page:
+        def wait_for_function(self, expr, timeout=None):
+            order.append(("settle", expr, timeout))
+
+        def evaluate(self, expr, arg=None):
+            order.append(("evaluate",))
+            return {"v": 1}
+
+    fw._v977_eval(_Page(), "() => 1")
+    assert [o[0] for o in order] == ["settle", "evaluate"], order
+    assert order[0][1] == "() => true"
+    assert order[0][2] == fw._V982_SETTLE_MS
+
+
+def test_a_dead_context_raises_instead_of_hanging():
+    """A lost context becomes the caller's existing failure path, not a hang."""
+    fw = _load()
+
+    class _Page:
+        def wait_for_function(self, expr, timeout=None):
+            raise RuntimeError("Timeout 8000ms exceeded")
+
+        def evaluate(self, expr, arg=None):
+            raise AssertionError("must not evaluate into a dead context")
+
+    with pytest.raises(RuntimeError):
+        fw._v977_eval(_Page(), "() => 1")
+
+
+def test_the_guard_can_be_switched_off(monkeypatch):
+    fw = _load()
+    calls = []
+
+    class _Page:
+        def wait_for_function(self, expr, timeout=None):
+            calls.append("settle")
+
+        def evaluate(self, expr, arg=None):
+            calls.append("evaluate")
+            return {"v": 1}
+
+    monkeypatch.setattr(fw, "_V982_SETTLE_MS", 0)
+    fw._v977_eval(_Page(), "() => 1")
+    assert calls == ["evaluate"]

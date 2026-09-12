@@ -8051,6 +8051,12 @@ _V977_NET_EVAL_TIMEOUT_MS = float(os.environ.get("FLOW_NET_EVAL_TIMEOUT_MS") or 
 
 _V977_RAISE = object()
 
+# v982 — how long to wait for a live execution context before evaluating into
+# it. This is the guard against the root cause of the delivery stall: an
+# evaluate issued while the SPA is replacing its context never gets a reply and
+# `page.evaluate` has no timeout of its own. 0 disables the guard.
+_V982_SETTLE_MS = float(os.environ.get("FLOW_EVAL_SETTLE_MS") or 8000)
+
 
 class _V977EvalTimeout(Exception):
     """An in-page call did not answer inside its budget.
@@ -8138,6 +8144,28 @@ def _v977_eval(page, js, arg=None, timeout_ms=None, default=_V977_RAISE):
     # must propagate exactly as `page.evaluate` propagates it today, because 60
     # of the 62 call sites have an `except` that handles precisely that and
     # swallowing it here would silently disable all 60.
+    # v982 — ROOT CAUSE GUARD. Re-acquire the execution context BEFORE
+    # evaluating into it.
+    #
+    # Measured 2026-09-12: `ENTER reload() / leave reload 1.5s` followed
+    # immediately by an `evaluate` that never returned. reload() returns when
+    # the navigation commits, but Flow's SPA then replaces the main frame's
+    # execution context; an evaluate issued in that window races the swap, the
+    # reply is dropped, and `page.evaluate` -- which takes no timeout -- waits
+    # for it forever. The browser stays idle the whole time, which is why four
+    # earlier diagnoses blamed whichever call happened to be first after the
+    # reload.
+    #
+    # `wait_for_function` is the right primitive because its deadline is
+    # driver-side: tools/flow_probe_bound_smoke.py measured it raising a real
+    # TimeoutError 5/5 within 3.02s of a 3.0s budget, specifically ACROSS a
+    # context-destroying reload. So a lost context becomes a bounded exception
+    # the caller's existing handler already covers, instead of a hang.
+    #
+    # `() => true` answers on the first poll of a healthy context, so this costs
+    # almost nothing when the page is fine.
+    if _V982_SETTLE_MS > 0:
+        page.wait_for_function("() => true", timeout=_V982_SETTLE_MS)
     _res = page.evaluate(_wrapped, arg) or {}
     if _res.get("__v977_timeout"):
         # Loud on purpose. A silent default is what made the original bug read

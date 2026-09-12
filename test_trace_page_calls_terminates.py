@@ -147,6 +147,11 @@ class _EvalPage:
         self.raise_exc = raise_exc
         self.seen = []
 
+    def wait_for_function(self, expression, timeout=None):
+        # v982 — the helper re-acquires the execution context before
+        # evaluating; a healthy page answers immediately.
+        return None
+
     def evaluate(self, expression, arg=None):
         self.seen.append((expression, arg))
         if self.raise_exc is not None:
