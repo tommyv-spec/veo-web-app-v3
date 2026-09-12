@@ -105,9 +105,16 @@ def trace_page_calls(page, label=""):
         return page
 
     import time as _time
+    # `evaluate` takes NO timeout, so it is the one call that can park forever
+    # even though Playwright's timeouts ARE enforced here (measured 2026-09-12,
+    # tools/flow_probe_bound_smoke.py: 5/5 raised within 3.02s of a 3.0s budget
+    # across a context-destroying reload). query_selector_all and
+    # wait_for_timeout were missing and are both on paths that hang.
     METHODS = ("goto", "reload", "click", "evaluate", "wait_for_function",
                "wait_for_selector", "wait_for_load_state", "wait_for_url",
-               "screenshot", "title", "content", "query_selector", "set_content")
+               "screenshot", "title", "content", "query_selector", "set_content",
+               "query_selector_all", "wait_for_timeout", "set_viewport_size",
+               "bring_to_front", "go_back")
 
     def _wrap(name, fn):
         def inner(*a, **k):
@@ -148,16 +155,32 @@ def trace_page_calls(page, label=""):
                     setattr(loc, lname, _wrap(f"locator({sel[:40]}).{lname}", lfn))
             except Exception:
                 pass
+        # ONE level, and deliberately NOT recursive. `Locator.first` is a
+        # property that builds a NEW Locator on every access, so a recursive
+        # descent here never terminates: the `_traced` flag is always absent on
+        # the fresh object, and `.first.first.first...` runs until the stack
+        # dies. That cost 7 minutes of 104%-CPU silence and a RecursionError on
+        # 2026-09-12 -- with no log line, because the recursion happens inside
+        # page.locator() before any ENTER can print. `.first.first` is the same
+        # element as `.first`, so there is nothing below this level to see.
         for prop in ("first", "last"):
             try:
                 child = getattr(loc, prop, None)
-                if child is not None and not getattr(child, "_traced", False):
-                    _wrap_locator(child, f"{sel[:36]}.{prop}")
-                    child._traced = True
+                if child is None:
+                    continue
+                for lname in LOC_METHODS:
+                    lfn = getattr(child, lname, None)
+                    if callable(lfn):
+                        setattr(child, lname,
+                                _wrap(f"locator({sel[:36]}.{prop}).{lname}", lfn))
             except Exception:
                 pass
         return loc
 
+    # Whether the LOCATOR half installed is the half that matters, and it used
+    # to fail silently: absence of locator lines then reads as "no locator
+    # calls were made" instead of "locator tracing is not installed".
+    _loc_armed = False
     try:
         _real_locator = page.locator
 
@@ -169,13 +192,17 @@ def trace_page_calls(page, label=""):
                 return loc
 
         page.locator = _traced_locator
-    except Exception:
-        pass
+        _loc_armed = page.locator is _traced_locator
+    except Exception as _le:
+        print(f"[PAGE-TRACE]{label} LOCATOR TRACING NOT INSTALLED: "
+              f"{type(_le).__name__}: {str(_le)[:90]} — absence of locator "
+              f"lines below means nothing", flush=True)
     try:
         page._call_trace_installed = True
     except Exception:
         pass
-    print(f"[PAGE-TRACE]{label} installed on {len(METHODS)} methods", flush=True)
+    print(f"[PAGE-TRACE]{label} installed on {len(METHODS)} page methods; "
+          f"locator tracing {'ARMED' if _loc_armed else 'NOT ARMED'}", flush=True)
     return page
 
 
@@ -7592,19 +7619,86 @@ def _construct_media_url(uuid):
     return f"{FLOW_MEDIA_ORIGIN}/fx/api/trpc/media.getMediaUrlRedirect?name={uuid}"
 
 
+def _v977_eval(page, js, arg=None, timeout_ms=10000, default=None):
+    """Evaluate `js` in the page with a REAL, enforced deadline.
+
+    `page.evaluate` has no timeout, so a wedged renderer or a destroyed JS
+    context holds the caller forever -- measured twice on 2026-09-12, once in
+    `_uuid_video_ready` and once in the post-job scroll, both with the tracer
+    logging ENTER and no matching leave and the stall watchdog firing at 120s.
+
+    `js` is a function expression, exactly as `page.evaluate` takes it. It is
+    wrapped so the result is an OBJECT: `wait_for_function` waits for a truthy
+    value, and a bare scroll returns `undefined`, which would otherwise poll
+    until the deadline on every single call. `await` on a non-promise is a
+    no-op, so sync and async expressions both work.
+
+    Returns `default` on timeout or any error -- a call that cannot answer must
+    not take the lane down with it. Callers that need to distinguish "false"
+    from "could not ask" should pass a sentinel as `default`.
+    """
+    try:
+        _h = page.wait_for_function(
+            "async (a) => ({ v: await (" + js + ")(a) })",
+            arg=arg, timeout=timeout_ms)
+        return (_h.json_value() or {}).get("v", default)
+    except Exception:
+        return default
+
+
+# Driver-side budget for the in-page media-readiness probe, ABOVE the 8s
+# in-page AbortController so the page normally answers first and this fires
+# only when the page cannot answer at all. See _uuid_video_ready.
+_V977_MEDIA_PROBE_TIMEOUT_MS = 12000
+
+
 def _uuid_video_ready(page, uuid):
     """In-page (auth-cookie) probe: True iff this uuid's getMediaUrlRedirect resolves
     to a RENDERED video (final URL under /video/ or content-type video/*), False if
     it's still a poster (/image/), not ready, or errors. Range bytes=0-0 so it does
     not download the whole file."""
+    # v977 — this probe is what stops delivery, and it had NO bound of any kind.
+    # `page.evaluate` takes no timeout argument, and the fetch had no
+    # AbortController, so it could hang two different ways. Measured 2026-09-12
+    # on one run, from two independent instruments: the page tracer logged
+    # `ENTER evaluate(async (u) => ... await fetch ...)` with no matching leave
+    # (two identical calls had returned in 0.1s just before), and the stall
+    # watchdog then fired at 120s with the main thread frozen in
+    # run_until_complete. The poll turn immediately before had logged
+    # `Post-job error: Page.reload: Timeout 30000ms exceeded`, so the renderer
+    # was already wedged. The render itself was finished in Flow and was never
+    # delivered.
+    #
+    # Two guards, because they cover different failures:
+    #   in-page AbortController -> a slow or stalled fetch still settles;
+    #   driver-side wait_for_function timeout -> a DEAD JS context cannot hold
+    #   the lane. Nothing in the page can help with that one: if the context is
+    #   gone, there is no one left to run the catch and send a reply.
+    #
+    # wait_for_function's budget is enforced here -- measured today by
+    # tools/flow_probe_bound_smoke.py: a real TimeoutError inside the window,
+    # 3/3, INCLUDING across a context-destroying reload, which is this exact
+    # failure mode. It is also the conversion v963.5 already made to
+    # _flow_page_state for the same reason. The JS answers with an OBJECT, and
+    # wait_for_function waits for a TRUTHY value, so an object returns on the
+    # page's first answer instead of polling.
     try:
-        info = page.evaluate("""async (u) => {
+        _h = page.wait_for_function("""async (u) => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 8000);
             try {
-                const r = await fetch(u, {method:'GET', headers:{'Range':'bytes=0-0'}});
+                const r = await fetch(u, {method:'GET',
+                    headers:{'Range':'bytes=0-0'}, signal:controller.signal});
                 return {url: r.url || '', ct: (r.headers.get('content-type') || ''), status: r.status};
             } catch(e) { return {err: String(e)}; }
-        }""", _construct_media_url(uuid))
+            finally { clearTimeout(timer); }
+        }""", arg=_construct_media_url(uuid),
+            timeout=_V977_MEDIA_PROBE_TIMEOUT_MS)
+        info = _h.json_value()
     except Exception:
+        # Including the timeout. "Could not verify" means "not ready yet" --
+        # the clip stays pending and the poll loop keeps going. An
+        # unverifiable clip must never freeze the lane.
         return False
     _final = str((info or {}).get('url') or '')
     _ct = str((info or {}).get('ct') or '')
@@ -13647,7 +13741,7 @@ def ensure_lower_priority_model(page, label=""):
         if not selected:
             print(f"{prefix}⚠ Could not find model option for '{target}'", flush=True)
             try:
-                visible = page.evaluate("""() => {
+                visible = _v977_eval(page, """() => {
                     const items = document.querySelectorAll('[role=\"menuitem\"]');
                     return Array.from(items).map(el => (el.innerText || '').trim()).filter(Boolean);
                 }""")
@@ -13687,7 +13781,7 @@ def _dump_generate_disabled_state(page, prefix=""):
     prompt have text, what model does the bottom bar show, which tabs are
     selected, is a dialog stuck open, does the page mention credits/quota."""
     try:
-        state = page.evaluate("""() => {
+        state = _v977_eval(page, """() => {
             const out = {};
             const icons = Array.from(document.querySelectorAll('button i')).filter(i => (i.textContent||'').trim() === 'arrow_forward');
             const btn = icons.length ? icons[0].closest('button') : null;
@@ -14810,7 +14904,7 @@ def scan_tiles_for_policy_failures(page, clip_submit_times, account_name="", job
     prefix = f"[{account_name}] " if account_name else ""
     
     try:
-        failed_info = page.evaluate("""() => {
+        failed_info = _v977_eval(page, """() => {
             const results = [];
             const containers = document.querySelectorAll('[data-index]');
             for (const container of containers) {
@@ -14906,7 +15000,7 @@ def scan_tiles_for_policy_failures(page, clip_submit_times, account_name="", job
 
             # Click Retry
             if info.get('hasRetryBtn'):
-                clicked = page.evaluate(f"""() => {{
+                clicked = _v977_eval(page, f"""() => {{
                     const tile = document.querySelector('[data-tile-id="{tile_id}"]');
                     if (!tile) return false;
                     const btn = Array.from(tile.querySelectorAll('button')).find(b =>
@@ -14923,7 +15017,7 @@ def scan_tiles_for_policy_failures(page, clip_submit_times, account_name="", job
             
             # Reuse Prompt fallback
             if info.get('hasReuseBtn'):
-                clicked = page.evaluate(f"""() => {{
+                clicked = _v977_eval(page, f"""() => {{
                     const tile = document.querySelector('[data-tile-id="{tile_id}"]');
                     if (!tile) return false;
                     const btn = Array.from(tile.querySelectorAll('button')).find(b =>
@@ -26195,9 +26289,13 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             ensure_videos_tab_selected(page)
                             # Scroll down to force virtualized tiles to render
                             try:
-                                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                                # v977 — bounded. This exact call parked the
+                                # lane on 2026-09-12 once _uuid_video_ready was
+                                # bounded: the park hops to whatever is still
+                                # unbounded.
+                                _v977_eval(page, "() => window.scrollTo(0, document.body.scrollHeight)")
                                 time.sleep(2)
-                                page.evaluate("window.scrollTo(0, 0)")
+                                _v977_eval(page, "() => window.scrollTo(0, 0)")
                                 time.sleep(1)
                             except Exception:
                                 pass
@@ -28826,9 +28924,10 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         ensure_videos_tab_selected(page)
                         # Scroll down then back up to force Flow to render all tiles
                         try:
-                            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                            # v977 — bounded, same reason as the other scroll pair.
+                            _v977_eval(page, "() => window.scrollTo(0, document.body.scrollHeight)")
                             time.sleep(1)
-                            page.evaluate("window.scrollTo(0, 0)")
+                            _v977_eval(page, "() => window.scrollTo(0, 0)")
                             time.sleep(1)
                         except Exception:
                             pass
@@ -28931,7 +29030,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             # v794: prefer bound mediaId (position-independent; handles
                             # empty-dialogue clips). Dialogue scan only as fallback, and
                             # empty-guarded so an empty key can't grab a sibling's tile.
-                            _urls = captured_urls_for_clip(job_id, _ci, captured_media_urls) or page.evaluate(f"""() => {{
+                            _urls = captured_urls_for_clip(job_id, _ci, captured_media_urls) or _v977_eval(page, f"""() => {{
                                 for (const c of document.querySelectorAll('[data-index]')) {{
                                     if ({repr(_dlg)} && (c.innerText||'').includes({repr(_dlg)})) {{
                                         const urls = [];
@@ -28947,7 +29046,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             }}""")
                             _tile_fail_type = None
                             if not _urls or _urls == ['__blob__']:
-                                _tile_fail_type = page.evaluate(f"""() => {{
+                                _tile_fail_type = _v977_eval(page, f"""() => {{
                                     for (const c of document.querySelectorAll('[data-index]')) {{
                                         if ({repr(_dlg)} && (c.innerText||'').includes({repr(_dlg)})) {{
                                             const icons = Array.from(c.querySelectorAll('i')).map(i => i.textContent.trim());
@@ -29031,7 +29130,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             elif _tile_fail_type == 'soft':
                                 print(f"[Flow] ⚠ Post-job: clip {_ci+1} tile failed — retrying in-place...", flush=True)
                                 try:
-                                    _reuse_btn = page.evaluate(f"""() => {{
+                                    _reuse_btn = _v977_eval(page, f"""() => {{
                                         const containers = Array.from(document.querySelectorAll('[data-index]'));
                                         const dlg = {repr(_dlg)};
                                         let target = dlg ? containers.find(c => (c.innerText||'').includes(dlg)) : null;
