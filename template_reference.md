@@ -21894,7 +21894,30 @@ captured, and the download leg has nothing to attribute. The worker then parks i
 minutes in one run, with NO `flow_worker` frames in the stall stack (it is blocked
 inside a Playwright call), so the stall watchdog cannot name it either.
 
-The data needed to fix it is already in hand: v963.35 says deliver by BYTE SIZE
-rather than ownership, and `flow_generation_status` returns exactly `uuid -> finished
-size`. **Unfixed as of 2026-09-12** — recorded here so the next reader starts from
-"the binding failed, the render is fine" instead of "the render is still going".
+**CORRECTED 2026-09-12, later the same day — this is NOT an unfixed defect.** The
+paragraph here first said it was, and that was wrong; reading §v963.33 to the bottom
+settled it.
+
+Delivery on this host is the **UI download button** (`_v963_download_project_videos`),
+not a media URL — because a fresh render appears in no frame carrying an `/asb` URL,
+so the listing-based route has nothing to hand out and loops forever. §v963.33
+measured exactly this on 2026-09-10 (job `df454e3c` clip 14993: both videos finished,
+`clips_downloaded: []` for seven minutes).
+
+And that download route has a **deliberate guard: ISOLATED projects only** — *"on the
+shared project it would be a guess, so it is not attempted there."* §v963.36 made
+project REUSE the default, so a clip that does not declare otherwise gets a shared
+project and therefore no download-button delivery. Verified on the 2026-09-12 run:
+its clips carry no v965 contract at all, so `isolate_project` is absent.
+
+**So the worker needs no fix for this, and the missing piece is a DECLARATION:**
+`isolate_project: true` on the clip, which §v963.36 records the worker now actually
+obeys. That is the markdown-is-the-brain design working as specified — a clip that
+wants its render delivered by the only route that works on this host must ask for its
+own project.
+
+What remains genuinely open is narrower: the uuid binding miss itself (`workflows_seen=0`
+— the response listener saw no `batchexecute` at all on the 09-12 run, only recaptcha),
+and the fact that a shared-project clip whose render finished has NO delivery path and
+parks rather than saying so. Both are worth a rule of their own; neither is "the render
+is still going".
