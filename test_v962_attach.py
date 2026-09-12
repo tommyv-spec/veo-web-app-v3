@@ -145,3 +145,33 @@ def test_the_picker_upload_drives_the_add_media_menu():
         "it is a NATIVE chooser -- there is no input[type=file] to drive"
     assert "button:has-text('Upload media')" not in body, \
         "the dead caption must not come back"
+
+
+# --- v974: agent-off on the new host -----------------------------------------
+#
+# Copied from the operator's HAR (flow.google.com, 2026-09-08). The payload shape
+# is the whole trick, so guard it: a wrong index or a wrong enum silently leaves
+# Agent ON, which hides the Settings chip and fails every clip with
+# "Settings button not found" -- a symptom nobody traces back to here.
+
+
+def test_agent_off_payloads_match_the_har():
+    fw = _load()
+    calls = []
+
+    class _P:
+        url = "https://flow.google.com/project/abc"
+
+        def evaluate(self, _js, args=None):
+            calls.append(args)
+            return {"status": 200}
+
+    assert fw._v974_agent_off_batchexecute(_P(), "abc", "") is True
+    shapes = [(rpcid, inner) for rpcid, inner, _src in calls]
+    assert [s[0] for s in shapes] == ["DA4VGb", "DA4VGb", "Kcr7Ub", "Kcr7Ub"]
+    # user-level: the flag sits at index 11 / 12 and must be 0 (off)
+    assert shapes[0][1] == [[None] * 11 + [0], [["is_agent_mode_toggled"]]]
+    assert shapes[1][1] == [[None] * 12 + [0], [["is_chat_panel_open"]]]
+    # per-project: agent_toggle_state 2 == DISABLED (1 == ENABLED in the HAR)
+    assert shapes[3][1] == ["projects/abc", [None] * 4 + [2],
+                            [["agent_toggle_state"]]]

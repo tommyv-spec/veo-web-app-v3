@@ -1907,6 +1907,70 @@ def _fa_init_project_best_effort(page, project_id, context=""):
     return _verdict
 
 
+_V974_AGENT_OFF_JS = r"""async ([rpcid, inner, srcpath]) => {
+  const g = window.WIZ_global_data || {};
+  const at = g['SNlM0e'] || '';
+  if (!at) return {error: 'no xsrf token on the page'};
+  const freq = JSON.stringify([[[rpcid, JSON.stringify(inner), null, 'generic']]]);
+  const qs = new URLSearchParams({
+      rpcids: rpcid, 'source-path': srcpath, hl: 'en-US', rt: 'c',
+      _reqid: String(100000 + Math.floor(Math.random() * 899999))});
+  if (g['cfb2h']) qs.set('bl', g['cfb2h']);
+  if (g['FdrFJe']) qs.set('f.sid', g['FdrFJe']);
+  try {
+    const res = await fetch('/_/AiSandboxAngularFrontend/data/batchexecute?' + qs,
+      {method: 'POST', credentials: 'include',
+       headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
+       body: new URLSearchParams({'f.req': freq, at: at}).toString()});
+    return {status: res.status};
+  } catch (e) { return {error: String(e).slice(0, 120)}; }
+}"""
+
+
+def _v974_agent_off_batchexecute(page, project_id, prefix=""):
+    """Turn Agent mode off the way flow.google.com itself does it.
+
+    COPIED from the operator's HAR (flow.google.com, 2026-09-08), not derived.
+    The app uses neither of the two things this file used to try, and both of
+    those fail on this host -- measured 2026-09-12:
+
+      * `labs.google/fx/api/trpc/videoFx.updateUserSettings` -> NetworkError
+        (the frontend moved to flow.google.com on 09-06; labs.google is gone)
+      * `aisandbox-pa/v1/projects/<id>/agentInfo` PATCH -> AUTH DENIED, because
+        it needs a Bearer and this host is COOKIE-authed, so the token listener
+        has no `Bearer ya29.` request to sniff and the store stays empty.
+
+    What the app really does is four cookie-authed batchexecute POSTs. `DA4VGb`
+    writes the USER-level settings, `Kcr7Ub` writes the PER-PROJECT ones, and the
+    user-level one is the lever that matters -- without it every new project
+    opens in Agent mode again.
+
+    Proven 2026-09-12 on a fresh project: agent_composer 1 -> 0, chat 1 -> 0,
+    ingredient bar 0 -> 1, settings chip hidden -> VISIBLE.
+    """
+    srcpath = f"/project/{project_id}"
+    seq = (
+        ("DA4VGb", [[None] * 11 + [0], [["is_agent_mode_toggled"]]]),
+        ("DA4VGb", [[None] * 12 + [0], [["is_chat_panel_open"]]]),
+        ("Kcr7Ub", [f"projects/{project_id}", [], [["chat_panel_open"]]]),
+        ("Kcr7Ub", [f"projects/{project_id}", [None] * 4 + [2], [["agent_toggle_state"]]]),
+    )
+    ok = 0
+    for rpcid, inner in seq:
+        try:
+            res = page.evaluate(_V974_AGENT_OFF_JS, [rpcid, inner, srcpath])
+        except Exception as exc:
+            print(f"{prefix}[agent-off] {rpcid} raised: {type(exc).__name__}", flush=True)
+            continue
+        if isinstance(res, dict) and res.get("status") == 200:
+            ok += 1
+        else:
+            print(f"{prefix}[agent-off] {rpcid} -> {res}", flush=True)
+    print(f"{prefix}[agent-off] [v974] batchexecute agent-off: {ok}/{len(seq)} accepted",
+          flush=True)
+    return ok == len(seq)
+
+
 def force_agent_off(page, context=""):
     """Flow's AGENT mode replaces the editor with a chat panel, so the Settings
     (variant 'xN') gear vanishes — select_frames_to_video_mode can't configure the
@@ -1921,6 +1985,20 @@ def force_agent_off(page, context=""):
     try:
         _fa_attach_token_listener(page)  # idempotent
         print(f"{pfx}[agent-off] Settings gear missing → forcing Agent OFF (user-level + per-project)", flush=True)
+        # v974 — on flow.google.com the two calls below cannot work: labs.google
+        # is gone and the aisandbox PATCH needs a Bearer this cookie-authed host
+        # never emits. Use what the app itself does; if it lands, stop here.
+        if _v962_on_new_host(page):
+            _m = re.search(r'/project/([A-Za-z0-9_\-]+)', page.url or "")
+            if _m and _v974_agent_off_batchexecute(page, _m.group(1), pfx):
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=30000)
+                    time.sleep(3)
+                except Exception:
+                    pass
+                print(f"{pfx}[agent-off] reload done — editor should show the Settings gear",
+                      flush=True)
+                return True
         # 1. USER-LEVEL (account-wide) agent toggle — THE real lever. HAR-proven
         #    2026-06-23: manually flipping THIS is what makes the editor + Settings
         #    gear appear. The per-project agentInfo PATCH alone does NOT override the
