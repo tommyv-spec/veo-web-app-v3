@@ -10281,10 +10281,14 @@ class HumanPacer:
                                                 if not _already_redo:
                                                     _STUCK_REDO_FIRED.add(_key)
                                             if not _already_redo:
+                                                # v984 — this line used to promise a redo, 130
+                                                # lines before the update that performs it. It
+                                                # now reports what the gate is doing; the
+                                                # verdict is announced where it is decided.
                                                 print(
-                                                    f"[{self.account_name}] [v738] ❌ clip {_ci+1} stuck @{_age:.0f}s "
+                                                    f"[{self.account_name}] [v738] clip {_ci+1} stuck @{_age:.0f}s "
                                                     f">= {STUCK_REDO_THRESHOLD}s with no URL + no fail signal — "
-                                                    f"marking flow_redo_queued for submit-side resubmit",
+                                                    f"checking whether it is still rendering",
                                                     flush=True,
                                                 )
                                                 # v738-diag (TEMP) — before redoing, dump the WHOLE grid so we can
@@ -10418,16 +10422,71 @@ class HumanPacer:
                                                         except Exception as _rb_err:
                                                             print(f"[{self.account_name}] [v739b] rescue enqueue failed: {_rb_err}", flush=True)
                                                 if not _v739_rescued:
+                                                    # v984 — a BOUND MEDIA ID means this clip
+                                                    # reached Flow and the POST-JOB HARVEST owns
+                                                    # it. Do not redo it, and above all do not
+                                                    # pop it out of the pipeline.
+                                                    #
+                                                    # Measured 2026-09-13. batch6: clip 14912 was
+                                                    # submitted, bound to 019e075f + a28467b8 and
+                                                    # generating; this gate called it stuck at
+                                                    # 229s and popped it. Two minutes later the
+                                                    # post-job harvest delivered the three clips
+                                                    # it had NOT popped — in 32s, straight off the
+                                                    # media listing. 14912 was absent from that
+                                                    # harvest for exactly one reason: the pop,
+                                                    # because the harvest's pending set is
+                                                    # `set(clip_submit_times.keys())`. batch7
+                                                    # repeated it on 14916 and 14917.
+                                                    #
+                                                    # The "no URL" half of the verdict cannot
+                                                    # carry it on this host: it is read from
+                                                    # `[data-index]`, which does not exist here
+                                                    # (v963.19) — the diag line above already
+                                                    # printed `grid=[]`. It returns zero for a
+                                                    # healthy clip and a dead one alike, so no
+                                                    # threshold repairs it; 180s is shorter than
+                                                    # a render anyway.
+                                                    #
+                                                    # Holding loses no safety: the post-job path
+                                                    # makes the same call with a signal that
+                                                    # works and redoes a clip that really never
+                                                    # appeared, at its own 300s cap.
+                                                    #
+                                                    # Read HERE, not at the gate head. Bindings
+                                                    # arrive asynchronously (the measured case is
+                                                    # a LATE-BIND at 57s) and the rescue above can
+                                                    # spend 15s, so a value snapshotted earlier
+                                                    # would be stale exactly when a just-bound
+                                                    # clip needed it.
                                                     try:
-                                                        update_clip_status(
-                                                            _clip_obj['id'], 'flow_redo_queued',
-                                                            error_message=f"Stuck @{_age:.0f}s — no URL captured, no fail signal (v738 redo gate)"
+                                                        _v984_hold = bool(bound_media_ids_for_clip(job_id, _ci))
+                                                    except Exception:
+                                                        _v984_hold = False
+                                                    if _v984_hold:
+                                                        print(
+                                                            f"[{self.account_name}] [v984] clip {_ci+1} still rendering "
+                                                            f"at {_age:.0f}s — bound mediaId(s) present, no fail signal; "
+                                                            f"NOT redoing, the post-job media-listing harvest collects it",
+                                                            flush=True,
                                                         )
-                                                    except Exception as _redo_err:
-                                                        print(f"[{self.account_name}] [v738] failed to mark flow_redo_queued: {_redo_err}", flush=True)
-                                                    _dl_checked.add(_ci)
-                                                    # Remove from clip_submit_times so the scanner stops re-checking
-                                                    clip_submit_times.pop(_ci, None)
+                                                    else:
+                                                        print(
+                                                            f"[{self.account_name}] [v738] ❌ clip {_ci+1} stuck @{_age:.0f}s "
+                                                            f"— no URL, no fail signal and no bound mediaId — "
+                                                            f"marking flow_redo_queued for submit-side resubmit",
+                                                            flush=True,
+                                                        )
+                                                        try:
+                                                            update_clip_status(
+                                                                _clip_obj['id'], 'flow_redo_queued',
+                                                                error_message=f"Stuck @{_age:.0f}s — no URL captured, no fail signal (v738 redo gate)"
+                                                            )
+                                                        except Exception as _redo_err:
+                                                            print(f"[{self.account_name}] [v738] failed to mark flow_redo_queued: {_redo_err}", flush=True)
+                                                        _dl_checked.add(_ci)
+                                                        # Remove from clip_submit_times so the scanner stops re-checking
+                                                        clip_submit_times.pop(_ci, None)
                                     except Exception as _v738_err:
                                         print(f"[{self.account_name}] [v738] heartbeat/redo logic error: {_v738_err}", flush=True)
                         except Exception:
