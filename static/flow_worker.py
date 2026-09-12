@@ -2732,6 +2732,32 @@ def _scan_failure_reason(resp, url, buf_key=''):
         st = resp.status
     except Exception:
         return
+    # v976 — LEARN THE SIZES FIRST, before anything can return early.
+    #
+    # This used to live ~70 lines below, after `data = resp.json()` and after
+    # `if not _FAIL_MARKER_RE.search(blob): return`. Both are fatal here:
+    # batchexecute is NOT json (it is `)]}'` plus length-prefixed chunks) so
+    # resp.json() raises, and a HEALTHY response returns at the failure-marker
+    # gate. So sizes could only ever be learned from a FAILING response, and on
+    # this host not even then.
+    #
+    # What that cost: `media_sizes_for_clip()` stayed empty, so v963.35's
+    # byte-size match had nothing to match with, so the shared-project delivery
+    # guard (`if not _want and not _isolated: continue`) skipped every clip.
+    # Renders finished and NOTHING was ever delivered -- and it read as "the
+    # clip is still generating", because the platform status is the worker's
+    # opinion (v974.5). Measured 2026-09-12: `[v963.35] learned ...` appears
+    # ZERO times across four runs.
+    try:
+        _txt = resp.text() or ""
+        _learned = 0
+        for _rpc, _payload in _v963_batchexecute_frames(_txt):
+            _learned += _v963_note_media_sizes(_payload)
+        if _learned:
+            print(f"[v963.35] learned {_learned} finished media size(s); "
+                  f"{len(_V963_MEDIA_SIZES)} known", flush=True)
+    except Exception:
+        pass
     if st != 200:
         print(f"[fail-reason-diag] {ep} HTTP {st} buf={buf_key}", flush=True)
         # v898 TEMP DIAG (remove after the 403 cause is confirmed) — a 4xx on
