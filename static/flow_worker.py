@@ -2835,6 +2835,82 @@ _V963_UUID_RE = re.compile(
 _V963_BX_DUMP = os.path.expanduser("~/.kaveno/flow_batchexecute_submit.txt")
 
 
+def _v975_page_of(resp):
+    """The page a response belongs to, or None. Playwright exposes it as
+    resp.frame.page; a stub in a test may expose neither."""
+    try:
+        return resp.frame.page
+    except Exception:
+        return None
+
+
+def _v975_body_carries_prompt(page, req_body):
+    """True when this request body carries the prompt the worker last typed.
+
+    The rename-proof half of submit detection, and the reason it exists: on
+    2026-09-12 Flow's submit rpcid moved from MZZa6b to eb1hJf, the name-gate
+    stopped matching, no uuid bound, and every clip rendered while NOT ONE was
+    delivered. A list of names only postpones the next rename. The prompt is
+    ours -- `_v962_type_prompt` stashes a slice on the page -- and nothing else
+    the app posts repeats it.
+
+    Conservative: no page, no probe, or a probe too short to be distinctive
+    returns False and the caller falls back to the known-name list.
+    """
+    try:
+        probe = (getattr(page, "_v975_prompt_probe", "") or "").strip()
+    except Exception:
+        return False
+    if len(probe) < 12:
+        return False
+    if probe in (req_body or ""):
+        return True
+
+    # The payload is JSON inside a form-encoded body, so the prompt arrives
+    # escaped. Compare with the punctuation and escaping removed rather than
+    # guessing at the exact encoding.
+    # Percent-decode FIRST. Stripping non-alphanumerics from a raw
+    # percent-encoded body injects the hex digits themselves ('%2C' -> '2c')
+    # straight into the middle of the text, so the probe stops matching.
+    # Caught by test_the_prompt_match_survives_json_escaping.
+    from urllib.parse import unquote_plus
+
+    def _flat(s):
+        try:
+            s = unquote_plus(s or "")
+        except Exception:
+            s = s or ""
+        return "".join(ch for ch in s.lower() if ch.isalnum())
+
+    flat = _flat(probe)
+    return len(flat) >= 12 and flat in _flat(req_body)
+
+
+def _v975_clear_overlays(page, tries=4):
+    """Press Escape until no cdk overlay pane is left, bounded.
+
+    One blind Escape was not enough: on 2026-09-12 clip 2 of a 2-clip run failed
+    with `Add media menu ... Locator.click: Timeout 8000ms exceeded`, because the
+    previous clip's asset picker was still covering the page and intercepting the
+    click. Wait for the pane to actually go instead of assuming it went.
+    """
+    for _ in range(tries):
+        try:
+            if page.locator(".cdk-overlay-container .cdk-overlay-pane").count() == 0:
+                return True
+        except Exception:
+            return True
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            return False
+        time.sleep(0.8)
+    try:
+        return page.locator(".cdk-overlay-container .cdk-overlay-pane").count() == 0
+    except Exception:
+        return False
+
+
 def _v963_batchexecute_submit_data(resp, url):
     """A flow.google.com submit response, in the shape the v700 binder expects.
 
@@ -2873,7 +2949,12 @@ def _v963_batchexecute_submit_data(resp, url):
         except Exception:
             req_body = ""
         if not any(r in url or r in req_body for r in _V963_SUBMIT_RPCIDS):
-            return None
+            # v975 — a KNOWN name is a fast path, not the identity. Fall back
+            # to content: the submit is the batchexecute POST carrying the
+            # prompt this clip just typed. That survives a rename; a list of
+            # names does not, which is exactly what broke on 2026-09-12.
+            if not _v975_body_carries_prompt(_v975_page_of(resp), req_body):
+                return None
         if resp.status != 200:
             return None
         body = resp.text() or ""
@@ -10672,18 +10753,21 @@ def _v962_pick_asset_in_picker(page, image_path, prefix="", which="start"):
         #   * the picker overlay covers the menu, so the picker is closed first
         #     and the slot re-opened after — the 60s wait below then finds the
         #     new asset with the search that was already here.
-        try:
-            page.keyboard.press("Escape")
-            time.sleep(1.0)
-        except Exception:
-            pass
+        # v975 — the picker overlay covers the Add-media button, so wait for it
+        # to GO rather than pressing Escape once and hoping. One blind Escape
+        # is why clip 2 of a 2-clip run failed with a click timeout here.
+        _v975_clear_overlays(page)
         try:
             with page.expect_file_chooser(timeout=20000) as fc:
                 page.locator("button[aria-label='Add media menu']").first.click(timeout=8000)
                 time.sleep(1.5)
+                # v975 — match the mat-icon LIGATURE, not the English label.
+                # The item renders as "uploadUpload": ligature + label. The
+                # ligature is identical in every locale; the label is not, and
+                # has_text matches a substring, so lowercase "upload" hits it.
                 page.locator(".cdk-overlay-container [role='menuitem'], "
                              ".cdk-overlay-container button"
-                             ).filter(has_text="Upload").first.click(timeout=8000)
+                             ).filter(has_text="upload").first.click(timeout=8000)
             fc.value.set_files(image_path)
             print(f"{prefix}[v974] uploaded {name} through Flow's Add-media chooser", flush=True)
         except Exception as e:
@@ -10807,6 +10891,13 @@ def _v962_attach_frame(page, image_path, which="start", prefix=""):
 
 
 def _v962_type_prompt(page, prompt, prefix=""):
+    # v975 — remember a slice of this prompt so the submit RESPONSE can be
+    # recognised by CONTENT rather than by rpcid name. See
+    # _v975_body_carries_prompt for why a name list is not enough.
+    try:
+        page._v975_prompt_probe = (prompt or "")[:48]
+    except Exception:
+        pass
     """Type the prompt into the rich-text editor. True when the text landed."""
     ed = page.locator(_V962_PROMPT_EDITOR).first
     ed.wait_for(state="visible", timeout=15000)

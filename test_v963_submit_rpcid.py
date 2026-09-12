@@ -111,3 +111,69 @@ def test_a_non_batchexecute_url_is_ignored():
     fw = _load()
     resp = _Resp("https://flow.google.com/project/abc", _wire("eb1hJf", OUT))
     assert fw._v963_batchexecute_submit_data(resp, resp.url) is None
+
+
+# --- v975: the submit is recognised by CONTENT, so a rename cannot kill it ----
+
+
+class _Frame:
+    def __init__(self, page):
+        self.page = page
+
+
+class _PageWithProbe:
+    def __init__(self, probe):
+        self._v975_prompt_probe = probe
+
+
+class _RespWithPage(_Resp):
+    def __init__(self, url, body, req_body="", status=200, probe=None):
+        super().__init__(url, body, req_body=req_body, status=status)
+        self.frame = _Frame(_PageWithProbe(probe)) if probe is not None else None
+
+
+PROMPT = "The main AI generated character says, hello there"
+
+
+def test_an_unknown_rpcid_still_binds_when_the_body_carries_the_prompt():
+    """The whole point: Google renames the rpcid, and delivery keeps working.
+
+    This is the regression that cost the day -- MZZa6b -> eb1hJf silently killed
+    the uuid binding, so every clip rendered and none was delivered.
+    """
+    fw = _load()
+    body = _wire("brandNewName", OUT)
+    req = f'f.req=[["brandNewName","{PROMPT}"]]&at=x&{IN_}'
+    resp = _RespWithPage(_url("brandNewName"), body, req_body=req, probe=PROMPT)
+    data = fw._v963_batchexecute_submit_data(resp, resp.url)
+    assert data is not None, "a renamed rpcid must still bind via the prompt"
+    assert OUT in json.dumps(data).lower()
+
+
+def test_the_prompt_match_survives_json_escaping():
+    """The prompt arrives escaped inside a form-encoded body, so the comparison
+    is made with punctuation and escaping stripped."""
+    fw = _load()
+    escaped = PROMPT.replace(" ", "+").replace(",", "%2C")
+    req = f'f.req=[["x","{escaped}"]]&{IN_}'
+    resp = _RespWithPage(_url("anotherName"), _wire("anotherName", OUT),
+                         req_body=req, probe=PROMPT)
+    assert fw._v963_batchexecute_submit_data(resp, resp.url) is not None
+
+
+def test_a_body_without_the_prompt_is_not_a_submit():
+    """An upload or a status poll must never be mistaken for the submit -- that
+    would bind the wrong uuid and attribute a download to the wrong clip."""
+    fw = _load()
+    resp = _RespWithPage(_url("someOther"), _wire("someOther", OUT),
+                         req_body=f'f.req=[["someOther","unrelated"]]&{IN_}',
+                         probe=PROMPT)
+    assert fw._v963_batchexecute_submit_data(resp, resp.url) is None
+
+
+def test_a_too_short_probe_is_refused():
+    """A short prompt is not distinctive enough to identify a request by."""
+    fw = _load()
+    resp = _RespWithPage(_url("someOther"), _wire("someOther", OUT),
+                         req_body="hi", probe="hi")
+    assert fw._v963_batchexecute_submit_data(resp, resp.url) is None
