@@ -10339,7 +10339,64 @@ def _v962_clear_frame_bar(page, prefix=""):
         print(f"{prefix}⚠ [v962.7] clearing the frames bar: {str(e)[:80]}", flush=True)
 
 
-def _v962_upload_into_picker(page, image_path, prefix=""):
+def _v962_upload_via_add_media_menu(page, image_path, which="start", prefix=""):
+    """Put an image into the project through Flow's own Add-media menu.
+
+    MEASURED 2026-09-12, and it is the ONLY route on flow.google.com that works.
+    Everything else was tested and is dead:
+
+      * a synthesised DataTransfer drop fires Flow's uploader on NO element --
+        15 candidates, each tested in isolation with a reload between;
+      * there is no `input[type=file]` anywhere in the document, so the legacy
+        route-1 cannot fire;
+      * `flow-composer`, the target the old code tried FIRST, does not exist at
+        all -- it appears once in this whole file and was never validated.
+
+    What does work: `Add media menu` opens a menu whose first item is Upload, and
+    clicking it raises a NATIVE file chooser. There is no in-page input to drive,
+    which is exactly why a scan that counts file inputs sees nothing and concludes
+    wrongly. Handing that chooser the file puts the asset into the project in
+    about ten seconds -- proven by counting project media tiles 0 -> 2 in a fresh
+    project.
+
+    The frame picker is OPEN when this is reached and it covers the page, so the
+    picker is closed first and the slot re-opened afterwards; the caller then
+    finds the new asset with its normal search.
+    """
+    name = os.path.basename(image_path)
+    if not (image_path and os.path.isfile(image_path)):
+        print(f"{prefix}⚠ [v974] no file to upload at {image_path}", flush=True)
+        return False
+    try:
+        page.keyboard.press("Escape")       # the picker overlay covers the menu
+        time.sleep(1.0)
+    except Exception:
+        pass
+    try:
+        with page.expect_file_chooser(timeout=20000) as fc:
+            page.locator("button[aria-label='Add media menu']").first.click(timeout=10000)
+            time.sleep(2.0)
+            page.locator(".cdk-overlay-container button, "
+                         ".cdk-overlay-container [role='menuitem']"
+                         ).filter(has_text="Upload").first.click(timeout=8000)
+        fc.value.set_files(image_path)
+        print(f"{prefix}✓ [v974] {name} handed to Flow's upload chooser", flush=True)
+    except Exception as exc:
+        print(f"{prefix}⚠ [v974] Add-media upload failed: "
+              f"{type(exc).__name__}: {str(exc)[:110]}", flush=True)
+        return False
+    time.sleep(8.0)                         # measured: the asset lands in ~10s
+    try:
+        page.locator(_V962_FRAME_SLOT[which]).first.click(timeout=12000)
+        time.sleep(2.5)
+    except Exception as exc:
+        print(f"{prefix}⚠ [v974] uploaded but could not re-open the {which} "
+              f"picker: {str(exc)[:80]}", flush=True)
+        return False
+    return True
+
+
+def _v962_upload_into_picker(page, image_path, prefix="", which="start"):
     """Get `image_path` into the open Flow asset picker. True if a route ran.
 
     Route 1 — a real file input. Preferred, and the one the legacy Ingredients
@@ -10360,6 +10417,12 @@ def _v962_upload_into_picker(page, image_path, prefix=""):
         if not (image_path and os.path.isfile(image_path)):
             print(f"{prefix}⚠ [v962.9] no file to upload at {image_path}", flush=True)
             return False
+
+        # v974 (2026-09-12) -- the MEASURED route goes first. Both routes
+        # below were proven dead on flow.google.com; this one was proven
+        # alive (project media 0 -> 2 in a fresh project).
+        if _v962_upload_via_add_media_menu(page, image_path, which, prefix):
+            return True
 
         inputs = page.locator("input[type='file']")
         if inputs.count():
@@ -10435,7 +10498,7 @@ def _v962_upload_into_picker(page, image_path, prefix=""):
         return False
 
 
-def _v962_pick_asset_in_picker(page, image_path, prefix=""):
+def _v962_pick_asset_in_picker(page, image_path, prefix="", which="start"):
     """Inside the open picker: click the option named like the file, or upload the
     file through 'Upload media' (a real file chooser) and then click it."""
     name = os.path.basename(image_path)
@@ -10535,7 +10598,7 @@ def _v962_pick_asset_in_picker(page, image_path, prefix=""):
         #      EVENT times out in these dialogs while the input itself works;
         #   2. failing that, hand the bytes to the drop target as a DataTransfer,
         #      which is how an uploader with no input accepts a file.
-        if _v962_upload_into_picker(page, image_path, prefix):
+        if _v962_upload_into_picker(page, image_path, prefix, which):
             deadline = time.time() + 60
             while time.time() < deadline and opt is None:
                 time.sleep(1.5)
@@ -10647,7 +10710,7 @@ def _v962_attach_frame(page, image_path, which="start", prefix=""):
         except Exception as _de:
             print(f"{prefix}[v962.7-diag] shape probe failed: {type(_de).__name__}", flush=True)
         return False
-    if not _v962_pick_asset_in_picker(page, image_path, prefix):
+    if not _v962_pick_asset_in_picker(page, image_path, prefix, which):
         try:
             page.keyboard.press("Escape")
         except Exception:
