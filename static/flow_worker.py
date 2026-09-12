@@ -2812,7 +2812,24 @@ def _scan_failure_reason(resp, url, buf_key=''):
         print(f"[v800] status feed failed (non-fatal): {_e}", flush=True)
 
 
-_V963_SUBMIT_RPCID = "MZZa6b"   # measured 2026-09-08 from a real Generate click
+# Every rpcid Flow has used for the Generate submit, newest first. MEASURED,
+# never guessed: each was read off a real Generate click in
+# `flow_api_capture.jsonl` by finding the POST whose body carries the clip's
+# PROMPT. Google renames these without warning -- `MZZa6b` was correct on
+# 2026-09-08 and was gone by 2026-09-12, and because the binder gated on that
+# one name it silently stopped binding: "no submit response captured within
+# 40s" on submits that had worked, then no uuid to attribute a download to, so
+# every clip rendered and none was ever delivered.
+#
+# Add a new one to the FRONT when the capture shows a prompt-carrying POST
+# under an unknown rpcid. Keeping the old ones costs nothing: the parser still
+# has to find the payload AND subtract the request uuids, so a stale name
+# matches nothing rather than binding something wrong.
+_V963_SUBMIT_RPCIDS = (
+    "eb1hJf",   # measured 2026-09-12 — body carries the clip prompt
+    "MZZa6b",   # measured 2026-09-08 from a real Generate click
+)
+_V963_SUBMIT_RPCID = _V963_SUBMIT_RPCIDS[0]   # for logs and dumps only
 _V963_UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 _V963_BX_DUMP = os.path.expanduser("~/.kaveno/flow_batchexecute_submit.txt")
@@ -2855,7 +2872,7 @@ def _v963_batchexecute_submit_data(resp, url):
             req_body = resp.request.post_data or ""
         except Exception:
             req_body = ""
-        if _V963_SUBMIT_RPCID not in url and _V963_SUBMIT_RPCID not in req_body:
+        if not any(r in url or r in req_body for r in _V963_SUBMIT_RPCIDS):
             return None
         if resp.status != 200:
             return None
