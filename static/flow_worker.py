@@ -8062,6 +8062,43 @@ class _V977EvalTimeout(Exception):
     """
 
 
+def _v981_nudge_tiles(page):
+    """Scroll the grid so Flow renders every tile -- legacy host only.
+
+    On flow.google.com this is a no-op, for two measured reasons:
+
+      * it is THE call that parks the lane. Traced 2026-09-12 with both
+        instruments verified on: 119 page calls, one unclosed, this one. Its
+        `_v977_eval` bound cannot help, because that bound is a `setTimeout`
+        inside the page and a wedged renderer never runs it.
+      * it serves `scan_tiles_for_policy_failures`, which reads `[data-index]`
+        and `[data-tile-id]`. Both are absent here
+        (`document.querySelectorAll('[data-index]').length === 0`, v963.19), so
+        the scan returns nothing whether the tiles are rendered or not.
+
+    Delivery does not need it either: on that same run the media listing reached
+    62 known uuid->mp4 URLs while this call was hung, because the listing is a
+    batchexecute response and owes nothing to the viewport.
+
+    The legacy host keeps it: `[data-index]` exists there and position
+    attribution still applies, so the policy scan really does need rendered
+    tiles. Do not simplify this into an unconditional return.
+    """
+    try:
+        if _v962_on_new_host(page):
+            return False
+    except Exception:
+        # Cannot tell which host: behave like legacy, which is the side that
+        # needs the scroll. A pointless scroll is cheaper than a missed policy
+        # failure.
+        pass
+    _v977_eval(page, "() => window.scrollTo(0, document.body.scrollHeight)")
+    time.sleep(1)
+    _v977_eval(page, "() => window.scrollTo(0, 0)")
+    time.sleep(1)
+    return True
+
+
 def _v977_eval(page, js, arg=None, timeout_ms=None, default=_V977_RAISE):
     """Evaluate `js` in the page with a REAL, enforced deadline.
 
@@ -26241,6 +26278,13 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
     except Exception as _le:
         print(f"[v900] listener install skipped: {_le}", flush=True)
 
+    # No-op unless FLOW_TRACE_PAGE=1. Missing from HEAD until now, and its
+    # absence produced a false negative that cost several hours: a run reported
+    # "no unclosed calls" while tracing nothing at all, which read as "the page
+    # methods are innocent". An instrument that is off looks exactly like an
+    # instrument that found nothing.
+    trace_page_calls(page, label="[firstgen]")
+
     job_id = job['id']
     clips = job['clips']
 
@@ -26771,14 +26815,9 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             ensure_videos_tab_selected(page)
                             # Scroll down to force virtualized tiles to render
                             try:
-                                # v977 — bounded. This exact call parked the
-                                # lane on 2026-09-12 once _uuid_video_ready was
-                                # bounded: the park hops to whatever is still
-                                # unbounded.
-                                _v977_eval(page, "() => window.scrollTo(0, document.body.scrollHeight)")
-                                time.sleep(2)
-                                _v977_eval(page, "() => window.scrollTo(0, 0)")
-                                time.sleep(1)
+                                # v981 — no-op on flow.google.com; see
+                                # _v981_nudge_tiles. Same call, same park.
+                                _v981_nudge_tiles(page)
                             except Exception:
                                 pass
                         except Exception as _rl:
@@ -29406,11 +29445,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         ensure_videos_tab_selected(page)
                         # Scroll down then back up to force Flow to render all tiles
                         try:
-                            # v977 — bounded, same reason as the other scroll pair.
-                            _v977_eval(page, "() => window.scrollTo(0, document.body.scrollHeight)")
-                            time.sleep(1)
-                            _v977_eval(page, "() => window.scrollTo(0, 0)")
-                            time.sleep(1)
+                            # v981 — no-op on flow.google.com. This is the call
+                            # that parked the lane (traced 2026-09-12, the only
+                            # unclosed call in 119), and it serves a tile scan
+                            # whose attributes do not exist on this host.
+                            _v981_nudge_tiles(page)
                         except Exception:
                             pass
                         _last_reload = time.time()
