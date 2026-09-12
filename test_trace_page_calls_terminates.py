@@ -203,8 +203,22 @@ def test_a_timeout_returns_the_default():
     assert fw._v977_eval(page, "() => 1", default="unasked") == "unasked"
 
 
-def test_a_raising_evaluate_returns_the_default_instead_of_propagating():
-    """A destroyed context must not take the lane down with it."""
+def test_a_raising_evaluate_PROPAGATES(monkeypatch):
+    """This test used to assert the opposite, and it was wrong.
+
+    It read "a destroyed context must not take the lane down with it" and
+    asserted that `_v977_eval` swallowed the error and returned `default`. That
+    encoded the bug: 60 of the 62 call sites have an `except` that handles a
+    failed evaluate — logging, falling back to another selector, marking a clip
+    failed — and swallowing here disables all 60 silently.
+
+    A failure must propagate exactly as `page.evaluate` propagates it today.
+    Only a TIMEOUT is the new behaviour, and it raises `_V977EvalTimeout`, which
+    those same handlers catch. See code/test_v977_bounded_eval.py.
+    """
+    import pytest
+
     fw = _load()
     page = _EvalPage(None, raise_exc=RuntimeError("Execution context was destroyed"))
-    assert fw._v977_eval(page, "() => 1", default="unasked") == "unasked"
+    with pytest.raises(RuntimeError):
+        fw._v977_eval(page, "() => 1", default="unasked")

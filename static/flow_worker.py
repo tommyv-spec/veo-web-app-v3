@@ -992,7 +992,7 @@ def flow_ui_probe(page, event):
     if (os.environ.get("FLOW_UI_DIAGNOSTIC") or "").strip() != "1":
         return
     try:
-        controls = page.evaluate("""() => [...document.querySelectorAll('button,a,[role="button"]')]
+        controls = _v977_eval(page, """() => [...document.querySelectorAll('button,a,[role="button"]')]
             .filter(el => {
                 const r = el.getBoundingClientRect();
                 const s = getComputedStyle(el);
@@ -1610,7 +1610,7 @@ def _fa_attach_token_listener(page):
                     # Operator's console snippets can now read window.__faSniff.bearer
                     # directly — no manual copy from Network tab needed.
                     try:
-                        page.evaluate(
+                        _v977_eval(page, 
                             "(t) => { window.__faSniff = window.__faSniff || {}; window.__faSniff.bearer = t; }",
                             tok,
                         )
@@ -2293,7 +2293,10 @@ def _v974_agent_off_batchexecute(page, project_id, prefix=""):
     ok = 0
     for rpcid, inner in seq:
         try:
-            res = page.evaluate(_V974_AGENT_OFF_JS, [rpcid, inner, srcpath])
+            res = _v977_eval(page, _V974_AGENT_OFF_JS,
+                         [rpcid, inner, srcpath],
+                         timeout_ms=_V977_NET_EVAL_TIMEOUT_MS,
+                         default=None)
         except Exception as exc:
             print(f"{prefix}[agent-off] {rpcid} raised: {type(exc).__name__}", flush=True)
             continue
@@ -2527,7 +2530,7 @@ def _fa_spa_navigate_to_project(page, pid, context=""):
 
     # Approach 1: Next.js router.push (preserves all SPA state).
     try:
-        result = page.evaluate(
+        result = _v977_eval(page, 
             """
             (target) => {
               try {
@@ -2555,7 +2558,7 @@ def _fa_spa_navigate_to_project(page, pid, context=""):
 
     # Approach 2: history.pushState + popstate.
     try:
-        page.evaluate(
+        _v977_eval(page, 
             """
             (target) => {
               window.history.pushState({}, '', target);
@@ -3010,7 +3013,7 @@ def resolve_clip_download_urls(page, job_id, clip_index, dialogue_key, captured_
     if not dialogue_key:
         return []
     try:
-        urls = page.evaluate(f"""() => {{
+        urls = _v977_eval(page, f"""() => {{
             for (const c of document.querySelectorAll('[data-index]')) {{
                 if ((c.innerText||'').includes({repr(dialogue_key)})) {{
                     const out = [];
@@ -4373,7 +4376,7 @@ def defocus_chrome(page, label=""):
     """
     # DOM-level blur (portable across OSes)
     try:
-        page.evaluate("window.blur()")
+        _v977_eval(page, "window.blur()")
     except Exception:
         pass
     # OS-level: send to back (Windows only). v685 — DO NOT call
@@ -5563,7 +5566,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
                 print(f"[{label}] ⚠ No entry button found ({_consecutive_no_buttons}x) — waiting for page to settle...", flush=True)
                 # DIAG (remove after login-loop fix verified): dump visible button/link text
                 try:
-                    btn_texts = page.evaluate(
+                    btn_texts = _v977_eval(page, 
                         "() => Array.from(document.querySelectorAll('button, a'))"
                         ".filter(e => e.offsetParent !== null)"
                         ".map(e => (e.innerText || e.textContent || '').trim())"
@@ -5689,7 +5692,7 @@ def check_ultra_account(page, label="", timeout=5):
         _poll = max(timeout, 12)
         for _round in range(2):
             for _ in range(_poll):
-                if page.evaluate(_ULTRA_BADGE_JS):
+                if _v977_eval(page, _ULTRA_BADGE_JS):
                     _ULTRA_VERIFIED.add(label)
                     print(f"{prefix}✓ Account verified: ULTRA", flush=True)
                     return True
@@ -5725,7 +5728,7 @@ def check_ultra_account(page, label="", timeout=5):
                 page.reload(wait_until="domcontentloaded", timeout=30000)
                 time.sleep(3)
                 for _ in range(10):
-                    if page.evaluate(_ULTRA_BADGE_JS):
+                    if _v977_eval(page, _ULTRA_BADGE_JS):
                         print(f"{prefix}✓ ULTRA re-confirmed after reload", flush=True)
                         return True
                     time.sleep(1)
@@ -5764,7 +5767,7 @@ def check_ultra_account(page, label="", timeout=5):
         # DIAG (remove after ULTRA detection verified): dump any element text
         # mentioning "ultra" + the page URL, so we can see the real badge markup.
         try:
-            ultra_diag = page.evaluate("""() => {
+            ultra_diag = _v977_eval(page, """() => {
                 const hits = [];
                 for (const el of document.querySelectorAll('div, span, button, a, p')) {
                     const t = (el.textContent || '').trim();
@@ -5912,7 +5915,7 @@ def spa_navigate_to_flow_home(page, label=""):
         # v962.2 — the path depends on the host the page is on; the old
         # literal rendered the new SPA's 404 page (see flow_home_path).
         _home_path = flow_home_path(page)
-        result = page.evaluate(r"""(target) => {
+        result = _v977_eval(page, r"""(target) => {
             if (window.next && window.next.router) {
                 window.next.router.push(target);
                 return 'next_router';
@@ -8034,7 +8037,32 @@ def _construct_media_url(uuid):
     return f"{FLOW_MEDIA_ORIGIN}/fx/api/trpc/media.getMediaUrlRedirect?name={uuid}"
 
 
-def _v977_eval(page, js, arg=None, timeout_ms=10000, default=None):
+# v977 -- budgets for in-page evaluation, and the sentinel that tells
+# "no default was given" apart from "the default is None".
+#
+# Two budgets because the calls are not alike. 61 of the 62 converted sites are
+# ordinary DOM reads where 10s is already generous. ONE posts to Google from
+# inside the page (_V974_AGENT_OFF_JS, the agent-off batchexecute call) and its
+# JS is a CONSTANT, so an inline scan of the call site cannot see the `await
+# fetch` -- which is how it nearly got the DOM-read budget and a slow network
+# would have become a false timeout on the gate the whole settings path needs.
+_V977_EVAL_TIMEOUT_MS = float(os.environ.get("FLOW_EVAL_TIMEOUT_MS") or 10000)
+_V977_NET_EVAL_TIMEOUT_MS = float(os.environ.get("FLOW_NET_EVAL_TIMEOUT_MS") or 30000)
+
+_V977_RAISE = object()
+
+
+class _V977EvalTimeout(Exception):
+    """An in-page call did not answer inside its budget.
+
+    Raised rather than returned, so the caller's existing `except` handles it
+    the same way it already handles a failed `page.evaluate`. A timeout IS a
+    failure; treating it as a value is what would have silently disabled the
+    error branch at 60 of 62 call sites.
+    """
+
+
+def _v977_eval(page, js, arg=None, timeout_ms=None, default=_V977_RAISE):
     """Evaluate `js` in the page with a REAL, enforced deadline.
 
     `page.evaluate` has no timeout, so a wedged renderer or a destroyed JS
@@ -8058,27 +8086,35 @@ def _v977_eval(page, js, arg=None, timeout_ms=10000, default=None):
     not take the lane down with it. Callers that need to distinguish "false"
     from "could not ask" should pass a sentinel as `default`.
     """
+    _budget = int(_V977_EVAL_TIMEOUT_MS if timeout_ms is None else timeout_ms)
     _wrapped = (
         "async (a) => {"
         "  const __f = (" + js + ");"
         "  const __run = (async () => ({ v: await ("
         "      typeof __f === 'function' ? __f(a) : __f) }))();"
         "  const __to = new Promise(r => setTimeout("
-        "      () => r({ __v977_timeout: true }), " + str(int(timeout_ms)) + "));"
+        "      () => r({ __v977_timeout: true }), " + str(_budget) + "));"
         "  return await Promise.race([__run, __to]);"
         "}"
     )
-    try:
-        _res = page.evaluate(_wrapped, arg) or {}
-    except Exception:
-        return default
+    # NOT wrapped in a try. A JS error, a destroyed context or a protocol error
+    # must propagate exactly as `page.evaluate` propagates it today, because 60
+    # of the 62 call sites have an `except` that handles precisely that and
+    # swallowing it here would silently disable all 60.
+    _res = page.evaluate(_wrapped, arg) or {}
     if _res.get("__v977_timeout"):
-        # Loud on purpose. A silent default here is exactly what made the
-        # original bug read as "the clip is still generating".
-        print(f"[v977] in-page call exceeded {timeout_ms}ms and was abandoned: "
+        # Loud on purpose. A silent default is what made the original bug read
+        # as "the clip is still generating".
+        print(f"[v977] in-page call exceeded {_budget}ms and was abandoned: "
               f"{js[:70]}", flush=True)
+        if default is _V977_RAISE:
+            # A timeout IS a failure, so it raises and the caller's existing
+            # handler runs. Only a caller that explicitly passed `default` gets
+            # a value back.
+            raise _V977EvalTimeout(
+                f"in-page call exceeded {_budget}ms: {js[:70]}")
         return default
-    return _res.get("v", default)
+    return _res.get("v", None if default is _V977_RAISE else default)
 
 
 # Driver-side budget for the in-page media-readiness probe, ABOVE the 8s
@@ -8529,7 +8565,7 @@ def tile_text_is_prominent(page, data_index):
     if page is None or data_index is None or data_index < 0:
         return False
     try:
-        return bool(page.evaluate("""(idx) => {
+        return bool(_v977_eval(page, """(idx) => {
             const c = document.querySelector('[data-index="' + idx + '"]');
             if (!c) return false;
             return (c.textContent || '').toLowerCase().includes('prominent');
@@ -8558,7 +8594,7 @@ def tile_text_terminal_reason(page, data_index):
     if page is None or data_index is None or data_index < 0:
         return None
     try:
-        txt = page.evaluate("""(idx) => {
+        txt = _v977_eval(page, """(idx) => {
             const c = document.querySelector('[data-index="' + idx + '"]');
             if (!c) return '';
             return (c.textContent || '').toLowerCase();
@@ -8929,7 +8965,7 @@ def clear_flow_site_data(page, label=""):
             # until a golden restore bails it out (also caused the v758.22
             # false "NOT ULTRA"). The "unusual activity" block lives in the
             # cookies (cleared above), not in the app's local storage.
-            page.evaluate("""async () => {
+            _v977_eval(page, """async () => {
                 try {
                     if (window.caches) {
                         const ks = await caches.keys();
@@ -9911,7 +9947,7 @@ class HumanPacer:
                             _dl_checked.add(_ci)
                             continue
                         try:
-                            _urls = page.evaluate(f"""() => {{
+                            _urls = _v977_eval(page, f"""() => {{
                                 const c = document.querySelector('[data-index="{_data_idx}"]');
                                 if (!c) return [];
                                 const urls = [];
@@ -9933,7 +9969,7 @@ class HumanPacer:
                                 # v663: same data-index lookup as URL extraction
                                 # (was: dialogue-substring match on all tiles).
                                 try:
-                                    _fail_info = page.evaluate(f"""() => {{
+                                    _fail_info = _v977_eval(page, f"""() => {{
                                         const c = document.querySelector('[data-index="{_data_idx}"]');
                                         if (!c) return null;
                                         const icons = Array.from(c.querySelectorAll('i')).map(i => i.textContent.trim());
@@ -9966,7 +10002,7 @@ class HumanPacer:
                                         _rv_rendering = False
                                         for _rv in range(15):
                                             time.sleep(1)
-                                            _rv_urls = page.evaluate(f"""() => {{
+                                            _rv_urls = _v977_eval(page, f"""() => {{
                                                 const c = document.querySelector('[data-index="{_data_idx}"]');
                                                 if (!c) return [];
                                                 const urls = [];
@@ -10044,7 +10080,7 @@ class HumanPacer:
                                                     # tiles never say "violate...policies",
                                                     # so they fell into the blind hard-fail
                                                     # redo lane (job e03e939c clip 1).
-                                                    _pk = page.evaluate(f"""() => {{
+                                                    _pk = _v977_eval(page, f"""() => {{
                                                         const c = document.querySelector('[data-index="{_data_idx}"]');
                                                         if (!c) return {{policy:false, prominent:false, rai:false}};
                                                         const t = (c.textContent || '').toLowerCase();
@@ -10087,7 +10123,7 @@ class HumanPacer:
                                         # Transient failure — retry in-place via Reuse Prompt.
                                         # v663: data-index lookup (was: dialogue match).
                                         print(f"[{self.account_name}] ⚠ Between-clip: clip {_ci+1} tile failed — clicking Reuse Prompt to retry in-place...", flush=True)
-                                        _reused = page.evaluate(f"""() => {{
+                                        _reused = _v977_eval(page, f"""() => {{
                                             const c = document.querySelector('[data-index="{_data_idx}"]');
                                             if (!c) return false;
                                             const btn = Array.from(c.querySelectorAll('button')).find(b =>
@@ -10143,7 +10179,7 @@ class HumanPacer:
                                                 _STUCK_HEARTBEAT_BUCKETS[_key] = _bucket
                                             # Probe what we know about this clip's tile state
                                             try:
-                                                _diag = page.evaluate(f"""() => {{
+                                                _diag = _v977_eval(page, f"""() => {{
                                                     const c = document.querySelector('[data-index="{_data_idx}"]');
                                                     if (!c) return {{exists: false}};
                                                     const icons = Array.from(c.querySelectorAll('i')).map(i => i.textContent.trim());
@@ -10192,7 +10228,7 @@ class HumanPacer:
                                                 # the bound primaryMediaId(s) so we can test whether tile data-tile-id
                                                 # == mediaId (→ enables locate-by-id fix). Remove after evidence lands.
                                                 try:
-                                                    _v738diag_grid = page.evaluate("""() => {
+                                                    _v738diag_grid = _v977_eval(page, """() => {
                                                         const out = [];
                                                         document.querySelectorAll('[data-index]').forEach(c => {
                                                             const di = c.getAttribute('data-index');
@@ -10244,7 +10280,7 @@ class HumanPacer:
                                                 _v739_rescued = False
                                                 if _v738diag_bound:
                                                     try:
-                                                        _v739_srcs = page.evaluate("""() => {
+                                                        _v739_srcs = _v977_eval(page, """() => {
                                                             const out = [];
                                                             document.querySelectorAll('video').forEach(v => {
                                                                 const u = v.src || ((v.querySelector('source')||{}).src) || '';
@@ -10285,7 +10321,7 @@ class HumanPacer:
                                                 if not _v739_rescued:
                                                     try:
                                                         _dlg2 = (_clip_obj.get('dialogue_text') or '')[:20]
-                                                        _v739b = page.evaluate(f"""() => {{
+                                                        _v739b = _v977_eval(page, f"""() => {{
                                                             for (const c of document.querySelectorAll('[data-index]')) {{
                                                                 if ({repr(_dlg2)} && (c.innerText||'').includes({repr(_dlg2)})) {{
                                                                     const urls = [];
@@ -11153,7 +11189,7 @@ def _v962_upload_into_picker(page, image_path, prefix="", which="start"):
         ]
         reached = 0
         for sel in targets:
-            hit = page.evaluate(
+            hit = _v977_eval(page, 
                 """([b64, fname, sel]) => {
                     const target = document.querySelector(sel);
                     if (!target) return 'missing';
@@ -11253,7 +11289,7 @@ def _v962_pick_asset_in_picker(page, image_path, prefix="", which="start"):
         # into the upload branch. Tag names, class names and which attributes
         # exist — no text, no values, no URLs, no file names.
         try:
-            inner = page.evaluate("""() => {
+            inner = _v977_eval(page, """() => {
                 const pane = document.querySelector('.cdk-overlay-container .cdk-overlay-pane');
                 if (!pane) return {pane: false};
                 const seen = {};
@@ -11413,7 +11449,7 @@ def _v962_attach_frame(page, image_path, which="start", prefix=""):
         # listbox/option/dialog/menu/file-input anywhere in the document, and the
         # frames bar itself. Structure only — no text, no values, no URLs.
         try:
-            shape = page.evaluate("""() => {
+            shape = _v977_eval(page, """() => {
                 const vis = el => { const r = el.getBoundingClientRect();
                     const s = getComputedStyle(el);
                     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden'
@@ -11792,7 +11828,7 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                     # unhydrated editor, or a stale variant-button selector (Google
                     # UI change). Drives the next live failure to reveal the cause.
                     try:
-                        _diag = page.evaluate("""() => {
+                        _diag = _v977_eval(page, """() => {
                             const body = (document.body && document.body.innerText) || '';
                             const btns = Array.from(document.querySelectorAll('button'))
                                 .map(b => (b.innerText||'').trim()).filter(Boolean).slice(0, 30);
@@ -12131,7 +12167,7 @@ def select_frames_to_video_mode(page, context="", **kwargs):
                 # DIAG (remove after model-selector fix verified): dump buttons/menuitems
                 # in the open settings menu so we can see the real model-control markup.
                 try:
-                    _mb = page.evaluate(
+                    _mb = _v977_eval(page, 
                         "() => Array.from(document.querySelectorAll(\"[role='menu'][data-state='open'] button, [role='menu'][data-state='open'] [role='menuitem']\"))"
                         ".map(e => (e.innerText||'').trim()).filter(t=>t).slice(0,20)"
                     )
@@ -14356,7 +14392,7 @@ def click_generate_button(page, context_name="", max_retries=3):
                 # between them is meaningless. On flow.google.com a tile is a
                 # flow-grid-tile-container identified by its thumbnail src;
                 # data-index / data-tile-id exist only on the legacy host.
-                _v700h_pre_ids = page.evaluate("""() => {
+                _v700h_pre_ids = _v977_eval(page, """() => {
                     const grid = Array.from(
                         document.querySelectorAll('flow-grid-tile-container'));
                     if (grid.length) {
@@ -15631,7 +15667,7 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
         # Wait 10 seconds for the new clip to render
         time.sleep(10)
         
-        result = page.evaluate(TILE_CHECK_JS.replace("DATA_INDEX_PLACEHOLDER", str(data_index)))
+        result = _v977_eval(page, TILE_CHECK_JS.replace("DATA_INDEX_PLACEHOLDER", str(data_index)))
         
         tiles = result.get('tiles', 0)
         has_video = result.get('hasVideo', False)
@@ -15861,7 +15897,7 @@ def check_recent_clip_failure(page, data_index=0, clip_num=0, old_tile_ids=None,
             print(f"[FailCheck] All tiles truly failed — waiting 10s for retries to take effect...", flush=True)
             time.sleep(10)
             
-            recheck = page.evaluate(TILE_CHECK_JS.replace("DATA_INDEX_PLACEHOLDER", str(data_index)))
+            recheck = _v977_eval(page, TILE_CHECK_JS.replace("DATA_INDEX_PLACEHOLDER", str(data_index)))
             
             rc_generating = recheck.get('hasGenerating', False)
             rc_video = recheck.get('hasVideo', False)
@@ -16145,7 +16181,7 @@ def quick_failure_check(page, clips_data, clip_project_map, main_project_url):
     # STEP 2: Now detect ALL failures using JavaScript — extract prompt text for matching
     try:
         # Find failed containers AND their prompt text for dialogue matching
-        debug_info = page.evaluate(r"""
+        debug_info = _v977_eval(page, r"""
             () => {
                 const failures = [];
                 const allElements = document.querySelectorAll('*');
@@ -17086,7 +17122,7 @@ class DownloadHelper:
                 
                 # Check for failure
                 try:
-                    fail_count = self.page.evaluate(r"""
+                    fail_count = _v977_eval(self.page, r"""
                         () => {
                             let count = 0;
                             const containers = document.querySelectorAll('[data-index]');
@@ -17208,7 +17244,7 @@ class DownloadHelper:
                 
                 # NOW read the container's content via JS while it's visible
                 # ALSO extract video src URLs while the container is rendered
-                info = self.page.evaluate(f"""
+                info = _v977_eval(self.page, f"""
                     () => {{
                         const c = document.querySelector("div[data-index='{idx}']");
                         if (!c) return null;
@@ -17818,7 +17854,7 @@ class DownloadHelper:
                     pass
                 
                 # Read container via JS
-                cinfo = self.page.evaluate(f"""
+                cinfo = _v977_eval(self.page, f"""
                     () => {{
                         const c = document.querySelector("div[data-index='{idx}']");
                         if (!c) return null;
@@ -17877,7 +17913,7 @@ class DownloadHelper:
                             promptText: promptText, promptSource: promptSource, videoUrls: videoUrls
                         }};
                     }}
-                """)
+                """, default=None)
                 
                 if not cinfo:
                     continue
@@ -18312,7 +18348,7 @@ class DownloadHelper:
                 container = self.page.locator("div[data-index='1']")
                 if container.count() > 0:
                     # Check for failure
-                    has_failed = self.page.evaluate(r"""
+                    has_failed = _v977_eval(self.page, r"""
                         () => {
                             const container = document.querySelector("div[data-index='1']");
                             if (!container) return false;
@@ -18868,7 +18904,7 @@ class DownloadHelper:
                             
                             # Check for "Failed" or "Failed Generation" text
                             try:
-                                has_failed = self.page.evaluate(f"""
+                                has_failed = _v977_eval(self.page, f"""
                                     () => {{
                                         const container = document.querySelector("div[data-index='{idx}']");
                                         if (!container) return false;
@@ -19223,7 +19259,7 @@ def _frame_slot_probe(page):
     thumbnail (Flow thumbs carry 'getMediaUrlRedirect' in src; blob:/data: also
     count). Returns a dict so any log slice shows which case we are in."""
     try:
-        return page.evaluate(
+        return _v977_eval(page, 
             "() => {"
             "  const slots = Array.from(document.querySelectorAll('div[aria-haspopup=\"dialog\"], button[aria-haspopup=\"dialog\"]'));"
             "  const real = (s) => !!s && (s.indexOf('getMediaUrlRedirect')>=0 || s.startsWith('blob:') || s.startsWith('data:image'));"
@@ -19249,7 +19285,7 @@ def _dump_open_menu(page, where=""):
     role + class + aria-selected + aria-haspopup. Covers menuitem/option/tab
     roles AND Flow's flow_tab_slider_trigger tabs. Log-only."""
     try:
-        data = page.evaluate(
+        data = _v977_eval(page, 
             "() => {"
             "  const out = []; const seen = new Set();"
             "  const sel = \"button, [role='menuitem'], [role='option'], [role='tab'], .flow_tab_slider_trigger, [aria-haspopup]\";"
@@ -21304,7 +21340,7 @@ def select_frame_from_gallery(page, dialog, filename, frame_selector, expected_b
               f"(expected_btn={expected_btn_count} remaining={remaining} sel={frame_selector!r})", flush=True)
         print(f"[Gallery] [slot-probe] {_frame_slot_probe(page)}", flush=True)
         try:
-            _diag = page.evaluate(
+            _diag = _v977_eval(page, 
                 "() => {"
                 "  const dlg = document.querySelector(\"[role='dialog']\") || document;"
                 "  const imgs = Array.from(dlg.querySelectorAll('img')).map(i => (i.getAttribute('alt')||i.src||'').slice(0,40)).filter(Boolean).slice(0,12);"
@@ -21546,7 +21582,7 @@ def fill_prompt_textarea(page, prompt):
         # If focus failed, Ctrl+A selects the entire page and Backspace destroys the UI
         textbox_focused = False
         try:
-            textbox_focused = page.evaluate('''() => {
+            textbox_focused = _v977_eval(page, '''() => {
                 const tb = document.querySelector('div[role="textbox"]');
                 return tb && (document.activeElement === tb || tb.contains(document.activeElement));
             }''')
@@ -21562,7 +21598,7 @@ def fill_prompt_textarea(page, prompt):
             try:
                 textbox.click(force=True, timeout=3000)
                 time.sleep(0.3)
-                textbox_focused = page.evaluate('''() => {
+                textbox_focused = _v977_eval(page, '''() => {
                     const tb = document.querySelector('div[role="textbox"]');
                     return tb && (document.activeElement === tb || tb.contains(document.activeElement));
                 }''')
@@ -21573,7 +21609,7 @@ def fill_prompt_textarea(page, prompt):
             # Still not focused — last resort: JS focus
             print("⚠ Textbox STILL not focused — forcing JS focus", flush=True)
             try:
-                page.evaluate('document.querySelector(\'div[role="textbox"]\').focus()')
+                _v977_eval(page, 'document.querySelector(\'div[role="textbox"]\').focus()')
                 time.sleep(0.3)
             except:
                 pass
@@ -21590,7 +21626,7 @@ def fill_prompt_textarea(page, prompt):
         pasted_ok = False
         try:
             escaped = json.dumps(prompt)
-            page.evaluate(f"navigator.clipboard.writeText({escaped})")
+            _v977_eval(page, f"navigator.clipboard.writeText({escaped})")
             time.sleep(random.uniform(0.2, 0.4))
             page.keyboard.press("Control+v")
             time.sleep(random.uniform(0.3, 0.6))
@@ -21617,7 +21653,7 @@ def fill_prompt_textarea(page, prompt):
     
     # Fallback: old textarea
     escaped = json.dumps(prompt)
-    page.evaluate(f'''() => {{
+    _v977_eval(page, f'''() => {{
         const textarea = document.querySelector("#PINHOLE_TEXT_AREA_ELEMENT_ID");
         if (!textarea) return;
         
@@ -21629,7 +21665,7 @@ def fill_prompt_textarea(page, prompt):
         textarea.dispatchEvent(event);
         const changeEvent = new Event('change', {{ bubbles: true, cancelable: true }});
         textarea.dispatchEvent(changeEvent);
-    }}''')
+    }}''', default=None)
 
 
 def poll_clip_status(page, data_index=None, max_time=MAX_POLL_TIME):
@@ -21682,7 +21718,7 @@ def poll_clip_status(page, data_index=None, max_time=MAX_POLL_TIME):
             # Found a clip section, check its status
             try:
                 # Use JavaScript to check for "Failed" in this container
-                has_failed = page.evaluate(f"""
+                has_failed = _v977_eval(page, f"""
                     () => {{
                         const container = document.querySelector("div[data-index='{idx}']");
                         if (!container) return false;
@@ -22781,7 +22817,7 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                     if not _retried_in_place:
                         print(f"[REDO] ⚠ data-index=0 failed — clicking Reuse Prompt to retry...", flush=True)
                         try:
-                            page.evaluate("""() => {
+                            _v977_eval(page, """() => {
                                 const c = document.querySelector("div[data-index='0']");
                                 if (!c) return false;
                                 const btn = Array.from(c.querySelectorAll('button')).find(b =>
@@ -22826,7 +22862,7 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                         _ua_dom = False
                         if not _ua_403:
                             try:
-                                _ua_dom = bool(page.evaluate("""() => {
+                                _ua_dom = bool(_v977_eval(page, """() => {
                                     const c = document.querySelector("div[data-index='0']");
                                     const t = ((c && c.textContent) || '').toLowerCase();
                                     return t.includes('unusual activity') || t.includes('actividad inusual')
@@ -24015,7 +24051,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
                     # the needle test cannot prove a tile wrong here, and
                     # `found` stays true on this host: the honest signals are
                     # the new-tile-id diff above and an empty grid below.
-                    _ghost_result = page.evaluate(f"""() => {{
+                    _ghost_result = _v977_eval(page, f"""() => {{
                         const needles = {repr(_needles)};
                         const countHits = (text) => {{
                             let h = 0;
@@ -25268,7 +25304,7 @@ def charswap_project_tile_ids(page):
     hand the fallback below a free pass. Unread must fail closed.
     """
     try:
-        ids = page.evaluate(_CHARSWAP_TILE_IDS_JS)
+        ids = _v977_eval(page, _CHARSWAP_TILE_IDS_JS)
     except Exception:
         return None
     if ids is None:
@@ -25328,7 +25364,7 @@ def charswap_video_chip_present(page):
     is what gets asked.
     """
     try:
-        return bool(page.evaluate(_CHARSWAP_VIDEO_CHIP_JS))
+        return bool(_v977_eval(page, _CHARSWAP_VIDEO_CHIP_JS))
     except Exception:
         return False
 
@@ -25344,7 +25380,7 @@ def charswap_composer_chip_media_ids(page):
     still works.
     """
     try:
-        res = page.evaluate(_CHARSWAP_CHIP_IDS_JS)
+        res = _v977_eval(page, _CHARSWAP_CHIP_IDS_JS)
     except Exception:
         return []
     if isinstance(res, dict):
@@ -25812,7 +25848,7 @@ def charswap_await_submit_verdict(page, timeout_s=20, poll_ms=250, want=2):
             page.wait_for_timeout(poll_ms)
         except Exception:
             try:
-                page.evaluate("() => 0")
+                _v977_eval(page, "() => 0")
             except Exception:
                 time.sleep(poll_ms / 1000.0)
         seen, both = charswap_submit_body_verdict(page, want=want)
@@ -26062,7 +26098,7 @@ def charswap_attach_and_prompt(page, avatar_path, video_path, prompt,
             # below only matches image cards (button[data-card-open]) and can
             # never remove the video chip the 1dafac92 evidence shows lingering.
             try:
-                page.evaluate(_CHARSWAP_CLEAR_CHIPS_JS)
+                _v977_eval(page, _CHARSWAP_CLEAR_CHIPS_JS)
                 page.wait_for_timeout(400)
             except Exception:
                 pass
@@ -26111,7 +26147,7 @@ def charswap_attach_and_prompt(page, avatar_path, video_path, prompt,
             # clicker and the id reader disagree about this chip's controls;
             # this records the controls.
             try:
-                _diag["stale_chip_dom"] = page.evaluate(
+                _diag["stale_chip_dom"] = _v977_eval(page, 
                     "() => Array.from(document.querySelectorAll('button'))"
                     ".filter(b => { const r = b.getBoundingClientRect();"
                     " return r.top > (window.innerHeight - 280) && r.width > 0; })"
@@ -27745,7 +27781,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # looks like and for the one case this still cannot see.
                 try:
                     time.sleep(8)
-                    _cs_tile_state = page.evaluate(
+                    _cs_tile_state = _v977_eval(page, 
                         "() => { const tiles = Array.from(document"
                         ".querySelectorAll('[data-index]'));"
                         " let generating = 0, video = 0;"
@@ -27787,7 +27823,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # looking at the page AFTER the click. Capture everything cheap.
                 _dump_generate_disabled_state(page, f"{_cs_ctx} [post-click] ")
                 try:
-                    _cs_toasts = page.evaluate(
+                    _cs_toasts = _v977_eval(page, 
                         "() => Array.from(document.querySelectorAll("
                         "'[role=\"alert\"], [role=\"status\"], [aria-live]'))"
                         ".map(e => (e.innerText || '').trim()).filter(Boolean)")
@@ -27797,7 +27833,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     print(f"{_cs_ctx} [post-click] toast scrape failed: {_cs_te}",
                           flush=True)
                 try:
-                    _cs_gen_btns = page.evaluate(
+                    _cs_gen_btns = _v977_eval(page, 
                         "() => Array.from(document.querySelectorAll('button'))"
                         ".filter(b => /generate/i.test(b.innerText || ''))"
                         ".map(b => ({text: (b.innerText||'').trim().slice(0, 40),"
@@ -28391,7 +28427,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     # the needle test cannot prove a tile wrong here, and
                     # `found` stays true on this host: the honest signals are
                     # the new-tile-id diff above and an empty grid below.
-                    _ghost_result = page.evaluate(f"""() => {{
+                    _ghost_result = _v977_eval(page, f"""() => {{
                         const needles = {repr(_needles)};
                         const countHits = (text) => {{
                             let h = 0;
@@ -28736,7 +28772,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             # poisoned http_enqueued_clips (shared dedup) → stuck clip.
                             _urls = captured_urls_for_clip(job_id, _ci, captured_media_urls)
                             if not _urls and _dlg:
-                                _urls = page.evaluate(f"""() => {{
+                                _urls = _v977_eval(page, f"""() => {{
                                     for (const c of document.querySelectorAll('[data-index]')) {{
                                         if ((c.innerText||'').includes({repr(_dlg)})) {{
                                             const urls = [];
@@ -28960,7 +28996,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             continue
                         _dlg = (_clip_obj.get('dialogue_text') or '')[:20]
                         try:
-                            _urls = page.evaluate(f"""() => {{
+                            _urls = _v977_eval(page, f"""() => {{
                                 for (const c of document.querySelectorAll('[data-index]')) {{
                                     if ({repr(_dlg)} && (c.innerText||'').includes({repr(_dlg)})) {{
                                         const urls = [];
