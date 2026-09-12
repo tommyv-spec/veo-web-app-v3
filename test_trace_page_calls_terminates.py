@@ -131,55 +131,80 @@ def test_the_tracer_is_off_unless_the_env_var_is_set():
 
 # --- v977: the bounded evaluate helper ---------------------------------------
 #
-# The trap it exists to avoid: `wait_for_function` waits for a TRUTHY result,
-# and `window.scrollTo(...)` returns `undefined`. A naive conversion would
-# therefore poll until the deadline on EVERY call, turning a 0.1s scroll into a
-# multi-second one. The helper wraps the caller's expression so the result is
-# always an object, which is truthy even when the inner value is undefined.
+# The primitive matters. `wait_for_function` is a POLLING predicate, not a
+# bounded one-shot evaluate, and using it made every call burn the full timeout
+# — measured 10.0s on a scroll that takes 0.1s. So the deadline lives inside the
+# JS instead, as a Promise.race against a timer, and these tests hold that shape
+# down: fast calls must not pay the budget, falsy values must survive, a plain
+# expression must work as well as a function, and a timeout must be loud.
 
 
-class _HandlePage:
-    """Records the expression handed to wait_for_function and replays a value."""
+class _EvalPage:
+    """Records the expression handed to page.evaluate and replays a result."""
 
-    def __init__(self, value, raise_exc=None):
-        self.value = value
+    def __init__(self, result, raise_exc=None):
+        self.result = result
         self.raise_exc = raise_exc
         self.seen = []
 
-    def wait_for_function(self, expression, arg=None, timeout=None):
-        self.seen.append((expression, arg, timeout))
+    def evaluate(self, expression, arg=None):
+        self.seen.append((expression, arg))
         if self.raise_exc is not None:
             raise self.raise_exc
-        page = self
-
-        class _H:
-            def json_value(self_inner):
-                return {"v": page.value}
-
-        return _H()
+        return self.result
 
 
-def test_the_expression_is_wrapped_so_undefined_is_still_truthy():
-    """A scroll returns undefined; the wrapper must make the result an object."""
+def test_it_uses_page_evaluate_not_a_polling_predicate():
+    """The regression: wait_for_function polls, so it cost the full budget."""
     fw = _load()
-    page = _HandlePage(None)
-    assert fw._v977_eval(page, "() => window.scrollTo(0, 0)") is None
-    expression, arg, timeout = page.seen[0]
-    assert expression.startswith("async (a) => ({ v: await ("), expression
-    assert expression.endswith(")(a) })"), expression
-    assert timeout == 10000
+    page = _EvalPage({"v": None})
+    fw._v977_eval(page, "() => window.scrollTo(0, 0)")
+    assert page.seen, "it must go through page.evaluate"
+    expression = page.seen[0][0]
+    assert "Promise.race" in expression, expression
+    assert "setTimeout" in expression, expression
 
 
-def test_the_value_comes_back():
+def test_the_deadline_is_baked_into_the_js():
     fw = _load()
-    page = _HandlePage({"url": "https://x/video/y", "ct": "video/mp4"})
+    page = _EvalPage({"v": 1})
+    fw._v977_eval(page, "() => 1", timeout_ms=4500)
+    assert "4500" in page.seen[0][0]
+
+
+def test_a_plain_expression_works_not_just_a_function():
+    """`page.evaluate("window.blur()")` is legal, so the wrapper must allow it."""
+    fw = _load()
+    page = _EvalPage({"v": None})
+    fw._v977_eval(page, "window.blur()")
+    assert "typeof __f === 'function'" in page.seen[0][0]
+
+
+def test_a_falsy_value_survives():
+    """0 / false / "" must not be mistaken for "no answer" — hence the object."""
+    fw = _load()
+    for falsy in (0, False, ""):
+        page = _EvalPage({"v": falsy})
+        assert fw._v977_eval(page, "() => x", default="MISSING") == falsy
+
+
+def test_the_value_comes_back_and_the_arg_is_passed_through():
+    fw = _load()
+    page = _EvalPage({"v": {"ct": "video/mp4"}})
     got = fw._v977_eval(page, "async (u) => fetch(u)", arg="https://x")
     assert got["ct"] == "video/mp4"
-    assert page.seen[0][1] == "https://x", "the arg must be passed through"
+    assert page.seen[0][1] == "https://x"
 
 
-def test_a_timeout_returns_the_default_instead_of_raising():
-    """A call that cannot answer must not take the lane down with it."""
+def test_a_timeout_returns_the_default():
+    """The JS timer won the race: return the default rather than a bad answer."""
     fw = _load()
-    page = _HandlePage(None, raise_exc=RuntimeError("Timeout 10000ms exceeded"))
+    page = _EvalPage({"__v977_timeout": True})
+    assert fw._v977_eval(page, "() => 1", default="unasked") == "unasked"
+
+
+def test_a_raising_evaluate_returns_the_default_instead_of_propagating():
+    """A destroyed context must not take the lane down with it."""
+    fw = _load()
+    page = _EvalPage(None, raise_exc=RuntimeError("Execution context was destroyed"))
     assert fw._v977_eval(page, "() => 1", default="unasked") == "unasked"

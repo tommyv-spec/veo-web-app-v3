@@ -7627,23 +7627,43 @@ def _v977_eval(page, js, arg=None, timeout_ms=10000, default=None):
     `_uuid_video_ready` and once in the post-job scroll, both with the tracer
     logging ENTER and no matching leave and the stall watchdog firing at 120s.
 
-    `js` is a function expression, exactly as `page.evaluate` takes it. It is
-    wrapped so the result is an OBJECT: `wait_for_function` waits for a truthy
-    value, and a bare scroll returns `undefined`, which would otherwise poll
-    until the deadline on every single call. `await` on a non-promise is a
-    no-op, so sync and async expressions both work.
+    `js` is whatever `page.evaluate` takes -- a function expression or a plain
+    expression; the wrapper checks `typeof` and handles both. The deadline lives
+    INSIDE the JS, as a Promise.race against a timer, because
+    `wait_for_function` is a POLLING predicate rather than a bounded one-shot
+    evaluate: using it here made every call burn the full timeout (measured 10.0s
+    on a scroll that takes 0.1s). The result is wrapped in an object so a
+    legitimately falsy value is not read as "no answer".
+
+    Does NOT cover a renderer so wedged it never runs JS at all -- then the
+    timer never fires either. That one needs the watchdog to act, not a guard
+    inside the page.
 
     Returns `default` on timeout or any error -- a call that cannot answer must
     not take the lane down with it. Callers that need to distinguish "false"
     from "could not ask" should pass a sentinel as `default`.
     """
+    _wrapped = (
+        "async (a) => {"
+        "  const __f = (" + js + ");"
+        "  const __run = (async () => ({ v: await ("
+        "      typeof __f === 'function' ? __f(a) : __f) }))();"
+        "  const __to = new Promise(r => setTimeout("
+        "      () => r({ __v977_timeout: true }), " + str(int(timeout_ms)) + "));"
+        "  return await Promise.race([__run, __to]);"
+        "}"
+    )
     try:
-        _h = page.wait_for_function(
-            "async (a) => ({ v: await (" + js + ")(a) })",
-            arg=arg, timeout=timeout_ms)
-        return (_h.json_value() or {}).get("v", default)
+        _res = page.evaluate(_wrapped, arg) or {}
     except Exception:
         return default
+    if _res.get("__v977_timeout"):
+        # Loud on purpose. A silent default here is exactly what made the
+        # original bug read as "the clip is still generating".
+        print(f"[v977] in-page call exceeded {timeout_ms}ms and was abandoned: "
+              f"{js[:70]}", flush=True)
+        return default
+    return _res.get("v", default)
 
 
 # Driver-side budget for the in-page media-readiness probe, ABOVE the 8s
