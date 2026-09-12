@@ -206,6 +206,284 @@ def trace_page_calls(page, label=""):
     return page
 
 
+# ---------------------------------------------------------------- v978 stall
+# `time` and `threading` are imported further down this file (948, 954), well after
+# this block, so import them here too and keep it self-contained. Re-importing a
+# stdlib module is cached and free; the alternative is depending on where the
+# installer happens to be called from.
+import threading
+import time
+# The existing `_install_stall_watchdog` below compares the main thread's stack
+# against the previous sample. That answers "where is it parked" and nothing
+# else, and it misses two of the three failure shapes measured on 2026-09-12:
+#
+#   park    stack frozen in run_until_complete   -> it DOES catch this
+#   spin    stack moving, 104% of one core for   -> MISSED (the stack changes)
+#           seven minutes, no output
+#   block   parked on a Playwright call the      -> MISSED (nothing to diff
+#           tracer does not wrap, ~0% CPU                  that looks stuck)
+#
+# What all three share is that the main thread stopped making progress. So this
+# measures progress, and it is the thing allowed to ACT.
+_V978_WARN_S = float(os.environ.get("FLOW_STALL_WARN_S") or 240)
+_V978_ACT_S = float(os.environ.get("FLOW_STALL_ACT_S") or 480)
+_V978_ACT_ENABLED = (os.environ.get("FLOW_STALL_ACT") or "1").strip() not in (
+    "0", "false", "no", "off")
+_V978_SELF_HEAL_CLAIM = (os.environ.get("FLOW_SELF_HEAL_CLAIM") or "1").strip() not in (
+    "0", "false", "no", "off")
+_V978_SELF_HEAL_MAX = 3
+_V978_self_heals = [0]
+
+# Kept aside at install time so the watchdog can report WITHOUT refreshing the
+# liveness stamp it is reporting on. Codex pass-1 finding 2: the warning used to
+# go through the wrapped stdout, which reset the silence clock, so `act` was
+# unreachable and the feature would have warned forever and never acted.
+_V978_RAW_WRITE = None
+
+
+class _V978Liveness:
+    """Seconds since the MAIN thread last produced output.
+
+    Main-thread-only is not a detail, it is the correctness of the detector.
+    This worker starts background threads for downloads, the heartbeat and the
+    response capture (flow_worker.py ~30357, ~30518, ~31811, ~33156, ~34420,
+    ~34576). Any of them printing would have kept a process-wide detector happy
+    while the main job sat frozen -- it would go quiet exactly when it matters.
+    (Codex pass-1 finding 3.)
+
+    Monotonic clock, so moving the system clock cannot fake progress or trip a
+    false stall.
+    """
+
+    def __init__(self, warn_s=None, act_s=None, now=None):
+        self.warn_s = _V978_WARN_S if warn_s is None else float(warn_s)
+        self.act_s = _V978_ACT_S if act_s is None else float(act_s)
+        self._now = now or time.monotonic
+        self._last = self._now()
+        self.acted = False
+
+    def stamp(self):
+        """Record progress. A no-op off the main thread, by design."""
+        try:
+            if threading.current_thread() is threading.main_thread():
+                self._last = self._now()
+        except Exception:
+            pass
+
+    def silent_for(self):
+        return max(0.0, self._now() - self._last)
+
+    def level(self):
+        quiet = self.silent_for()
+        if quiet >= self.act_s:
+            return "act"
+        if quiet >= self.warn_s:
+            return "warn"
+        return "ok"
+
+
+def _v978_install_liveness_stamp(liveness):
+    """Refresh the stamp on every main-thread `print`.
+
+    One hook instead of instrumenting call sites, and it covers park, spin and
+    invisible-block identically. Installed AFTER the `sys.stdout.reconfigure`
+    at the top of this file so it wraps the final writer, and it never prints --
+    a diagnostic that can recurse through the thing it measures is worse than
+    none.
+    """
+    global _V978_RAW_WRITE
+    try:
+        _stream = sys.stdout
+        _original = _stream.write
+        _V978_RAW_WRITE = _original
+
+        def _stamping_write(text):
+            try:
+                liveness.stamp()
+            except Exception:
+                pass
+            return _original(text)
+
+        _stream.write = _stamping_write
+        return True
+    except Exception:
+        _V978_RAW_WRITE = None
+        return False
+
+
+def _v978_say(message):
+    """Watchdog output that does NOT count as progress. See finding 2 above."""
+    line = f"{message}\n"
+    try:
+        if _V978_RAW_WRITE is not None:
+            _V978_RAW_WRITE(line)
+            sys.stdout.flush()
+            return
+    except Exception:
+        pass
+    try:
+        sys.stderr.write(line)
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def _v978_unorphan_own_clips(job_ids):
+    """Put THIS RUN'S OWN clips back to plain `pending`. Nothing else.
+
+    A stalled run leaves its in-flight clips at `generating`, where nothing
+    picks them up -- that is why job 0d456c24 carries 11 of them from runs that
+    died hours ago.
+
+    Blast radius is the whole design. Resetting a clip another worker is
+    actively rendering duplicates a paid render, so this touches ONLY the ids in
+    this run's own allowlist. A non-scoped run has no way to know which clips
+    are its own and therefore resets NOTHING, leaving it to the server's sweeps.
+
+    NOT `/api/jobs/{id}/retry-stuck`, which looked like the answer and is wrong
+    three ways (Codex pass-2 finding 2 + main.py): it targets FLOW_REDO_QUEUED,
+    routing clips through the redo lane that is known to hang and that refuses
+    movie-section; it sweeps in EVERY pending clip, which on a scoped parent job
+    is the full-job expansion this workflow exists to prevent; and it wants a
+    `get_current_user` session the worker does not hold. `POST /clips/{id}/status`
+    is what tools/flow_requeue_job.py uses, sets plain `pending` (the
+    first-generation path), and goes through `api_request`'s worker token.
+    """
+    try:
+        if not FLOW_CLIP_SCOPE_FIRSTGEN:
+            return 0
+        own = [int(c) for c in (FLOW_ONLY_CLIP_IDS or [])]
+    except Exception:
+        return 0
+    if not own:
+        return 0
+
+    reset = 0
+    for clip_id in own:
+        try:
+            api_request("POST", f"/clips/{clip_id}/status",
+                        {"status": "pending", "error_message": None})
+            reset += 1
+        except Exception as exc:
+            # Never raise into escalation: the exit still has to happen even
+            # when the platform is unreachable.
+            _v978_say(f"[v978] clip {clip_id} un-orphan FAILED: "
+                      f"{type(exc).__name__}: {str(exc)[:90]}")
+    _v978_say(f"[v978] un-orphaned {reset}/{len(own)} own clip(s) back to pending "
+              f"(jobs: {list(job_ids or [])})")
+    return reset
+
+
+def _v978_escalate(exit_fn=None):
+    """Hand everything back, then leave. Order is load-bearing.
+
+    RELEASE FIRST. The exit path cannot be trusted to run `atexit`: the main
+    thread is hung, so a `SystemExit` raised from this watchdog thread would not
+    unwind it, and `os._exit` skips `atexit` outright. So the release is
+    explicit and happens before anything can end the process.
+
+    THE JOB IDS COME FROM THE RELEASE'S RETURN VALUE, never from the global.
+    `_scoped_firstgen_release_parent_jobs` copies `_SCOPED_FIRSTGEN_CLAIMED_JOBS`
+    and clears it under the lock before returning the copy, so reading the
+    global afterwards yields an empty set and silently does nothing at all.
+    (Codex pass-2 finding 1 -- its repair was to snapshot first; the function
+    already hands the list back, which is smaller and cannot drift.)
+
+    Exit 75 = EX_TEMPFAIL, so a supervisor can tell "stalled, retry" from
+    "failed".
+    """
+    _exit = exit_fn or os._exit
+    released = []
+    try:
+        released = _scoped_firstgen_release_parent_jobs(reason="stall-watchdog") or []
+    except Exception as exc:
+        _v978_say(f"[v978] release during escalation FAILED: "
+                  f"{type(exc).__name__}: {str(exc)[:90]}")
+    try:
+        _v978_unorphan_own_clips(released)
+    except Exception as exc:
+        _v978_say(f"[v978] un-orphan during escalation FAILED: "
+                  f"{type(exc).__name__}: {str(exc)[:90]}")
+    return _exit(75)
+
+
+def _v978_tick(liveness, act_fn=None):
+    """One watchdog turn. Warns, then escalates once.
+
+    The latch matters: without it every subsequent tick would escalate again,
+    and on the `act` path that means calling the release and the exit repeatedly
+    while the first one is still unwinding.
+    """
+    level = liveness.level()
+    if level == "ok":
+        return level
+    quiet = liveness.silent_for()
+    try:
+        stack = _v978_main_stack() or "(stack unavailable)"
+    except Exception:
+        stack = "(stack unavailable)"
+    if level == "warn":
+        _v978_say(f"\n[v978] NO MAIN-THREAD PROGRESS for {quiet:.0f}s "
+                  f"(warn at {liveness.warn_s:.0f}s, act at {liveness.act_s:.0f}s) "
+                  f"— the main thread is here:\n{stack}")
+        return level
+    if liveness.acted:
+        return level
+    liveness.acted = True
+    if not _V978_ACT_ENABLED:
+        _v978_say(f"[v978] would escalate after {quiet:.0f}s of silence, but "
+                  f"FLOW_STALL_ACT=0 — reporting only")
+        return level
+    _v978_say(f"\n[v978] STALLED — no main-thread progress for {quiet:.0f}s. "
+              f"Releasing the job and exiting so the lane is not held.\n{stack}")
+    (act_fn or _v978_escalate)()
+    return level
+
+
+def _v978_main_stack():
+    """The main thread's stack, for the warn/act evidence."""
+    import traceback as _tb
+    frame = sys._current_frames().get(threading.main_thread().ident)
+    if frame is None:
+        return None
+    return "".join(_tb.format_stack(frame))
+
+
+def _v978_install_liveness_watchdog():
+    """Arm the progress detector. Off entirely when both thresholds are 0."""
+    if _V978_WARN_S <= 0 and _V978_ACT_S <= 0:
+        return None
+    liveness = _V978Liveness()
+    if not _v978_install_liveness_stamp(liveness):
+        print("[v978] could not wrap stdout — progress detector NOT armed",
+              flush=True)
+        return None
+
+    # Poll often enough that the thresholds mean what they say. A fixed 15s
+    # sleep looked harmless and was not: it also meant the FIRST check happened
+    # 15s in, so any threshold below that could never fire and the feature was
+    # untestable without waiting minutes. Derive it instead -- a quarter of the
+    # warn budget, clamped -- so small thresholds work in a smoke test and large
+    # ones are not polled needlessly.
+    _interval = max(0.5, min(15.0, (_V978_WARN_S or 60) / 4.0))
+
+    def _loop():
+        while True:
+            time.sleep(_interval)
+            try:
+                _v978_tick(liveness)
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_loop, name="v978-liveness", daemon=True)
+    t.start()
+    print(f"[v978] progress watchdog armed — warn at {_V978_WARN_S:.0f}s of "
+          f"main-thread silence, "
+          f"{'release+exit' if _V978_ACT_ENABLED else 'report only'} at "
+          f"{_V978_ACT_S:.0f}s (checked every {_interval:.1f}s)", flush=True)
+    return liveness
+
+
 def _install_stall_watchdog():
     import threading as _th
     import time as _time
@@ -254,6 +532,11 @@ def _install_stall_watchdog():
 
 
 _install_stall_watchdog()
+
+# The stack-diff watchdog above answers WHERE the main thread is parked; this
+# answers WHETHER the run is still moving, and it is the one allowed to act.
+# Both, because today each caught a failure the other missed.
+_v978_install_liveness_watchdog()
 
 
 # The lifecycle launcher serializes normal starts, but this file is also often
@@ -5872,6 +6155,126 @@ def _scoped_firstgen_signal_handler(signum, _frame):
     print(f"[Scope] signal {signum} — releasing the parent job before exit", flush=True)
     _scoped_firstgen_release_parent_jobs(reason=f"signal-{signum}")
     raise SystemExit(128 + int(signum))
+
+
+# --------------------------------------------------- v978 dead-claim self-heal
+_V978_PROC_CACHE = {"at": 0.0, "pids": None}
+
+
+def _v978_live_pids():
+    """Every pid currently running on this machine, or None if we cannot tell.
+
+    Enumerated with PowerShell `Get-Process`, which is the approach already
+    proven in `tools/worker_lifecycle._all_processes` -- duplicated rather than
+    imported because this worker is installed standalone at ~/veo-worker/ and
+    cannot reach the repo's tools/ package.
+
+    NEVER `os.kill(pid, 0)`. On Windows `signal.CTRL_C_EVENT == 0`, so that call
+    delivers a Ctrl+C to the target, and every other signal value routes to
+    TerminateProcess. There is no harmless-probe value -- the probe would kill
+    the live worker it was checking.
+
+    Returns None on every failure path, and None means "do not know", which the
+    caller must treat as alive.
+    """
+    now = time.time()
+    if _V978_PROC_CACHE["pids"] is not None and (now - _V978_PROC_CACHE["at"]) < 10.0:
+        return _V978_PROC_CACHE["pids"]
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-Process | ForEach-Object { $_.Id } | ConvertTo-Json -Compress"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60).stdout.strip()
+        if not out:
+            return None
+        rows = json.loads(out)
+        rows = [rows] if isinstance(rows, int) else rows
+        pids = {int(r) for r in rows}
+    except Exception:
+        return None
+    if not pids:
+        return None
+    _V978_PROC_CACHE["at"] = now
+    _V978_PROC_CACHE["pids"] = pids
+    return pids
+
+
+def _v978_pid_alive(pid):
+    """True unless this pid is provably absent. Fails CLOSED on purpose."""
+    pids = _v978_live_pids()
+    if pids is None:
+        return True
+    return int(pid) in pids
+
+
+def _v978_dead_claim_holder(detail):
+    """(job_id, holder) when the claim is safe to release, else None.
+
+    `detail` is the server's `scope_error_detail`, which already carries
+    `job_id`, `job_status` and `claimed_by_worker` (main.py `_scope_error` and
+    the JOB_NOT_CLAIMABLE branch). Reading the structured field beats parsing
+    the human message, which has no job id in it at all.
+
+    A worker id is `worker-<host>-<pid>`. Hostnames contain '-' and so does the
+    `worker-` prefix, so split from the RIGHT: the pid is the last segment and
+    the host is everything between.
+    """
+    if not isinstance(detail, dict):
+        return None
+    job_id = detail.get("job_id")
+    holder = detail.get("claimed_by_worker")
+    if not isinstance(job_id, str) or not job_id.strip():
+        return None
+    if not isinstance(holder, str) or not holder.startswith("worker-"):
+        return None
+    rest = holder[len("worker-"):]
+    if "-" not in rest:
+        return None
+    host, _, pid_text = rest.rpartition("-")
+    if not host or not pid_text.isdigit():
+        return None
+    try:
+        mine = socket.gethostname()
+    except Exception:
+        return None
+    # Windows reports hostnames in mixed case; the worker id may not match the
+    # case `gethostname` returns.
+    if host.strip().lower() != str(mine).strip().lower():
+        return None
+    if _v978_pid_alive(int(pid_text)):
+        return None
+    return (job_id, holder)
+
+
+def _v978_self_heal_dead_claim(result):
+    """Release a dead worker's claim so the next poll can take the job.
+
+    Returns True when a release actually landed. Capped per run so a genuine
+    claim war between two live workers cannot become a loop.
+    """
+    if not _V978_SELF_HEAL_CLAIM:
+        return False
+    if _V978_self_heals[0] >= _V978_SELF_HEAL_MAX:
+        return False
+    found = _v978_dead_claim_holder((result or {}).get("scope_error_detail"))
+    if not found:
+        return False
+    job_id, holder = found
+    _V978_self_heals[0] += 1
+    try:
+        resp = api_request("POST", f"/jobs/{job_id}/scoped-release",
+                           {"worker_id": holder})
+        released = bool((resp or {}).get("released"))
+    except Exception as exc:
+        print(f"[v978] dead-claim release FAILED for {holder}: "
+              f"{type(exc).__name__}: {str(exc)[:90]}", flush=True)
+        return False
+    print(f"[v978] {holder} is gone from this machine — claim on job "
+          f"{job_id[:8]} {'RELEASED' if released else 'not ours, left alone'} "
+          f"({_V978_self_heals[0]}/{_V978_SELF_HEAL_MAX} self-heals used)",
+          flush=True)
+    return released
 
 
 def _install_scoped_firstgen_release_hooks():
@@ -12201,6 +12604,17 @@ def _get_scoped_firstgen_job(exclude_ids=None):
               f"{result.get('scope_error_message')}", flush=True)
         if scope_error in _SCOPED_FIRSTGEN_FATAL_ERRORS:
             raise SystemExit(1)
+        # v978 — if the claim belongs to a worker that is gone from THIS
+        # machine, release it now instead of waiting out the server's
+        # 10-minute stale-claim sweep. Killing a run leaves its claim behind,
+        # and the next run then refuses in a loop that looks exactly like a
+        # healthy one: measured 22, then 12, then 30 refusals today with no
+        # Generate click on any of them. Safe because "gone" means same
+        # hostname AND an absent pid, and any uncertainty counts as alive.
+        if scope_error == "JOB_NOT_CLAIMABLE" and _v978_self_heal_dead_claim(result):
+            # Do not count this poll against the give-up budget: the next one
+            # has a real chance now.
+            return None
         _scoped_firstgen_unclaimable_polls[0] += 1
         if _scoped_firstgen_unclaimable_polls[0] >= _SCOPED_FIRSTGEN_UNCLAIMABLE_LIMIT:
             print(f"[Scope] parent job stayed unclaimable for "
