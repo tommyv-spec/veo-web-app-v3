@@ -1874,6 +1874,19 @@ def _fa_init_project_best_effort(page, project_id, context=""):
         page, f"{TRPC}/videoFx.updateUserSettings", "POST",
         {"json": {"isAgentModeToggled": False}},
     ))
+    # 25. v974 — the one that actually lands on flow.google.com. Steps 23 and 24
+    # above cannot: 23 needs a Bearer this cookie-authed host never emits, and 24
+    # posts to labs.google, which stopped answering when the frontend moved on
+    # 09-06. Measured 2026-09-12: denied=12, confirmed=none.
+    #
+    # ASSERTED here, every init, rather than left to force_agent_off. The account
+    # flag does persist -- a project opened after this run comes up with the
+    # composer already clean -- but persistence is not a guarantee. A human, a
+    # parallel session, or a Google default flip can turn Agent back on, and the
+    # reactive path only notices once a clip has already failed with
+    # "Settings button not found". Four idempotent POSTs cost about a second.
+    if _v962_on_new_host(page):
+        _v974_agent_off_batchexecute(page, project_id, pfx)
 
     elapsed = time.time() - _replay_t0
 

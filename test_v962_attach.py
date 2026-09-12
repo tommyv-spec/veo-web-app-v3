@@ -175,3 +175,20 @@ def test_agent_off_payloads_match_the_har():
     # per-project: agent_toggle_state 2 == DISABLED (1 == ENABLED in the HAR)
     assert shapes[3][1] == ["projects/abc", [None] * 4 + [2],
                             [["agent_toggle_state"]]]
+
+
+def test_project_init_asserts_agent_off_not_just_force_agent_off():
+    """Operator, 2026-09-12: "we always need to make sure it's off."
+
+    The account flag persists, so a project usually comes up clean -- but
+    persistence is not a guarantee. A human, a parallel session or a Google
+    default flip can turn Agent back on, and the reactive path
+    (force_agent_off, called when the gear is already missing) only notices
+    after a clip has failed with "Settings button not found". So init must
+    ASSERT it. This guards against that call being dropped as redundant.
+    """
+    src = (_STATIC / "flow_worker.py").read_text(encoding="utf-8")
+    start = src.index("def _fa_init_project_best_effort(")
+    body = src[start:src.index("\ndef ", start + 10)]
+    assert "_v974_agent_off_batchexecute(page, project_id" in body, \
+        "project init must assert Agent OFF, not rely on the remembered state"
