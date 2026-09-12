@@ -125,117 +125,23 @@ def test_missing_file_still_reports_failure(tmp_path, monkeypatch):
     assert fw._v962_upload_into_picker(page, str(tmp_path / "nope.png"), "") is False
 
 
-# --- v974: the Add-media-menu route, the only one that works on this host ---
-
-class _Chooser:
-    def __init__(self):
-        self.files = None
-
-    def set_files(self, path):
-        self.files = path
+# --- v974: the uploader's CONTROL changed, not the mechanism ------------------
+#
+# The file-chooser upload already lived in _v962_pick_asset_in_picker. The only
+# thing that broke was the caption it clicked: flow.google.com has no button
+# saying "Upload media" any more, the uploader is `Add media menu` -> `Upload`.
+# One check, on the thing that would silently rot: the control it drives.
 
 
-class _ChooserCtx:
-    """Stands in for page.expect_file_chooser()."""
-
-    def __init__(self, chooser, raise_on_enter=False):
-        self._chooser = chooser
-        self._raise = raise_on_enter
-
-    def __enter__(self):
-        if self._raise:
-            raise TimeoutError("no file chooser appeared")
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    @property
-    def value(self):
-        return self._chooser
-
-
-class _Keyboard:
-    def press(self, _key):
-        return None
-
-
-class _MenuLoc:
-    def __init__(self, page, fail_click=False):
-        self._page = page
-        self._fail = fail_click
-
-    @property
-    def first(self):
-        return self
-
-    def filter(self, **_k):
-        return self
-
-    def click(self, **_k):
-        if self._fail:
-            raise RuntimeError("control not present")
-        self._page.clicks += 1
-
-
-class _MenuPage:
-    """A page where Add media menu -> Upload raises a native file chooser."""
-
-    def __init__(self, chooser_works=True, slot_works=True):
-        self.keyboard = _Keyboard()
-        self.chooser = _Chooser()
-        self.clicks = 0
-        self._chooser_works = chooser_works
-        self._slot_works = slot_works
-
-    def expect_file_chooser(self, **_k):
-        return _ChooserCtx(self.chooser, raise_on_enter=not self._chooser_works)
-
-    def locator(self, sel):
-        # the frame slot is the last thing clicked, to re-open the picker
-        if "ingredient-bar" in sel or "Start" in sel or "End" in sel:
-            return _MenuLoc(self, fail_click=not self._slot_works)
-        return _MenuLoc(self)
-
-
-def test_add_media_menu_route_hands_the_file_over(tmp_path, monkeypatch):
-    fw = _load()
-    monkeypatch.setattr(fw.time, "sleep", lambda *_a, **_k: None)
-    img = _png(tmp_path)
-    page = _MenuPage()
-    assert fw._v962_upload_via_add_media_menu(page, img, "start", "") is True
-    assert page.chooser.files == img, "the chooser must actually receive the file"
-
-
-def test_add_media_menu_route_fails_when_no_chooser_appears(tmp_path, monkeypatch):
-    """No chooser means no upload — it must not report success."""
-    fw = _load()
-    monkeypatch.setattr(fw.time, "sleep", lambda *_a, **_k: None)
-    page = _MenuPage(chooser_works=False)
-    assert fw._v962_upload_via_add_media_menu(page, _png(tmp_path), "start", "") is False
-
-
-def test_add_media_menu_route_fails_if_the_picker_cannot_reopen(tmp_path, monkeypatch):
-    """The caller searches the picker next, so a picker that never re-opens is a
-    failure even though the file was handed over."""
-    fw = _load()
-    monkeypatch.setattr(fw.time, "sleep", lambda *_a, **_k: None)
-    page = _MenuPage(slot_works=False)
-    assert fw._v962_upload_via_add_media_menu(page, _png(tmp_path), "start", "") is False
-
-
-def test_upload_into_picker_tries_the_measured_route_first(tmp_path, monkeypatch):
-    """The dead routes must not run when the live one succeeds."""
-    fw = _load()
-    monkeypatch.setattr(fw.time, "sleep", lambda *_a, **_k: None)
-    called = {"n": 0}
-
-    def _fake(page, path, which="start", prefix=""):
-        called["n"] += 1
-        return True
-
-    monkeypatch.setattr(fw, "_v962_upload_via_add_media_menu", _fake)
-    page = _Page(present=("flow-ingredient-bar",))
-    assert fw._v962_upload_into_picker(page, _png(tmp_path), "") is True
-    assert called["n"] == 1
-    assert not page.dropped, "no drop should be attempted once the real route worked"
+def test_the_picker_upload_drives_the_add_media_menu():
+    """A regression here is invisible at runtime -- the old caption simply never
+    matches and the attach fails with "no chip", which reads as a glitch."""
+    src = (_STATIC / "flow_worker.py").read_text(encoding="utf-8")
+    start = src.index("def _v962_pick_asset_in_picker(")
+    body = src[start:src.index("\ndef ", start + 10)]
+    assert "button[aria-label='Add media menu']" in body, \
+        "the picker upload must open Flow's Add-media menu"
+    assert "expect_file_chooser" in body, \
+        "it is a NATIVE chooser -- there is no input[type=file] to drive"
+    assert "button:has-text('Upload media')" not in body, \
+        "the dead caption must not come back"
