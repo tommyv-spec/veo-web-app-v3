@@ -326,3 +326,29 @@ def test_self_heal_can_be_switched_off(monkeypatch):
     monkeypatch.setattr(fw, "_V978_SELF_HEAL_CLAIM", False)
     fw._V978_self_heals[0] = 0
     assert fw._v978_self_heal_dead_claim({"scope_error_detail": DETAIL}) is False
+
+
+def test_a_continuing_stall_does_not_repeat_its_warning_every_tick():
+    """Caught by watching the live stall, not by review.
+
+    The poll interval is a quarter of the warn budget, so an unthrottled warn
+    printed a full stack on every tick — sixteen identical dumps between warn
+    and act on the run that proved the feature.
+    """
+    fw = _load()
+    clock = {"t": 1000.0}
+    said = []
+    lv = fw._V978Liveness(warn_s=10, act_s=1000, now=lambda: clock["t"])
+    lv.stamp()
+    clock["t"] += 12
+    for _ in range(6):                    # six ticks inside one repeat window
+        fw._v978_tick(lv, act_fn=lambda: said.append("act"))
+        clock["t"] += 1
+    warns_first_window = lv._warned_at
+    assert warns_first_window is not None, "it must warn at least once"
+
+    # Past the repeat window it may speak again.
+    clock["t"] += fw._V978_WARN_REPEAT_S + 1
+    fw._v978_tick(lv, act_fn=lambda: said.append("act"))
+    assert lv._warned_at > warns_first_window, "it must warn again after the window"
+    assert said == [], "act must not fire while act_s is far away"

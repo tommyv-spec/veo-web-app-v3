@@ -232,6 +232,10 @@ _V978_ACT_ENABLED = (os.environ.get("FLOW_STALL_ACT") or "1").strip() not in (
 _V978_SELF_HEAL_CLAIM = (os.environ.get("FLOW_SELF_HEAL_CLAIM") or "1").strip() not in (
     "0", "false", "no", "off")
 _V978_SELF_HEAL_MAX = 3
+# How often a CONTINUING stall may repeat its warning. Without this the warn
+# fires on every poll tick, which on the live stall that proved the feature
+# meant sixteen full stack dumps between warn and act.
+_V978_WARN_REPEAT_S = float(os.environ.get("FLOW_STALL_WARN_REPEAT_S") or 60)
 _V978_self_heals = [0]
 
 # Kept aside at install time so the watchdog can report WITHOUT refreshing the
@@ -423,9 +427,17 @@ def _v978_tick(liveness, act_fn=None):
     except Exception:
         stack = "(stack unavailable)"
     if level == "warn":
-        _v978_say(f"\n[v978] NO MAIN-THREAD PROGRESS for {quiet:.0f}s "
-                  f"(warn at {liveness.warn_s:.0f}s, act at {liveness.act_s:.0f}s) "
-                  f"— the main thread is here:\n{stack}")
+        # Throttled. The poll interval is a quarter of the warn budget, so an
+        # unthrottled warn printed a full stack on EVERY tick -- measured on the
+        # live stall at 18:14, sixteen identical dumps between warn and act.
+        # Repeat at most once a minute; the silence figure in each line still
+        # shows the clock advancing, which is the part worth reading.
+        _last = getattr(liveness, "_warned_at", None)
+        if _last is None or (liveness._now() - _last) >= _V978_WARN_REPEAT_S:
+            liveness._warned_at = liveness._now()
+            _v978_say(f"\n[v978] NO MAIN-THREAD PROGRESS for {quiet:.0f}s "
+                      f"(warn at {liveness.warn_s:.0f}s, act at "
+                      f"{liveness.act_s:.0f}s) — the main thread is here:\n{stack}")
         return level
     if liveness.acted:
         return level
