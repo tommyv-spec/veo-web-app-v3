@@ -13571,6 +13571,42 @@ def _canonical_frame_name(clip, frame_type):
     return f"{frame_type}_{clip.get('clip_index', 0)}.png"
 
 
+def _v989_looks_like_an_image(head):
+    """True when these first bytes are a real image container.
+
+    Written because a 190-byte proxy error ("upstream connect error or
+    disconnect/reset before headers...") was saved as image_07.png and then
+    reused as a picture for five runs.
+
+    WEBP is not optional here: Flow serves these frames as WEBP under a .png
+    name (image_35..38 on 2026-09-13 are all `RIFF....WEBP`), so a PNG-only
+    check would throw away every good frame.
+    """
+    if not head or len(head) < 12:
+        return False
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True
+    if head.startswith(b"\xff\xd8\xff"):              # JPEG
+        return True
+    if head.startswith(b"GIF8"):
+        return True
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return True
+    if head[:4] in (b"II*\x00", b"MM\x00*"):          # TIFF
+        return True
+    if head[4:8] == b"ftyp":                          # HEIC / AVIF
+        return True
+    return False
+
+
+def _v989_file_is_an_image(path):
+    try:
+        with open(path, "rb") as fh:
+            return _v989_looks_like_an_image(fh.read(16))
+    except Exception:
+        return False
+
+
 def download_frame(url, local_path, r2_fallback_url=None):
     """Download frame from web app proxy or R2
     
@@ -13581,22 +13617,60 @@ def download_frame(url, local_path, r2_fallback_url=None):
     """
     # Check if file already exists locally
     if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-        print(f"[Download] {os.path.basename(local_path)} already exists locally")
-        return local_path
+        # v989 — "non-empty" is not "an image". A 190-byte proxy error saved as
+        # image_07.png was returned here as a valid frame for five consecutive
+        # runs, and no amount of retrying could help because the failure itself
+        # was cached. Re-fetch instead of trusting the size.
+        if _v989_file_is_an_image(local_path):
+            print(f"[Download] {os.path.basename(local_path)} already exists locally")
+            return local_path
+        try:
+            with open(local_path, "rb") as _bf:
+                _bad = _bf.read(80)
+        except Exception:
+            _bad = b""
+        print(f"[Download] [v989] {os.path.basename(local_path)} on disk is not an "
+              f"image ({os.path.getsize(local_path)} bytes, starts {_bad[:60]!r}) "
+              f"- discarding it and downloading again", flush=True)
+        try:
+            os.remove(local_path)
+        except Exception:
+            pass
     
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
     headers = {"Authorization": f"Bearer {API_KEY}"}
     
     try:
-        response = requests.get(url, headers=headers, timeout=120)
-        response.raise_for_status()
-        
-        with open(local_path, 'wb') as f:
-            f.write(response.content)
-        
-        filename = os.path.basename(local_path)
-        print(f"[Download] {filename} ({len(response.content)} bytes)")
-        return local_path
+        # v989 — the proxy can answer HTTP 200 with an ERROR BODY, so
+        # raise_for_status() is not enough on its own. Measured 2026-09-13:
+        # image_07.png was 190 bytes of "upstream connect error or
+        # disconnect/reset before headers ... Connection refused", written
+        # straight to disk and then uploaded to Flow, which silently refused it
+        # - so the asset never existed, the picker never listed it, and the clip
+        # died as "frame attach glitched" five runs running.
+        _v989_last = b""
+        for _v989_try in range(3):
+            response = requests.get(url, headers=headers, timeout=120)
+            response.raise_for_status()
+            _v989_body = response.content
+            if _v989_looks_like_an_image(_v989_body[:16]):
+                with open(local_path, 'wb') as f:
+                    f.write(_v989_body)
+                filename = os.path.basename(local_path)
+                print(f"[Download] {filename} ({len(_v989_body)} bytes)")
+                return local_path
+            _v989_last = _v989_body[:80]
+            print(f"[Download] [v989] {os.path.basename(local_path)} came back as "
+                  f"{len(_v989_body)} bytes that are not an image "
+                  f"(starts {_v989_last[:60]!r}) - attempt {_v989_try + 1}/3",
+                  flush=True)
+            time.sleep(2 * (_v989_try + 1))
+        # Nothing is written: a frame we cannot fetch must not become a file that
+        # every later run trusts.
+        print(f"[Download] [v989] gave up on {os.path.basename(local_path)} - "
+              f"3 responses were not images (last starts {_v989_last[:60]!r})",
+              flush=True)
+        return None
     except requests.exceptions.HTTPError as e:
         code = e.response.status_code if e.response is not None else 0
         if code == 404:
