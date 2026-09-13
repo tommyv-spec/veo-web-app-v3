@@ -11362,6 +11362,13 @@ def _v962_upload_into_picker(page, image_path, prefix="", which="start"):
         return False
 
 
+# v985 — how long to wait for an asset that is in the picker but not yet
+# clickable. Flow keeps a just-uploaded asset in the pane as a container with no
+# button and no thumbnail while it processes it, and `_find()` matches on exactly
+# those. 0 restores the old single-shot behaviour.
+_V985_PICK_WAIT_S = float(os.environ.get("FLOW_PICK_WAIT_S") or 30)
+
+
 def _v962_pick_asset_in_picker(page, image_path, prefix="", which="start"):
     """Inside the open picker: click the option named like the file, or upload the
     file through 'Upload media' (a real file chooser) and then click it."""
@@ -11406,6 +11413,35 @@ def _v962_pick_asset_in_picker(page, image_path, prefix="", which="start"):
         return None
 
     opt = _find()
+    if opt is None and _V985_PICK_WAIT_S > 0:
+        # v985 — the asset is usually THERE, just not clickable yet.
+        #
+        # Measured over six failures (batches 11-15, 2026-09-13): the pane holds
+        # N asset containers and N-1 buttons, every time, and the missing one is
+        # the file we want. `_find()` matches `button` and `img[alt]`, neither of
+        # which exists on an asset Flow is still processing.
+        #
+        # Being a single shot is what turns that into a hard failure. Falling
+        # through to the upload branch cannot recover on flow.google.com: every
+        # drop target refuses the file and the Add-media click then times out
+        # under the still-open picker overlay, so the clip never submits.
+        #
+        # The post-upload path already polls this same `_find()` for 60s; this
+        # only gives the first call the same patience. The wait is paid solely by
+        # a clip that would otherwise fail outright, and the line printed below
+        # says which way it went — so the next run settles the cause instead of
+        # leaving it to another guess.
+        _v985_t0 = time.time()
+        while opt is None and (time.time() - _v985_t0) < _V985_PICK_WAIT_S:
+            time.sleep(1.0)
+            opt = _find()
+        if opt is not None:
+            print(f"{prefix}✓ [v985] {name} became clickable after "
+                  f"{time.time() - _v985_t0:.1f}s — no upload needed", flush=True)
+        else:
+            print(f"{prefix}[v985] {name} never became clickable in "
+                  f"{_V985_PICK_WAIT_S:.0f}s — falling through to upload",
+                  flush=True)
     if opt is None:
         # TEMPORARY DIAGNOSTIC (v962.8, 2026-09-07) — remove once the picker's
         # option shape is settled. If the widened _OPTION_SHAPES still match
