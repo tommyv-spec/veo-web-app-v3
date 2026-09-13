@@ -8031,6 +8031,10 @@ MAX_POLL_TIME = 120     # Max seconds to poll before giving up
 POLL_INTERVAL = 5       # Seconds between status polls (used in download phase)
 MAX_GENERATION_RETRIES = 2   # Max retries per clip
 CLIP_READY_WAIT = 50    # Seconds to wait after submission before clip is ready for download
+# v998 -- how long the post-job wait gives a render whose media id the worker
+# bound at submit. 300 s gave six finished renders up on 2026-09-13; renders on
+# this host take 4-10 min. Ghosts and refusals keep the 300 s.
+_V998_RENDER_DEADLINE_S = float(os.environ.get("FLOW_POSTJOB_RENDER_DEADLINE_S") or 900)
 # v920.1 — REVERTED to 1. v920 raised this to 8 on the theory that the failure
 # check's page.evaluate poll was running through the reCAPTCHA mint window and
 # spoiling the token. The v920 timestamps disproved it on the first run:
@@ -11773,6 +11777,13 @@ def _v962_upload_into_picker(page, image_path, prefix="", which="start"):
         # fires when a file lands on the COMPOSER. So the composer and the frames
         # bar come first, and each target is checked for an effect rather than
         # assumed to have worked.
+        if _v962_on_new_host(page):
+            # v997 -- these five synthetic drops attached nothing in nine runs
+            # on 2026-09-13 (0 hits, 40+ tries) and mutate the page on every
+            # clip. The chooser below is the upload route on this host.
+            print(f"{prefix}[v997] file-drop routes skipped on flow.google.com "
+                  f"(0 attaches in 9 runs) — going to the Add-media chooser", flush=True)
+            return False
         import base64
         blob = base64.b64encode(open(image_path, "rb").read()).decode("ascii")
         targets = [
@@ -12094,21 +12105,61 @@ def _v962_pick_asset_in_picker(page, image_path, prefix="", which="start"):
                   f"— cannot upload {name}", flush=True)
             return False
         print(f"{prefix}[v986] opening the add menu via {_v986_btn}", flush=True)
-        try:
-            with page.expect_file_chooser(timeout=20000) as fc:
-                page.locator(_v986_btn).first.click(timeout=8000)
-                time.sleep(1.5)
-                # v975 — match the mat-icon LIGATURE, not the English label.
-                # The item renders as "uploadUpload": ligature + label. The
-                # ligature is identical in every locale; the label is not, and
-                # has_text matches a substring, so lowercase "upload" hits it.
-                page.locator(".cdk-overlay-container [role='menuitem'], "
-                             ".cdk-overlay-container button"
-                             ).filter(has_text="upload").first.click(timeout=8000)
-            fc.value.set_files(image_path)
-            print(f"{prefix}[v974] uploaded {name} through Flow's Add-media chooser", flush=True)
-        except Exception as e:
-            print(f"{prefix}⚠ [v974] Add-media upload of {name} failed: {str(e)[:100]}", flush=True)
+        # v997 -- at most two attempts; the second only after the page was
+        # cleared, and only with the first failure's full call log and page
+        # state on record. Measured 2026-09-13: this chooser worked once per
+        # browser session and then timed out on the button click every time,
+        # while the same click succeeded in 0.1 s in two isolated probes.
+        _v997_err = None
+        for _v997_attempt in (1, 2):
+            try:
+                with page.expect_file_chooser(timeout=20000) as fc:
+                    page.locator(_v986_btn).first.click(timeout=8000)
+                    time.sleep(1.5)
+                    # v975 — match the mat-icon LIGATURE, not the English label.
+                    # The item renders as "uploadUpload": ligature + label. The
+                    # ligature is identical in every locale; the label is not, and
+                    # has_text matches a substring, so lowercase "upload" hits it.
+                    page.locator(".cdk-overlay-container [role='menuitem'], "
+                                 ".cdk-overlay-container button"
+                                 ).filter(has_text="upload").first.click(timeout=8000)
+                fc.value.set_files(image_path)
+                print(f"{prefix}[v974] uploaded {name} through Flow's Add-media chooser"
+                      f"{' (attempt 2, after clearing overlays)' if _v997_attempt == 2 else ''}",
+                      flush=True)
+                _v997_err = None
+                break
+            except Exception as e:
+                _v997_err = e
+                print(f"{prefix}⚠ [v974] Add-media upload of {name} failed (attempt {_v997_attempt}): "
+                      + " | ".join(str(e).splitlines()[:10])[:900], flush=True)
+                try:
+                    _v997_state = page.wait_for_function("""() => {
+                        const q = s => document.querySelectorAll(s).length;
+                        const b = document.querySelector("button[aria-label='Add ingredients to the prompt box']")
+                               || document.querySelector("button[aria-label='Add media menu']");
+                        let at = 'no-button';
+                        if (b) { const r = b.getBoundingClientRect();
+                                 const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                                 at = el ? el.tagName.toLowerCase() + '.' + String(el.className).slice(0, 60) : 'nothing'; }
+                        return JSON.stringify({pane: q('.cdk-overlay-container .cdk-overlay-pane'),
+                            backdrop: q('.cdk-overlay-backdrop'), popover: q('.add-menu-popover-container'),
+                            dialog: q('[role=dialog]'), file_inputs: q('input[type=file]'),
+                            btn: b ? {expanded: b.getAttribute('aria-expanded'), disabled: b.disabled,
+                                      visible: !!(b.offsetWidth || b.offsetHeight)} : null, at_center: at});
+                    }""", timeout=5000).json_value()
+                    print(f"{prefix}[v997] page state at the failure: {_v997_state}", flush=True)
+                except Exception as _v997_se:
+                    print(f"{prefix}[v997] page state unreadable: {type(_v997_se).__name__}", flush=True)
+                if _v997_attempt == 1:
+                    try:
+                        page.keyboard.press("Escape")
+                        time.sleep(0.5)
+                        page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+                    _v975_clear_overlays(page)
+        if _v997_err is not None:
             return False
         try:
             page.locator(_V962_FRAME_SLOT[which]).first.click(timeout=12000)
@@ -30726,7 +30777,20 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             _last_reload = time.time()
             ensure_videos_tab_selected(page)
 
-            while _pending_left and (time.time() - _poll_start) < 300:
+            def _v998_window():
+                """v998 -- 900 s while a pending clip has a bound media id and no
+                refusal on record (a render in flight); 300 s otherwise."""
+                for _c in clips:
+                    _i = _c.get('clip_index')
+                    if _i in _pending_left and _i not in http_enqueued_clips:
+                        try:
+                            if (bound_media_ids_for_clip(job_id, _i)
+                                    and _v992_peek_refusal_for_clip(job_id, _i) is None):
+                                return _V998_RENDER_DEADLINE_S
+                        except Exception:
+                            pass
+                return 300
+            while _pending_left and (time.time() - _poll_start) < _v998_window():
                 # Detect tab crash — no point scanning a dead page for 600s
                 if is_page_crashed(page):
                     print(f"[Flow] 💥 Submit tab crashed during post-job wait — breaking out (download thread will handle remaining clips)", flush=True)
@@ -31119,6 +31183,17 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     # media, decide, write, and only on a confirmed write consume,
                     # count and print (see _v992_give_up_on_clip). A failed write
                     # keeps the clip, the ledger and the cache entry for the next pass.
+                    try:
+                        _v998_bound = list(bound_media_ids_for_clip(job_id, _ci) or [])
+                    except Exception:
+                        _v998_bound = []
+                    if _v998_bound:
+                        # v998 -- for the record: this clip HAD a bound render and
+                        # was given the long window; whatever follows is a judgement
+                        # on a render that never became a video, not on a miss.
+                        print(f"[v998] Post-job: clip {_ci+1} bound uuid {_v998_bound[0][:8]} still has no "
+                              f"video after {int(time.time() - _poll_start)}s (window "
+                              f"{int(_v998_window())}s) — handing it to the v992 ladder", flush=True)
                     if _v992_give_up_on_clip(job_id, _ci, _clip_obj['id']):
                         # Remove from cache so resume path doesn't skip it
                         if job_id in cache.get('jobs', {}):
