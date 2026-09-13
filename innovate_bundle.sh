@@ -146,6 +146,46 @@ SOURCE_COUNT=0
 [[ -n "$SOURCE_FULL" ]] && SOURCE_COUNT=1
 TOTAL_FILES=$((${#BUNDLE_FILES[@]} + SOURCE_COUNT))
 
+# --- Rule Coverage table (2026-09-13) ----------------------------------------
+# ONE generator, two entry points. This script hands the LLM
+# code/template_new_format.md and NEVER calls tools/new_build_scaffold.py, so
+# without this the bundle route emitted no coverage table at all — which is why
+# 0 of the 4 builds made after the APPLY layer landed carried one. The scaffold
+# calls the same tools/rule_coverage_table.py, so both routes produce the same
+# rows for the same TYPE and METHOD. Override with BUILD_TYPE / BUILD_METHOD.
+RC_PY="${PYTHON:-python}"
+RC_TYPE="${BUILD_TYPE:-SELLING}"
+RC_METHOD="${BUILD_METHOD:-INNOVATION-MIX-AND-MATCH}"
+RC_TOOL="$REPO_ROOT/tools/rule_coverage_table.py"
+
+emit_rule_coverage() {
+    cat <<EOF
+
+================================================================================
+# RULE COVERAGE TABLE — carry this INTO the videos/*.md you author
+================================================================================
+
+Copy the "## Rule Coverage" section below into the artifact you write, directly
+after "## §0 Citations Check". It is the full §A denominator, pre-filled only
+where TYPE ($RC_TYPE) and METHOD ($RC_METHOD) already decide applicability.
+
+AFTER drafting, resolve EVERY row that still says UNKNOWN: read the draft in
+front of you and write Y or N with the reason. An UNKNOWN left in the file FAILs
+the authoring auditor (check: rule_coverage). Fill "Loaded" with the
+rules/vNNN.md you opened, and "APPLIED" with a place in YOUR file — a
+"§0 TOKEN", an image_N / Scene N / Clip N.M, or a backticked "- **field:**"
+name. The comment under each row is that rule's own APPLY instruction, verbatim.
+
+EOF
+    if [[ -f "$RC_TOOL" ]] && command -v "$RC_PY" >/dev/null 2>&1; then
+        "$RC_PY" "$RC_TOOL" build --type "$RC_TYPE" --method "$RC_METHOD" || \
+            echo "(generator failed — build the table by hand from wiki/meta/build-rule-index.md §A)"
+    else
+        echo "(tools/rule_coverage_table.py not reachable from this checkout —"
+        echo " build the table by hand from wiki/meta/build-rule-index.md §A)"
+    fi
+}
+
 build_bundle() {
     cat <<EOF
 # INNOVATE BUNDLE — generated $TIMESTAMP
@@ -1905,6 +1945,8 @@ End with:
   ## Used in — placeholder (operator fills post-production)
 
 TASKEOF
+
+    emit_rule_coverage
 }
 
 # Always write to temp file as fallback (clipboard can fail in sandboxed envs)
