@@ -11471,14 +11471,26 @@ def _v962_pick_asset_in_picker(page, image_path, prefix="", which="start"):
                     .map(el => el.getAttribute('aria-label')).filter(Boolean).slice(0, 12);
                 const icons = [...pane.querySelectorAll('mat-icon')]
                     .map(el => (el.textContent || '').trim()).filter(Boolean).slice(0, 12);
+                // v987 — WHAT THE ASSETS ARE CALLED. `_find()` matches the file
+                // name and fails even right after a successful upload
+                // ("uploaded ... but no asset option with that name in 60 s"),
+                // so the names themselves are the missing evidence. These are
+                // our own generated frame files (image_NN.png), never user
+                // content. Bounded, and the alt text too because a thumbnail
+                // carries the name there rather than as text.
+                const titles = [...pane.querySelectorAll('.asset-text, span.asset-title')]
+                    .map(el => (el.textContent || '').trim()).filter(Boolean).slice(0, 20);
+                const alts = [...pane.querySelectorAll('img[alt]')]
+                    .map(el => el.getAttribute('alt')).filter(Boolean).slice(0, 20);
                 const roles = [...new Set([...pane.querySelectorAll('[role]')]
                     .map(el => el.getAttribute('role')))].slice(0, 12);
-                return {pane: true, total: pane.querySelectorAll('*').length,
+                return {pane: true, titles: titles, alts: alts,
+                        total: pane.querySelectorAll('*').length,
                         shapes: Object.fromEntries(Object.entries(seen)
                             .sort((x, y) => y[1] - x[1]).slice(0, 25)),
                         with_attr: attrs, labels: labels, icons: icons, roles: roles};
             }""")
-            print(f"{prefix}[v962.8-diag] picker pane contents: {json.dumps(inner)[:1200]}",
+            print(f"{prefix}[v962.8-diag] picker pane contents: {json.dumps(inner)[:2000]}",
                   flush=True)
         except Exception as _pe:
             print(f"{prefix}[v962.8-diag] pane probe failed: {type(_pe).__name__}", flush=True)
