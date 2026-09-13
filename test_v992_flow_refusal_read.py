@@ -53,3 +53,59 @@ def test_the_shared_decoder_returns_every_frame_with_its_rpcid():
     assert fw._v963_batchexecute_frames(body) == [("UpteDb", [1, 2]), ("jwpduf", {"a": 1})]
     assert fw._v963_batchexecute_payloads(body, "jwpduf") == [{"a": 1}]
     assert fw._v963_batchexecute_frames("not batchexecute at all") == []
+
+
+# ---------------------------------------------------------------- Task 2
+class _Req:
+    def __init__(self, post_data=""):
+        self.post_data = post_data
+
+
+class _Frame:
+    page = None
+
+
+class _Resp:
+    """A Playwright Response stand-in: status, text(), json() (never JSON on
+    this host), request.post_data, url. frame.page is None like a test stub."""
+    def __init__(self, url, body, status=200, req_body=""):
+        self.url = url
+        self.status = status
+        self._body = body
+        self.request = _Req(req_body)
+        self.frame = _Frame()
+
+    def text(self):
+        return self._body
+
+    def json(self):
+        raise ValueError("batchexecute is not json")
+
+
+class _Page:
+    """Collects handlers passed to page.on(event, fn)."""
+    def __init__(self):
+        self.handlers = {}
+
+    def on(self, event, fn):
+        self.handlers.setdefault(event, []).append(fn)
+
+
+BX_URL = ("https://flow.google.com/_/AiSandboxAngularFrontend/data/batchexecute"
+          "?rpcids=jwpduf&source-path=%2Fproject%2F" + PROJECT + "&rt=c")
+
+
+def test_the_response_listener_reaches_the_scan_for_a_batchexecute_url():
+    fw = _load()
+    seen = []
+    fw._scan_failure_reason = lambda resp, url, buf_key='': seen.append((url, buf_key))
+    page = _Page()
+    fw._install_submit_response_listener(page, "TESTACCT")
+    handler = page.handlers["response"][0]
+    handler(_Resp(BX_URL, _wire([("jwpduf", [None, []])])))
+    assert seen == [(BX_URL, "acct:TESTACCT")], (
+        "a flow.google.com status poll never reached the scan: the gate only "
+        "matched the old host's endpoint names")
+    seen.clear()
+    handler(_Resp("https://flow.google.com/asb/AB-nOUxyz=mm,22,15", "video bytes"))
+    assert seen == [], "a media fetch is not a batchexecute response; the scan must not read it"

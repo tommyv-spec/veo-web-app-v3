@@ -3386,7 +3386,11 @@ def _install_submit_response_listener(page, account_label=""):
             # endpoint (skipped by the strict bind filter below) AND submits.
             try:
                 _u_lc = url.lower()
+                # v992 -- flow.google.com answers EVERYTHING over /data/batchexecute;
+                # the two legacy names never match there, so on this host the scan
+                # was never called at all (0 [fail-reason-diag] lines in batch10-21).
                 if ('batchcheckasyncvideogenerationstatus' in _u_lc
+                        or '/data/batchexecute' in _u_lc
                         or _SUBMIT_BIND_URL_SUBSTR.lower() in _u_lc):
                     _scan_failure_reason(resp, url, buf_key)
             except Exception:
