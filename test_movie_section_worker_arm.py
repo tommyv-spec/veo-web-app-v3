@@ -88,20 +88,24 @@ def test_movie_section_selected_only_on_exact_value():
 
 
 def test_chip_verdict_requires_scene_plus_every_face_distinct():
+    # v991 — the verdict now takes TWO readings: the ids the attach captured,
+    # and the DOM's own chip count. One number could not do both jobs (see
+    # test_v991_section_gate.py), so the count is a separate argument.
     verdict = _worker_function("movie_section_chip_verdict")
-    ok, why = verdict(["a", "b", "c"], faces_wanted=2)
+    ok, why = verdict(["a", "b", "c"], faces_wanted=2, chip_count=3)
     assert ok
-    ok, why = verdict(["a", "b"], faces_wanted=2)
+    ok, why = verdict(["a", "b"], faces_wanted=2, chip_count=3)
     assert not ok and "3" in why
-    ok, why = verdict(["a", "a", "b"], faces_wanted=2)
+    ok, why = verdict(["a", "a", "b"], faces_wanted=2, chip_count=3)
     assert not ok and "distinct" in why
 
 
 def test_chip_verdict_holds_for_a_single_face_too():
     """D3 allows 1 or 2 faces, so the wanted count is derived, never hard-coded."""
     verdict = _worker_function("movie_section_chip_verdict")
-    assert verdict(["scene", "face"], faces_wanted=1)[0] is True
-    assert verdict(["scene", "face", "extra"], faces_wanted=1)[0] is False
+    assert verdict(["scene", "face"], faces_wanted=1, chip_count=2)[0] is True
+    assert verdict(["scene", "face", "extra"], faces_wanted=1,
+                   chip_count=3)[0] is False
 
 
 _GEN_OK = {"endpoint": "batchAsyncGenerateVideoReferenceImages",
@@ -262,13 +266,21 @@ def test_an_empty_local_path_is_refused_at_the_fetch_not_inside_the_attach():
 # 1c. attaching — the scene clears, every face must not
 # =============================================================================
 
-def _attach_fn(attach_results=None, chips=("s", "f1", "f2"), armed=(True, "ok")):
-    """movie_section_attach_and_prompt with every browser call stubbed."""
+def _attach_fn(attach_results=None, chips=("s", "f1", "f2"), armed=(True, "ok"),
+               chip_count=3):
+    """movie_section_attach_and_prompt with every browser call stubbed.
+
+    v991 — a successful attach now returns the media id it committed, and the
+    section path collects those into `expected_ids`. That is the list the
+    verdict, the submit probe and the arm all judge; the DOM chip count comes
+    in separately, from `_v962_section_chip_count`.
+    """
     log = []
+    ids_by_path = {"/s.png": "s", "/f1.png": "f1", "/f2.png": "f2"}
 
     def _attach(page, path, context="", clear_existing=True, **kw):
         log.append(("attach", path, clear_existing))
-        return (attach_results or {}).get(path, (True, None))
+        return (attach_results or {}).get(path, (True, ids_by_path.get(path)))
 
     diag = []
     fn = _worker_function("movie_section_attach_and_prompt", {
@@ -276,9 +288,14 @@ def _attach_fn(attach_results=None, chips=("s", "f1", "f2"), armed=(True, "ok"))
         "movie_section_write_diag": lambda **f: diag.append(f),
         "movie_section_chip_verdict": _worker_function("movie_section_chip_verdict"),
         "charswap_composer_chip_media_ids": lambda page: list(chips),
+        "_v962_section_chip_count": lambda page, prefix="": chip_count,
+        "_V962_SECTION_CANCEL": "flow-prompt-box button:has-text('cancel')",
         "charswap_install_submit_probe": lambda page, ids: log.append(("probe", ids)),
         "fill_prompt_textarea": lambda page, p: log.append(("prompt", p)),
-        "charswap_arm_generate": lambda page, p, ids, context="": armed,
+        "charswap_arm_generate": (
+            lambda page, p, ids, context="", want=2, count_fn=None:
+            log.append(("arm", ids, want)) or armed
+        ),
         "time": type("T", (), {"sleep": staticmethod(lambda s: None)}),
     })
     return fn, log, diag
@@ -292,6 +309,33 @@ def test_the_scene_chip_clears_and_every_face_chip_does_not():
     assert ok and chips == ["s", "f1", "f2"]
     assert [(e[1], e[2]) for e in log if e[0] == "attach"] == [
         ("/s.png", True), ("/f1.png", False), ("/f2.png", False)]
+    assert [e for e in log if e[0] == "arm"] == [
+        ("arm", ["s", "f1", "f2"], 3)]
+
+
+def test_an_unidentified_chip_refuses_instead_of_submitting_on_a_count():
+    """v991 — three chips in the box is not three PROVEN references. An
+    ingredient whose media id the attach could not capture stops the clip
+    before a render is paid for."""
+    fn, log, diag = _attach_fn(attach_results={"/f1.png": (True, None)})
+    page = _Page()
+    ok, chips = fn(page, "/s.png", ["/f1.png", "/f2.png"], "prompt")
+    assert not ok and chips == []
+    assert page._movie_section_block_reason == "identity unknown for f1.png"
+    assert [d["stage"] for d in diag] == ["face_identity_unknown"]
+    assert not [k for k, *_ in log if k == "probe"]
+
+
+def test_the_dom_count_must_agree_with_the_captured_ids():
+    """Three ids and a composer holding four is a dirty composer — the number
+    that moved is the one the uuid scrape used to get wrong in both
+    directions, so both instruments have to agree before a submit."""
+    fn, log, _ = _attach_fn(chip_count=4)
+    page = _Page()
+    ok, _chips = fn(page, "/s.png", ["/f1.png", "/f2.png"], "prompt")
+    assert not ok
+    assert "composer holds 4 chip(s), needs 3" in page._movie_section_block_reason
+    assert not [k for k, *_ in log if k == "probe"]
 
 
 def test_a_face_that_will_not_attach_stops_before_the_probe():
@@ -584,8 +628,12 @@ def test_the_arm_stamps_its_identity_for_the_attach_stage_diag():
     helper = _body(_worker_src(), "movie_section_attach_and_prompt")
     assert 'getattr(page, "_movie_section_job_id", None)' in helper
     assert 'getattr(page, "_movie_section_clip_index", None)' in helper
-    # every diag line the helper writes carries them
-    assert helper.count("**_who") == 3
+    # every diag line the helper writes carries them. Stated as an equality
+    # rather than a magic number: v991 added two more refusal stages and the
+    # hard-coded 3 failed for the one reason this check must never fire on —
+    # a new diag line that DOES carry the identity.
+    assert helper.count("**_who") == helper.count("movie_section_write_diag(")
+    assert helper.count("**_who") >= 3
 
 
 def test_a_failed_diag_write_says_so_instead_of_vanishing():

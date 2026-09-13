@@ -211,7 +211,7 @@ class _Page:
 
 class _Monitor:
     def __init__(self, _page):
-        pass
+        self.media_ids = []
 
     def start(self):
         pass
@@ -221,6 +221,13 @@ class _Monitor:
 
     def is_rejected(self):
         return False
+
+    def new_media_id(self, exclude=()):
+        # v991 — the monitor now also reports the media id the upload produced.
+        # This stub answers None, which is the measured flow.google.com case:
+        # the upload response is not visible to the page listener there, so the
+        # id has to come from one of the other two channels.
+        return None
 
 
 @pytest.fixture

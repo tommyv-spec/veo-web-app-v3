@@ -19702,6 +19702,166 @@ def _v962_chips_in_box(page):
         return -1
 
 
+# v991 — ONE chip element per chip, for the movie-section gate.
+#
+# _V962_COMPOSER_CHIP above matches TWO element types per chip
+# (flow-image-ingredient-chip AND flow-ingredient-chip), which is why every
+# attach logs "0 → 2, 2 in the box" for one image. That doubling is harmless
+# as a delta and useless as a count. The image-chip element alone is one per
+# chip, so this is the count a gate can compare against "1 scene + N faces".
+_V962_SECTION_CHIP = ("flow-prompt-box flow-image-ingredient-chip, "
+                      "flow-base-prompt-box flow-image-ingredient-chip")
+# The same selector clear_existing uses — one 'cancel' control per chip.
+_V962_SECTION_CANCEL = ("flow-prompt-box button:has-text('cancel'), "
+                        "flow-base-prompt-box button:has-text('cancel')")
+
+
+def _v962_section_chip_count(page, prefix=""):
+    """v991 — how many ingredient chips the composer holds. -1 if unreadable.
+
+    WHY THIS EXISTS. The movie-section gate used to count chips with
+    charswap_composer_chip_media_ids — a page-wide scrape of mediaId uuids out
+    of <img src>. On flow.google.com that instrument disagreed with the
+    composer three different ways inside one run (2026-09-13, run 3):
+
+        clip 2   read 1   three fresh uploads, whose chip thumbnails are
+                          /asb/ tokens with NO uuid in the URL at all
+        clip 3   read 4   one stale uuid from an earlier clip's assets
+        clip 4   read 5   two stale ones
+        clip 1   read 3   right, by luck — its project was resumed from cache
+                          so all three assets already existed and carried uuids
+
+    Meanwhile the attach helper's own element counter reported 6 = 3 chips on
+    every one of the four clips. The instrument the gate trusted was the wrong
+    one; the right one was sitting there being ignored.
+
+    The first call per clip also logs the composer's 'cancel' button count.
+    Two independent readings of the same fact: if they disagree the log says
+    so and the SMALLER is returned, so a disagreement fails closed instead of
+    letting a phantom chip wave a short composer through.
+    """
+    try:
+        n = page.locator(_V962_SECTION_CHIP).count()
+    except Exception:
+        return -1
+    try:
+        cancels = page.locator(_V962_SECTION_CANCEL).count()
+    except Exception:
+        cancels = -1
+    clip_key = getattr(page, "_movie_section_clip_index", None)
+    try:
+        already = getattr(page, "_v991_cancel_logged_for", "__none__")
+    except Exception:
+        already = "__none__"
+    if already != clip_key:
+        try:
+            page._v991_cancel_logged_for = clip_key
+        except Exception:
+            pass
+        print(f"{prefix}[v991] composer chips: {n} image-chip element(s), "
+              f"{cancels} cancel button(s)", flush=True)
+    if cancels >= 0 and cancels != n:
+        print(f"{prefix}⚠ [v991] the two chip readings disagree "
+              f"(chips={n}, cancels={cancels}) — using the smaller", flush=True)
+        return min(n, cancels)
+    return n
+
+
+def _v991_media_uuids(text):
+    """Every media-uuid-shaped token in a string, lowercased, in order."""
+    try:
+        return [m.lower() for m in re.findall(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            text or "", re.I)]
+    except Exception:
+        return []
+
+
+_V991_UPLOAD_PROBE_DONE = False
+
+
+def _v991_install_upload_probe(page, prefix=""):
+    """v991 TEMP DIAG — log what the FIRST upload window actually talks to.
+
+    Returns a callable that removes the listener and prints what it saw. Never
+    raises; a diagnostic must not be able to fail a render.
+
+    This exists because A4 named a channel that does not fire here (see the
+    caller). Naming the real endpoint is a measurement, and it costs one run.
+    """
+    seen = []
+
+    def _on_resp(response):
+        try:
+            url = response.url or ""
+            if "recaptcha" in url or "/asb/" in url or "gstatic" in url:
+                return
+            ct = ""
+            try:
+                ct = (response.headers or {}).get("content-type", "")
+            except Exception:
+                pass
+            if ct.startswith("image/") or ct.startswith("font/"):
+                return
+            if len(seen) >= 10:
+                return
+            head = ""
+            try:
+                head = (response.text() or "")[:200]
+            except Exception:
+                head = "<unreadable>"
+            seen.append((response.status, ct[:40], url[:150], head))
+        except Exception:
+            pass
+
+    try:
+        page.on("response", _on_resp)
+    except Exception:
+        return None
+
+    def _finish():
+        global _V991_UPLOAD_PROBE_DONE
+        try:
+            page.remove_listener("response", _on_resp)
+        except Exception:
+            pass
+        _V991_UPLOAD_PROBE_DONE = True
+        if not seen:
+            print(f"{prefix}[v991-probe] the upload window produced NO "
+                  f"page-visible response at all — the request is not on this "
+                  f"page's network (service worker / separate context)",
+                  flush=True)
+            return
+        print(f"{prefix}[v991-probe] {len(seen)} response(s) during the first "
+              f"upload:", flush=True)
+        for st, ct, url, head in seen:
+            print(f"{prefix}[v991-probe]   {st} {ct} {url}", flush=True)
+            print(f"{prefix}[v991-probe]     body head: {head!r}", flush=True)
+
+    return _finish
+
+
+def _v991_item_media_id(item):
+    """The media uuid on an add-menu item's thumbnail, or None.
+
+    A project asset that already exists is served from a URL carrying its
+    uuid, so the item we are about to commit names itself. A freshly uploaded
+    one is served from /asb/<opaque> and names nothing — that case is answered
+    by the upload response and the chip delta instead.
+    """
+    if item is None:
+        return None
+    try:
+        imgs = item.locator("img")
+        for i in range(min(imgs.count(), 4)):
+            got = _v991_media_uuids(imgs.nth(i).get_attribute("src") or "")
+            if got:
+                return got[0]
+    except Exception:
+        pass
+    return None
+
+
 def _v962_ensure_ingredients_mode(page, prefix=""):
     """Put the composer on INGREDIENTS. True/False, or None if it can't be read.
 
@@ -19902,6 +20062,15 @@ def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
             pass
 
     chips_before = _v962_composer_chips(page)
+    # v991 — the third identity channel: which media uuids the page already
+    # showed BEFORE this attach. A uuid that appears only afterwards belongs to
+    # the image we just committed. This is a per-attach DELTA, not the page-wide
+    # count that v991 is removing from the gate: a stale id from an earlier clip
+    # was present before too, so it cancels out.
+    try:
+        ids_before = set(charswap_composer_chip_media_ids(page) or [])
+    except Exception:
+        ids_before = set()
 
     try:
         add_btn = page.locator(_V962_ADD_MENU_BTN).first
@@ -19931,10 +20100,26 @@ def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
     # whether the item is already selected, and it is the one thing the DOM
     # never tells us afterwards.
     fresh = picked is None
+    upload_media_id = None
     if picked is None:
         # Not in the project yet — 'Upload media' is a real file chooser here.
         monitor = FramePolicyMonitor(page)
         monitor.start()
+        # v991 TEMP DIAG — name the endpoint the upload actually uses.
+        #
+        # A4 was written believing FramePolicyMonitor already sees the upload
+        # response. It does not on this host: across all three 2026-09-13 runs
+        # and twelve uploads, the monitor printed ZERO lines, and the API
+        # capture (whose allowlist DOES include 'uploadImage') recorded no
+        # uploadImage row on flow.google.com either — the last one on this
+        # machine is 2026-09-04, from the legacy host. So the endpoint is
+        # something else and nobody has ever written down what. Rather than
+        # guess a name or a field, log the URL and body head of every non-image
+        # response that lands during the FIRST upload window. One run names it.
+        # Delete this block once the endpoint is recorded in the rule.
+        _v991_probe = None
+        if not _V991_UPLOAD_PROBE_DONE:
+            _v991_probe = _v991_install_upload_probe(page, prefix)
         try:
             up = page.locator(".cdk-overlay-container button:has-text('Upload media'), "
                               "button:has-text('Upload media')").first
@@ -19958,7 +20143,19 @@ def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
             print(f"{prefix}⚠ [v963.11] upload failed: {str(exc)[:110]}", flush=True)
             return (False, 'no_buttons')
         finally:
+            # v991 — its own try, and BEFORE stop() so the listener is still
+            # live. An exception escaping here would skip monitor.stop() and
+            # leak a response listener onto the page for the rest of the run;
+            # a bare `except: pass` around it would delete the one answer this
+            # block exists to produce. So: catch it, and SAY it.
+            try:
+                upload_media_id = monitor.new_media_id(exclude=ids_before)
+            except Exception as _idexc:
+                print(f"{prefix}⚠ [v991] could not read the upload's media id: "
+                      f"{str(_idexc)[:110]}", flush=True)
             monitor.stop()
+            if _v991_probe is not None:
+                _v991_probe()
         if picked is None:
             print(f"{prefix}⚠ [v963.11] {name} never appeared in the add menu", flush=True)
             return (False, 'no_buttons')
@@ -20005,6 +20202,12 @@ def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
     # FILE LOCK: _v962_attach_ingredient is claimed by session db8a95a3 for
     # 2026-09-13. Message before editing it.
     raw_sel = _v962_asset_selected(picked)
+    # v991 — read the item's own media id BEFORE committing, while the add menu
+    # is still open. A project asset that already exists is served from a URL
+    # carrying its uuid, so it names itself here; a fresh upload is served from
+    # an /asb/ token and names nothing, which is what the other two channels
+    # are for.
+    item_media_id = _v991_item_media_id(picked)
 
     def _click_item():
         try:
@@ -20068,14 +20271,55 @@ def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
     # chip's own label if the page exposes one. Conservative on purpose: a
     # generic label must never cost us a good chip.
     ident = _v990_newest_chip_identity(page)
+    if ident is not None and not _v990_identity_matches(ident, name):
+        print(f"{prefix}⚠ [v990] wrong asset attached ({ident} ≠ {name})", flush=True)
+        _v990_remove_newest_chip(page)
+        return (False, 'wrong_asset')
     if ident is None:
         print(f"{prefix}[v990] identity unverified (no label on chip)", flush=True)
-        return (True, None)
-    if _v990_identity_matches(ident, name):
-        return (True, None)
-    print(f"{prefix}⚠ [v990] wrong asset attached ({ident} ≠ {name})", flush=True)
-    _v990_remove_newest_chip(page)
-    return (False, 'wrong_asset')
+
+    # v991 — WHICH media did this attach put on the composer? The gate above
+    # this one may no longer submit on a count, so every ingredient has to come
+    # back with an id. Three channels, tried in order, because no single one
+    # answers on both kinds of ingredient:
+    #
+    #   upload   the uploadImage 200 body. The only channel that can name a
+    #            FRESH upload... in theory. Measured DEAD on flow.google.com
+    #            (zero monitor lines in twelve uploads); kept because it is the
+    #            right answer wherever it does fire, and the probe above is
+    #            there to find its replacement.
+    #   item     the add-menu item's thumbnail uuid. Answers for an asset the
+    #            project already had.
+    #   delta    a uuid on the page that was not there before this attach.
+    #            Answers whenever the committed chip renders with a uuid URL.
+    #
+    # None of them answering is NOT "probably fine": it is an unidentified
+    # chip, and the section gate refuses on it rather than paying for a render
+    # whose references cannot be proven. The source is logged either way, so
+    # the next run is read off evidence instead of re-derived.
+    media_id, source = upload_media_id, "upload"
+    if not media_id:
+        media_id, source = item_media_id, "item"
+    if not media_id:
+        try:
+            delta = [i for i in (charswap_composer_chip_media_ids(page) or [])
+                     if i not in ids_before]
+        except Exception:
+            delta = []
+        if len(delta) == 1:
+            media_id, source = delta[0], "delta"
+        elif len(delta) > 1:
+            print(f"{prefix}[v991] {len(delta)} new uuid(s) after one attach "
+                  f"{delta[:4]} — ambiguous, not claiming an identity",
+                  flush=True)
+    if media_id:
+        print(f"{prefix}[v991] {name} identity {media_id} (source={source})",
+              flush=True)
+    else:
+        print(f"{prefix}⚠ [v991] {name} attached but UNIDENTIFIED "
+              f"(upload={upload_media_id!r} item={item_media_id!r} "
+              f"delta=none)", flush=True)
+    return (True, media_id)
 
 
 def attach_ingredient_image_with_check(page, image_path, context="", extra_images=None,
@@ -20566,7 +20810,14 @@ class FramePolicyMonitor:
         self.succeeded = False
         self.hard_400 = False
         self.error_reason = None
+        self.media_ids = []      # v991 — uuids carried by the 200 body, in order
         self._handler = None
+
+    # v991 — the raw body of the FIRST uploadImage 200 this process sees, printed
+    # once. The field name is NOT guessed anywhere in this file: the id is taken
+    # as a uuid-shaped token, and this line is how the next session learns what
+    # the body actually looks like. Remove it once the shape is written down.
+    _V991_BODY_HEAD_PRINTED = False
 
     def _on_response(self, response):
         try:
@@ -20590,14 +20841,56 @@ class FramePolicyMonitor:
             elif status == 200:
                 self.succeeded = True
                 print(f"[PolicyMonitor] ✓ uploadImage succeeded (200)", flush=True)
+                # v991 — the uploaded asset's media id. This is the ONLY channel
+                # that names a freshly uploaded image: its chip thumbnail is an
+                # /asb/ token with no uuid in it (measured 2026-09-13), so the
+                # DOM cannot answer and a gate built on the DOM alone would be
+                # counting, not identifying.
+                try:
+                    body = response.text()
+                except Exception:
+                    body = ""
+                got = _v991_media_uuids(body)
+                if not FramePolicyMonitor._V991_BODY_HEAD_PRINTED:
+                    FramePolicyMonitor._V991_BODY_HEAD_PRINTED = True
+                    print(f"[v991] uploadImage 200 body head: "
+                          f"{(body or '')[:400]!r}", flush=True)
+                if got:
+                    self.media_ids.extend(got)
+                    print(f"[v991] uploadImage 200 carried media id(s) "
+                          f"{got[:4]}", flush=True)
+                else:
+                    print(f"[v991] uploadImage 200 carried no uuid-shaped id "
+                          f"({len(body or '')} byte body)", flush=True)
         except:
             pass
+
+    def new_media_id(self, exclude=()):
+        """v991 — the id this upload produced, or None. Never raises.
+
+        With one uuid in the body the answer is unambiguous. With several, the
+        one we have not already attached this clip is the new asset — and both
+        the choice and the full list are logged, so a wrong pick shows up as a
+        refused submit verdict (the generate body would not carry it) rather
+        than as a silently wrong render.
+        """
+        try:
+            seen = {str(x).lower() for x in (exclude or ())}
+            fresh = [i for i in self.media_ids if i not in seen]
+            if len(self.media_ids) > 1:
+                print(f"[v991] upload body held {len(self.media_ids)} uuids "
+                      f"{self.media_ids[:6]} — taking "
+                      f"{(fresh or self.media_ids)[0]}", flush=True)
+            return (fresh or self.media_ids or [None])[0]
+        except Exception:
+            return None
 
     def start(self):
         self.rejected = False
         self.succeeded = False
         self.hard_400 = False
         self.error_reason = None
+        self.media_ids = []
         self._handler = self._on_response
         self.page.on("response", self._handler)
     
@@ -25581,20 +25874,43 @@ def movie_section_fetch_inputs(clip, temp_dir, context="[v959]"):
     return scene, faces
 
 
-def movie_section_chip_verdict(chip_ids, faces_wanted):
-    """(ok, why): the composer must hold scene + every face, all distinct.
+def movie_section_chip_verdict(expected_ids, faces_wanted, chip_count):
+    """(ok, why): scene + every face, each identified, and the DOM agrees.
 
-    Distinctness matters because the attach helper's success signal is a chip
-    COUNT increase: two chips carrying the same media id means one image went
-    up twice and a face never made it.
+    v991 — TWO facts, both required, from two independent instruments.
+
+    `expected_ids` is what the ATTACH path proved: one media id per ingredient,
+    captured at the moment it was committed. `chip_count` is what the DOM says
+    the composer is holding right now (_v962_section_chip_count). Both must be
+    exactly 1 scene + N faces.
+
+    This replaces a single reading — a page-wide scrape of uuids out of <img
+    src> — that on 2026-09-13 returned 1, 3, 4 and 5 on four clips that had all
+    attached exactly 3. It was wrong in both directions on the same page in the
+    same run: blind to fresh uploads (whose thumbnails carry no uuid) and
+    fooled by stale ids left over from earlier clips. Counting and identifying
+    are different jobs and one number cannot do both, so each is now measured
+    by the instrument that can actually see it.
+
+    Distinctness still matters: two ingredients resolving to the same media id
+    means one image went up twice and a face never made it.
     """
     want = 1 + int(faces_wanted)
-    ids = list(chip_ids or [])
+    ids = [i for i in (expected_ids or []) if i]
+    try:
+        chip_count = int(chip_count)
+    except Exception:
+        chip_count = -1
     if len(ids) != want:
-        return False, f"composer holds {len(ids)} chip(s), needs {want} (1 scene + {faces_wanted} face)"
+        return False, (f"{len(ids)} of {want} ingredient(s) identified "
+                       f"(1 scene + {faces_wanted} face) — refusing to submit "
+                       f"on a count")
     if len(set(ids)) != len(ids):
         return False, "chips are not distinct — the same image attached twice"
-    return True, f"{want} distinct chips"
+    if chip_count != want:
+        return False, (f"composer holds {chip_count} chip(s), needs {want} "
+                       f"(1 scene + {faces_wanted} face)")
+    return True, f"{want} identified, distinct chips; DOM agrees ({chip_count})"
 
 
 def movie_section_submit_verdict(seen, hits, want, api_last):
@@ -25668,12 +25984,23 @@ def movie_section_attach_and_prompt(page, scene_path, face_paths, prompt, contex
         chips_before = charswap_composer_chip_media_ids(page)
     except Exception:
         chips_before = None
+    # v991 — every ingredient comes back with the media id it put on the
+    # composer, captured at attach time. `expected_ids` is what the gate below
+    # judges, and what the submit probe then has to find in the generate body.
+    expected_ids = []
     ok, why = attach_ingredient_image_with_check(page, scene_path, context=f"{context}-scene",
                                                  clear_existing=True)
     if not ok:
         page._movie_section_block_reason = f"scene chip did not attach ({why})"
         movie_section_write_diag(stage="scene_attach_failed", reason=why, **_who)
         return False, []
+    if not why:
+        page._movie_section_block_reason = (
+            f"identity unknown for {os.path.basename(scene_path or '')}")
+        movie_section_write_diag(stage="scene_identity_unknown",
+                                 reason=page._movie_section_block_reason, **_who)
+        return False, []
+    expected_ids.append(why)
     for k, fp in enumerate(face_paths):
         # clear_existing=False: a True here would delete the scene chip it must
         # sit beside (the v881 pair discipline, tools/flow_clip_section.py).
@@ -25683,21 +26010,36 @@ def movie_section_attach_and_prompt(page, scene_path, face_paths, prompt, contex
             page._movie_section_block_reason = f"face chip {k+1} did not attach ({why})"
             movie_section_write_diag(stage="face_attach_failed", face=k + 1, reason=why, **_who)
             return False, []
-    chip_ids = charswap_composer_chip_media_ids(page)
-    ok, why = movie_section_chip_verdict(chip_ids, len(face_paths))
-    movie_section_write_diag(stage="chips_read", chip_ids=chip_ids, verdict=why,
-                             chips_before=chips_before, **_who)
+        if not why:
+            page._movie_section_block_reason = (
+                f"identity unknown for {os.path.basename(fp or '')}")
+            movie_section_write_diag(stage="face_identity_unknown", face=k + 1,
+                                     reason=page._movie_section_block_reason, **_who)
+            return False, []
+        expected_ids.append(why)
+    want = 1 + len(face_paths)
+    chip_count = _v962_section_chip_count(page, prefix=f"{context} ")
+    try:
+        cancels = page.locator(_V962_SECTION_CANCEL).count()
+    except Exception:
+        cancels = -1
+    ok, why = movie_section_chip_verdict(expected_ids, len(face_paths), chip_count)
+    movie_section_write_diag(stage="chips_read", expected_ids=expected_ids,
+                             chip_count=chip_count, cancel_count=cancels,
+                             verdict=why, chips_before=chips_before, **_who)
     if not ok:
         page._movie_section_block_reason = why
-        return False, chip_ids
-    charswap_install_submit_probe(page, chip_ids)   # N-generic: want = len(chip_ids)
+        return False, expected_ids
+    charswap_install_submit_probe(page, expected_ids)   # want = len(expected_ids)
     fill_prompt_textarea(page, prompt)
     time.sleep(2)
-    armed, armed_why = charswap_arm_generate(page, prompt, chip_ids, context=context)
+    armed, armed_why = charswap_arm_generate(
+        page, prompt, expected_ids, context=context, want=want,
+        count_fn=lambda: _v962_section_chip_count(page, prefix=f"{context} "))
     if not armed:
         page._movie_section_block_reason = f"composer not ready to generate: {armed_why}"
-        return False, chip_ids
-    return True, chip_ids
+        return False, expected_ids
+    return True, expected_ids
 
 
 def charswap_submit_gate(seen, both):
@@ -25955,8 +26297,17 @@ def charswap_prompt_readback_action(observed, prompt, min_ratio=0.8,
     return 'ok', f'prompt read back {got}/{want} chars, text matches'
 
 
-def charswap_generate_readiness(enabled, prompt_len, chip_count):
+def charswap_generate_readiness(enabled, prompt_len, chip_count, want=2):
     """v945.3 — may this charswap click Generate? Returns (ready, why).
+
+    v991 — `want` is how many chips THIS render needs. A charswap needs 2 (the
+    avatar image and the source video) and that stays the default, so every
+    charswap caller is unchanged. A movie-section clip needs 1 scene + N faces,
+    and it used to be judged against the hard-coded 2 with the hard-coded
+    sentence "needs 2 (avatar + source video)" — which is how a three-chip
+    section clip came to be refused on 2026-09-13 in the vocabulary of a
+    completely different render method. The number and the words now come from
+    the caller.
 
     Fails on the two states that make a click a no-op, and says WHICH one in
     the same sentence, because the failing run's log could not tell them
@@ -25973,9 +26324,15 @@ def charswap_generate_readiness(enabled, prompt_len, chip_count):
         prompt_len = int(prompt_len)
     except Exception:
         prompt_len = 0
-    if chip_count < 2:
-        return False, (f"composer holds {chip_count} chip(s), needs 2 "
-                       f"(avatar + source video)")
+    try:
+        want = int(want)
+    except Exception:
+        want = 2
+    if chip_count < want:
+        what = ("avatar + source video" if want == 2
+                else f"{want} ingredients")
+        return False, (f"composer holds {chip_count} chip(s), needs {want} "
+                       f"({what})")
     if prompt_len <= 0:
         return False, (f"prompt box is empty ({chip_count} chips attached) — "
                        f"Generate cannot register")
@@ -26068,8 +26425,14 @@ def charswap_retype_prompt(page, prompt, context="[v943]"):
         return False
 
 
-def charswap_arm_generate(page, prompt, chip_ids, context="[v943]"):
+def charswap_arm_generate(page, prompt, chip_ids, context="[v943]",
+                          want=2, count_fn=None):
     """v945.3 — prove the composer can actually submit, before the click.
+
+    v991 — `want` and `count_fn` let the movie-section path bring its own
+    arithmetic: 1 scene + N faces, counted by the DOM element counter rather
+    than by the uuid scrape. Both default to today's charswap behaviour, so
+    every existing caller keeps the code path it has.
 
     Three steps, in this order, because each one only means something once the
     one before it holds:
@@ -26097,17 +26460,24 @@ def charswap_arm_generate(page, prompt, chip_ids, context="[v943]"):
             print(f"{context} prompt read-back after re-entry: {why}", flush=True)
 
         prompt_len = len((observed or "").strip())
-        try:
-            live_ids = charswap_composer_chip_media_ids(page) or list(chip_ids or [])
-        except Exception:
-            live_ids = list(chip_ids or [])
+        if count_fn is not None:
+            try:
+                live_count = count_fn()
+            except Exception:
+                live_count = -1
+        else:
+            try:
+                live_ids = charswap_composer_chip_media_ids(page) or list(chip_ids or [])
+            except Exception:
+                live_ids = list(chip_ids or [])
+            live_count = len(live_ids)
         try:
             enabled = is_generate_button_enabled(page)
         except Exception:
             enabled = False
 
         ready, ready_why = charswap_generate_readiness(
-            enabled, prompt_len, len(live_ids))
+            enabled, prompt_len, live_count, want=want)
         if ready:
             print(f"{context} {ready_why}", flush=True)
             return True, ready_why
@@ -30156,6 +30526,62 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 except Exception:
                     pass
             
+            # v991 — LOOK IN THE RIGHT PROJECT BEFORE GIVING UP.
+            #
+            # A movie-section clip rotates into a fresh project of its own
+            # (v963.28), so a job's renders do not all live where the page
+            # happens to be standing at the end. On 2026-09-13 clip 1 submitted
+            # into 7cc41865 and rendered two perfectly good takes; the worker
+            # then rotated to 2894a486 for clip 2, and the post-job listing read
+            # THAT project, found nothing belonging to clip 1, and declared the
+            # clip missing. The render was never lost — nobody looked where it
+            # was. `clip_project_map` has known the answer the whole time.
+            #
+            # So: visit each project a still-pending clip was submitted into,
+            # let the Zzl0ze media listing fire there (it is what fills the
+            # uuid -> mp4 map the recovery reads), and try the recovery again.
+            # The current project goes LAST so the page ends where it started.
+            # Traversal only — every decision below is unchanged.
+            if _pending_left:
+                try:
+                    _v991_projects, _v991_seen = [], set()
+                    for _ci in sorted(_pending_left):
+                        _p = clip_project_map.get(_ci)
+                        if _p and _p != project_url and _p not in _v991_seen:
+                            _v991_seen.add(_p)
+                            _v991_projects.append(_p)
+                    if project_url:
+                        _v991_projects.append(project_url)
+                    if len(_v991_projects) > 1:
+                        print(f"[v991] post-job: {len(_pending_left)} clip(s) still "
+                              f"missing — walking {len(_v991_projects)} project(s) "
+                              f"from clip_project_map before giving up", flush=True)
+                    for _p in _v991_projects:
+                        if not _pending_left:
+                            break
+                        try:
+                            print(f"[v991] post-job: reading media listing in {_p[-12:]}",
+                                  flush=True)
+                            page.goto(_p, timeout=30000, wait_until='domcontentloaded')
+                            time.sleep(4)
+                            ensure_videos_tab_selected(page)
+                            time.sleep(3)
+                        except Exception as _ne:
+                            print(f"[v991] post-job: could not open {_p[-12:]}: "
+                                  f"{str(_ne)[:90]}", flush=True)
+                            continue
+                        _clips_pending = [c for c in clips
+                                          if c.get('clip_index') in _pending_left]
+                        if _recover_pending_clip_downloads(
+                                page, job_id, _clips_pending, http_dl_queue,
+                                http_enqueued_clips, temp_dir, context="v991"):
+                            for _c in _clips_pending:
+                                if _c.get('clip_index') in http_enqueued_clips:
+                                    _pending_left.discard(_c.get('clip_index'))
+                except Exception as _v991e:
+                    print(f"[v991] post-job project walk skipped (non-fatal): "
+                          f"{_v991e}", flush=True)
+
             # Any clips still not found after 300s + API check → queue as redo
             # These clips were likely ghost submissions (Generate clicked but no tile created)
             # or the tile was lost.
