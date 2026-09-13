@@ -382,6 +382,12 @@ def detect_speech_segments(
 # arithmetic over intervals and is unit-tested; sweep_silence_holes() is the
 # ffmpeg wrapper around it.
 
+# v948.3 — how much shorter than its own plan a delivered sweep may be before
+# it is rejected. The render is CFR, so each keep-segment boundary can round by
+# up to one frame (~0.042s at 24fps); half a second absorbs a dozen of those
+# and still catches the failure this exists for, which loses whole seconds.
+V948_PLAN_TOLERANCE_S = 0.5
+
 
 def plan_silence_cuts(
     holes: List[Tuple[float, float]],
@@ -589,6 +595,62 @@ def sweep_silence_holes(
         raise RuntimeError(f"v948 silence-sweep render failed: {(err or '')[:500]}")
 
     final_duration = get_duration(ffprobe_json(out))
+
+    # v948.3 — CHECK THE DELIVERED LENGTH AGAINST THE PLAN, not only the
+    # silence. Measured 2026-09-13 on the nuri county-fair export (job
+    # 34824da1, four approved 10s clips): clip 4 came from a different encode
+    # than clips 1-3 — it carries bt709 colour tags in its bitstream where the
+    # others carry none. The concat therefore CHANGES video properties at the
+    # clip-4 join, ffmpeg reinitialises this filter graph there, and
+    # `setpts=PTS-STARTPTS` restarts from clip 4's first frame. The output
+    # timestamps jump backwards and the encoder drops every frame after the
+    # join. The plan said keep 38.610s; the render delivered 28.835s and the
+    # whole scene-4 CTA was gone bar its first ~0.6s.
+    #
+    # Nothing downstream could tell. The file was valid, the residual check
+    # below passed (the cut silence really was gone), and `removed_s` is
+    # derived from the delivered duration, so it reported the loss as a
+    # successful cut. Three exports shipped truncated before anyone measured
+    # the length.
+    #
+    # A sweep may only ever remove what it PLANNED to remove. Delivering less
+    # than that is the render disagreeing with the plan, whatever the reason,
+    # so keep the unswept file and say so. Re-normalising the concat does NOT
+    # avoid this (measured on a 1080x1920/30fps/48kHz re-encode of the same
+    # four clips: same truncation), so the guard is the thing that protects
+    # the video; a renderer that survives a mid-file property change is a
+    # separate change with its own evidence.
+    planned_duration = sum(e - s for s, e in keeps)
+    if final_duration < planned_duration - V948_PLAN_TOLERANCE_S:
+        print(
+            f"[VideoProcessor/v948.3] sweep REJECTED: the render delivered "
+            f"{final_duration:.3f}s where the plan kept {planned_duration:.3f}s "
+            f"({planned_duration - final_duration:.3f}s of KEPT content is "
+            f"missing); shipping the unswept {original_duration:.3f}s file",
+            flush=True,
+        )
+        try:
+            Path(out).unlink()
+        except Exception:
+            pass
+        return {
+            "applied": False,
+            "holes_detected": len(holes),
+            "holes_cut": 0,
+            "removed_s": 0.0,
+            "original_duration": original_duration,
+            "final_duration": original_duration,
+            "residual": holes_cut,
+            "residual_holes": [
+                (round(s, 3), round(e, 3))
+                for s, e in holes if (e - s) >= max_silence_s
+            ],
+            "keep_segments": keeps,
+            "plan_mismatch_s": round(planned_duration - final_duration, 3),
+            "planned_duration": round(planned_duration, 3),
+            "rejected_duration": round(final_duration, 3),
+        }
+
     # Re-measure the DELIVERED file, not the plan. A plan that says the holes
     # are gone is a prediction; this is the check.
     residual = [

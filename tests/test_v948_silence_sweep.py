@@ -5,9 +5,10 @@ of a clip and the stack-up at a clip boundary both survive into the finished
 file. The sweep runs on the assembled final and cuts every hole >= the
 declared threshold down to a ~0.3s breath.
 
-These cover the pure arithmetic (plan_silence_cuts). The ffmpeg wrapper around
-it is exercised in production; what can go wrong silently is the interval
-maths, so that is what is pinned here.
+These cover the pure arithmetic (plan_silence_cuts) plus the one thing the
+ffmpeg wrapper must never do silently: deliver a file SHORTER than the plan it
+just computed. "Exercised in production" was the old note here, and production
+shipped three truncated exports before anyone measured the length (v948.3).
 """
 import sys
 
@@ -108,3 +109,97 @@ def test_a_single_keep_segment_is_still_an_applied_sweep():
     # the sweep path's apply-gate logic: holes_cut > 0 and keeps non-empty
     holes_cut = 1
     assert not (holes_cut == 0 or not keeps)
+
+
+# ---------------------------------------------------------------------------
+# v948.3 — the render must deliver the plan, and is rejected when it does not.
+#
+# The numbers below are the ones measured locally on 2026-09-13 from the four
+# approved clips of the nuri county-fair build (job 34824da1), reproducing the
+# platform's truncated export:
+#
+#   clip | source  | post-trim | post-VAD | 30-33w floor | verdict  | final
+#      1 | 10.005s |  10.026s  |  10.026s |     5.400s   | ACCEPTED | 10.026s
+#      2 | 10.005s |  10.026s  |  10.026s |     5.760s   | ACCEPTED | 10.026s
+#      3 | 10.005s |  10.026s  |   9.792s |     5.940s   | ACCEPTED |  9.792s
+#      4 | 10.008s |  10.031s  |  10.031s |     5.940s   | ACCEPTED | 10.031s
+#
+# export_final_video delivered all four: 39.896s. The sweep then planned to
+# keep 38.610s and the render delivered 28.835s — the whole scene-4 CTA gone.
+# Clip 4 carries bt709 colour tags its three siblings do not, so the concat
+# changes video properties at its join, ffmpeg reinitialises the filter graph
+# there, and setpts restarts. ffmpeg is not run here: the guard's contract is
+# "delivered < planned -> reject", and that is what is pinned.
+# ---------------------------------------------------------------------------
+
+COUNTY_FAIR_IN = 39.896354       # export_final_video's output, all 4 scenes
+COUNTY_FAIR_HOLES = [(5.332542, 6.918896), (34.103, 34.939)]
+COUNTY_FAIR_TRUNCATED = 28.835   # what the sweep's render actually delivered
+
+
+def _sweep(monkeypatch, tmp_path, delivered, *, src_duration=COUNTY_FAIR_IN,
+           holes=None):
+    """Run sweep_silence_holes with ffmpeg stubbed to deliver `delivered`s."""
+    import video_processor as vp
+
+    src = tmp_path / "final.mp4"
+    out = tmp_path / "swept.mp4"
+    src.write_bytes(b"")
+
+    durations = {str(src): src_duration, str(out): delivered}
+    monkeypatch.setattr(vp, "ffprobe_json", lambda p: {"_p": str(p)})
+    monkeypatch.setattr(vp, "get_duration", lambda info: durations[info["_p"]])
+    monkeypatch.setattr(
+        vp, "detect_silence_holes",
+        lambda path, **kw: (COUNTY_FAIR_HOLES if holes is None else holes)
+        if str(path) == str(src) else [],
+    )
+
+    def _fake_run(cmd, **kw):
+        out.write_bytes(b"rendered")
+        return 0, "", ""
+
+    monkeypatch.setattr(vp, "run", _fake_run)
+    return vp.sweep_silence_holes(src, out, 0.9), out
+
+
+def test_the_county_fair_truncation_is_rejected(monkeypatch, tmp_path):
+    """The measured failure: plan 38.610s, render 28.835s. The sweep must be
+    refused so the caller ships the full 39.896s export with scene 4 intact."""
+    stats, out = _sweep(monkeypatch, tmp_path, COUNTY_FAIR_TRUNCATED)
+
+    assert stats["applied"] is False, "a 9.8s shortfall must never be applied"
+    # the caller (main.py) replaces the export only when applied is True, and
+    # prints these three keys unconditionally
+    assert stats["removed_s"] == 0.0
+    assert stats["final_duration"] == pytest.approx(COUNTY_FAIR_IN)
+    assert stats["holes_cut"] == 0
+    assert stats["plan_mismatch_s"] == pytest.approx(9.775, abs=0.01)
+    assert not out.exists(), "the rejected render must not be left on disk"
+
+
+def test_a_render_that_matches_its_plan_is_applied(monkeypatch, tmp_path):
+    """The same file, same holes, a renderer that delivers the plan: applied.
+    The plan keeps 38.610s; CFR rounding puts the real render at 38.665s."""
+    stats, out = _sweep(monkeypatch, tmp_path, 38.665)
+
+    assert stats["applied"] is True
+    assert stats["holes_cut"] == 1
+    assert stats["removed_s"] == pytest.approx(COUNTY_FAIR_IN - 38.665)
+    assert "plan_mismatch_s" not in stats
+
+
+def test_frame_rounding_under_the_tolerance_still_applies(monkeypatch, tmp_path):
+    """A sweep may land a few frames short of its plan — the render is CFR.
+    Only a real shortfall is rejected."""
+    from video_processor import V948_PLAN_TOLERANCE_S
+
+    planned = sum(e - s for s, e in
+                  plan_silence_cuts(COUNTY_FAIR_HOLES, COUNTY_FAIR_IN, 0.9))
+    stats, _ = _sweep(monkeypatch, tmp_path,
+                      planned - V948_PLAN_TOLERANCE_S + 0.01)
+    assert stats["applied"] is True
+
+    stats, _ = _sweep(monkeypatch, tmp_path,
+                      planned - V948_PLAN_TOLERANCE_S - 0.01)
+    assert stats["applied"] is False
