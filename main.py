@@ -1649,6 +1649,8 @@ async def upsert_link_assignment(
         raise HTTPException(400, "measure_tag without measure_until would measure "
                                  "forever and never release the id")
 
+    from sqlalchemy.exc import IntegrityError
+
     row = db.query(LinkAssignment).filter(LinkAssignment.post_id == post_id).first()
     created = row is None
     if created:
@@ -1657,12 +1659,190 @@ async def upsert_link_assignment(
     row.asin, row.persona = asin, persona
     row.measure_tag = measure_tag or None
     row.measure_until = until
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # WP4 — the active-tag index bit. This endpoint names the tag itself,
+        # so the caller chose one another post is still holding; say that
+        # instead of returning a 500 on a database error nobody can read.
+        db.rollback()
+        holder = (db.query(LinkAssignment)
+                    .filter(LinkAssignment.measure_tag == measure_tag,
+                            LinkAssignment.released_at == None)   # noqa: E711
+                    .first())
+        raise HTTPException(409, f"tracking id {measure_tag!r} is already held by "
+                                 f"post {getattr(holder, 'post_id', '?')!r}; release "
+                                 "it first, or use /api/link-assignments/claim to "
+                                 "take a free one")
     print(json.dumps({"evt": "link_assignment_upsert", "post": post_id[:32],
                       "persona": persona, "tag": measure_tag,
                       "until": measure_until, "created": created}), flush=True)
     return {"post_id": post_id, "persona": persona, "measure_tag": measure_tag,
             "measure_until": measure_until, "created": created}
+
+
+_ACTIVE_TAG_GUARD = None
+
+
+def _active_tag_guard(db) -> str:
+    """Which guarantee is actually in force: the index, or only a check? WP4.
+
+    The migration that creates the index CATCHES its own failure — it has to,
+    or a boot dies on a schema problem. That means "the index is missing" and
+    "the index is there" look identical from the outside unless somebody asks.
+    The claim answer carries this string so the allocator, its log, and anyone
+    reading a 409 can tell a real guarantee from a best-effort one.
+    """
+    global _ACTIVE_TAG_GUARD
+    if _ACTIVE_TAG_GUARD is None:
+        try:
+            from sqlalchemy import inspect as _inspect
+            from models import ACTIVE_TAG_INDEX
+            names = {i["name"] for i in
+                     _inspect(db.get_bind()).get_indexes("link_assignments")}
+            _ACTIVE_TAG_GUARD = ("unique-index" if ACTIVE_TAG_INDEX in names
+                                 else "check-only")
+        except Exception as exc:
+            _ACTIVE_TAG_GUARD = f"unknown ({type(exc).__name__})"
+        print(json.dumps({"evt": "link_assignment_guard",
+                          "guard": _ACTIVE_TAG_GUARD}), flush=True)
+    return _ACTIVE_TAG_GUARD
+
+
+@app.post("/api/link-assignments/claim")
+async def claim_link_assignment(
+    payload: dict = Body(...),
+    db: DBSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Take ONE free tracking id out of the pool, atomically. WP4.
+
+    What this replaces. `tools/tracking_pool.py allocate` used to GET every
+    assignment, work out which tags were free in the client, pick the first,
+    and POST it back. Two allocators running at once both read the same free
+    tag and both wrote it — one id measuring two videos, and every sale from
+    then on credited to whichever of them Amazon saw. Nothing in any report
+    would have said so.
+
+    So the choosing moves inside one database transaction. The caller sends the
+    tags it considers ELIGIBLE (the cool-off policy stays in the client, where
+    the pool file and the ledger live); the server decides which of them is
+    actually free, and the write that takes it is the same write that proves it
+    was free.
+
+    Two things make that true, and they do different jobs:
+      * the SELECT below keeps the ordinary case out of the exception path and
+        lets the 409 name the holder;
+      * the partial unique index on `measure_tag` decides the race the SELECT
+        cannot see — the other caller's row does not exist yet when we look.
+    Only the second one is a guarantee. The answer says which is in force.
+
+    A post gets an id ONCE. A repeat call returns the same tag rather than
+    spending a second one, so a lost response is safe to retry. A post whose id
+    has already been released is refused outright: giving it a fresh tag would
+    overwrite the release stamp the cool-off is computed from, and the tag it
+    used to hold would come back into rotation with no rest.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    post_id = str(payload.get("post_id") or "").strip()
+    persona = str(payload.get("persona") or "").strip().lower()
+    asin = str(payload.get("asin") or KORELLA_ASIN).strip()
+    raw_tags = payload.get("candidate_tags")
+    raw_days = payload.get("measure_days")
+    try:
+        # NOT `or 21` — that quietly turns a caller's 0 into the default, which
+        # is the one value that means "this caller is confused".
+        measure_days = int(21 if raw_days in (None, "") else raw_days)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "measure_days must be a whole number of days")
+
+    if not post_id or len(post_id) > 64:
+        raise HTTPException(400, "post_id is required and must be <= 64 chars")
+    if persona not in BIO_TAGS:
+        raise HTTPException(400, f"persona must be one of {sorted(BIO_TAGS)}")
+    if not _valid_asin(asin):
+        raise HTTPException(400, f"asin {asin!r} is malformed")
+    if not 1 <= measure_days <= 365:
+        raise HTTPException(400, "measure_days must be between 1 and 365")
+    if not isinstance(raw_tags, list) or not raw_tags:
+        raise HTTPException(400, "candidate_tags must be a non-empty list of "
+                                 "tracking ids the caller considers eligible")
+    if len(raw_tags) > 200:
+        raise HTTPException(400, "candidate_tags may name at most 200 ids")
+    candidates, seen = [], set()
+    for t in raw_tags:
+        tag = str(t or "").strip()
+        if not tag:
+            continue
+        if not _valid_tag(tag):
+            raise HTTPException(400, f"candidate tag {tag!r} is malformed")
+        if tag not in seen:
+            seen.add(tag)
+            candidates.append(tag)
+    if not candidates:
+        raise HTTPException(400, "candidate_tags held no usable tracking id")
+
+    guard = _active_tag_guard(db)
+    until = datetime.utcnow() + timedelta(days=measure_days)
+
+    def _answer(tag, until_dt, claimed, note):
+        return {"post_id": post_id, "persona": persona, "asin": asin,
+                "tag": tag, "measure_tag": tag,
+                "measure_until": until_dt.isoformat() if until_dt else None,
+                "claimed": claimed, "guard": guard, "note": note}
+
+    # Allocation is per post, once.
+    row = db.query(LinkAssignment).filter(LinkAssignment.post_id == post_id).first()
+    if row is not None and row.measure_tag:
+        if row.persona != persona:
+            raise HTTPException(409, f"post {post_id!r} is filed under persona "
+                                     f"{row.persona!r}, not {persona!r}")
+        if row.released_at is not None:
+            raise HTTPException(409, f"post {post_id!r} already held "
+                                     f"{row.measure_tag!r} and it was released on "
+                                     f"{row.released_at.isoformat()}; a post is "
+                                     "never given a second id")
+        return _answer(row.measure_tag, row.measure_until, False,
+                       "this post already holds an id")
+
+    taken = []
+    for tag in candidates:
+        holder = (db.query(LinkAssignment)
+                    .filter(LinkAssignment.measure_tag == tag,
+                            LinkAssignment.released_at == None)   # noqa: E711
+                    .first())
+        if holder is not None:
+            taken.append(tag)
+            continue
+        try:
+            row = (db.query(LinkAssignment)
+                     .filter(LinkAssignment.post_id == post_id).first())
+            if row is None:
+                row = LinkAssignment(post_id=post_id)
+                db.add(row)
+            row.asin, row.persona = asin, persona
+            row.measure_tag, row.measure_until, row.released_at = tag, until, None
+            db.commit()
+        except IntegrityError:
+            # Somebody committed this tag between the SELECT and this write.
+            # Their row stands. Take the next candidate.
+            db.rollback()
+            taken.append(tag)
+            continue
+        print(json.dumps({"evt": "link_assignment_claim", "post": post_id[:32],
+                          "persona": persona, "tag": tag,
+                          "until": until.isoformat(), "guard": guard,
+                          "skipped": len(taken)}), flush=True)
+        return _answer(tag, until, True, f"claimed after skipping {len(taken)} held id(s)")
+
+    print(json.dumps({"evt": "link_assignment_claim_exhausted",
+                      "post": post_id[:32], "persona": persona,
+                      "candidates": len(candidates), "guard": guard}), flush=True)
+    raise HTTPException(409, f"no tracking id is free: all {len(candidates)} "
+                             f"candidate(s) already have an open holder "
+                             f"({', '.join(taken[:8])}{' …' if len(taken) > 8 else ''}). "
+                             "Run /api/link-assignments/release, or mint more ids.")
 
 
 @app.get("/api/link-assignments")
@@ -1694,9 +1874,17 @@ async def release_link_assignments(
     whether or not this ever runs. The only thing released here is the ID, so it
     can be given to another video. A missed run delays reuse; it cannot
     mis-attribute a click.
+
+    WP4 made this the ONLY way a tag becomes claimable again. `released_at IS
+    NULL` is what the unique index and `/claim` both read as "this tag has an
+    open holder", so a window that has passed but was never released keeps its
+    id off the market. That is the safe direction: the cost of a missed run is
+    a tag sitting idle, and the cost of the other choice is an id measuring two
+    videos at once.
     """
     now = datetime.utcnow()
     due = db.query(LinkAssignment).filter(
+        LinkAssignment.measure_tag != None,            # noqa: E711
         LinkAssignment.measure_until != None,          # noqa: E711
         LinkAssignment.measure_until <= now,
         LinkAssignment.released_at == None,            # noqa: E711

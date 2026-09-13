@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime,
-    Boolean, Float, ForeignKey, Enum as SQLEnum, JSON, event, Index
+    Boolean, Float, ForeignKey, Enum as SQLEnum, JSON, event, Index, text
 )
 from sqlalchemy.exc import OperationalError as SQLAOperationalError
 from sqlalchemy.ext.declarative import declarative_base
@@ -826,6 +826,28 @@ class LinkAssignment(Base):
     Rows are written at publish. `measure_tag` + `measure_until` define the
     window; after it passes, resolution falls back to the persona tag with no
     write needed, so a missed cron cannot strand a video on a recycled id.
+
+    WP4 — ONE OPEN HOLDER PER TAG, enforced by the database.
+    The table was keyed only on `post_id`, so nothing stopped two posts holding
+    the same `measure_tag` at once — and the allocator that hands ids out read
+    the pool over HTTP and then wrote, which is two round trips with a gap in
+    the middle. Two allocators running together both saw the tag free.
+
+    The guarantee is the partial unique index below, NOT a row lock: a lock can
+    only hold a row that already exists, and the row that would collide is the
+    one the other caller has not inserted yet. A unique index is the only thing
+    that decides that race, and it does it identically on PostgreSQL (Render)
+    and SQLite (tests and local runs) — both support `CREATE UNIQUE INDEX …
+    WHERE …`.
+
+    "Open holder" is `released_at IS NULL`, not `measure_until > now()`. An
+    index predicate cannot call `now()` (it is not immutable in Postgres, and
+    the index would have to be rebuilt every second if it could). Reading the
+    holder off `released_at` also makes the release endpoint mean what it says:
+    a tag is busy until `POST /api/link-assignments/release` clears it, which
+    only happens after the window has actually passed. An expired-but-unreleased
+    tag therefore stays blocked — fail closed, one run of `release` away from
+    being reusable.
     """
     __tablename__ = "link_assignments"
 
@@ -836,6 +858,14 @@ class LinkAssignment(Base):
     measure_until = Column(DateTime, nullable=True)       # publish + 21 days
     released_at = Column(DateTime, nullable=True)         # when the id went back to the pool
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index(
+            "uq_link_assignments_active_tag", "measure_tag", unique=True,
+            postgresql_where=text("measure_tag IS NOT NULL AND released_at IS NULL"),
+            sqlite_where=text("measure_tag IS NOT NULL AND released_at IS NULL"),
+        ),
+    )
 
 
 class GenerationLog(Base):
@@ -1346,8 +1376,63 @@ def init_db(database_url: str = None):
         _run_migrations_sqlite(engine)
     else:
         _run_migrations_postgresql(engine)
-    
+
+    _ensure_active_tag_index(engine)
+
     return engine
+
+
+ACTIVE_TAG_INDEX = "uq_link_assignments_active_tag"
+ACTIVE_TAG_INDEX_SQL = (
+    f"CREATE UNIQUE INDEX IF NOT EXISTS {ACTIVE_TAG_INDEX} "
+    "ON link_assignments (measure_tag) "
+    "WHERE measure_tag IS NOT NULL AND released_at IS NULL"
+)
+
+
+def _ensure_active_tag_index(engine):
+    """WP4 — put the one-open-holder-per-tag index on an EXISTING table.
+
+    `create_all` only builds indexes for tables it creates, so a fresh test DB
+    gets this from `__table_args__` and production does not. This runs on every
+    boot; the DDL is idempotent on both engines.
+
+    It reports the duplicates it finds before trying. A `CREATE UNIQUE INDEX`
+    over data that already violates it FAILS, and a failure printed as one more
+    "skipped index" line is exactly the shape of a broken guarantee that reads
+    like a working one. If this prints DUPLICATES, the index is NOT on the
+    database and `/api/link-assignments/claim` will say so in its own answer.
+    """
+    from sqlalchemy import text as _text, inspect as _inspect
+    try:
+        if not _inspect(engine).has_table("link_assignments"):
+            return
+        with engine.connect() as conn:
+            if not engine.url.drivername.startswith("sqlite"):
+                # v860's rule: never wait on a lock in the startup path — a
+                # rolling deploy holds locks and an unbounded wait means the
+                # new worker never binds its port.
+                conn.execute(_text("SET lock_timeout = '3s'"))
+                conn.commit()
+            dupes = conn.execute(_text(
+                "SELECT measure_tag, COUNT(*) AS n FROM link_assignments "
+                "WHERE measure_tag IS NOT NULL AND released_at IS NULL "
+                "GROUP BY measure_tag HAVING COUNT(*) > 1"
+            )).fetchall()
+            if dupes:
+                print("[Migration][WP4] DUPLICATES BLOCK THE ACTIVE-TAG INDEX — "
+                      f"{len(dupes)} tag(s) have more than one open holder: "
+                      + ", ".join(f"{r[0]}x{r[1]}" for r in dupes[:10]), flush=True)
+                print("[Migration][WP4] release or re-point the extra rows, then "
+                      "restart. Until then claims fall back to a check-only "
+                      "guard and two allocators CAN still collide.", flush=True)
+                return
+            conn.execute(_text(ACTIVE_TAG_INDEX_SQL))
+            conn.commit()
+            print(f"[Migration][WP4] ensured {ACTIVE_TAG_INDEX} "
+                  "(one open holder per tracking id)", flush=True)
+    except Exception as e:
+        print(f"[Migration][WP4] active-tag index NOT ensured: {e}", flush=True)
 
 
 def _run_migrations_postgresql(engine):
