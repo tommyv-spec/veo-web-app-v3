@@ -160,3 +160,87 @@ def test_dump_caps_the_body_and_stops_at_the_file_cap(monkeypatch, tmp_path):
     fw._scan_failure_reason(_Resp(BX_URL, long_body), BX_URL, "acct:T")
     assert len(path.read_text(encoding="utf-8").splitlines()) == 1, "past the file cap nothing more is written"
     assert fw._V992_DUMP_STATE["off"] is True
+
+
+# ---------------------------------------------------------------- Task 4
+REFUSED = [4, [3, "PUBLIC_ERROR_UNSAFE_GENERATION"], ["IDENTIFIABLE_PERSON_SAFETY"]]
+
+
+def _record(media, status, op=OP):
+    """A flow.google.com generation record in the MEASURED jwpduf shape:
+    [operation, project, MEDIA, "CAE", null, [[ts], "<prompt>"], <ingredient uuid>, <status>].
+    The ingredient uuid sits nearer the error than the media uuid on purpose."""
+    prompt = "Setting: a sunlit kitchen. Healer: click the link below and get the whole set free."
+    return [op, PROJECT, media, "CAE", None, [[1789048452, 429215000], prompt], INGREDIENT, status]
+
+
+def test_positional_reader_takes_the_record_media_not_the_nearest_uuid():
+    fw = _load()
+    payload = [None, [_record(MEDIA, REFUSED), _record(MEDIA2, 1, op="88888888-7777-6666-5555-444444444444")]]
+    assert fw._v992_failed_media_ids_positional(payload, "PUBLIC_ERROR_UNSAFE_GENERATION") == {MEDIA}
+    assert fw._v992_failed_media_ids_positional(payload, "PUBLIC_ERROR_NOPE") == set()
+
+
+def test_smallest_subtree_fallback_for_an_unseen_shape():
+    fw = _load()
+    a, b = "aaaaaaaa-1111-2222-3333-444444444444", "bbbbbbbb-1111-2222-3333-444444444444"
+    payload = [["x", ["PUBLIC_ERROR_FOO", a]], ["y", b], ["PUBLIC_ERROR_FOO with " + a + " inline"]]
+    assert fw._v992_failed_media_ids_smallest(payload, "PUBLIC_ERROR_FOO") == {a}
+
+
+def _bind(fw):
+    fw._VIDEO_POLICY_TERMINAL.clear(); fw._V992_REFUSALS.clear(); fw._POLICY_SOFT_SEEN.clear()
+    fw._PRIMARY_MEDIA_BINDINGS.clear()
+    fw._PRIMARY_MEDIA_BINDINGS[MEDIA] = {'job_id': 'J', 'clip_index': 27, 'clip_id': 14934}
+    fw._PRIMARY_MEDIA_BINDINGS[MEDIA2] = {'job_id': 'J', 'clip_index': 26, 'clip_id': 14933}
+
+
+def test_a_text_refusal_lands_in_the_prompt_ledger_for_the_clip_whose_media_was_refused():
+    fw = _load()
+    _bind(fw)
+    body = _wire([("jwpduf", [None, [_record(MEDIA, REFUSED), _record(MEDIA2, 1)]])])
+    fw._scan_failure_reason(_Resp(BX_URL, body), BX_URL, "acct:T")
+    assert fw._v992_peek_refusal_for_clip('J', 27) == "UNSAFE_GENERATION", (
+        "the refusal must be readable for the clip whose media was refused")
+    assert fw._v992_peek_refusal_for_clip('J', 26) is None, (
+        "the healthy sibling in the same poll must not be flagged")
+    assert INGREDIENT not in fw._V992_REFUSALS, "an attached image is never the refused media"
+    assert fw._v992_peek_refusal_for_clip('J', 27) == "UNSAFE_GENERATION", "peek is read-only"
+    assert fw._v992_consume_refusal_for_clip('J', 27) == "UNSAFE_GENERATION"
+    assert fw._v992_peek_refusal_for_clip('J', 27) is None, "consume clears it"
+
+
+def test_an_unknown_public_error_never_acquires_frame_swap_semantics():
+    """Codex HIGH 1. Recording a text refusal must not touch the FRAME ledger,
+    the frame-swap budget, or policy_reason_is_terminal. The last assert
+    documents WHY the ledgers are split: that function's docstring says unknown
+    reasons are soft; its code says they are terminal."""
+    fw = _load()
+    _bind(fw)
+    body = _wire([("jwpduf", [None, [_record(MEDIA, REFUSED)]])])
+    fw._scan_failure_reason(_Resp(BX_URL, body), BX_URL, "acct:T")
+    assert fw._VIDEO_POLICY_TERMINAL == {}, "UNSAFE_GENERATION is a text refusal; the frame ledger stays empty"
+    assert fw._peek_video_policy_terminal_for_clip('J', 27) is None
+    assert fw._POLICY_SOFT_SEEN == {}, "recording must not spend the frame-swap soft budget"
+    assert fw.policy_reason_is_terminal('UNSAFE_GENERATION') is True, (
+        "the CODE makes unknown reasons terminal (its docstring says soft) -- "
+        "which is exactly why the prompt axis must not route through it")
+
+
+def test_a_known_frame_reason_still_lands_in_the_frame_ledger():
+    fw = _load()
+    _bind(fw)
+    prominent = [4, [3, "PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED"], ["IDENTIFIABLE_PERSON_SAFETY"]]
+    body = _wire([("jwpduf", [None, [_record(MEDIA, prominent)]])])
+    fw._scan_failure_reason(_Resp(BX_URL, body), BX_URL, "acct:T")
+    assert fw._peek_video_policy_terminal_for_clip('J', 27) == "PROMINENT_PEOPLE_FILTER_FAILED", (
+        "a face/identity reason keeps the existing frame-axis contract")
+    assert fw._V992_REFUSALS == {}, "a frame reason is not also a prompt refusal"
+
+
+def test_a_healthy_poll_records_nothing():
+    fw = _load()
+    _bind(fw)
+    body = _wire([("jwpduf", [None, [_record(MEDIA, 1)]])])
+    fw._scan_failure_reason(_Resp(BX_URL, body), BX_URL, "acct:T")
+    assert fw._VIDEO_POLICY_TERMINAL == {} and fw._V992_REFUSALS == {}

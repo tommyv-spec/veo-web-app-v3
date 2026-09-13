@@ -3095,6 +3095,168 @@ def _v992_dump_batchexecute(resp, url, status, body, buf_key=''):
     except Exception as e:
         print(f"[v992-dump] write failed: {type(e).__name__}: {str(e)[:80]}", flush=True)
 
+_V992_PUBLIC_ERROR_RE = re.compile(r'PUBLIC_ERROR_[A-Z_]+')
+
+
+def _v992_failed_media_ids_positional(payload, code):
+    """The refused MEDIA uuid per generation record, by POSITION -- the shape we
+    HAVE measured (11 real jwpduf bodies, 2026-09-10/11):
+        [operation_uuid, project_uuid, MEDIA_uuid, "CAE", ..., [4,[3,"PUBLIC_ERROR_..."],[...]]]
+    The uuids NEAREST the code are the attached ingredient images, so "closest
+    uuid wins" would blame an input picture. Take the third uuid of the record
+    that carries the code and stop descending so a sibling cannot contribute."""
+    found = set()
+    code_u = (code or '').upper()
+
+    def walk(node):
+        if isinstance(node, list):
+            head = node[:3]
+            if len(head) == 3 and all(isinstance(x, str) and _UUID_RE.fullmatch(x) for x in head):
+                try:
+                    blob = json.dumps(node).upper()
+                except Exception:
+                    blob = ''
+                if code_u in blob:
+                    found.add(head[2].lower())
+                    return
+            for v in node:
+                walk(v)
+        elif isinstance(node, dict):
+            for v in node.values():
+                walk(v)
+
+    try:
+        walk(payload)
+    except Exception:
+        pass
+    return found
+
+
+def _v992_failed_media_ids_smallest(payload, code):
+    """Fallback for a shape we have NOT measured (a failed UpteDb or Zzl0ze
+    entry): every uuid inside the SMALLEST list that holds both the code and a
+    uuid. Logged as `via guess` so a reader knows which path spoke."""
+    code_u = (code or '').upper()
+    best = []
+
+    def walk(node):
+        # returns (has_code, uuids, a_smaller_subtree_already_qualified)
+        if isinstance(node, str):
+            ids = {m.lower() for m in _UUID_RE.findall(node)}
+            has = code_u in node.upper()
+            if has and ids:
+                best.append(ids)
+            return has, ids, has and bool(ids)
+        if isinstance(node, dict):
+            node = list(node.values())
+        if not isinstance(node, list):
+            return False, set(), False
+        has, ids, below = False, set(), False
+        for v in node:
+            h, u, q = walk(v)
+            has, ids, below = has or h, ids | u, below or q
+        if has and ids and not below:
+            best.append(ids)
+            return has, ids, True
+        return has, ids, below
+
+    try:
+        walk(payload)
+    except Exception:
+        pass
+    out = set()
+    for ids in best:
+        out |= ids
+    return out
+
+
+# v992 -- the PROMPT-axis ledger. A refusal whose reason is NOT one of
+# _VIDEO_POLICY_TERMINAL_REASONS (today: UNSAFE_GENERATION) says "the TEXT was
+# refused", which is the not-found ladder's question, never the frame-swap
+# machinery's. It therefore lives apart from _VIDEO_POLICY_TERMINAL: that dict's
+# 13 readers end in handle_terminal_reject -> the replace-image card, and
+# policy_reason_is_terminal makes every unknown reason terminal (its docstring
+# says the opposite -- trust the code). No time window: a media uuid is unique
+# per submit, and the give-up that reads this runs >= 300 s after the submit
+# (the frame ledger's 180 s window would already have expired it).
+_V992_REFUSALS = {}          # media uuid (lower) -> {'reason': str, 'ts': float}
+_V992_REFUSALS_LOCK = threading.Lock()
+
+
+def _v992_note_refusal(media_id, reason):
+    if not media_id:
+        return
+    with _V992_REFUSALS_LOCK:
+        _V992_REFUSALS[media_id.lower()] = {'reason': reason, 'ts': time.time()}
+        if len(_V992_REFUSALS) > 512:
+            for k in sorted(_V992_REFUSALS, key=lambda k: _V992_REFUSALS[k]['ts'])[:256]:
+                _V992_REFUSALS.pop(k, None)
+
+
+def _v992_peek_refusal_for_clip(job_id, clip_index):
+    """READ-ONLY: the text-refusal reason recorded for any of THIS clip's bound
+    media uuids, or None. Decide with this; consume only after the write."""
+    try:
+        mids = bound_media_ids_for_clip(job_id, clip_index)
+    except Exception:
+        return None
+    with _V992_REFUSALS_LOCK:
+        for mid in mids or []:
+            rec = _V992_REFUSALS.get(mid)
+            if rec:
+                return rec.get('reason')
+    return None
+
+
+def _v992_consume_refusal_for_clip(job_id, clip_index):
+    """Return the reason AND clear it. Call only after the state transition it
+    justified has been confirmed written."""
+    try:
+        mids = bound_media_ids_for_clip(job_id, clip_index)
+    except Exception:
+        return None
+    with _V992_REFUSALS_LOCK:
+        for mid in mids or []:
+            rec = _V992_REFUSALS.pop(mid, None)
+            if rec:
+                return rec.get('reason')
+    return None
+
+
+def _v992_record_refusals(frames, ep='', buf_key=''):
+    """Record every PUBLIC_ERROR_* a decoded batchexecute response carries,
+    keyed by the refused media uuid. The REASON picks the ledger: a frame
+    reason (_VIDEO_POLICY_TERMINAL_REASONS) -> _VIDEO_POLICY_TERMINAL, the
+    existing frame-axis contract; anything else -> _V992_REFUSALS, read only
+    by the not-found ladder. Never touches policy_reason_is_terminal or the
+    soft budget. Returns {uuid: reason}. Never raises."""
+    out = {}
+    for _rpcid, payload in frames:
+        try:
+            blob = json.dumps(payload)
+        except Exception:
+            continue
+        for code in sorted(set(_V992_PUBLIC_ERROR_RE.findall(blob))):
+            reason = code[len('PUBLIC_ERROR_'):] or code
+            axis = 'frame' if any(k in reason for k in _VIDEO_POLICY_TERMINAL_REASONS) else 'prompt'
+            try:
+                ids, via = _v992_failed_media_ids_positional(payload, code), 'record'
+                if not ids:
+                    ids, via = _v992_failed_media_ids_smallest(payload, code), 'guess'
+                for mid in ids:
+                    if axis == 'frame':
+                        _record_video_policy_terminal(mid, reason)
+                    else:
+                        _v992_note_refusal(mid, reason)
+                    out[mid] = reason
+            except Exception as _re_err:
+                ids, via = set(), f'error {type(_re_err).__name__}'
+            print(f"[v992-refusal] {ep} rpcid={_rpcid} buf={buf_key} {code} -> "
+                  f"{sorted(ids) if ids else 'NO uuid in the refusing entry -- not attributed'} "
+                  f"(via {via}, {axis} axis)", flush=True)
+    return out
+
+
 
 # --- fail-reason diagnostic (read-only, temporary) ---------------------------
 # d0b69c0 baseline detects a failed tile purely from the DOM (refresh button, no
@@ -3157,6 +3319,8 @@ def _scan_failure_reason(resp, url, buf_key=''):
                   f"{len(_V963_MEDIA_SIZES)} known", flush=True)
     except Exception as _se:
         print(f"[v992] {ep} size learning failed: {type(_se).__name__}: {str(_se)[:80]}", flush=True)
+    if st == 200 and _frames:
+        _v992_record_refusals(_frames, ep, buf_key)
     if st != 200:
         print(f"[fail-reason-diag] {ep} HTTP {st} buf={buf_key}", flush=True)
         # v898 TEMP DIAG (remove after the 403 cause is confirmed) — a 4xx on
