@@ -109,3 +109,54 @@ def test_the_response_listener_reaches_the_scan_for_a_batchexecute_url():
     seen.clear()
     handler(_Resp("https://flow.google.com/asb/AB-nOUxyz=mm,22,15", "video bytes"))
     assert seen == [], "a media fetch is not a batchexecute response; the scan must not read it"
+
+
+# ---------------------------------------------------------------- Task 3
+def _dump_env(monkeypatch, tmp_path, on=True):
+    path = tmp_path / "flow_bx_dump.jsonl"
+    if on:
+        monkeypatch.setenv("FLOW_BX_DUMP", "1")
+    else:
+        monkeypatch.delenv("FLOW_BX_DUMP", raising=False)
+    monkeypatch.setenv("FLOW_BX_DUMP_PATH", str(path))
+    return path
+
+
+def test_dump_off_by_default_writes_nothing(monkeypatch, tmp_path):
+    fw = _load()
+    path = _dump_env(monkeypatch, tmp_path, on=False)
+    fw._scan_failure_reason(_Resp(BX_URL, _wire([("jwpduf", [None, []])])), BX_URL, "acct:T")
+    assert not path.exists(), "FLOW_BX_DUMP unset must leave no file behind"
+
+
+def test_dump_writes_one_raw_record_per_batchexecute_response(monkeypatch, tmp_path):
+    fw = _load()
+    path = _dump_env(monkeypatch, tmp_path)
+    body = _wire([("jwpduf", [None, [[OP, PROJECT, MEDIA, "CAE"]]])])
+    fw._scan_failure_reason(_Resp(BX_URL, body, req_body="f.req=%5B%5D"), BX_URL, "acct:T")
+    fw._scan_failure_reason(_Resp("https://flow.google.com/asb/x", "video"), "https://flow.google.com/asb/x", "acct:T")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1, "only batchexecute responses are dumped"
+    rec = json.loads(lines[0])
+    assert rec["rpcids"] == "jwpduf"
+    assert rec["status"] == 200
+    assert rec["buf_key"] == "acct:T"
+    assert rec["url"].endswith("/data/batchexecute")
+    assert rec["body"] == body and rec["req_body"] == "f.req=%5B%5D"
+    assert rec["truncated"] is False
+    assert MEDIA in rec["body"], "a human must be able to grep the dump by the clip's bound uuid"
+
+
+def test_dump_caps_the_body_and_stops_at_the_file_cap(monkeypatch, tmp_path):
+    fw = _load()
+    path = _dump_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(fw, "_V992_DUMP_BODY_CAP", 20)
+    fw._V992_DUMP_STATE.update(off=False, announced=False)
+    long_body = _wire([("jwpduf", ["x" * 100])])
+    fw._scan_failure_reason(_Resp(BX_URL, long_body), BX_URL, "acct:T")
+    rec = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert len(rec["body"]) == 20 and rec["truncated"] is True
+    monkeypatch.setattr(fw, "_V992_DUMP_FILE_CAP", 1)      # the file is already past 1 byte
+    fw._scan_failure_reason(_Resp(BX_URL, long_body), BX_URL, "acct:T")
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 1, "past the file cap nothing more is written"
+    assert fw._V992_DUMP_STATE["off"] is True

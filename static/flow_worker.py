@@ -3031,6 +3031,71 @@ def resolve_clip_download_urls(page, job_id, clip_index, dialogue_key, captured_
         return []
 
 
+# --- v992 raw batchexecute dump ------------------------------------------------
+# Default OFF. FLOW_BX_DUMP=1 turns it on; FLOW_BX_DUMP_PATH overrides the file
+# (default <tempdir>/flow_bx_dump.jsonl). One JSON line per batchexecute response
+# the failure scan sees: url (no query), rpcids, HTTP status, the request body
+# and the response body (each cut at _V992_DUMP_BODY_CAP chars, 'truncated'
+# says when). Writing stops for the rest of the process once the file reaches
+# _V992_DUMP_FILE_CAP bytes, said once. It adds NO body read: the caller hands
+# over the text it already read for the size learner, and Request.post_data is a
+# client-side property. This is how a human reads Flow's own verdict on a clip
+# that "never appeared" -- grep the file for the clip's bound media uuid.
+_V992_DUMP_BODY_CAP = 512_000
+_V992_DUMP_FILE_CAP = 200 * 1024 * 1024
+_V992_DUMP_STATE = {'off': False, 'announced': False}
+
+
+def _v992_dump_enabled():
+    return (os.environ.get("FLOW_BX_DUMP") or "").strip().lower() in ("1", "on", "true", "yes")
+
+
+def _v992_dump_path():
+    return os.environ.get("FLOW_BX_DUMP_PATH") or os.path.join(tempfile.gettempdir(), "flow_bx_dump.jsonl")
+
+
+def _v992_dump_batchexecute(resp, url, status, body, buf_key=''):
+    """Append one raw record for a batchexecute response. Never raises."""
+    try:
+        if _V992_DUMP_STATE['off'] or not _v992_dump_enabled():
+            return
+        if '/data/batchexecute' not in (url or ''):
+            return
+        path = _v992_dump_path()
+        try:
+            if os.path.getsize(path) >= _V992_DUMP_FILE_CAP:
+                _V992_DUMP_STATE['off'] = True
+                print(f"[v992-dump] {path} reached {_V992_DUMP_FILE_CAP} bytes -- "
+                      f"dump OFF for the rest of this run", flush=True)
+                return
+        except OSError:
+            pass  # no file yet
+        try:
+            req_body = resp.request.post_data or ""
+        except Exception:
+            req_body = ""
+        body = body or ""
+        q = url.split('?', 1)[1] if '?' in url else ''
+        m = re.search(r'(?:^|&)rpcids=([^&]*)', q)
+        rec = {
+            'ts': time.time(),
+            'buf_key': buf_key,
+            'url': url.split('?', 1)[0],
+            'rpcids': m.group(1) if m else '',
+            'status': status,
+            'req_body': req_body[:_V992_DUMP_BODY_CAP],
+            'body': body[:_V992_DUMP_BODY_CAP],
+            'truncated': len(req_body) > _V992_DUMP_BODY_CAP or len(body) > _V992_DUMP_BODY_CAP,
+        }
+        with open(path, 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps(rec) + "\n")
+        if not _V992_DUMP_STATE['announced']:
+            _V992_DUMP_STATE['announced'] = True
+            print(f"[v992-dump] writing raw batchexecute records to {path}", flush=True)
+    except Exception as e:
+        print(f"[v992-dump] write failed: {type(e).__name__}: {str(e)[:80]}", flush=True)
+
+
 # --- fail-reason diagnostic (read-only, temporary) ---------------------------
 # d0b69c0 baseline detects a failed tile purely from the DOM (refresh button, no
 # <video>) — that tells us THAT a clip failed but never WHY. The only place the
@@ -3073,16 +3138,25 @@ def _scan_failure_reason(resp, url, buf_key=''):
     # clip is still generating", because the platform status is the worker's
     # opinion (v974.5). Measured 2026-09-12: `[v963.35] learned ...` appears
     # ZERO times across four runs.
+    # v992 -- ONE body read per response, on the main greenlet, in its OWN try:
+    # a failing read must not also delete the diagnostics that follow it (that
+    # is the "swallowed diagnostic reads as code that never ran" class).
+    _txt = ""
     try:
         _txt = resp.text() or ""
+    except Exception as _te:
+        print(f"[v992] {ep} body read failed: {type(_te).__name__}: {str(_te)[:80]}", flush=True)
+    _frames = _v963_batchexecute_frames(_txt) if _txt else []
+    _v992_dump_batchexecute(resp, url, st, _txt, buf_key)
+    try:
         _learned = 0
-        for _rpc, _payload in _v963_batchexecute_frames(_txt):
+        for _rpc, _payload in _frames:
             _learned += _v963_note_media_sizes(_payload)
         if _learned:
             print(f"[v963.35] learned {_learned} finished media size(s); "
                   f"{len(_V963_MEDIA_SIZES)} known", flush=True)
-    except Exception:
-        pass
+    except Exception as _se:
+        print(f"[v992] {ep} size learning failed: {type(_se).__name__}: {str(_se)[:80]}", flush=True)
     if st != 200:
         print(f"[fail-reason-diag] {ep} HTTP {st} buf={buf_key}", flush=True)
         # v898 TEMP DIAG (remove after the 403 cause is confirmed) — a 4xx on
