@@ -11368,6 +11368,13 @@ def _v962_upload_into_picker(page, image_path, prefix="", which="start"):
 # those. 0 restores the old single-shot behaviour.
 _V985_PICK_WAIT_S = float(os.environ.get("FLOW_PICK_WAIT_S") or 30)
 
+# v988 — Flow's asset picker is a VIRTUALISED list: only a window of the
+# project's assets is in the DOM at once (measured 2026-09-13: 15 rows rendered,
+# 8 distinct names, one lazy thumbnail alt between them). Its own search box is
+# how a person makes a particular asset render. 0 disables it.
+_V988_ASSET_SEARCH = os.environ.get("FLOW_ASSET_SEARCH", "1") != "0"
+_V988_SEARCH_BOX = ".cdk-overlay-container [aria-label='Search assets']"
+
 
 def _v962_pick_asset_in_picker(page, image_path, prefix="", which="start"):
     """Inside the open picker: click the option named like the file, or upload the
@@ -11413,6 +11420,39 @@ def _v962_pick_asset_in_picker(page, image_path, prefix="", which="start"):
         return None
 
     opt = _find()
+    if opt is None and _V988_ASSET_SEARCH:
+        # v988 — the row is almost certainly not on the page at all.
+        #
+        # Measured 2026-09-13 with the v987 title dump: the pane rendered 15
+        # asset containers carrying 8 distinct names, `image_07.png` was not one
+        # of them, and only ONE of the 15 thumbnails had an alt. The list is
+        # virtualised and lazy, so `_find()` -- which can only read rendered DOM
+        # -- cannot see an asset outside that window no matter how long it waits.
+        # That is why v985's 30s changed nothing here, and why re-uploading did
+        # not help: the file was already in the project and the new row landed
+        # outside the window too.
+        #
+        # `Search assets` is the control Flow puts in this pane for exactly this,
+        # and the titles are plain file names, so filtering by the name we already
+        # have renders the row and the existing `_find()` picks it up. No new
+        # matching rule, no virtual-list traversal of our own.
+        try:
+            _box = page.locator(_V988_SEARCH_BOX).first
+            if _box.count() > 0:
+                _box.click(timeout=4000)
+                _box.fill("")
+                _box.fill(stem)
+                time.sleep(1.5)
+                opt = _find()
+                print(f"{prefix}{'✓' if opt is not None else '⚠'} [v988] searched "
+                      f"the picker for {stem!r} — "
+                      f"{'found it' if opt is not None else 'still not listed'}",
+                      flush=True)
+            else:
+                print(f"{prefix}[v988] no {_V988_SEARCH_BOX} in the pane", flush=True)
+        except Exception as _se:
+            print(f"{prefix}[v988] asset search failed: {type(_se).__name__}: "
+                  f"{str(_se)[:80]}", flush=True)
     if opt is None and _V985_PICK_WAIT_S > 0:
         # v985 — the asset is usually THERE, just not clickable yet.
         #
