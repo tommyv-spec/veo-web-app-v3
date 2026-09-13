@@ -8524,6 +8524,18 @@ def _uuid_video_ready(page, uuid):
     to a RENDERED video (final URL under /video/ or content-type video/*), False if
     it's still a poster (/image/), not ready, or errors. Range bytes=0-0 so it does
     not download the whole file."""
+    # v998.3 -- on flow.google.com the LISTING is the readiness signal: it only
+    # lists media that exists and its mp4 form was measured as video/mp4
+    # (v963.24), while the in-page Range fetch below times out here every time
+    # (probe 2026-09-13 20:38: TimeoutError on the newest listed mp4). That
+    # read every finished render as "not ready" on batch26c/27/28; harvest
+    # shipped all eight. The HTTP download thread checks content-type and size
+    # before any upload, so presence here is enough to enqueue.
+    try:
+        if _v962_on_new_host(page):
+            return bool(_V963_MEDIA_URLS.get(str(uuid or "").lower()))
+    except Exception:
+        pass
     # v977 — this probe is what stops delivery, and it had NO bound of any kind.
     # `page.evaluate` takes no timeout argument, and the fetch had no
     # AbortController, so it could hang two different ways. Measured 2026-09-12
