@@ -2107,7 +2107,7 @@ All four constants live at the top of the v611 / v616 blocks in `code/video_proc
 
 ## Dialogue lip-sync trigger and voice qualifier syntax (v642)
 
-**APPLY:** (covers v644 and v665) a quoted line triggers Veo lip-sync, and the subject is ALWAYS "The main AI generated character" — never a name or a pronoun.
+**APPLY:** write the spoken line as a QUOTED line — the quote is what triggers Veo lip-sync; an unquoted line renders as narration. The subject-syntax sentence is v665's rule and the short-line pad is v644's — each carries its own instruction; this line does not replace them.
 
 **Source: 2026-05-07 owner review** + cross-reference against Google Vertex AI docs (`Clippings/Veo on Vertex AI video generation prompt guide.md`) + project wiki (`wiki/generation/veo-prompting.md`, `wiki/generation/kaveno-veo-bridge.md`).
 
@@ -4858,7 +4858,7 @@ Exception — keep both images when the setup image carries visual information t
 
 ### Recipe / process state-evolution — each step needs its own image (v580)
 
-**APPLY:** (covers v580.1, v580.2 and v580.4) declare the inheritance mode per image — STRICT CHAIN, IMAGE-1 ANCHOR or NO CHAIN — and write `- **reference_image:**` to match. A paired START image carries `- **pair_role:** start` only; the END image carries `- **pair_role:** end` plus `- **paired_with:** image_K`.
+**APPLY:** declare the inheritance mode per image — STRICT CHAIN, IMAGE-1 ANCHOR or NO CHAIN — and write `- **reference_image:**` to match; the decision tree for WHICH mode is v580.4 below, and v580.1 (carry-over from a decode) and v580.2 (paired images) carry their own instructions. A paired START image carries `- **pair_role:** start` only; the END image carries `- **pair_role:** end` plus `- **paired_with:** image_K`.
 
 Companion rule to "Image economy" above. Image economy says **merge two phases of ONE action** into a single image (drop the setup, keep the mid-action). v580 says the OPPOSITE for multi-step processes: **DO NOT merge multiple distinct steps into a single image**. Each step that changes the visible state of a foreground prop needs its own start image showing the cumulative state at that step.
 
@@ -6281,6 +6281,34 @@ For each scene in the new authored sequence:
 **Verification mandatory before claiming v580.1 composition-register extension correctly applied**: re-run the male-detox → puffy-face innovate port; confirm Pre-Flight Section 1 declares "re-evaluated per v580.1 carry-over discipline"; confirm recipe scenes 2-5 are persona-on-camera (not voiceover, not disembodied hands); confirm v737 + v698A.1 N/A on those scenes; render-test Image 2 on Banana 2 + confirm persona visible at counter performing the action.
 
 ---
+
+### v580.4 — Image inheritance modes: the decision tree (STRICT CHAIN / IMAGE-1 ANCHOR / NO CHAIN)
+
+**APPLY:** on every `### Image N` after the first, pick ONE inheritance mode and write `- **reference_image:**` to match — `image_{N-1}` for STRICT CHAIN (the same thing in a later state), `image_1` (or the run's first frame) for IMAGE-1 ANCHOR (same room and camera, different props or beat), `none` for NO CHAIN (a new setting or a standalone frame) — and add `- **visual_delta:**` naming what changed whenever the mode is not NO CHAIN.
+
+**Where it came from**: this section was advertised as `§v580.4` in root `CLAUDE.md` (`code/CLAUDE.md:77` still lists `v580 / v580.2 / v580.3 / v580.4 image inheritance modes`) and was pointed at by two dated records — the 2026-07-06 CLAUDE.md quickref (*"3-mode decision tree: STRICT CHAIN (state-evolution) / IMAGE-1 ANCHOR (shared canvas + diff props) / NO CHAIN (standalone)"*) and the 2026-08-09 generate-video checklist (*"each image declares the right mode (STRICT CHAIN / IMAGE-1 ANCHOR / NO CHAIN) + `visual_delta`"*) — but no deep-dive was ever written; both pointers dangled until 2026-09-13. Written then from those two records plus the field grammar already canonical in v580 (state-evolution chains), v590 (chain optionality), v667 (`frame_anchor` / `reference_image` / `visual_delta`) and v718h-B / v580.2 (paired images). Nothing here is new doctrine; it is the missing home for doctrine three files already cited.
+
+**The three modes**:
+
+| mode | use it when | `- **reference_image:**` | what the renderer inherits |
+|---|---|---|---|
+| **STRICT CHAIN** | the SAME object or body appears in a LATER state — a recipe step, a Day 1 → Day 14 checkpoint, a prop that transforms | `image_{N-1}` — the immediately prior step | the prior frame's pose, light, layout and prop positions carry; only the declared delta moves (v580) |
+| **IMAGE-1 ANCHOR** | the same room and camera as an earlier frame in this run, but DIFFERENT props or a different beat — a shared canvas | `image_1`, or the first frame of the same-setting run | setting and framing carry from ONE anchor, so drift does not compound across the run (v590) |
+| **NO CHAIN** | a new setting, a hard cut to another room, or a standalone insert (a product plate, a text-card base) | `none` | nothing — a fresh generation |
+
+**The decision tree** — walk it per image, in this order, and stop at the first yes:
+
+1. Does this frame show the same object or body as the PREVIOUS frame, in a later state? → **STRICT CHAIN** to `image_{N-1}`.
+2. Else, is it the same room and camera as an EARLIER frame in this run? → **IMAGE-1 ANCHOR** to that run's first frame.
+3. Else → **NO CHAIN**. A `none` is legal ONLY where the setting changes or the frame stands alone: *a same-setting run anchors to its first frame — no independent opening bases inside one setting* (the 2026-08-09 checklist's own wording).
+
+**Why three modes and not one**: chaining every image compounds drift — each generation inherits the last one's errors (v590); chaining none loses the continuity a viewer reads as a cut inside one scene (v580). The mode is the per-image declaration of WHICH continuity this frame owes, and to what.
+
+**Boundaries**: a paired START/END image (v580.2, v718j) declares its relation with `pair_role` / `paired_with`; the END's inheritance is its START, per §v718h-B — do not point a paired END image's `reference_image` at some third frame. Chain depth stays ≤ 3 (the build skill's standing limit). When building from a decode, re-evaluate the mode against operator intent rather than copying the decode's chain (v580.1).
+
+**Scope / gates**: every build, every `### Image N` after `image_1`. Authoring-side; no auditor check reads the mode yet (recorded 2026-09-13 — a `reference_image` that names a non-existent image is already caught at import).
+
+**Touched**: this deep-dive (canonical), `wiki/patterns/conventions.md` (index row), `rules/v580.md` (generated mirror, base number). `wiki/meta/build-rule-index.md` already carried `v580.4` in its §A row before the section existed.
 
 ### v698A.2 — Cutaways land on the words heard in the shipped file (the export reuses v825's master-audio alignment)
 

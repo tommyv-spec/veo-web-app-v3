@@ -61,6 +61,11 @@
         "what": "three APPLY lines found by reading all 178 heading/instruction pairs: v573 (product referenced BY NAME in product frames), v644 (audio-padding suffix for short dialogue lines) and v828 (interview builds, three mandatory parts)",
         "superseded_by": "corrected 2026-09-11 from each rule's own body",
         "why": "v573's line was about keeping the upload set isolated and never mentioned NAMING the product, which is what its heading and body are about - that is v581/v618 territory. v644's line was about voice-qualifier syntax and quoted lines triggering lip-sync, which is v642's subject; v644 is the `- **pad:**` suffix that lengthens a short line to ~20 words because Veo 3.1's audio stage fails on lines of about ten words or fewer. v828's line carried ONE of the rule's own 'three parts, all mandatory' - a builder following it would ship an interview build with no patient-carried proxy and no symptom-showing body. All three are the wrong-subject class; none involves an amendment, so no amendment check could see them. Rule coverage unchanged; check_rule_index.py stays PASS."
+      },
+      {
+        "what": "two base-rule APPLY lines whose cover-claim hid a rule with its own instruction: v580 (covers v580.1, v580.2 and v580.4) and v642 (covers v644 and v665)",
+        "superseded_by": "the same lines rewritten 2026-09-13 as pointers; v580.4 given its own section the same day (P0.2 + P0.3 of docs/plans/apply-layer-review-and-improvements-2026-09-13.md)",
+        "why": "v580.2 carries its own APPLY line and v580.4 now has its own section, so v580 claiming to cover them told a reader to skip rules they need. v642 repeated v665's subject-syntax sentence verbatim and claimed to cover v644, whose rule (pad a short line to ~20 words) it never mentioned. Both surfaced by check_apply_amendments.py's cover-claim report after the per-section scan landed. Rule coverage grows by one heading (v580.4) with its conventions.md row; check_rule_index.py stays PASS."
       }
     ],
     "retired_line_sha256_16": [
@@ -203,7 +208,9 @@
       "a795010e5eccf3f7",
       "9c158fbc32f04479",
       "a0d81aab78efcb3b",
-      "ebf6d4a7c38745f8"
+      "ebf6d4a7c38745f8",
+      "0b79a150687a387a",
+      "56907afd7fbe71b2"
     ]
   },
   "template_new_format.md": {
