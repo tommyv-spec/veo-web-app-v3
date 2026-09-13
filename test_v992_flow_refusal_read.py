@@ -244,3 +244,176 @@ def test_a_healthy_poll_records_nothing():
     body = _wire([("jwpduf", [None, [_record(MEDIA, 1)]])])
     fw._scan_failure_reason(_Resp(BX_URL, body), BX_URL, "acct:T")
     assert fw._VIDEO_POLICY_TERMINAL == {} and fw._V992_REFUSALS == {}
+
+
+# ---------------------------------------------------------------- Task 5
+import ast
+
+
+def _fresh_ladder(fw):
+    fw._V992_NOT_FOUND.clear(); fw._CLIP_PROMPT_B.clear(); fw._PROMPT_B_TRIED.clear()
+    fw._V992_REFUSALS.clear(); fw._VIDEO_POLICY_TERMINAL.clear(); fw._PRIMARY_MEDIA_BINDINGS.clear()
+    fw._PRIMARY_MEDIA_BINDINGS[MEDIA] = {'job_id': 'J', 'clip_index': 27, 'clip_id': 14934}
+
+
+def test_fail_clip_general_policy_returns_a_verified_boolean(monkeypatch):
+    fw = _load()
+    monkeypatch.setattr(fw, "api_request_ex", lambda m, e, d=None: ({"ok": True}, 200))
+    assert fw.fail_clip_general_policy(14934, "m") is True
+    monkeypatch.setattr(fw, "api_request_ex", lambda m, e, d=None: (None, 500))   # HTTP error, no exception
+    monkeypatch.setattr(fw, "update_clip_status", lambda *a, **k: {"status": "failed"})
+    assert fw.fail_clip_general_policy(14934, "m") is True, "fallback write succeeded"
+    monkeypatch.setattr(fw, "update_clip_status", lambda *a, **k: None)
+    assert fw.fail_clip_general_policy(14934, "m") is False, "HTTP 500 and a failed fallback = NOT failed"
+    def _boom(*a, **k):
+        raise RuntimeError("network")
+    monkeypatch.setattr(fw, "api_request_ex", _boom)
+    assert fw.fail_clip_general_policy(14934, "m") is False
+
+
+def test_fail_clip_general_policy_keeps_prompt_b_tried_when_both_writes_fail(monkeypatch):
+    """Codex HIGH 4. The cleanup pops (attempt count, swap mark, Prompt-B tried)
+    used to run whether or not a write landed. When the ladder fails a clip
+    BECAUSE Prompt B was already tried, a failed write must not make B look
+    untried again, or the next pass queues it a second time."""
+    fw = _load()
+    fw._PROMPT_B_TRIED.clear(); fw._POLICY_SWAP_DONE.clear()
+    with fw._POLICY_GEN_LOCK:
+        fw._POLICY_GEN_ATTEMPTS.clear()
+    fw._PROMPT_B_TRIED[14934] = True
+    fw._POLICY_SWAP_DONE[14934] = "veo-3-fast"
+    with fw._POLICY_GEN_LOCK:
+        fw._POLICY_GEN_ATTEMPTS[14934] = 2
+    monkeypatch.setattr(fw, "api_request_ex", lambda m, e, d=None: (None, 503))
+    monkeypatch.setattr(fw, "update_clip_status", lambda *a, **k: None)
+    assert fw.fail_clip_general_policy(14934, "m") is False
+    assert fw._PROMPT_B_TRIED.get(14934) is True, "a failed terminal write must leave Prompt B marked tried"
+    assert fw._POLICY_SWAP_DONE.get(14934) == "veo-3-fast" and fw._POLICY_GEN_ATTEMPTS.get(14934) == 2
+    monkeypatch.setattr(fw, "api_request_ex", lambda m, e, d=None: ({"ok": True}, 200))
+    assert fw.fail_clip_general_policy(14934, "m") is True
+    assert 14934 not in fw._PROMPT_B_TRIED and 14934 not in fw._POLICY_SWAP_DONE and 14934 not in fw._POLICY_GEN_ATTEMPTS, (
+        "on a CONFIRMED failure the cleanup runs as before (fresh budget for a later user Retry)")
+
+
+def test_not_found_route_is_a_pure_decision_over_the_miss_number():
+    fw = _load()
+    _fresh_ladder(fw)
+    fw.register_clip_prompt_b({'id': 14934, 'prompt_b': 'tap the link below and get the whole set free.'})
+    assert fw._v992_not_found_route(14934, 1)[0] == 'redo' and 14934 not in fw._PROMPT_B_TRIED
+    route, msg = fw._v992_not_found_route(14934, 2)
+    assert route == 'prompt_b' and 'retry reworded line (prompt b)' in msg.lower(), (
+        "second miss with the same text must switch to Prompt B, carrying the v849 marker")
+    assert fw._PROMPT_B_TRIED.get(14934) is True
+    assert fw._v992_not_found_route(14934, 3)[0] == 'fail'
+    assert fw._V992_NOT_FOUND == {}, "the route never counts; the caller does, after a confirmed write"
+    fw._PROMPT_B_TRIED.clear()
+    route, msg = fw._v992_not_found_route(14934, 1, reason='UNSAFE_GENERATION')
+    assert route == 'prompt_b' and 'UNSAFE_GENERATION' in msg, "a refusal we READ goes straight to Prompt B"
+    _fresh_ladder(fw)
+    assert fw._v992_not_found_route(777, 1)[0] == 'redo'
+    route, msg = fw._v992_not_found_route(777, 2)
+    assert route == 'fail' and 'no reworded line' in msg.lower()
+
+
+def test_give_up_counts_and_consumes_only_after_a_confirmed_write(monkeypatch):
+    fw = _load()
+    _fresh_ladder(fw)
+    fw.register_clip_prompt_b({'id': 14934, 'prompt_b': 'tap the link below.'})
+    fw._v992_note_refusal(MEDIA, 'UNSAFE_GENERATION')
+    writes = []
+    monkeypatch.setattr(fw, "update_clip_status", lambda cid, st, **k: writes.append((cid, st, k.get('error_message'))) or {"ok": 1})
+    assert fw._v992_give_up_on_clip('J', 27, 14934) is True
+    assert writes == [(14934, 'flow_redo_queued', writes[0][2])] and 'retry reworded line (prompt b)' in writes[0][2].lower()
+    assert fw._V992_NOT_FOUND[14934] == 1, "counted once, after the write"
+    assert fw._v992_peek_refusal_for_clip('J', 27) is None, "consumed after the write"
+    assert fw._PROMPT_B_TRIED.get(14934) is True
+
+
+def test_give_up_keeps_everything_when_the_redo_write_fails(monkeypatch):
+    """Codex HIGH 2: a failed status write must not consume the refusal,
+    advance the counter, or leave Prompt B marked tried."""
+    fw = _load()
+    _fresh_ladder(fw)
+    fw.register_clip_prompt_b({'id': 14934, 'prompt_b': 'tap the link below.'})
+    fw._v992_note_refusal(MEDIA, 'UNSAFE_GENERATION')
+    monkeypatch.setattr(fw, "update_clip_status", lambda *a, **k: None)      # retries exhausted
+    assert fw._v992_give_up_on_clip('J', 27, 14934) is False
+    assert fw._v992_peek_refusal_for_clip('J', 27) == 'UNSAFE_GENERATION', "refusal still there"
+    assert 14934 not in fw._V992_NOT_FOUND, "miss not counted"
+    assert 14934 not in fw._PROMPT_B_TRIED, "Prompt B still untried"
+
+
+def test_give_up_keeps_everything_when_the_failure_write_fails(monkeypatch):
+    """Codex HIGH 3: FAILED is only printed and counted when the clip was really marked failed."""
+    fw = _load()
+    _fresh_ladder(fw)
+    fw._V992_NOT_FOUND[777] = 2                       # third miss, no Prompt B -> 'fail'
+    fw._PRIMARY_MEDIA_BINDINGS[MEDIA2] = {'job_id': 'J', 'clip_index': 5, 'clip_id': 777}
+    fw._v992_note_refusal(MEDIA2, 'UNSAFE_GENERATION')
+    calls = []
+    monkeypatch.setattr(fw, "fail_clip_general_policy", lambda cid, msg: calls.append(cid) or False)
+    assert fw._v992_give_up_on_clip('J', 5, 777) is False
+    assert calls == [777]
+    assert fw._V992_NOT_FOUND[777] == 2, "not advanced"
+    assert fw._v992_peek_refusal_for_clip('J', 5) == 'UNSAFE_GENERATION', "not consumed"
+    monkeypatch.setattr(fw, "fail_clip_general_policy", lambda cid, msg: True)
+    assert fw._v992_give_up_on_clip('J', 5, 777) is True
+    assert fw._V992_NOT_FOUND[777] == 3 and fw._v992_peek_refusal_for_clip('J', 5) is None
+
+
+def test_give_up_hands_a_frame_reason_to_the_existing_handler_and_does_not_consume(monkeypatch):
+    """Decision (a) for Codex HIGH 5: the handler's write is unverified, so the
+    wrapper returns False, leaves the frame ledger alone, and never counts."""
+    fw = _load()
+    _fresh_ladder(fw)
+    fw._record_video_policy_terminal(MEDIA, 'PROMINENT_PEOPLE')
+    seen = []
+    monkeypatch.setattr(fw, "handle_terminal_reject", lambda cid, reason, **k: seen.append((cid, reason)) or 'requeued')
+    assert fw._v992_give_up_on_clip('J', 27, 14934) is False, "an unverified write is not a state change"
+    assert seen == [(14934, 'PROMINENT_PEOPLE')]
+    assert fw._peek_video_policy_terminal_for_clip('J', 27) == 'PROMINENT_PEOPLE', "deliberately NOT consumed"
+    assert fw._V992_NOT_FOUND == {}, "a frame reason never walks the text ladder"
+
+
+def test_give_up_keeps_a_frame_refusal_when_the_handlers_requeue_write_returns_none(monkeypatch):
+    """Codex HIGH 5, the real handler: PROMINENT with an untried Prompt B makes
+    handle_terminal_reject call update_clip_status and return 'requeued' without
+    reading the result. With that write answering None the evidence must survive."""
+    fw = _load()
+    _fresh_ladder(fw)
+    fw.register_clip_prompt_b({'id': 14934, 'prompt_b': 'tap the link below.'})
+    fw._record_video_policy_terminal(MEDIA, 'PROMINENT_PEOPLE')
+    monkeypatch.setattr(fw, "update_clip_status", lambda *a, **k: None)
+    assert fw._v992_give_up_on_clip('J', 27, 14934) is False
+    assert fw._peek_video_policy_terminal_for_clip('J', 27) == 'PROMINENT_PEOPLE', "phantom requeue: refusal kept"
+    assert fw._V992_NOT_FOUND == {}
+    # Pre-existing and documented as residual risk (§Task 5): the handler marks
+    # Prompt B tried before it knows whether the requeue landed.
+    assert fw._PROMPT_B_TRIED.get(14934) is True
+
+
+def test_give_up_keeps_a_frame_refusal_when_the_handlers_terminal_write_fails(monkeypatch):
+    """Codex HIGH 5, terminal branch: CSAM -> route_terminal_content_reject ->
+    report_policy_violation raises -> fail_clip_general_policy answers False ->
+    the handler still returns 'terminal'. The wrapper must not consume."""
+    fw = _load()
+    _fresh_ladder(fw)
+    fw._record_video_policy_terminal(MEDIA, 'CSAM')
+    def _down(*a, **k):
+        raise RuntimeError("api down")
+    monkeypatch.setattr(fw, "report_policy_violation", _down)
+    monkeypatch.setattr(fw, "fail_clip_general_policy", lambda cid, msg: False)
+    assert fw._v992_give_up_on_clip('J', 27, 14934) is False
+    assert fw._peek_video_policy_terminal_for_clip('J', 27) == 'CSAM', "phantom terminal: refusal kept"
+
+
+def test_the_give_up_branch_routes_through_the_ladder():
+    """AST, not substring: the post-job give-up branch must call the give-up
+    function and must no longer write flow_redo_queued with the old fixed message."""
+    tree = ast.parse(_PATH.read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "process_job_submission")
+    calls = [n.func.id for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]
+    assert "_v992_give_up_on_clip" in calls, "the give-up branch does not consult the ladder"
+    old = [n for n in ast.walk(fn) if isinstance(n, ast.Constant)
+           and n.value == "Clip not found in project after generation — resubmitting via redo"]
+    assert not old, "the fixed give-up message still exists: the branch still resubmits identical text blindly"

@@ -8888,21 +8888,39 @@ def policy_gen_next_action(clip_id, current_model, generation_attempt=1,
 def fail_clip_general_policy(clip_id, message):
     """Mark a clip failed with the GENERATION_POLICY error_code. Uses a direct
     /status POST because update_clip_status can't set error_code. NOT
-    image-attributable — no replace-image card; the user must change the prompt."""
+    image-attributable — no replace-image card; the user must change the prompt.
+
+    v992 -- returns True only when a write is CONFIRMED (2xx on the POST, or a
+    truthy result from the fallback). api_request_ex does not raise on an HTTP
+    error, it returns (None, code), so before this an HTTP 500 counted as
+    "failed the clip" and the caller printed FAILED for a clip left untouched.
+    Every pre-v992 caller discards the return; nothing changes for them.
+    """
+    ok = False
     try:
-        api_request_ex("POST", f"/clips/{clip_id}/status",
-                       {"status": "failed", "error_message": message, "error_code": GEN_POLICY_ERROR_CODE})
+        _res, _code = api_request_ex("POST", f"/clips/{clip_id}/status",
+                                     {"status": "failed", "error_message": message,
+                                      "error_code": GEN_POLICY_ERROR_CODE})
+        ok = 200 <= int(_code or 0) < 300
+        if not ok:
+            print(f"[policy] general-policy fail POST for clip {clip_id} answered HTTP {_code}", flush=True)
     except Exception as _e:
         print(f"[policy] general-policy fail POST failed for clip {clip_id}: {_e}", flush=True)
-        update_clip_status(clip_id, 'failed', error_message=message)
-    # Drop the per-clip attempt count so a later user-initiated Retry of this
-    # clip starts the same->swap->fail sequence fresh (and the dict doesn't grow).
+    if not ok:
+        ok = bool(update_clip_status(clip_id, 'failed', error_message=message))
+        if not ok:
+            print(f"[policy] clip {clip_id}: the fallback 'failed' write ALSO failed — "
+                  f"clip NOT marked failed, attempt/Prompt-B state left as it was", flush=True)
+            return False
+    # Only on a CONFIRMED failure write (Codex HIGH 4): drop the per-clip attempt
+    # count so a later user-initiated Retry starts the same->swap->fail sequence
+    # fresh, and (v805) give it a fresh Prompt B budget. Running these on a failed
+    # write made Prompt B look untried and the next pass queued it again.
     with _POLICY_GEN_LOCK:
         _POLICY_GEN_ATTEMPTS.pop(clip_id, None)
     _POLICY_SWAP_DONE.pop(clip_id, None)
-    # v805 — fresh Prompt B budget on a later user Retry. The registered
-    # _CLIP_PROMPT_B text itself stays (still valid for the retry).
-    _PROMPT_B_TRIED.pop(clip_id, None)
+    _PROMPT_B_TRIED.pop(clip_id, None)   # the registered _CLIP_PROMPT_B text itself stays
+    return True
 
 
 # v769 — split generation-time policy blocks into TWO kinds, treated differently:
@@ -9062,6 +9080,101 @@ def prominent_promptb_decision(clip_id):
     if _has_pb:              # tried already
         return 'terminal_line'
     return 'terminal_image'  # no B -> old replace-image behavior
+
+
+# v992 -- the not-found ladder. Module-level: a worker restart resets the count,
+# and then the v849 marker in the clip's error_message still carries the Prompt B
+# intent, so the worst case after a restart is ONE extra plain redo.
+# ponytail: in-memory counter; persist it on the clip only if that case is measured.
+_V992_NOT_FOUND = {}     # clip_id -> how many times the post-job harvest gave up on it
+
+
+def _v992_not_found_route(clip_id, n, reason=None):
+    """The PROMPT-axis decision for a clip the harvest never found. `n` is the
+    miss the caller is about to record (1 = first). No counting, no status
+    writes here; the only side effect is prominent_promptb_decision marking
+    Prompt B tried, which the caller rolls back if its write fails.
+
+    Returns (route, message):
+      ('redo',     msg)  first blind miss: resubmit the same text (today's behaviour)
+      ('prompt_b', msg)  a refusal was read, or the second miss: resubmit with the
+                         reworded line. The message carries the v849 marker
+                         'retry reworded line (Prompt B)' so process_redo_clip
+                         picks B even in a restarted process.
+      ('fail',     msg)  Prompt B already tried, or none registered, or the third
+                         miss: the caller marks GENERATION_POLICY 'rework the line'.
+    """
+    seen = f"Flow refused it: {reason}" if reason else f"not found {n}x with identical text"
+    if not reason and n == 1:
+        return ('redo', "Clip not found in project after generation — resubmitting once via redo (v992 1/3)")
+    if n >= 3:
+        return ('fail', f"Flow dropped this clip {n} times ({seen}). Rework the line — "
+                        f"the text is what it keeps refusing.")
+    d = prominent_promptb_decision(clip_id)     # marks Prompt B tried when it says retry
+    if d == 'retry_prompt_b':
+        return ('prompt_b', f"v992 {seen} -> retry reworded line (Prompt B)")
+    if d == 'terminal_line':
+        return ('fail', f"Flow dropped this clip again after the reworded line (Prompt B) "
+                        f"({seen}). Rework the line.")
+    return ('fail', f"Flow dropped this clip {n}x ({seen}) and there is no reworded line "
+                    f"(Prompt B) to try. Rework the line.")
+
+
+def _v992_give_up_on_clip(job_id, clip_index, clip_id, label='[Flow]'):
+    """The post-job give-up for ONE clip, in the order the evidence demands:
+    PEEK (read-only) -> decide -> WRITE -> only when the write is confirmed:
+    consume the refusal, count the miss, print what happened.
+
+    Returns True only when THIS function confirmed the write. False means
+    nothing was consumed or counted and the next pass sees exactly what this
+    one saw. A FRAME-axis reason (the picture) goes to the existing single
+    handler, handle_terminal_reject, never walks the text ladder, and always
+    returns False here because that handler does not verify its own writes.
+    """
+    tag = f"{label} Post-job: clip {clip_index + 1} not found after 300s"
+    frame = _peek_video_policy_terminal_for_clip(job_id, clip_index)
+    if frame:
+        # Decision (a), Codex HIGH 5. handle_terminal_reject returns 'requeued'
+        # / 'terminal' WITHOUT reading the result of the update_clip_status /
+        # fail_clip_general_policy / route_terminal_content_reject call it made,
+        # and update_clip_status returns None on failure without raising. So
+        # neither string proves a write. The refusal is therefore NOT consumed
+        # here and the cache entry is kept: a refusal read twice costs one more
+        # handler call (its terminal branch); a refusal consumed on a phantom
+        # write is gone for good. Residual risks are listed in the plan.
+        try:
+            outcome = handle_terminal_reject(clip_id, frame, job_id=job_id, clip_index=clip_index)
+        except Exception as _he:
+            print(f"{tag} — frame-axis handler raised ({type(_he).__name__}: {str(_he)[:80]}); state kept", flush=True)
+            return False
+        print(f"{tag} — {frame} handed to the frame-axis handler, which answered {outcome!r}; "
+              f"its write is UNVERIFIED, so the refusal is deliberately NOT consumed", flush=True)
+        return False
+    reason = _v992_peek_refusal_for_clip(job_id, clip_index)
+    n = _V992_NOT_FOUND.get(clip_id, 0) + 1
+    route, msg = _v992_not_found_route(clip_id, n, reason)
+    if route == 'fail':
+        ok = bool(fail_clip_general_policy(clip_id, msg))
+    else:
+        ok = bool(update_clip_status(clip_id, 'flow_redo_queued', error_message=msg))
+    if not ok:
+        if route == 'prompt_b':
+            _PROMPT_B_TRIED.pop(clip_id, None)          # not queued -> B is still untried
+        print(f"{tag} — {'failure' if route == 'fail' else 'redo'} write FAILED ({route}); "
+              f"nothing consumed or counted, state kept", flush=True)
+        return False
+    _V992_NOT_FOUND[clip_id] = n
+    if len(_V992_NOT_FOUND) > 512:
+        _V992_NOT_FOUND.clear()
+        _V992_NOT_FOUND[clip_id] = n
+    if reason:
+        _v992_consume_refusal_for_clip(job_id, clip_index)
+    if route == 'fail':
+        print(f"{tag} — FAILED (rework the line), miss {n}: {msg}", flush=True)
+    else:
+        print(f"{tag} — queued for redo ({route}), miss {n}: {msg}", flush=True)
+    return True
+
 
 
 def route_generation_policy(clip_id, current_model, is_prominent, account_name="",
@@ -30889,14 +31002,34 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             for _ci in _pending_left:
                 _clip_obj = next((c for c in clips if c.get('clip_index') == _ci), None)
                 if _clip_obj and _ci not in http_enqueued_clips:
-                    print(f"[Flow] ⚠ Post-job: clip {_ci+1} not found after 300s — queuing for redo resubmission", flush=True)
-                    update_clip_status(_clip_obj['id'], 'flow_redo_queued', error_message="Clip not found in project after generation — resubmitting via redo")
-                    # Remove from cache so resume path doesn't skip it
-                    if job_id in cache.get('jobs', {}):
-                        _cs = cache['jobs'][job_id].get('clips_submitted', [])
-                        if _ci in _cs:
-                            _cs.remove(_ci)
-                            save_cache(cache)
+                    # v992 — carried from the unclaimed worktree draft (disclaimed by
+                    # the v991 session, 2026-09-13; never committed, so production has
+                    # been plain-redoing these). A movie-section / charswap submit
+                    # cannot be replayed through the redo lane, so a quiet one is left
+                    # in flight rather than queued.
+                    _method = str(_clip_obj.get('render_method') or '').strip().lower()
+                    if _method in ('movie-section', 'charswap'):
+                        print(f"[Flow] ⏳ Post-job: clip {_ci+1} not found after 300s; "
+                              f"{_method} submit remains in-flight (plain redo is invalid)",
+                              flush=True)
+                        flow_model_event(
+                            "render_wait_pending", job_id=job_id,
+                            clip_id=_clip_obj.get('id'), clip_index=_ci,
+                            render_method=_method,
+                            diagnostic="postjob-timeout-preserved",
+                        )
+                        continue
+                    # v992 — peek the refusal the scan recorded for THIS clip's bound
+                    # media, decide, write, and only on a confirmed write consume,
+                    # count and print (see _v992_give_up_on_clip). A failed write
+                    # keeps the clip, the ledger and the cache entry for the next pass.
+                    if _v992_give_up_on_clip(job_id, _ci, _clip_obj['id']):
+                        # Remove from cache so resume path doesn't skip it
+                        if job_id in cache.get('jobs', {}):
+                            _cs = cache['jobs'][job_id].get('clips_submitted', [])
+                            if _ci in _cs:
+                                _cs.remove(_ci)
+                                save_cache(cache)
 
 
 
