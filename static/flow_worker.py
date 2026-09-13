@@ -8752,26 +8752,28 @@ _CLIP_PROMPT_B = {}     # clip_id -> prompt_b text (registered whenever a clip d
 _PROMPT_B_TRIED = {}    # clip_id -> True once the Prompt B rung fired (redo substitutes the text)
 
 
-# v1000 -- clip ids an operator-scoped launch renders with Prompt B
-# (run_scoped_flow_worker.py --prompt-b). Read once at import, like the scope.
-_V1000_PROMPT_B_CLIPS = {s.strip() for s in (os.environ.get("FLOW_PROMPT_B_CLIPS") or "").split(",") if s.strip()}
+# v1001 -- the platform decides: a clip renders with its Prompt B when ITS OWN
+# record carries the ladder's durable v849 marker (error_message
+# "retry reworded line (Prompt B)", sent in every pending/claim payload) and a
+# prompt_b. No env list -- a job-specific instruction lives on the clip row,
+# never in the worker's environment (operator 2026-09-13).
+_V1001_PROMPT_B_MARKER = "retry reworded line (Prompt B)"
 
 
 def _v1000_prompt_for(clip, prompt):
-    """v1000 -- Prompt B for clips named in FLOW_PROMPT_B_CLIPS: Flow refused
-    their Prompt A on content, the redo lane that would retry Prompt B never
-    serves an old job (7-day age cap, rev 896), and a firstgen run otherwise
-    re-sends the refused words. Named clips only; a named clip without a
-    prompt_b keeps Prompt A and says so."""
+    """v1000/v1001 -- Prompt B for a clip whose platform record asks for it:
+    Flow refused its Prompt A on content and the ladder marked it (v849), or the
+    operator put the marker on it (run_scoped_flow_worker.py --prompt-b writes it
+    through the API). A marked clip without a prompt_b keeps Prompt A and says so."""
     try:
         cid = str(clip.get('id') or '')
-        if not cid or cid not in _V1000_PROMPT_B_CLIPS:
+        if not cid or _V1001_PROMPT_B_MARKER not in (clip.get('error_message') or ''):
             return prompt
         pb = (clip.get('prompt_b') or '').strip()
         if not pb:
-            print(f"[v1000] clip {clip.get('clip_index')} ({cid}) is named for Prompt B but has none — Prompt A stays", flush=True)
+            print(f"[v1000] clip {clip.get('clip_index')} ({cid}) is marked for Prompt B but has none — Prompt A stays", flush=True)
             return prompt
-        print(f"[v1000] clip {clip.get('clip_index')} ({cid}): rendering with Prompt B (operator scope): {pb[:70]!r}", flush=True)
+        print(f"[v1000] clip {clip.get('clip_index')} ({cid}): rendering with Prompt B (platform marker): {pb[:70]!r}", flush=True)
         # v1000.1 -- the ladder's own marker: a refused B must go to `fail`, not to a second B retry
         try:
             _PROMPT_B_TRIED[clip.get('id')] = True
