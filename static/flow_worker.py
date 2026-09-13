@@ -11530,10 +11530,47 @@ def _v962_pick_asset_in_picker(page, image_path, prefix="", which="start"):
         # v975 — the picker overlay covers the Add-media button, so wait for it
         # to GO rather than pressing Escape once and hoping. One blind Escape
         # is why clip 2 of a 2-clip run failed with a click timeout here.
-        _v975_clear_overlays(page)
+        _v986_cleared = _v975_clear_overlays(page)
+        if not _v986_cleared:
+            # v986 — this return value was discarded, so a picker overlay that
+            # refused to close looked exactly like a missing button: the same
+            # click timeout, with nothing to tell them apart.
+            print(f"{prefix}⚠ [v986] the picker overlay would not close — the "
+                  f"add-menu click below may be intercepted rather than absent",
+                  flush=True)
+        # v986 — the add-menu button, by the name the REST of this file uses.
+        #
+        # Measured 2026-09-13: this click failed as
+        # `Locator.click: Timeout 8000ms exceeded. Call log: waiting for
+        # locator("button[aria-label='Add me...`, on every clip whose start frame
+        # was not already in the project. "waiting for locator" is Playwright
+        # saying the element never appeared -- not that something covered it.
+        #
+        # `_V962_ADD_MENU_BTN` (L20443) is the same button, and it is what the
+        # Ingredients path, image_worker.py and tools/flow_ui_audit.py's contract
+        # test all use to open this menu. 'Add media menu' appears nowhere else in
+        # the tree except this call and a test pinning it.
+        #
+        # Tried in order rather than swapped: v974 recorded a real measurement for
+        # its selector on 2026-09-12 and this host changes under us, so if that
+        # button returns the fallback still finds it. The line printed below says
+        # which one the host actually had.
+        _v986_btn = None
+        for _v986_sel in (_V962_ADD_MENU_BTN, "button[aria-label='Add media menu']"):
+            try:
+                if page.locator(_v986_sel).count() > 0:
+                    _v986_btn = _v986_sel
+                    break
+            except Exception:
+                continue
+        if _v986_btn is None:
+            print(f"{prefix}⚠ [v986] neither add-menu button is on the page "
+                  f"— cannot upload {name}", flush=True)
+            return False
+        print(f"{prefix}[v986] opening the add menu via {_v986_btn}", flush=True)
         try:
             with page.expect_file_chooser(timeout=20000) as fc:
-                page.locator("button[aria-label='Add media menu']").first.click(timeout=8000)
+                page.locator(_v986_btn).first.click(timeout=8000)
                 time.sleep(1.5)
                 # v975 — match the mat-icon LIGATURE, not the English label.
                 # The item renders as "uploadUpload": ligature + label. The
