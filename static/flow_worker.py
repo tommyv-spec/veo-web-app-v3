@@ -3508,7 +3508,13 @@ def _v975_clear_overlays(page, tries=4):
     """
     for _ in range(tries):
         try:
-            if page.locator(".cdk-overlay-container .cdk-overlay-pane").count() == 0:
+            # v993 -- the PANE going is not the picker going. CDK leaves a
+            # full-screen .cdk-overlay-backdrop that intercepts every click;
+            # measured 2026-09-13: with only the pane checked, 16 clips in one
+            # run failed because the Add-media button and the settings chip were
+            # "present but not clickable" from clip 5 onward.
+            if page.locator(".cdk-overlay-container .cdk-overlay-pane, "
+                            ".cdk-overlay-container .cdk-overlay-backdrop").count() == 0:
                 return True
         except Exception:
             return True
@@ -3518,7 +3524,8 @@ def _v975_clear_overlays(page, tries=4):
             return False
         time.sleep(0.8)
     try:
-        return page.locator(".cdk-overlay-container .cdk-overlay-pane").count() == 0
+        return page.locator(".cdk-overlay-container .cdk-overlay-pane, "
+                            ".cdk-overlay-container .cdk-overlay-backdrop").count() == 0
     except Exception:
         return False
 
@@ -11772,7 +11779,10 @@ def _v962_upload_into_picker(page, image_path, prefix="", which="start"):
 # clickable. Flow keeps a just-uploaded asset in the pane as a container with no
 # button and no thumbnail while it processes it, and `_find()` matches on exactly
 # those. 0 restores the old single-shot behaviour.
-_V985_PICK_WAIT_S = float(os.environ.get("FLOW_PICK_WAIT_S") or 30)
+# v993 -- default 0: the 30 s wait was built on a wrong hypothesis (the asset
+# was never in the pane) and stacked into a 480 s stall on 2026-09-13. Set
+# FLOW_PICK_WAIT_S to re-enable it for a case that has been measured to need it.
+_V985_PICK_WAIT_S = float(os.environ.get("FLOW_PICK_WAIT_S") or 0)
 
 # v988 — Flow's asset picker is a VIRTUALISED list: only a window of the
 # project's assets is in the DOM at once (measured 2026-09-13: 15 rows rendered,
