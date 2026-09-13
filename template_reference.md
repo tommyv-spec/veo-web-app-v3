@@ -10085,6 +10085,8 @@ Applied in order: see structure (Z-depth) → attribute correctly (kinematic) �
 ---
 
 #### v718b — Z-Depth Isolation (cures blocking blindness)
+**APPLY:** before writing `static_composition`, map the Z-axis in the five steps — name the absolute FOREGROUND, the MIDGROUND, the BACKGROUND, check which object's pixels cover which, and say out loud when a body part crossing the frame BLOCKS a character behind it. A layer you did not name is a layer the render will flatten.
+
 
 **Rule.** Before writing static_composition, EXPLICITLY MAP THE Z-AXIS. Five-step protocol:
 
@@ -10103,6 +10105,8 @@ Applied in order: see structure (Z-depth) → attribute correctly (kinematic) �
 ---
 
 #### v718c — Literal Pixel VFX Recognition (cures anatomical normalization)
+**APPLY:** describe the LITERAL shape the pixels show — a closed loop of flesh, an object floating with no support — and never translate impossible VFX back into a normal anatomical word because normal makes more sense. The five hallucination patterns in the table are the tells; when one fits, use its literal correction.
+
 
 **Rule.** Source videos frequently use extreme VFX that violate real-world physics. DESCRIBE LITERAL SHAPES AND CONNECTIONS YOU SEE IN THE PIXELS. Do NOT map impossible VFX back to "normal" anatomical descriptors just because normal makes more logical sense.
 
@@ -10198,6 +10202,8 @@ Banana 2 renders: patient's looped flesh on extended arm in foreground; practiti
 ---
 
 #### v718d — Intrinsic State Isolation (4-axis morphological-delta diagnostic, NEW 2026-05-16)
+**APPLY:** before writing `static_composition`, isolate the hero prop or symptom and run the four-axis diagnostic at t=start vs t=end — Surface/Texture, Structural Integrity, Volume/Shape, Colour/Illumination — and declare `primary_change_axis` plus `intrinsic_state_start` → `intrinsic_state_end`. Movement is not state change; if no axis changes, say `NONE` rather than describing the action as the payoff.
+
 
 **Surfaced 2026-05-16** from operator audit: prior v718a-c covered spatial perception (kinematic tracing + Z-depth + literal VFX) but did NOT explicitly force the VLM to isolate the hero prop / symptom's intrinsic SUBSTANCE properties before describing it. Result: VLM treats movement and state-change as the same observation, then writes static_composition that glosses over the visceral payoff. Example: source video shows a tongue model getting washed clean — VLM observes "hand pours liquid down" (kinematics) and writes the scene as a generic pouring action, missing that the tongue's surface texture transformed from coated-grime to washed-pink (Morphological Delta). The transformation IS the scene's rhetorical anchor; without it, downstream lift/innovate inherits a generic recipe step instead of a cleansing payoff.
 
@@ -10285,6 +10291,8 @@ def validate_v718d(stage4d_json):
 ---
 
 #### v718e — Action-Consequence Coupling (NEW 2026-05-17)
+**APPLY:** when `primary_change_axis` is not `NONE`, pair the force-verb in the `[Mid-clip beat]` AND the `[End beat]` of `action_note` with what the prop BECOMES — "washing away the grime", not "coating the grime". A contact verb with no consequence clause (`coating`, `pooling on`, `resting on`, `covering`, `touching`) ships a pour the viewer sees and a cleanse they never do.
+
 
 **Surfaced 2026-05-17** from operator audit on tongue-cleansing-recipe lift: v718d correctly isolates `primary_change_axis` and `intrinsic_state_start` → `intrinsic_state_end`, but the scene's `action_note` still describes the agent's contact with the prop without describing the prop's transformation. VLM and lift LLM both default to "safe contact" verbs (`coating`, `pooling on`, `resting on`, `covering`, `touching`, `sitting on`) when describing the agent-prop interaction — kinematically accurate but morphologically vacant. Banana 2 + Veo render the contact but not the consequence: liquid pours, hits tongue, sits there — viewer sees splash, never sees the grime wash away. Same failure class generalizes across niches: tea pours onto fat (no melting), banana smashed by hammer (no bursting), saw cuts wood (no splitting), wand waves over face (no smoothing).
 
@@ -11865,6 +11873,8 @@ If the operator's first-instinct prop is on this list (or a near-neighbor), STOP
 The list is non-exhaustive; the SPIRIT is "would a middle-schooler draw this analogy in a biology textbook diagram?" If yes, banned.
 
 #### v736b — Trend-Hijack Mandate
+**APPLY:** only when retrieval finds a relevant current aesthetic or the source already carries one, declare `TREND GRAMMAR: <bank slug | UNLISTED — source-derived name | NOT APPLICABLE — source mechanism supplies the grammar> | evidence: <source> | transfer: <the exact camera/action grammar used>` and actually TRANSFER that grammar. A named trend with no evidence, or a catalog tag pasted as decoration, fails; no trend is a legal answer (2026-08-09 amendment).
+
 
 > **AMENDMENT (2026-08-09, evidence-to-video Stage 3).** **Protected function:** when a current visual trend is used, borrow the trend's proven camera/action grammar instead of naming it as decoration. **Trigger:** only when retrieval finds a relevant current aesthetic or the chosen source already carries one. **Decision test:** declare `TREND GRAMMAR: <bank slug | UNLISTED — source-derived name | NOT APPLICABLE — source mechanism supplies the grammar> | evidence: <source> | transfer: <the exact camera/action grammar used>`. A named trend with no evidence or no transferred grammar fails; an unlisted evidenced trend is valid; a video whose source mechanism already supplies the visual grammar does not need a trend pasted onto it. **Boundary:** this is a hook-design aid, not a universal innovation mandate and never overrides source fidelity, the chosen route or a stronger parent-owned mechanism. **Combination:** v873 decides the hook message, v539/§6.7 the opening action, v870 the safe composition, and v736c the visible texture only when that texture is actually triggered. The twelve items and five-concept sandbox below remain a dated example bank. For new work, this amendment supersedes every later sentence in v736 that requires a catalog tag or says the trend option should win.
 
@@ -11888,6 +11898,8 @@ The old bundle prompt required a catalog trend name. That instruction is retired
 The trend-hijack also enforces composition discipline: ASMR soap cutting forces a top-down macro shot; hydraulic press forces a side-profile industrial framing; power-washing forces a wide angle showing before/after halves; kinetic-sand slicing forces overhead crisp lighting. The trend brings its own visual grammar that the LLM doesn't have to invent.
 
 #### v736c — Uncomfortable-Texture Mandate
+**APPLY:** on a SPECTACLE-PROP hook, give the hero prop a messy physical state from the allowed texture classes — oozing, bursting, sticky, fibrous, gelatinous, foamy, slimy, fleshy, soaked, stretchy — and never the LLM's safe defaults (dry plastic, polished metal, clean glass, bare wood, polished stone). This is the spectacle-prop family's contract (2026-08-30 F3 amendment); a text-card or talking-head hook owes no texture.
+
 
 Hero props in the HOOK MUST possess a textural / messy / slightly uncomfortable physical state. Allowed texture classes:
 
@@ -11926,6 +11938,8 @@ Texture rule applies to the PROP, not the persona's hands or the setting. Person
 Combine with v720c body-pose discipline (limb-pose structural bans) + v716/v717 anti-normalization (geometric magnitude + structural bans) for max impact. The prop's texture provides the spectacle; v720c locks the body pose; v716/v717 prevent Banana 2 from rendering a "polite" version.
 
 #### v736d — Sandbox-Ideation Gate
+**APPLY:** nothing mandatory — the `## Brainstorming Sandbox` section is a dated example bank since the 2026-08-09 amendment, and 0 of the 58 builds since carry one. If you do ideate several hook concepts, rate each 1-10 on spectacle, drop the lowest, and declare any trend through v736b's `TREND GRAMMAR`, never the retired catalog tag.
+
 
 Every `videos/*.md` lift / innovate / create OUTPUT MUST be preceded by a `## Brainstorming Sandbox` section IN THE OUTPUT FILE (not in chat) BEFORE the YAML frontmatter. The sandbox MUST contain:
 
@@ -12032,6 +12046,8 @@ The DNA does not change with niche. The hero object / texture / trend / force-ve
 | **v736h.1** (short-prompt economy) | discipline gate (Banana 2 attention budget) | **2026-07-21 update** |
 
 #### v736e — Dead-center symptom composition rule
+**APPLY:** on a SPECTACLE-PROP hook, write the hero prop into `[Composition]` as "fills the immediate center-foreground, dominating the middle of the image" — never a rule-of-thirds intersection or a lower-third placement — with the negative `No prop sinking to the lower-third`. The spectacle-prop family's contract (2026-08-30 F3 amendment); other hook families declare their own one-glance read.
+
 
 Hero prop in HOOK occupies dead-center, NOT rule-of-thirds intersection. Symptom dominance overrides classical composition. Strict gate: HOOK Image's `[Composition]` block contains "fills the immediate center" / "dominating the middle" / "in the immediate center-foreground" — NOT "viewer-left third" / "viewer-right third" / "rule-of-thirds upper-line".
 
@@ -12046,6 +12062,8 @@ Single-subject variant: persona holds prop with both hands at chest-level, prop 
 Camera level MUST match the hero element's anchor height (chest-level for held-aloft / belly-level for distended belly / brow-level for forehead wrinkle macro / lumbar-level for back symptom). NEVER top-down. NEVER high-angle.
 
 #### v736f — Active-hands mandate
+**APPLY:** on a SPECTACLE-PROP hook, write `both hands <active-verb> the <hero prop>` in the `[Subject — Host]` block with one of the force verbs — grip, squeeze, lift, wrap, hang, measure, press, pierce, shake, wring, scrape, wind, inflate, pull-apart. A static hold is a still life and fails. The spectacle-prop family's contract (2026-08-30 F3 amendment).
+
 
 Persona's hands MUST be actively manipulating the hero object in HOOK. Static hold (just gripping, no force-verb action) FAILS the gate. Required active verbs (one or more): grip / squeeze / lift / wrap / hang / measure / point / press / pierce / shake / wring / scrape / smooth / wind / inflate / pull-apart.
 
@@ -12056,6 +12074,8 @@ Required `[Subject — Host]` block phrase: `both hands [active-verb] the [hero 
 Required Negative: `No static hold — persona's hands MUST [active-verb] the [hero prop]`.
 
 #### v736g — Face-above-OR-beside-object rule
+**APPLY:** on a SPECTACLE-PROP hook, keep the persona's face visible at chest-up framing either ABOVE the prop (standing behind it, hands gripping from the sides) or BESIDE it (viewer-side of the prop or patient, face at the frame edge, two-shot). Cropped, hidden behind the prop, or pushed to a corner fails. The spectacle-prop family's contract (2026-08-30 F3 amendment).
+
 
 Persona face MUST be visible just above OR beside the hero object at chest-up framing. Persona-cropped (no face) FAILS. Persona-hidden-behind-object FAILS. Persona-displaced-to-corner FAILS.
 
@@ -13171,6 +13191,8 @@ ANGLE-FORWARD / ANGLE-BACK / LEAN-IN / LEAN-OUT
 **Touched**: `code/template_reference.md` (this section + v738 STRICT REJECT CONDITIONS list amended with v718.1 carve-out). `code/decode_bundle.sh` (V738 STRICT ENFORCEMENT block amended). `wiki/patterns/conventions.md` (v718.1 row). `CLAUDE.md` (quickref). `wiki/log.md` (timeline). **Migration zero required**.
 
 ### v718g — `visual_delta_within_clip` formal Scene-block field (NEW 2026-05-17)
+**APPLY:** put `- **visual_delta_within_clip:**` on the SCENE block whenever the transformation happens INSIDE one Veo clip (BEFORE → ACTION → AFTER driven by the `action_arc`). It is not v580's `visual_delta:`, which sits on the IMAGE block and describes the Banana 2 parent→child change between two images — the two fields name different renderers and both may be present.
+
 
 **Composes with v580 cross-image state-evolution chain + v718d intrinsic state isolation.** Existing `visual_delta:` field lives on Image block and describes CROSS-IMAGE chain delta (Image K parent → Image K+1 child rendered by Banana 2). NEW field `- **visual_delta_within_clip:**` lives on Scene block and describes WITHIN-CLIP morphological transformation (BEFORE → ACTION → AFTER state-change inside one Veo render driven by the action_arc).
 
