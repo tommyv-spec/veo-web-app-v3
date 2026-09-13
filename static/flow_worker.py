@@ -19761,6 +19761,76 @@ def _v962_asset_selected(item):
     return None
 
 
+_V990_MEDIA_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm")
+
+
+def _v990_newest_chip_identity(page):
+    """The newest ingredient chip's FILE NAME, or None if it exposes none.
+
+    Deliberately narrow, because the failure modes are not symmetric. A chip
+    renders its remove control as the material ligature 'cancel', and Flow
+    serves chip thumbnails from /asb/ URLs that carry no file name at all
+    (measured in the 2026-09-13 logs), so inner_text and src are both
+    worthless as identity here. Reading either as one would condemn perfectly
+    good chips and cost us the clip. So ONLY a label that actually contains a
+    media file name counts; anything else is "the page did not say", which the
+    caller logs as unverified and continues past.
+    """
+    for sel in (_V962_COMPOSER_CHIP, _V962_ANY_CHIP):
+        try:
+            chips = page.locator(sel)
+            n = chips.count()
+        except Exception:
+            continue
+        if not n:
+            continue
+        chip = chips.nth(n - 1)
+        for attr in ("aria-label", "title", "alt", "data-filename"):
+            try:
+                v = chip.get_attribute(attr)
+            except Exception:
+                v = None
+            if v and any(e in v.lower() for e in _V990_MEDIA_EXTS):
+                return v.strip()
+        for inner_sel in ("img", "[alt]", "[title]", "[aria-label]"):
+            try:
+                inner = chip.locator(inner_sel).first
+                if not inner.count():
+                    continue
+                for attr in ("alt", "title", "aria-label"):
+                    v = inner.get_attribute(attr)
+                    if v and any(e in v.lower() for e in _V990_MEDIA_EXTS):
+                        return v.strip()
+            except Exception:
+                continue
+    return None
+
+
+def _v990_identity_matches(identity, name):
+    """Does this chip label name the file we asked for? Unknown counts as yes."""
+    if not identity or not name:
+        return True
+    stem = os.path.splitext(os.path.basename(name))[0].strip().lower()
+    return bool(stem) and stem in identity.lower()
+
+
+def _v990_remove_newest_chip(page):
+    """Take a wrong chip back off the composer. Best effort, never raises."""
+    for sel in (_V962_COMPOSER_CHIP, _V962_ANY_CHIP):
+        try:
+            chips = page.locator(sel)
+            n = chips.count()
+            if not n:
+                continue
+            cancel = chips.nth(n - 1).locator("button:has-text('cancel')").first
+            if cancel.count():
+                cancel.click(timeout=2500)
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
     """v963.11 — attach one ingredient on flow.google.com. (ok, reason).
 
@@ -19857,6 +19927,10 @@ def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
             return None
 
     picked = _item()
+    # v990 — did WE put this file on the page in this call? The answer decides
+    # whether the item is already selected, and it is the one thing the DOM
+    # never tells us afterwards.
+    fresh = picked is None
     if picked is None:
         # Not in the project yet — 'Upload media' is a real file chooser here.
         monitor = FramePolicyMonitor(page)
@@ -19889,61 +19963,119 @@ def _v962_attach_ingredient(page, image_path, prefix="", clear_existing=True):
             print(f"{prefix}⚠ [v963.11] {name} never appeared in the add menu", flush=True)
             return (False, 'no_buttons')
 
-    # v963.14 — clicking an asset TOGGLES it, so only click one that is not
-    # already selected.
+    # v990 — commit by OUTCOME in two cycles, and only skip the click for the
+    # case that was actually measured.
     #
-    # The scene chip (an asset already in the project, unselected) needed the
-    # click and attached 0 -> 2. The very next ingredient, freshly uploaded,
-    # came back "no chip (chips 2, in-box 2, commit clicked=True)": the upload
-    # leaves its new asset SELECTED, the click turned it back off, and
-    # 'Add to prompt' then had nothing to commit. Blind-clicking is the bug.
-    sel = _v962_asset_selected(picked)
-    if sel is True:
-        print(f"{prefix}[v963.14] {name} already selected after upload — not "
-              f"clicking it off", flush=True)
-    else:
+    # THE BUG v963.14 could not reach. It skips the click only when
+    # _v962_asset_selected(item) is True. On flow.google.com that never
+    # happens: the add-menu item carries neither aria-selected nor
+    # aria-checked, so the helper returns None, and None fell through to the
+    # else branch and clicked. The proof is an absence — the skip line
+    # "[v963.14] … already selected after upload — not clicking it off" has
+    # ZERO hits in both 2026-09-13 run logs, while every face upload failed
+    # with "no chip (chips N, in-box N, commit clicked=True)". So every upload
+    # WAS clicked, and by v963.14's own comment the click turned the newly
+    # uploaded asset back OFF and 'Add to prompt' had nothing to commit.
+    #
+    # THE FIX. Stop asking the page a question it does not answer. Press the
+    # commit, then read the chip count — the outcome is the only honest signal.
+    #
+    #   fresh upload   cycle A: do NOT click (the upload already selected it),
+    #                  commit, poll ~12s. No chip -> cycle B: click once,
+    #                  commit, poll ~12s.
+    #   existing asset today's proven order — click unless the flag actually
+    #                  says True, commit, poll — then ONE retry cycle. The
+    #                  scene image is an existing asset and it attaches on the
+    #                  click today; do not change what already works.
+    #
+    # Every attach logs which cycle won AND the raw flag reading, so the next
+    # session reads the DOM's real behaviour off a run instead of inferring it.
+    #
+    # A PARALLEL ATTEMPT EXISTS, and it is not in this commit. The shared
+    # worktree carries another session's uncommitted rewrite of this same
+    # function tagged [v963.33] (its own `fresh_upload = picked is None`, an
+    # `_item_readiness` probe, and new `attachment_unverified` /
+    # `ingredients_mode_unverified` reasons). This blob was constructed on HEAD
+    # so that work was not swept in (§16.5). Its author should reconcile the
+    # two; two of its measured facts are worth keeping either way — an item
+    # that matches by filename can still be UPLOADING (a mat-spinner or
+    # [role=progressbar] inside it), and 'Add to prompt' can be visible but
+    # DISABLED.
+    #
+    # FILE LOCK: _v962_attach_ingredient is claimed by session db8a95a3 for
+    # 2026-09-13. Message before editing it.
+    raw_sel = _v962_asset_selected(picked)
+
+    def _click_item():
         try:
             picked.click(timeout=8000)
+            return True
         except Exception as exc:
-            print(f"{prefix}⚠ [v963.11] could not click {name}: {str(exc)[:90]}", flush=True)
-            return (False, 'no_buttons')
-    time.sleep(1)
+            print(f"{prefix}⚠ [v990] could not click {name}: {str(exc)[:90]}",
+                  flush=True)
+            return False
 
-    # v963.13 — commit by OUTCOME, not by finding a button in one shot.
-    #
-    # 'Add to prompt' is the commit and usually sits in the menu from the
-    # moment it opens, but a hard wait_for on it is brittle: an asset that was
-    # already in the project attaches on a different rhythm than one just
-    # uploaded, and a single 8s window produced
-    #
-    #   no 'Add to prompt' button to commit with
-    #
-    # on a click that had in fact selected the asset. So poll for the thing
-    # that actually matters - the chip - and press the button if and when it
-    # shows up. Some assets attach on the click alone, which this also covers.
-    # Same shape as the legacy path's clicked_add loop.
-    clicked_add = False
-    for _ in range(24):
-        now = _v962_composer_chips(page)
+    def _commit_and_poll():
+        """Press 'Add to prompt' when it shows; watch the chip count ~12s."""
+        clicked_add = False
+        for _ in range(8):
+            now = _v962_composer_chips(page)
+            if now > chips_before:
+                return now, clicked_add
+            if not clicked_add:
+                try:
+                    atp = page.locator(
+                        ".cdk-overlay-container button:has-text('Add to prompt'), "
+                        "button:has-text('Add to prompt')").first
+                    if atp.count() and atp.is_visible():
+                        human_click_locator(page, atp,
+                                            f"{prefix}[v990] Add to prompt")
+                        clicked_add = True
+                except Exception:
+                    pass
+            time.sleep(1.5)
+        return _v962_composer_chips(page), clicked_add
+
+    if fresh:
+        plan = (('A', False), ('B', True))
+    else:
+        plan = (('A', raw_sel is not True), ('B', True))
+
+    attached = None
+    for label, do_click in plan:
+        if do_click:
+            if not _click_item():
+                return (False, 'no_buttons')
+            time.sleep(1)
+        now, clicked_add = _commit_and_poll()
         if now > chips_before:
-            print(f"{prefix}✓ [v963.11] {name} attached ({chips_before} → {now}, "
-                  f"{_v962_chips_in_box(page)} in the box)", flush=True)
-            return (True, None)
-        if not clicked_add:
-            try:
-                atp = page.locator(
-                    ".cdk-overlay-container button:has-text('Add to prompt'), "
-                    "button:has-text('Add to prompt')").first
-                if atp.count() and atp.is_visible():
-                    human_click_locator(page, atp, f"{prefix}[v963.11] Add to prompt")
-                    clicked_add = True
-            except Exception:
-                pass
-        time.sleep(1.5)
-    print(f"{prefix}⚠ [v963.11] {name}: no chip "
-          f"(chips {chips_before}, in-box {_v962_chips_in_box(page)}, "
-          f"commit clicked={clicked_add})", flush=True)
-    return (False, 'no_buttons')
+            attached = (label, do_click, now, clicked_add)
+            break
+
+    if attached is None:
+        print(f"{prefix}⚠ [v990] {name}: no chip after both cycles "
+              f"(chips {chips_before}, in-box {_v962_chips_in_box(page)}, "
+              f"fresh={fresh}, selected_flag={raw_sel!r})", flush=True)
+        return (False, 'no_buttons')
+
+    label, did_click, now, clicked_add = attached
+    print(f"{prefix}✓ [v990] {name} attached on cycle {label} "
+          f"(selected_flag={raw_sel!r}, fresh={fresh}, clicked={did_click}, "
+          f"commit clicked={clicked_add}) ({chips_before} → {now}, "
+          f"{_v962_chips_in_box(page)} in the box)", flush=True)
+
+    # v990 — the count grew, but did the RIGHT asset land? Read the newest
+    # chip's own label if the page exposes one. Conservative on purpose: a
+    # generic label must never cost us a good chip.
+    ident = _v990_newest_chip_identity(page)
+    if ident is None:
+        print(f"{prefix}[v990] identity unverified (no label on chip)", flush=True)
+        return (True, None)
+    if _v990_identity_matches(ident, name):
+        return (True, None)
+    print(f"{prefix}⚠ [v990] wrong asset attached ({ident} ≠ {name})", flush=True)
+    _v990_remove_newest_chip(page)
+    return (False, 'wrong_asset')
 
 
 def attach_ingredient_image_with_check(page, image_path, context="", extra_images=None,
