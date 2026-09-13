@@ -82,12 +82,21 @@ def test_resume_reload_rounds_still_exist_for_the_legacy_host():
     assert len(legacy) == 1, "the legacy reload round is gone or duplicated"
 
 
-def test_the_three_wait_loop_reloads_are_guarded_on_the_new_host():
-    """post-job 30 s, the 600 s poll's 30 s, continue-mode's 90 s: each test
-    carries `not _v962_on_new_host(page)` itself."""
+def test_the_two_post_job_poll_loops_refresh_through_the_helper_on_every_host():
+    """v998.2 -- the post-job 30 s site and the 600 s poll's 30 s site must NOT
+    be skipped on flow.google.com: routed through _v995_reload they are a goto
+    there, and that goto is what makes Flow re-fetch the media listing (batch28,
+    2026-09-13: eleven blind ticks with the renders finished in Flow)."""
     sites = [n for n in _ifs(_tree())
-             if any(k in ast.unparse(n.test) for k in ("_last_reload", "_poll_start) % 30", "elapsed == 90"))
+             if any(k in ast.unparse(n.test) for k in ("_last_reload", "_poll_start) % 30"))
              and _has_helper_call(n)]
-    assert len(sites) == 3, [ast.unparse(n.test) for n in sites]
+    assert len(sites) == 2, [ast.unparse(n.test) for n in sites]
     for n in sites:
-        assert "not _v962_on_new_host(page)" in ast.unparse(n.test), ast.unparse(n.test)
+        assert "_v962_on_new_host" not in ast.unparse(n.test), ast.unparse(n.test)
+
+
+def test_continue_mode_reload_stays_guarded_on_the_new_host():
+    """Not on today's path; left as measured under v995."""
+    sites = [n for n in _ifs(_tree()) if "elapsed == 90" in ast.unparse(n.test) and _has_helper_call(n)]
+    assert len(sites) == 1, [ast.unparse(n.test) for n in sites]
+    assert "not _v962_on_new_host(page)" in ast.unparse(sites[0].test)

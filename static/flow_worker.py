@@ -30499,7 +30499,8 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                         # Refresh page every 30s
                         # v995 -- never on flow.google.com: nothing to force-render
                         # there (clips resolve by bound uuid) and a reload wedges the tab.
-                        if int(time.time() - _poll_start) % 30 < 6 and not _v962_on_new_host(page):
+                        # v998.2 -- refresh the media listing (goto on flow.google.com, v995)
+                        if int(time.time() - _poll_start) % 30 < 6:
                             _v995_reload(page, wait_until='domcontentloaded', timeout=30000)
                             time.sleep(2)
                             ensure_videos_tab_selected(page)
@@ -30824,7 +30825,11 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     # 30 s for 300 s on 2026-09-13 and the four in-flight renders
                     # were given up; clips there resolve by bound uuid on the live
                     # page, which needs no reload.
-                    if _elapsed > 0 and (time.time() - _last_reload) >= 30 and not _v962_on_new_host(page):
+                    # v998.2 -- on flow.google.com this is a goto (v995), and it is
+                    # what makes Flow re-fetch the media listing: a render that
+                    # finished during the wait is invisible until then (batch28,
+                    # 2026-09-13: eleven blind ticks, renders done in Flow).
+                    if _elapsed > 0 and (time.time() - _last_reload) >= 30:
                         _v995_reload(page, wait_until='domcontentloaded', timeout=30000)
                         time.sleep(2)
                         ensure_videos_tab_selected(page)
