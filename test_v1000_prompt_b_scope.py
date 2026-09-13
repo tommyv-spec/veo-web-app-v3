@@ -23,11 +23,31 @@ def _fn(tree, name):
 
 def test_both_prompt_sites_route_through_the_helper():
     """process_job_submission reads the platform prompt in two clip-loop branches;
-    both must swap through the helper, right after the read."""
+    both swap through the helper. v1000.1: at the second site the swap sits BELOW
+    the v943.4 capture (`_cs_platform_prompt = prompt`) so that capture keeps
+    Prompt A; at the first site it follows the read directly."""
     src = _PATH.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
     assert src.count("prompt = _v1000_prompt_for(clip, prompt)") == 2
-    assert src.count("prompt = clip.get('prompt')\n        prompt = _v1000_prompt_for(clip, prompt)") == 2, \
-        "the swap must sit right after each platform-prompt read"
+    assert src.count("prompt = clip.get('prompt')\n        prompt = _v1000_prompt_for(clip, prompt)") == 1, \
+        "the first site swaps right after the read"
+    i_cap = src.index("_cs_platform_prompt = prompt")
+    i_swap2 = src.index("prompt = _v1000_prompt_for(clip, prompt)", i_cap - 400)
+    assert i_swap2 > i_cap, "the second site's swap must come after the v943.4 capture"
+
+
+def test_applying_prompt_b_marks_it_tried():
+    """v1000.1 -- the ladder's marker is set when B is handed to the composer, so a
+    refused B fails with its reason instead of earning a second B retry."""
+    fn = _fn(_tree(), "_v1000_prompt_for")
+    mod = ast.Module(body=[fn], type_ignores=[])
+    ast.fix_missing_locations(mod)
+    tried = {}
+    ns = {"_V1000_PROMPT_B_CLIPS": {"14908"}, "_PROMPT_B_TRIED": tried}
+    exec(compile(mod, "<v1000.1>", "exec"), ns)
+    assert ns["_v1000_prompt_for"]({"id": 14908, "clip_index": 1, "prompt_b": "B"}, "A") == "B"
+    assert tried.get(14908) is True
+    assert ns["_v1000_prompt_for"]({"id": 14934, "clip_index": 27, "prompt_b": "B"}, "A") == "A"   # unnamed: untouched, unmarked
+    assert 14934 not in tried
 
 
 def _load(env_ids):

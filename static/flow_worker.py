@@ -8772,6 +8772,11 @@ def _v1000_prompt_for(clip, prompt):
             print(f"[v1000] clip {clip.get('clip_index')} ({cid}) is named for Prompt B but has none — Prompt A stays", flush=True)
             return prompt
         print(f"[v1000] clip {clip.get('clip_index')} ({cid}): rendering with Prompt B (operator scope): {pb[:70]!r}", flush=True)
+        # v1000.1 -- the ladder's own marker: a refused B must go to `fail`, not to a second B retry
+        try:
+            _PROMPT_B_TRIED[clip.get('id')] = True
+        except Exception:
+            pass
         return pb
     except Exception:
         return prompt
@@ -28626,11 +28631,12 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         
         # Use API prompt if available, otherwise build with job context
         prompt = clip.get('prompt')
-        prompt = _v1000_prompt_for(clip, prompt)   # v1000 -- Prompt B for clips the launch names
         # v943.4 — keep the platform's own prompt before the dialogue builder
         # is allowed to stand in for it, so the charswap arm below can tell
         # "the build authored this" from "build_flow_prompt invented it".
         _cs_platform_prompt = prompt
+        # v1000.1 -- the swap sits BELOW the v943.4 capture so that capture keeps Prompt A
+        prompt = _v1000_prompt_for(clip, prompt)   # v1000 -- Prompt B for clips the launch names
         # v959 — clear the forced-Ingredients flag at the TOP of every clip.
         # set_clip_input_mode resets it too, but several readers run before it
         # (the full settings pass, rebuild_clip), and a stale True from the
