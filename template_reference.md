@@ -10105,12 +10105,12 @@ Applied in order: see structure (Z-depth) → attribute correctly (kinematic) �
 ---
 
 #### v718c — Literal Pixel VFX Recognition (cures anatomical normalization)
-**APPLY:** describe the LITERAL shape the pixels show — a closed loop of flesh, an object floating with no support — and never translate impossible VFX back into a normal anatomical word because normal makes more sense. The five hallucination patterns in the table are the tells; when one fits, use its literal correction.
+**APPLY:** describe the LITERAL shape the pixels show — a closed loop of flesh, an object floating with no support — and never translate impossible VFX back into a normal anatomical word because normal makes more sense. The hallucination patterns in the table are the tells; when one fits, use its literal correction.
 
 
 **Rule.** Source videos frequently use extreme VFX that violate real-world physics. DESCRIBE LITERAL SHAPES AND CONNECTIONS YOU SEE IN THE PIXELS. Do NOT map impossible VFX back to "normal" anatomical descriptors just because normal makes more logical sense.
 
-**Five hallucination patterns + literal corrections:**
+**Hallucination patterns + literal corrections** (the count is deliberately not stated — the 2026-05-15 amendment added the taboo/sensitive-prop row and the old "five" went stale above its own table):
 
 | VFX in source | VLM hallucination (anatomical) | v718c literal |
 |---|---|---|
