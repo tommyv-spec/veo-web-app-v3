@@ -7907,13 +7907,18 @@ _V963_ANY_UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
 
 
-def _v963_batchexecute_payloads(body, rpcid):
-    """Every payload `rpcid` returned in a batchexecute body.
+def _v963_batchexecute_frames(body):
+    """Every (rpcid, payload) in a batchexecute body -- THE shared decoder.
 
-    The wire format is `)]}'` then length-prefixed chunks, each a JSON array of
+    Wire format: `)]}'` then length-prefixed chunks, each a JSON array of
     `["wrb.fr", <rpcid>, "<payload as a JSON STRING>", ...]`. The chunk length
-    counts bytes that include a trailing newline, so the value is decoded with
-    raw_decode and the declared length is used only to find the next chunk.
+    counts bytes including a trailing newline, so the value is read with
+    raw_decode and the declared length only locates the next chunk.
+
+    v992 -- HEAD called this from _scan_failure_reason (v976, commit 4d14550)
+    without ever defining it; the call sat under `except Exception: pass`, so
+    every status poll died as a swallowed NameError and `[v963.35] learned`
+    never printed. The definition was only ever in the worktree.
     """
     out = []
     try:
@@ -7936,14 +7941,60 @@ def _v963_batchexecute_payloads(body, rpcid):
                 continue
             for entry in val:
                 if (isinstance(entry, list) and len(entry) > 2
-                        and entry[0] == "wrb.fr" and entry[1] == rpcid and entry[2]):
+                        and entry[0] == "wrb.fr" and entry[2]):
                     try:
-                        out.append(json.loads(entry[2]))
+                        out.append((entry[1], json.loads(entry[2])))
                     except Exception:
                         continue
     except Exception:
         return []
     return out
+
+
+def _v963_batchexecute_payloads(body, rpcid):
+    """Every payload `rpcid` returned in a batchexecute body -- a filter over the
+    shared decoder, so there is exactly ONE parser of this wire format."""
+    return [p for r, p in _v963_batchexecute_frames(body) if r == rpcid]
+
+
+# v976/v992 -- byte sizes of FINISHED renders, learned from healthy status polls.
+# Referenced by _scan_failure_reason; HEAD referenced them without defining them.
+_V963_MEDIA_SIZES = {}          # media uuid (lower) -> byte size of the finished render
+_V963_SIZE_LOCK = threading.Lock()
+_V963_SIZE_FLOOR = 1_000_000    # anything smaller is a thumbnail, not a video
+
+
+def _v963_note_media_sizes(payload):
+    """Record uuid -> byte size for every finished media in a decoded payload.
+    A finished record reads [op_uuid, project_uuid, MEDIA_uuid, ..., [..., <size>]]
+    (measured shape; the size is the last int of element 5). Returns how many
+    sizes were new."""
+    found = 0
+
+    def walk(node):
+        nonlocal found
+        if isinstance(node, list):
+            head = node[:3]
+            if (len(head) == 3 and all(isinstance(x, str) and _UUID_RE.fullmatch(x)
+                                       for x in head)):
+                inner = node[5] if len(node) > 5 and isinstance(node[5], list) else None
+                if inner and isinstance(inner[-1], int) and inner[-1] >= _V963_SIZE_FLOOR:
+                    with _V963_SIZE_LOCK:
+                        if _V963_MEDIA_SIZES.get(head[2].lower()) != inner[-1]:
+                            _V963_MEDIA_SIZES[head[2].lower()] = inner[-1]
+                            found += 1
+                return
+            for v in node:
+                walk(v)
+        elif isinstance(node, dict):
+            for v in node.values():
+                walk(v)
+
+    try:
+        walk(payload)
+    except Exception:
+        pass
+    return found
 
 
 def _v963_media_urls_from_listing(body):

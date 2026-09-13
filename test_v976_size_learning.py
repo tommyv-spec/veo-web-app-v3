@@ -17,10 +17,13 @@ import json
 import pathlib
 import sys
 
+import os
+
 _STATIC = pathlib.Path(__file__).parent / "static"
-_SPEC = importlib.util.spec_from_file_location(
-    "flow_worker_sizes", _STATIC / "flow_worker.py",
-)
+# FLOW_WORKER_PATH lets the test run against a constructed blob instead of the
+# shared worktree file (which carries other sessions' uncommitted edits).
+_PATH = pathlib.Path(os.environ.get("FLOW_WORKER_PATH") or (_STATIC / "flow_worker.py"))
+_SPEC = importlib.util.spec_from_file_location("flow_worker_sizes", _PATH)
 
 MEDIA = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 PROJECT = "11111111-2222-3333-4444-555555555555"
