@@ -71,6 +71,11 @@
         "what": "the v718c table heading \"**Five hallucination patterns + literal corrections:**\"",
         "superseded_by": "a count-free heading, 2026-09-13, after a Codex pass caught the number",
         "why": "the table under it has held NINE rows since the 2026-05-15 amendment added the taboo/sensitive-prop row; the heading still said five. It is the v831 class - a stated number the thing it describes no longer matches - and it had already spread: writing v718c's new APPLY line on 2026-09-13 I took the count from this heading rather than counting the table, so the stale label reproduced itself in the one sentence a builder is told to read. Both are now count-free, and the heading says why, so the next reader cannot inherit it either. No rule content changed; check_rule_index.py stays PASS."
+      },
+      {
+        "what": "five APPLY lines written 2026-09-13 for previously-hidden rules: v718d, v718e, v736d, v736f, v736g",
+        "superseded_by": "corrected the same day after a gpt-5.6-sol/xhigh review read them against the canonical",
+        "why": "v718d wrote the four-axis value as 'Colour/Illumination' where the live validator (code/v589_video_understanding.py:69-74) accepts 'Color/Illumination' - a decoder following the line emits a value the schema rejects. v718e made an UNCONDITIONAL vocabulary ban sound conditional on a missing clause. v736f dropped 'point' and 'smooth' from a canonical verb list, so the line rejected two allowed actions. v736g said a cropped face always fails, contradicting the v713a extreme-macro override the rule itself grants. v736d asserted 'nothing mandatory' past a MUST that still stands in the body; it now names the conflict and settles it with the corpus. None of these is an amendment drifting - all five are the wrong-subject/wrong-detail class, caught only by reading each line beside its own rule."
       }
     ],
     "retired_line_sha256_16": [
@@ -216,7 +221,12 @@
       "ebf6d4a7c38745f8",
       "0b79a150687a387a",
       "56907afd7fbe71b2",
-      "0739295acb8c607a"
+      "0739295acb8c607a",
+      "1b66d2663ff073c2",
+      "6e443cb2e071d21b",
+      "2556b5b049e81503",
+      "0734db56c244da82",
+      "bd0ea044a1c209eb"
     ]
   },
   "template_new_format.md": {

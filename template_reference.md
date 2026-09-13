@@ -10202,7 +10202,7 @@ Banana 2 renders: patient's looped flesh on extended arm in foreground; practiti
 ---
 
 #### v718d — Intrinsic State Isolation (4-axis morphological-delta diagnostic, NEW 2026-05-16)
-**APPLY:** before writing `static_composition`, isolate the hero prop or symptom and run the four-axis diagnostic at t=start vs t=end — Surface/Texture, Structural Integrity, Volume/Shape, Colour/Illumination — and declare `primary_change_axis` plus `intrinsic_state_start` → `intrinsic_state_end`. Movement is not state change; if no axis changes, say `NONE` rather than describing the action as the payoff.
+**APPLY:** before writing `static_composition`, isolate the hero prop or symptom and run the four-axis diagnostic at t=start vs t=end — Surface/Texture, Structural Integrity, Volume/Shape, Color/Illumination — and declare `primary_change_axis` plus `intrinsic_state_start` → `intrinsic_state_end`. Movement is not state change; if no axis changes, say `NONE` rather than describing the action as the payoff.
 
 
 **Surfaced 2026-05-16** from operator audit: prior v718a-c covered spatial perception (kinematic tracing + Z-depth + literal VFX) but did NOT explicitly force the VLM to isolate the hero prop / symptom's intrinsic SUBSTANCE properties before describing it. Result: VLM treats movement and state-change as the same observation, then writes static_composition that glosses over the visceral payoff. Example: source video shows a tongue model getting washed clean — VLM observes "hand pours liquid down" (kinematics) and writes the scene as a generic pouring action, missing that the tongue's surface texture transformed from coated-grime to washed-pink (Morphological Delta). The transformation IS the scene's rhetorical anchor; without it, downstream lift/innovate inherits a generic recipe step instead of a cleansing payoff.
@@ -10291,7 +10291,7 @@ def validate_v718d(stage4d_json):
 ---
 
 #### v718e — Action-Consequence Coupling (NEW 2026-05-17)
-**APPLY:** when `primary_change_axis` is not `NONE`, pair the force-verb in the `[Mid-clip beat]` AND the `[End beat]` of `action_note` with what the prop BECOMES — "washing away the grime", not "coating the grime". A contact verb with no consequence clause (`coating`, `pooling on`, `resting on`, `covering`, `touching`) ships a pour the viewer sees and a cleanse they never do.
+**APPLY:** when `primary_change_axis` is not `NONE`, pair the force-verb in the `[Mid-clip beat]` AND the `[End beat]` of `action_note` with what the prop BECOMES — "washing away the grime", not "coating the grime". When that axis moves, the safe contact verbs — `coating`, `pooling on`, `resting on`, `covering`, `touching` — are BANNED outright, not merely in need of a clause: they ship a pour the viewer sees and a cleanse they never do.
 
 
 **Surfaced 2026-05-17** from operator audit on tongue-cleansing-recipe lift: v718d correctly isolates `primary_change_axis` and `intrinsic_state_start` → `intrinsic_state_end`, but the scene's `action_note` still describes the agent's contact with the prop without describing the prop's transformation. VLM and lift LLM both default to "safe contact" verbs (`coating`, `pooling on`, `resting on`, `covering`, `touching`, `sitting on`) when describing the agent-prop interaction — kinematically accurate but morphologically vacant. Banana 2 + Veo render the contact but not the consequence: liquid pours, hits tongue, sits there — viewer sees splash, never sees the grime wash away. Same failure class generalizes across niches: tea pours onto fat (no melting), banana smashed by hammer (no bursting), saw cuts wood (no splitting), wand waves over face (no smoothing).
@@ -11938,7 +11938,7 @@ Texture rule applies to the PROP, not the persona's hands or the setting. Person
 Combine with v720c body-pose discipline (limb-pose structural bans) + v716/v717 anti-normalization (geometric magnitude + structural bans) for max impact. The prop's texture provides the spectacle; v720c locks the body pose; v716/v717 prevent Banana 2 from rendering a "polite" version.
 
 #### v736d — Sandbox-Ideation Gate
-**APPLY:** nothing mandatory — the `## Brainstorming Sandbox` section is a dated example bank since the 2026-08-09 amendment, and 0 of the 58 builds since carry one. If you do ideate several hook concepts, rate each 1-10 on spectacle, drop the lowest, and declare any trend through v736b's `TREND GRAMMAR`, never the retired catalog tag.
+**APPLY:** nothing mandatory — but read the conflict rather than trusting this line alone: the paragraph below still says every lift/innovate/create output MUST carry a `## Brainstorming Sandbox`, while the 2026-08-09 amendment above calls that section and its five-concept form a dated example bank. The corpus settles it — **NO build has ever carried the section: 0 of 351**, and the ten files that mention it only note it “would be required”. If you do ideate several hook concepts, rate each 1-10 on spectacle, drop the lowest, and declare any trend through v736b's `TREND GRAMMAR`, never the retired catalog tag.
 
 
 Every `videos/*.md` lift / innovate / create OUTPUT MUST be preceded by a `## Brainstorming Sandbox` section IN THE OUTPUT FILE (not in chat) BEFORE the YAML frontmatter. The sandbox MUST contain:
@@ -12062,7 +12062,7 @@ Single-subject variant: persona holds prop with both hands at chest-level, prop 
 Camera level MUST match the hero element's anchor height (chest-level for held-aloft / belly-level for distended belly / brow-level for forehead wrinkle macro / lumbar-level for back symptom). NEVER top-down. NEVER high-angle.
 
 #### v736f — Active-hands mandate
-**APPLY:** on a SPECTACLE-PROP hook, write `both hands <active-verb> the <hero prop>` in the `[Subject — Host]` block with one of the force verbs — grip, squeeze, lift, wrap, hang, measure, press, pierce, shake, wring, scrape, wind, inflate, pull-apart. A static hold is a still life and fails. The spectacle-prop family's contract (2026-08-30 F3 amendment).
+**APPLY:** on a SPECTACLE-PROP hook, write `both hands <active-verb> the <hero prop>` in the `[Subject — Host]` block with one of the force verbs — grip, squeeze, lift, wrap, hang, measure, point, press, pierce, shake, wring, scrape, smooth, wind, inflate, pull-apart. A static hold is a still life and fails. The spectacle-prop family's contract (2026-08-30 F3 amendment).
 
 
 Persona's hands MUST be actively manipulating the hero object in HOOK. Static hold (just gripping, no force-verb action) FAILS the gate. Required active verbs (one or more): grip / squeeze / lift / wrap / hang / measure / point / press / pierce / shake / wring / scrape / smooth / wind / inflate / pull-apart.
@@ -12074,7 +12074,7 @@ Required `[Subject — Host]` block phrase: `both hands [active-verb] the [hero 
 Required Negative: `No static hold — persona's hands MUST [active-verb] the [hero prop]`.
 
 #### v736g — Face-above-OR-beside-object rule
-**APPLY:** on a SPECTACLE-PROP hook, keep the persona's face visible at chest-up framing either ABOVE the prop (standing behind it, hands gripping from the sides) or BESIDE it (viewer-side of the prop or patient, face at the frame edge, two-shot). Cropped, hidden behind the prop, or pushed to a corner fails. The spectacle-prop family's contract (2026-08-30 F3 amendment).
+**APPLY:** on a SPECTACLE-PROP hook, keep the persona's face visible at chest-up framing either ABOVE the prop (standing behind it, hands gripping from the sides) or BESIDE it (viewer-side of the prop or patient, face at the frame edge, two-shot). Hidden behind the prop or pushed to a corner fails, and so does a crop that takes the face out — EXCEPT the v713a extreme-macro two-shot override, where an eyebrow-to-chin viewer-edge crop still satisfies this rule because the face is BESIDE the object. The spectacle-prop family's contract (2026-08-30 F3 amendment).
 
 
 Persona face MUST be visible just above OR beside the hero object at chest-up framing. Persona-cropped (no face) FAILS. Persona-hidden-behind-object FAILS. Persona-displaced-to-corner FAILS.
