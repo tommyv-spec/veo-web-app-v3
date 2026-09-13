@@ -10403,18 +10403,36 @@ async def list_outputs(
     List generated videos for a job.
     
     If approved_only=True, only returns videos from approved clips (selected variants).
-    Falls back to filesystem listing if job not in database (e.g., after server restart).
     Supports both local filesystem and R2 storage.
+
+    Ownership (2026-09-13): this route used to look the job up with NO owner
+    filter and, when the row was missing, list outputs_dir/<job_id> straight
+    off disk — so any signed-in user holding a job id could read another
+    user's output filenames, which is precisely what the public download route
+    below leans on ("UUID filenames are unguessable"). It now uses the same
+    guard as every other /api/jobs/{id} route: get_user_job (main.py:5239-5250
+    — 404 when the row is missing, 403 for a non-owner, no admin bypass).
+    The old "after server restart" filesystem fallback goes with it: a job with
+    no DB row cannot be shown to belong to anyone, so it 404s like a missing
+    job. What that costs: a job whose row is gone but whose files are still on
+    disk no longer lists — the fallback dates from the ephemeral-DB era, and
+    production runs a persistent DB, so the row outlives the files, not the
+    other way round.
     """
-    job = db.query(Job).filter(Job.id == job_id).first()
-    
-    # Try to find output directory even without database entry
-    if job:
-        output_dir = Path(job.output_dir)
-    else:
-        # Fallback: check if directory exists directly
-        output_dir = app_config.outputs_dir / job_id
-    
+    _diag_outcome = "error"
+    try:
+        job = get_user_job(db, job_id, current_user)
+        _diag_outcome = "owned"
+    except HTTPException as _e:
+        _diag_outcome = "not_found" if _e.status_code == 404 else "not_owned"
+        raise
+    finally:
+        # TEMP DIAG v-outputs-ownership 2026-09-13
+        print(f"[Outputs] TEMP DIAG v-outputs-ownership job={job_id} "
+              f"user={getattr(current_user, 'id', None)} outcome={_diag_outcome}", flush=True)
+
+    output_dir = Path(job.output_dir)
+
     videos = []
     
     if approved_only and job:
