@@ -2226,7 +2226,7 @@ def _fa_init_project_best_effort(page, project_id, context=""):
     # showing the "Start creating or drop media" agent landing and no
     # settings button.
     try:
-        page.reload(wait_until="domcontentloaded", timeout=30000)
+        _v995_reload(page, wait_until="domcontentloaded", timeout=30000)
         print(f"{pfx}[flow_api] page.reload() done — UI should reflect Agent-OFF", flush=True)
         # A live Flow page never becomes network-idle: telemetry and session
         # requests stay open. On Camoufox the Playwright timeout has also been
@@ -2330,7 +2330,7 @@ def force_agent_off(page, context=""):
             _m = re.search(r'/project/([A-Za-z0-9_\-]+)', page.url or "")
             if _m and _v974_agent_off_batchexecute(page, _m.group(1), pfx):
                 try:
-                    page.reload(wait_until="domcontentloaded", timeout=30000)
+                    _v995_reload(page, wait_until="domcontentloaded", timeout=30000)
                     time.sleep(3)
                 except Exception:
                     pass
@@ -2395,7 +2395,7 @@ def force_agent_off(page, context=""):
                 print(f"{pfx}[agent-off] per-project PATCH raised (non-blocking): {_pe}", flush=True)
         # 3. reload so the SPA re-fetches user settings + re-renders the editor
         try:
-            page.reload(wait_until="domcontentloaded", timeout=30000)
+            _v995_reload(page, wait_until="domcontentloaded", timeout=30000)
             try:
                 page.wait_for_load_state("networkidle", timeout=10000)
             except Exception:
@@ -5949,7 +5949,7 @@ def check_ultra_account(page, label="", timeout=5):
             if _round == 0:
                 print(f"{prefix}ULTRA badge not seen yet — reloading + re-polling...", flush=True)
                 try:
-                    page.reload(wait_until="domcontentloaded", timeout=30000)
+                    _v995_reload(page, wait_until="domcontentloaded", timeout=30000)
                     time.sleep(3)
                 except Exception:
                     pass
@@ -5974,7 +5974,7 @@ def check_ultra_account(page, label="", timeout=5):
         if _ULTRA_VERIFIED:
             print(f"{prefix}⚠ ULTRA badge not found on re-check, but account was verified earlier this session — transient state (likely post cookie-clear reload). Reloading + re-polling, NOT killing.", flush=True)
             try:
-                page.reload(wait_until="domcontentloaded", timeout=30000)
+                _v995_reload(page, wait_until="domcontentloaded", timeout=30000)
                 time.sleep(3)
                 for _ in range(10):
                     if _v977_eval(page, _ULTRA_BADGE_JS):
@@ -7001,6 +7001,38 @@ def purge_gpu_caches(session_folder, label=""):
             except Exception as e:
                 print(f"{prefix}⚠ Could not purge {os.path.basename(d)}: {e}", flush=True)
 
+def _v967_session_lead_seconds(session_folder, golden_folder):
+    """v967's one comparison, in one place (v996): how many seconds NEWER the
+    live session's cookie DB is than the golden's. Positive means a golden
+    restore would be SKIPPED by v967. None when FORCE_GOLDEN_RESTORE is set or
+    either cookie DB is missing (a restore then runs, or fails on its own)."""
+    if os.environ.get("FORCE_GOLDEN_RESTORE", "").strip() in ("1", "true", "yes"):
+        return None
+    _sess_ck = os.path.join(session_folder, "cookies.sqlite")
+    _gold_ck = os.path.join(golden_folder, "cookies.sqlite")
+    if not (os.path.exists(_sess_ck) and os.path.exists(_gold_ck)):
+        return None
+    return os.path.getmtime(_sess_ck) - os.path.getmtime(_gold_ck)
+
+
+def _v996_restore_would_be_skipped(page):
+    """True when stopping a job for a proactive golden restore would buy
+    nothing: v967 will not copy a golden over a live session that is newer
+    than it, and a missing golden cannot be restored at all. Unknown -> False,
+    the old behaviour (stop for the restore)."""
+    try:
+        _sess = getattr(page, '_user_data_dir', None)
+        if not _sess:
+            return False
+        _gold = get_golden_folder(_sess)
+        if not os.path.exists(_gold):
+            return True
+        _lead = _v967_session_lead_seconds(_sess, _gold)
+        return _lead is not None and _lead > 0
+    except Exception:
+        return False
+
+
 def restore_from_golden(session_folder, account_label="", restore_session=True,
                         # Legacy params kept for call-site compat — ignored in v126+
                         download_folder=None, restore_download=False):
@@ -7039,20 +7071,15 @@ def restore_from_golden(session_folder, account_label="", restore_session=True,
     # Set FORCE_GOLDEN_RESTORE=1 to override (that is what a genuinely broken
     # session needs, and it stays a deliberate act).
     try:
-        if os.environ.get("FORCE_GOLDEN_RESTORE", "").strip() not in ("1", "true", "yes"):
-            _sess_ck = os.path.join(session_folder, "cookies.sqlite")
-            _gold_ck = os.path.join(golden_folder, "cookies.sqlite")
-            if os.path.exists(_sess_ck) and os.path.exists(_gold_ck):
-                _s_age = os.path.getmtime(_sess_ck)
-                _g_age = os.path.getmtime(_gold_ck)
-                if _s_age > _g_age:
-                    print(f"{prefix}[v967] SKIPPING golden restore — the live "
-                          f"session is newer than the golden "
-                          f"({int(_s_age - _g_age)}s), so restoring would "
-                          f"replace a working login with a rotated-dead "
-                          f"snapshot. FORCE_GOLDEN_RESTORE=1 overrides.",
-                          flush=True)
-                    return True
+        _lead = _v967_session_lead_seconds(session_folder, golden_folder)  # v996: one comparison, shared
+        if _lead is not None and _lead > 0:
+            print(f"{prefix}[v967] SKIPPING golden restore — the live "
+                  f"session is newer than the golden "
+                  f"({int(_lead)}s), so restoring would "
+                  f"replace a working login with a rotated-dead "
+                  f"snapshot. FORCE_GOLDEN_RESTORE=1 overrides.",
+                  flush=True)
+            return True
     except Exception as _e:
         # A guard that cannot read the clock must not block a restore — fall
         # through to the old behaviour and say why.
@@ -9711,6 +9738,15 @@ class AccountHealthTracker:
             acc['clips_since_restore'] = 0
             print(f"[HealthTracker] 🔄 {account_name} failure count + clip counter reset (golden restore)", flush=True)
     
+    def reset_restore_counter(self, account_name):
+        """v996 -- clear only the proactive-restore clip counter: the restore it
+        counted toward would have been skipped by v967, so it was not taken.
+        Failure state is left alone."""
+        with self._lock:
+            acc = self._accounts.get(account_name)
+            if acc:
+                acc['clips_since_restore'] = 0
+
     def needs_proactive_restore(self, account_name):
         """Return True if this account has hit the proactive-restore clip threshold.
         
@@ -11442,6 +11478,28 @@ def _v962_on_new_host(page):
         return False
 
 
+def _v995_reload(page, **kwargs):
+    """Every page.reload() on the single-account path routes through here.
+
+    v995 -- on flow.google.com a reload leaves the project page with NO
+    composer and a tab that answers nothing. Measured 2026-09-13 in a clean
+    process on the worker's own profile, twice: goto -> settings chip in 4 s;
+    reload -> the chip never comes back and locator.count() hangs; goto of the
+    SAME url -> chip in 3 s again. Two runs died of it the same day (batch23,
+    batch25): every clip after the resume path's reload rounds failed
+    `settings chip not found`, and the post-job loop's own reload then timed
+    out until it gave the in-flight renders up. So on that host "reload" means
+    "goto the url the page is on". The legacy host keeps the real reload.
+    """
+    if not _v962_on_new_host(page):
+        return page.reload(**kwargs)
+    _url = page.url
+    _kw = {k: v for k, v in kwargs.items() if k in ("wait_until", "timeout", "referer")}
+    print(f"[v995] reload → goto({_url[:90]}) — a reload wedges the tab on flow.google.com",
+          flush=True)
+    return page.goto(_url, **_kw)
+
+
 def _v962_open_settings(page, prefix=""):
     """Open the Material settings overlay. Returns the chip locator, or None."""
     try:
@@ -12941,7 +12999,7 @@ def select_frames_to_video_mode(page, context="", **kwargs):
             _agent_off_tried = True
             force_agent_off(page, context)
         else:
-            page.reload(wait_until="domcontentloaded", timeout=30000)
+            _v995_reload(page, wait_until="domcontentloaded", timeout=30000)
         time.sleep(3)
         check_and_dismiss_popup(page)
     except Exception as reload_err:
@@ -15283,7 +15341,7 @@ def click_generate_with_crash_handler(page, account_name, clip_index, clips, cli
                 
                 try:
                     # Refresh the project page
-                    page.reload(timeout=30000)
+                    _v995_reload(page, timeout=30000)
                     page.wait_for_load_state("domcontentloaded", timeout=15000)
                     time.sleep(3)
                     check_and_dismiss_popup(page)
@@ -15438,7 +15496,7 @@ def click_reuse_and_generate(page, prompt, clip_num, account_name="", max_retrie
                 print(f"{prefix}Retry {attempt + 1}/{max_retries} for clip {clip_num} reuse...", flush=True)
                 # Refresh page before retry
                 print(f"{prefix}Refreshing page for reuse retry...", flush=True)
-                page.reload(timeout=30000)
+                _v995_reload(page, timeout=30000)
                 page.wait_for_load_state("domcontentloaded", timeout=15000)
                 time.sleep(3)
                 check_and_dismiss_popup(page)
@@ -25037,7 +25095,7 @@ def process_job_submission_with_failover(page, job, cache, download_queue, accou
                             print(f"[{account_name}] ✓ Cleared prompt for fresh submission", flush=True)
                     except Exception:
                         # If clear fails, try refreshing the page
-                        page.reload(wait_until="domcontentloaded", timeout=30000)
+                        _v995_reload(page, wait_until="domcontentloaded", timeout=30000)
                         time.sleep(3)
                         ensure_logged_into_flow(page, account_name)
                         check_and_dismiss_popup(page)
@@ -27371,7 +27429,7 @@ def charswap_attach_and_prompt(page, avatar_path, video_path, prompt,
             print(f"{context} {len(_stale)} chip(s) survived the click rounds — "
                   f"reloading the project page to rebuild the composer", flush=True)
             try:
-                page.reload(wait_until="domcontentloaded", timeout=45000)
+                _v995_reload(page, wait_until="domcontentloaded", timeout=45000)
                 page.wait_for_timeout(6000)
                 check_and_dismiss_popup(page)
             except Exception as _rl_e:
@@ -28011,10 +28069,19 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 for _scan_round in range(3):
                     if not _unfound:
                         break
+                    if _scan_round > 0 and _v962_on_new_host(page):
+                        # v995 -- no reload rounds on flow.google.com: rounds 2-3
+                        # only re-read what round 1 read seconds earlier, and the
+                        # reload wedged the tab for the rest of the run (twice,
+                        # 2026-09-13). The post-job scan takes the rest, as it
+                        # did anyway.
+                        print(f"[Flow] Resume: [v995] no reload on flow.google.com — "
+                              f"{len(_unfound)} clip(s) left to the post-job scan", flush=True)
+                        break
                     if _scan_round > 0:
                         print(f"[Flow] Resume: reload + retry (round {_scan_round+1}) for {len(_unfound)} clip(s)...", flush=True)
                         try:
-                            page.reload(wait_until='domcontentloaded', timeout=30000)
+                            _v995_reload(page, wait_until='domcontentloaded', timeout=30000)
                             time.sleep(3)
                             ensure_videos_tab_selected(page)
                             # Scroll down to force virtualized tiles to render
@@ -28288,10 +28355,12 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     
                     # At 90s, reload page to force Flow to re-render tiles
                     # (virtualized tiles may not be in DOM after restore)
-                    if elapsed == 90 and prev_clip_index not in http_enqueued_clips:
+                    # v995 -- not on flow.google.com: no virtualized tiles to force,
+                    # and a reload wedges the tab there.
+                    if elapsed == 90 and prev_clip_index not in http_enqueued_clips and not _v962_on_new_host(page):
                         print(f"[ContinueMode] Reloading page to force tile rendering...", flush=True)
                         try:
-                            page.reload(wait_until="domcontentloaded", timeout=30000)
+                            _v995_reload(page, wait_until="domcontentloaded", timeout=30000)
                             time.sleep(3)
                             ensure_logged_into_flow(page, "ContinueMode")
                             ensure_videos_tab_selected(page)
@@ -29422,7 +29491,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             # (5+ minutes passed). Refresh to get clean UI state before uploading frames.
             if continue_frame_extracted:
                 print(f"[Flow] Refreshing page after continue mode wait...", flush=True)
-                page.reload(wait_until="domcontentloaded", timeout=30000)
+                _v995_reload(page, wait_until="domcontentloaded", timeout=30000)
                 time.sleep(3)
                 ensure_logged_into_flow(page, "SUBMIT")
                 check_and_dismiss_popup(page)
@@ -29489,7 +29558,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                 # clean composer, re-upload frames (Layer A now forces a real file
                 # upload when the gallery bind was fake), re-paste, regenerate ONCE.
                 print(f"[Flow] ⚠ Clip {i+1}: Generate failed ({_gen_err}) — reload + fresh re-submit (v871)", flush=True)
-                page.reload(wait_until="domcontentloaded", timeout=30000)
+                _v995_reload(page, wait_until="domcontentloaded", timeout=30000)
                 time.sleep(3)
                 ensure_logged_into_flow(page, "SUBMIT")
                 check_and_dismiss_popup(page)
@@ -29543,7 +29612,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                             time.sleep(1)
                             print(f"[Flow] ✓ Cleared prompt for fresh submission", flush=True)
                     except Exception:
-                        page.reload(wait_until="domcontentloaded", timeout=30000)
+                        _v995_reload(page, wait_until="domcontentloaded", timeout=30000)
                         time.sleep(3)
                         ensure_logged_into_flow(page, "SUBMIT")
                         check_and_dismiss_popup(page)
@@ -29915,6 +29984,17 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
 
         # Check proactive restore threshold mid-job — don't wait until job end
         _needs_proactive_restore = account_health.needs_proactive_restore(account_name)
+        if _needs_proactive_restore and _v996_restore_would_be_skipped(page):
+            # v996 -- the restore this stop exists for would be SKIPPED (v967:
+            # the live session is newer than the golden, or there is no golden),
+            # so stopping the job buys a browser relaunch and nothing else. On
+            # 2026-09-13 that relaunch's resume path cost every remaining clip of
+            # the run, twice. Count from zero again and keep going; the reactive
+            # restore after a real failure is untouched.
+            print(f"[v996] proactive restore after clip {clip_index+1} SKIPPED — v967 would not "
+                  f"restore anything over this live session; the job continues", flush=True)
+            account_health.reset_restore_counter(account_name)
+            _needs_proactive_restore = False
         if _needs_proactive_restore:
             print(f"[Flow] 🔄 Proactive restore threshold reached mid-job after clip {clip_index+1} — stopping job for golden refresh", flush=True)
             # v174: Do NOT reset job to 'pending' in DB.  The account will self-resume
@@ -30366,8 +30446,10 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     _dlg = (_clip_obj.get('dialogue_text') or '')[:20]
                     try:
                         # Refresh page every 30s
-                        if int(time.time() - _poll_start) % 30 < 6:
-                            page.reload(wait_until='domcontentloaded', timeout=30000)
+                        # v995 -- never on flow.google.com: nothing to force-render
+                        # there (clips resolve by bound uuid) and a reload wedges the tab.
+                        if int(time.time() - _poll_start) % 30 < 6 and not _v962_on_new_host(page):
+                            _v995_reload(page, wait_until='domcontentloaded', timeout=30000)
                             time.sleep(2)
                             ensure_videos_tab_selected(page)
                         _urls = resolve_clip_download_urls(page, job_id, _ci, _dlg, captured_media_urls)  # v794: bound mediaId first, no sibling-grab/poison
@@ -30664,8 +30746,12 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                                 if _c.get('clip_index') in http_enqueued_clips:
                                     _pending_left.discard(_c.get('clip_index'))
                     # Reload every 30s + scroll to force virtualized tiles to render
-                    if _elapsed > 0 and (time.time() - _last_reload) >= 30:
-                        page.reload(wait_until='domcontentloaded', timeout=30000)
+                    # v995 -- never on flow.google.com: this reload timed out every
+                    # 30 s for 300 s on 2026-09-13 and the four in-flight renders
+                    # were given up; clips there resolve by bound uuid on the live
+                    # page, which needs no reload.
+                    if _elapsed > 0 and (time.time() - _last_reload) >= 30 and not _v962_on_new_host(page):
+                        _v995_reload(page, wait_until='domcontentloaded', timeout=30000)
                         time.sleep(2)
                         ensure_videos_tab_selected(page)
                         # Scroll down then back up to force Flow to render all tiles
