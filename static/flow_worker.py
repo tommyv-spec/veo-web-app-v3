@@ -8107,7 +8107,11 @@ def _v963_looks_like_video(content_type, body):
         return body[4:8] == b"ftyp"
     except Exception:
         return False
-POSTER_RETRY_MAX = 6       # retries on the same stable URL while it's still a poster
+# v998.4 -- 45 x 20 s = 900 s, the render window (_V998_RENDER_DEADLINE_S). With
+# v998.3 a clip is enqueued as soon as the listing holds its mp4 url; if that url
+# still serves a poster, THIS loop is the wait for the render, and 6 x 20 s was
+# "an 8s clip's render time" on a host where renders took 3-16 min on 2026-09-13.
+POSTER_RETRY_MAX = int(os.environ.get("FLOW_POSTER_RETRY_MAX") or 45)   # retries on the same stable URL while it's still a poster
 POSTER_RETRY_DELAY = 20    # seconds between poster retries (6×20 = 120s ≈ an 8s clip's render time)
 
 
@@ -8746,6 +8750,31 @@ DEFAULT_VEO_MODEL = "Veo 3.1 - Lite [Lower Priority]"
 # Clips without prompt_b keep the pre-v805 ladder (swap -> fail) unchanged.
 _CLIP_PROMPT_B = {}     # clip_id -> prompt_b text (registered whenever a clip dict is seen)
 _PROMPT_B_TRIED = {}    # clip_id -> True once the Prompt B rung fired (redo substitutes the text)
+
+
+# v1000 -- clip ids an operator-scoped launch renders with Prompt B
+# (run_scoped_flow_worker.py --prompt-b). Read once at import, like the scope.
+_V1000_PROMPT_B_CLIPS = {s.strip() for s in (os.environ.get("FLOW_PROMPT_B_CLIPS") or "").split(",") if s.strip()}
+
+
+def _v1000_prompt_for(clip, prompt):
+    """v1000 -- Prompt B for clips named in FLOW_PROMPT_B_CLIPS: Flow refused
+    their Prompt A on content, the redo lane that would retry Prompt B never
+    serves an old job (7-day age cap, rev 896), and a firstgen run otherwise
+    re-sends the refused words. Named clips only; a named clip without a
+    prompt_b keeps Prompt A and says so."""
+    try:
+        cid = str(clip.get('id') or '')
+        if not cid or cid not in _V1000_PROMPT_B_CLIPS:
+            return prompt
+        pb = (clip.get('prompt_b') or '').strip()
+        if not pb:
+            print(f"[v1000] clip {clip.get('clip_index')} ({cid}) is named for Prompt B but has none — Prompt A stays", flush=True)
+            return prompt
+        print(f"[v1000] clip {clip.get('clip_index')} ({cid}): rendering with Prompt B (operator scope): {pb[:70]!r}", flush=True)
+        return pb
+    except Exception:
+        return prompt
 
 
 def register_clip_prompt_b(clip):
@@ -27947,6 +27976,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
     for clip in clips:
         # Use API prompt if available, otherwise build with job context
         prompt = clip.get('prompt')
+        prompt = _v1000_prompt_for(clip, prompt)   # v1000 -- Prompt B for clips the launch names
         if not prompt:
             prompt = build_flow_prompt(
                 dialogue_line=clip.get('dialogue_text', ''),
@@ -28596,6 +28626,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
         
         # Use API prompt if available, otherwise build with job context
         prompt = clip.get('prompt')
+        prompt = _v1000_prompt_for(clip, prompt)   # v1000 -- Prompt B for clips the launch names
         # v943.4 — keep the platform's own prompt before the dialogue builder
         # is allowed to stand in for it, so the charswap arm below can tell
         # "the build authored this" from "build_flow_prompt invented it".
