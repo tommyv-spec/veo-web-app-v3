@@ -30775,6 +30775,7 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
             _pending_left = set(_still_pending)  # clips not yet enqueued
             _poll_start = time.time()
             _last_reload = time.time()
+            _v998_next_say = time.time() + 60   # v998.1 -- heartbeat cadence, see the loop
             ensure_videos_tab_selected(page)
 
             def _v998_window():
@@ -30797,6 +30798,15 @@ def process_job_submission(page, job, cache, download_queue, clip_submit_times_s
                     break
                 try:
                     _elapsed = int(time.time() - _poll_start)
+                    # v998.1 -- the v978 watchdog counts main-thread PRINTS as
+                    # life and acts at 480 s of silence; a 900 s wait that
+                    # prints nothing is a stall to it (batch27, 2026-09-13:
+                    # killed at 483 s with three renders cooking). Say so once
+                    # a minute -- this is real progress, the tick just ran.
+                    if time.time() >= _v998_next_say:
+                        print(f"[v998] post-job: {len(_pending_left)} render(s) still cooking — "
+                              f"{_elapsed}s of a {int(_v998_window())}s window", flush=True)
+                        _v998_next_say = time.time() + 60
                     # v801 — recover any pending clip whose render is COMPLETE via its
                     # bound uuid's constructed getMediaUrlRedirect URL. Catches renders
                     # the live-DOM/listener capture missed (page idle / golden restore).
