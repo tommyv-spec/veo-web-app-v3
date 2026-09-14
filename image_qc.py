@@ -169,6 +169,15 @@ import os
 import re
 import sys
 import time
+# Mapping is used at RUNTIME (isinstance checks in the reference-contract
+# builder, ~L2902-2918), not only in annotations -- `from __future__ import
+# annotations` above makes the signatures lazy, so the missing name only ever
+# blew up inside those isinstance calls. That NameError was caught and
+# downgraded to "reference contract unavailable ... manual review", which
+# stripped auto_contract_version, which made --auto-choose abstain on every
+# node. Measured 2026-09-14 on node 5431: automatic image approval had been
+# silently handing every variant back to the operator.
+from collections.abc import Mapping
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
