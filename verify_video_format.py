@@ -177,6 +177,16 @@ def lint(path: str) -> int:
     _t_render = re.sub(r"<!--.*?-->", " ", t, flags=re.S)
     _t_render = re.sub(
         r"^##\s+§0 Citations Check.*?(?=^##\s(?!#)|\Z)", " ", _t_render, flags=re.S | re.M)
+    # — and the same for `## Publishing` (contract v2). That section holds the
+    # POSTED caption and the DM copy; the platform importer never reads it, so
+    # a v808 hit here would print "the parser WILL reject this build" about a
+    # section the parser does not see. "my daughter", "kids" and "baby" are
+    # ordinary words in a wellness caption. v808's own rationale is that a
+    # minor token SEEDS A RENDER — a caption seeds nothing.
+    # NOTE this narrows only the RENDER-text scan. The auditor still reads the
+    # caption for §12 forbidden words and §14.1 banned tags.
+    _t_render = re.sub(
+        r"^##\s+Publishing\b.*?(?=^##\s(?!#)|\Z)", " ", _t_render, flags=re.S | re.M)
 
     # --- structure / parser (v696 + v594) ---
     images = re.findall(r"^###\s+Image\s+(\d+)", t, re.M)
