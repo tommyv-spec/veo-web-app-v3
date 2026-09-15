@@ -6149,6 +6149,49 @@ def _ig_export_rows(db, account_id: int, start, end):
     return rows, undated
 
 
+def _ig_export_sales(user_id: str) -> dict:
+    """Reel URL -> that video's Amazon numbers, from the stored snapshot.
+
+    The export answers "how did this reel do" and could only ever say views. The
+    sales half is already on this server, pushed per user, keyed by the same reel
+    permalink -- so the downloaded file can answer the same question the
+    Performance tab does instead of being half the picture.
+
+    Returns {} when no snapshot has been pushed. The caller then writes the
+    Unknown marker rather than 0: a zero here would read as "this reel sold
+    nothing" when the truth is that nothing has been pushed yet.
+    """
+    current = _amazon_sales_dir(user_id) / "sales-report.json"
+    if not current.is_file():
+        return {}
+    try:
+        report = json.loads(current.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[ig-export] sales snapshot unreadable ({exc}); columns left Unknown",
+              flush=True)
+        return {}
+    by_url = {}
+    for video in report.get("videos") or []:
+        url = str(video.get("instagram_url") or "").strip()
+        if url:
+            by_url[url.rstrip("/")] = video
+    return by_url
+
+
+def _ig_export_sales_cells(video: dict | None) -> list:
+    """The five Amazon cells for one reel, Unknown wherever we cannot see."""
+    unknown = ["Unknown"] * 5
+    if not video:
+        return unknown
+    def val(key):
+        entry = (video.get("period") or {}).get(key) or {}
+        value = entry.get("value")
+        return "Unknown" if value in (None, "") else value
+    return [val("clicks"), video.get("click_rate") or "Unknown",
+            val("items_ordered"), video.get("order_rate") or "Unknown",
+            val("ordered_revenue")]
+
+
 @app.get("/api/instagram/accounts/{account_id}/export")
 def export_instagram_videos(
     account_id: int,
@@ -6167,11 +6210,20 @@ def export_instagram_videos(
 
     buf = _io.StringIO()
     w = _csv.writer(buf, lineterminator="\n")
-    w.writerow(["video_title", "video_name", "video_url", "video_id", "posted_at", "views"])
-    w.writerows(rows)
+    w.writerow(["video_title", "video_name", "video_url", "video_id", "posted_at", "views",
+                "clicks", "click_rate", "items_ordered", "order_rate", "ordered_revenue"])
+    # Join on the reel URL, the one key both halves carry. A reel with no sales
+    # row gets Unknown, never 0.
+    sales = _ig_export_sales(str(current_user.id))
+    matched = 0
+    for row in rows:
+        video = sales.get(str(row[2]).strip().rstrip("/"))
+        matched += 1 if video else 0
+        w.writerow(list(row) + _ig_export_sales_cells(video))
     print(
         f"[ig-export] account={acc.id} @{acc.handle} range={range} month={month} "
-        f"window={start.date()}..{end.date()} rows={len(rows)} undated_skipped={undated}",
+        f"window={start.date()}..{end.date()} rows={len(rows)} undated_skipped={undated} "
+        f"sales_matched={matched}/{len(rows)}",
         flush=True,
     )
     fname = f"ig-{acc.handle}-{label}.csv"
