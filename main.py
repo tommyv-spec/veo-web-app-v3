@@ -18392,95 +18392,6 @@ async def local_worker_health():
     return {"status": "ok", "time": datetime.utcnow().isoformat()}
 
 
-def _amazon_sales_dir() -> Path:
-    """Where the sales snapshot lives — the PERSISTENT disk when there is one.
-
-    The Amazon report is computed on the operator's machine (it reads downloaded
-    CSVs, the run ledger, the post map and the publish ledger, none of which exist
-    here). The server only ever holds the finished numbers, so losing them on a
-    deploy would leave the Performance tab blank until the next daily run — up to
-    a day of looking broken for no reason. Falls back to temp in local dev, and
-    SAYS SO rather than failing silently.
-    """
-    try:
-        from config import config
-        out = getattr(config, "outputs_dir", None)
-        if out:
-            root = Path(out).parent
-            if root.exists():
-                folder = root / "amazon"
-                folder.mkdir(parents=True, exist_ok=True)
-                return folder
-    except Exception as exc:
-        print(f"[amazon-sales] persistent disk unavailable ({type(exc).__name__}: {exc})",
-              flush=True)
-    import tempfile
-    folder = Path(tempfile.gettempdir()) / "amazon"
-    folder.mkdir(parents=True, exist_ok=True)
-    print(f"[amazon-sales] storing in {folder} — wiped on restart, so the tab "
-          f"goes blank after a deploy until the next push.", flush=True)
-    return folder
-
-
-# Under /api/local-worker/ on purpose: that prefix is exempt from the session
-# middleware (PUBLIC_PREFIXES), which then hands over to the Bearer key check
-# below. A route outside it never reaches this function — the middleware
-# answers 401 "Not authenticated" first, whatever key the pusher sends.
-@app.post("/api/local-worker/amazon/sales-report")
-async def receive_amazon_sales_report(
-    payload: dict = Body(...),
-    authorized: bool = Depends(verify_local_worker_key),
-):
-    """Store the newest sales-per-video snapshot pushed from the operator's machine.
-
-    Keeps the previous snapshot beside it. That is not history for its own sake:
-    when a push lands wrong the only way to see WHAT changed is to still have the
-    thing it replaced.
-    """
-    if not isinstance(payload, dict) or "videos" not in payload:
-        raise HTTPException(status_code=400,
-                            detail="payload must be the object built by "
-                                   "tools/amazon_sales_payload.py (no 'videos' key found)")
-    folder = _amazon_sales_dir()
-    current, previous = folder / "sales-report.json", folder / "sales-report.prev.json"
-    body = json.dumps(payload, ensure_ascii=False)
-    try:
-        if current.is_file():
-            previous.write_text(current.read_text(encoding="utf-8"), encoding="utf-8")
-        # Write beside, then replace: a crash mid-write must not leave the tab
-        # reading half a file.
-        staging = current.with_suffix(".json.tmp")
-        staging.write_text(body, encoding="utf-8")
-        staging.replace(current)
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"could not store snapshot: {exc}")
-    # v994 DIAGNOSTIC — remove once a real push has been seen in the logs.
-    print(f"[amazon-sales] stored {len(payload.get('videos') or [])} video(s), "
-          f"period {(payload.get('period') or {}).get('from')}..."
-          f"{(payload.get('period') or {}).get('to')}, "
-          f"{len(payload.get('excluded_days') or [])} day(s) held back, "
-          f"{len(body)} bytes -> {current}", flush=True)
-    return {"stored": True, "videos": len(payload.get("videos") or []),
-            "generated_at": payload.get("generated_at")}
-
-
-@app.get("/api/amazon/sales-report")
-async def read_amazon_sales_report(current_user: User = Depends(get_current_user)):
-    """The stored snapshot, for the Performance tab.
-
-    Returns `stored: false` rather than 404 when nothing has been pushed yet: the
-    tab has to tell "no data yet" apart from "the endpoint is broken", and a 404
-    cannot say which.
-    """
-    current = _amazon_sales_dir() / "sales-report.json"
-    if not current.is_file():
-        return {"stored": False, "reason": "no sales report has been pushed yet"}
-    try:
-        return {"stored": True, "report": json.loads(current.read_text(encoding="utf-8"))}
-    except (OSError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=500, detail=f"stored snapshot unreadable: {exc}")
-
-
 def _v812_audio_anchor_fallback(db, clip, rejected_key):
     """v812 — audio-twin anchor auto-swap on image policy reject.
 
@@ -21329,6 +21240,103 @@ def verify_user_worker_token(
 # These four live here because Depends(verify_user_worker_token) is resolved
 # while the module executes, so the name must already be defined above.
 # Every one scopes on user_id: a worker only ever sees its own account's rows.
+
+
+
+def _amazon_sales_dir(user_id: str) -> Path:
+    """Where ONE user's sales snapshot lives — the PERSISTENT disk when there is one.
+
+    Per user, not one shared file. These are somebody's Amazon earnings, tied to
+    their own Associates account and their own tracking ids; a single global
+    snapshot would show whoever logged in first the numbers of whoever pushed
+    last. The worker already authenticates per user (`USER_WORKER_TOKEN`), so the
+    identity is available and there is no reason to flatten it.
+
+    Losing it on a deploy would blank the tab until the next daily run, so it goes
+    on the disk that survives a restart. The temp fallback SAYS SO rather than
+    failing quietly.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(user_id))[:64] or "unknown"
+    try:
+        from config import config
+        out = getattr(config, "outputs_dir", None)
+        if out:
+            root = Path(out).parent
+            if root.exists():
+                folder = root / "amazon" / safe
+                folder.mkdir(parents=True, exist_ok=True)
+                return folder
+    except Exception as exc:
+        print(f"[amazon-sales] persistent disk unavailable ({type(exc).__name__}: {exc})",
+              flush=True)
+    import tempfile
+    folder = Path(tempfile.gettempdir()) / "amazon" / safe
+    folder.mkdir(parents=True, exist_ok=True)
+    print(f"[amazon-sales] storing in {folder} — wiped on restart, so the tab "
+          f"goes blank after a deploy until the next push.", flush=True)
+    return folder
+
+
+# Under /api/user-worker/ on purpose, for two reasons. The prefix is exempt from
+# the session middleware (PUBLIC_PREFIXES), which then hands over to the token
+# check -- a route outside it never reaches this function, the middleware answers
+# 401 "Not authenticated" first whatever key is sent. And the token is PER USER:
+# these are somebody's own Amazon earnings, so they are stored under the user the
+# token identifies rather than in one shared file.
+@app.post("/api/user-worker/amazon/sales-report")
+async def receive_amazon_sales_report(
+    payload: dict = Body(...),
+    user_id: str = Depends(verify_user_worker_token),
+):
+    """Store the newest sales-per-video snapshot pushed from the operator's machine.
+
+    Keeps the previous snapshot beside it. That is not history for its own sake:
+    when a push lands wrong the only way to see WHAT changed is to still have the
+    thing it replaced.
+    """
+    if not isinstance(payload, dict) or "videos" not in payload:
+        raise HTTPException(status_code=400,
+                            detail="payload must be the object built by "
+                                   "tools/amazon_sales_payload.py (no 'videos' key found)")
+    folder = _amazon_sales_dir(user_id)
+    current, previous = folder / "sales-report.json", folder / "sales-report.prev.json"
+    body = json.dumps(payload, ensure_ascii=False)
+    try:
+        if current.is_file():
+            previous.write_text(current.read_text(encoding="utf-8"), encoding="utf-8")
+        # Write beside, then replace: a crash mid-write must not leave the tab
+        # reading half a file.
+        staging = current.with_suffix(".json.tmp")
+        staging.write_text(body, encoding="utf-8")
+        staging.replace(current)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"could not store snapshot: {exc}")
+    # v994 DIAGNOSTIC — remove once a real push has been seen in the logs.
+    print(f"[amazon-sales] stored {len(payload.get('videos') or [])} video(s), "
+          f"period {(payload.get('period') or {}).get('from')}..."
+          f"{(payload.get('period') or {}).get('to')}, "
+          f"{len(payload.get('excluded_days') or [])} day(s) held back, "
+          f"{len(body)} bytes -> {current}", flush=True)
+    return {"stored": True, "videos": len(payload.get("videos") or []),
+            "generated_at": payload.get("generated_at")}
+
+
+@app.get("/api/amazon/sales-report")
+async def read_amazon_sales_report(current_user: User = Depends(get_current_user)):
+    """The stored snapshot, for the Performance tab.
+
+    Returns `stored: false` rather than 404 when nothing has been pushed yet: the
+    tab has to tell "no data yet" apart from "the endpoint is broken", and a 404
+    cannot say which.
+    """
+    current = _amazon_sales_dir(str(current_user.id)) / "sales-report.json"
+    if not current.is_file():
+        return {"stored": False, "reason": "no sales report has been pushed yet"}
+    try:
+        return {"stored": True, "report": json.loads(current.read_text(encoding="utf-8"))}
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"stored snapshot unreadable: {exc}")
+
 
 
 def _autoedit_run_for_worker(db, autoedit_id: str, worker_user_id: str):
