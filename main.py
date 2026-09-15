@@ -21256,7 +21256,9 @@ def _amazon_sales_dir(user_id: str) -> Path:
     on the disk that survives a restart. The temp fallback SAYS SO rather than
     failing quietly.
     """
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(user_id))[:64] or "unknown"
+    # main.py imports the module as `_re`, not `re` — a bare `re` here passes
+    # `import main` and then NameErrors the first time a push arrives.
+    safe = _re.sub(r"[^A-Za-z0-9_-]", "_", str(user_id))[:64] or "unknown"
     try:
         from config import config
         out = getattr(config, "outputs_dir", None)
