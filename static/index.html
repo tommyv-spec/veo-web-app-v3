@@ -301,6 +301,11 @@
         #performanceTab .perf-bucket { margin-top: 20px; font-size: 13px; }
         #performanceTab .perf-bucket .warn { color: #b3261e; }
         #performanceTab tr.perf-day td { background: #fafafa; font-size: 12px; color: #555; }
+        #performanceTab tr.perf-account td { background: #f4f7fb; font-size: 12px; }
+        #performanceTab .perf-platform { display: inline-block; font-size: 10px;
+            text-transform: uppercase; letter-spacing: .04em; background: #dde6f2;
+            color: #33527a; padding: 1px 6px; border-radius: 3px; margin-right: 6px; }
+        #performanceTab .perf-tag { color: #888; font-size: 11px; margin-left: 8px; }
         .app-container.tab-videos #imagesTab { display: none !important; }
         /* Default state (no class) = videos */
         .app-container:not(.tab-images) #imagesTab { display: none !important; }
@@ -20434,13 +20439,42 @@ async function renderAutoEditCard(jobId, hasExport) {
                     '<td>' + perfMoney(p.ordered_revenue) + '</td>' +
                     '<td>' + perfMoney(p.earnings) + '</td>' +
                     '</tr>');
-                (v.daily || []).forEach(function (d) {
-                    out.push('<tr class="perf-day"><td style="padding-left:20px;">' +
-                        escapeHtml(d.date) + '</td><td></td><td>' + perfNum(d.clicks) +
-                        '</td><td></td><td>' + perfNum(d.items_ordered) + '</td><td></td><td>' +
-                        perfMoney(d.ordered_revenue) + '</td><td>' + perfMoney(d.earnings) +
-                        '</td></tr>');
-                });
+                // Each account has its OWN tracking id on its OWN platform, so the
+                // same video is measured twice. Showing only the video total hides
+                // the one comparison that answers "where does this work?".
+                const accounts = v.by_account || [];
+                if (accounts.length) {
+                    accounts.forEach(function (a) {
+                        const ap = a.period || {};
+                        out.push('<tr class="perf-account"><td style="padding-left:20px;">' +
+                            '<span class="perf-platform">' +
+                            escapeHtml(a.platform || 'unknown') + '</span> ' +
+                            escapeHtml(a.account || '') +
+                            '<span class="perf-tag">' +
+                            escapeHtml((a.tracking_ids || []).join(', ')) + '</span></td>' +
+                            '<td></td><td>' + perfNum(ap.clicks) + '</td><td></td><td>' +
+                            perfNum(ap.items_ordered) + '</td><td></td><td>' +
+                            perfMoney(ap.ordered_revenue) + '</td><td>' +
+                            perfMoney(ap.earnings) + '</td></tr>');
+                        (a.daily || []).forEach(function (d) {
+                            out.push('<tr class="perf-day"><td style="padding-left:40px;">' +
+                                escapeHtml(d.date) + '</td><td></td><td>' + perfNum(d.clicks) +
+                                '</td><td></td><td>' + perfNum(d.items_ordered) +
+                                '</td><td></td><td>' + perfMoney(d.ordered_revenue) +
+                                '</td><td>' + perfMoney(d.earnings) + '</td></tr>');
+                        });
+                    });
+                } else {
+                    // No account breakdown (an older snapshot): fall back to the
+                    // video's own days rather than showing nothing.
+                    (v.daily || []).forEach(function (d) {
+                        out.push('<tr class="perf-day"><td style="padding-left:20px;">' +
+                            escapeHtml(d.date) + '</td><td></td><td>' + perfNum(d.clicks) +
+                            '</td><td></td><td>' + perfNum(d.items_ordered) +
+                            '</td><td></td><td>' + perfMoney(d.ordered_revenue) +
+                            '</td><td>' + perfMoney(d.earnings) + '</td></tr>');
+                    });
+                }
             });
             out.push('</tbody></table>');
 
