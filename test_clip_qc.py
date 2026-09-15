@@ -102,6 +102,72 @@ def test_variant_files_dedupe_and_include_current():
         ["one.mp4", "two.mp4", "three.mp4"]
 
 
+def test_two_variants_of_one_attempt_are_both_scored():
+    """Measured 2026-09-15, job 47c34ae5: Veo returned TWO takes for one
+    attempt — `version_key` 1.1 and 1.2, both real files of different sizes.
+    Deduping on `attempt` alone collapsed them and scored only the LAST, so
+    the stored PASS described a file the clip did not select and the selected
+    file was never listened to at all. `version_key` is the take's identity."""
+    clip = {
+        "versions": [
+            {"attempt": 1, "variant": 1, "version_key": "1.1", "filename": "a.mp4"},
+            {"attempt": 1, "variant": 2, "version_key": "1.2", "filename": "b.mp4"},
+        ],
+        "output_filename": "a.mp4", "generation_attempt": 1,
+    }
+    assert [v["filename"] for v in q.variant_files(clip)] == ["a.mp4", "b.mp4"]
+
+
+def test_the_clip_verdict_follows_the_take_the_operator_is_looking_at():
+    """The clip-level verdict describes the SELECTED take, never the best one.
+
+    With two takes of one attempt, matching on `attempt` finds whichever was
+    scored first — here the good one — and reports PASS for a clip whose
+    selected file FAILS. The selected file is named by `output_filename`."""
+    clip = {"selected_variant": 1, "output_filename": "a.mp4",
+            "approval_status": "pending_review", "dialogue_text": "hello there"}
+    results = [
+        {"attempt": 1, "filename": "b.mp4", "verdict": "PASS", "score": 0.95, "hard": []},
+        {"attempt": 1, "filename": "a.mp4", "verdict": "FAIL", "score": 0.20,
+         "hard": ["tail_truncated"]},
+    ]
+    report = q.build_report(clip, results, "2026-09-15T00:00:00Z")
+    assert report["verdict"] == "FAIL", "the selected take failed; the clip did not pass"
+    assert [t["filename"] for t in report["takes"]] == ["b.mp4", "a.mp4"], "ranked best first"
+    assert report["recommendation_reason"].startswith("best of 2 takes")
+
+
+def test_selected_take_is_found_by_filename_not_by_attempt_number():
+    """`selected_variant` is a POSITION; `attempt` is a render attempt. They
+    coincide until one attempt returns two takes, and then every comparison of
+    the two picks whichever take happened to be scored first."""
+    clip = {"selected_variant": 1, "output_filename": "a.mp4"}
+    rows = [{"attempt": 1, "filename": "b.mp4"}, {"attempt": 1, "filename": "a.mp4"}]
+    assert q.selected_take(rows, clip) is rows[1]
+
+
+def test_selected_take_falls_back_to_the_attempt_when_no_filename_is_known():
+    clip = {"selected_variant": 2}
+    rows = [{"attempt": 1, "filename": "a.mp4"}, {"attempt": 2, "filename": "b.mp4"}]
+    assert q.selected_take(rows, clip) is rows[1]
+    assert q.selected_take(rows, {"selected_variant": 9}) is None
+
+
+def test_two_takes_of_one_attempt_are_told_apart_in_the_report():
+    """Both takes print as "take 1" without this: the person who has to choose
+    between them cannot see which row is which. `version_key` is the label."""
+    clip = {"selected_variant": 1, "output_filename": "a.mp4",
+            "approval_status": "pending_review", "dialogue_text": "hello there"}
+    results = [
+        {"attempt": 1, "version_key": "1.1", "filename": "a.mp4",
+         "verdict": "PASS", "score": 0.90, "hard": []},
+        {"attempt": 1, "version_key": "1.2", "filename": "b.mp4",
+         "verdict": "PASS", "score": 0.95, "hard": []},
+    ]
+    report = q.build_report(clip, results, "2026-09-15T00:00:00Z")
+    assert [t["version_key"] for t in report["takes"]] == ["1.2", "1.1"]
+
+
 # --- alignment metrics -----------------------------------------------------
 
 def test_clean_line_is_fully_covered():

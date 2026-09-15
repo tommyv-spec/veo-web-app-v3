@@ -405,23 +405,41 @@ def should_score_clip(clip: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
 
 
 def variant_files(clip: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """One entry per rendered take: {attempt, filename}. Deduplicated on
-    attempt number, keeping the last, which is what the API's own
+    """One entry per rendered take: {attempt, filename}. Deduplicated on the
+    take's identity, keeping the last, which is what the API's own
     deduplicate_versions does. `output_filename` is folded in because the
-    current take is not always present in versions_json."""
-    seen: Dict[int, Dict[str, Any]] = {}
+    current take is not always present in versions_json.
+
+    THE IDENTITY IS `version_key`, NOT `attempt`. One attempt can come back
+    with several takes — Veo returns two — and they are `version_key` "1.1" and
+    "1.2", same attempt, `variant` 1 and 2. Measured 2026-09-15 on job
+    47c34ae5: keying on attempt alone collapsed those two real files (2,087,228
+    and 2,020,828 bytes) into one, so QC listened only to the LAST one and
+    stored a PASS describing a file the clip had not selected, while the
+    selected file was never listened to at all. Four clips, one job.
+    `attempt` remains the fallback for older payloads that carry no
+    version_key, which keeps the stale-duplicate case it was written for.
+
+    Order follows `versions` as given, because `selected_variant` is a
+    1-indexed POSITION into that same list; sorting the takes would break that
+    correspondence the moment a payload arrives out of order.
+    """
+    seen: Dict[Any, Dict[str, Any]] = {}
     for v in (clip.get("versions") or []):
         if not isinstance(v, dict):
             continue
         fn = v.get("filename")
         attempt = v.get("attempt")
         if fn and isinstance(attempt, int):
-            seen[attempt] = {"attempt": attempt, "filename": fn}
+            seen[v.get("version_key") or attempt] = {
+                "attempt": attempt, "version_key": v.get("version_key"), "filename": fn}
     current = clip.get("output_filename")
     if current:
         attempt = clip.get("generation_attempt") or 1
-        seen.setdefault(attempt, {"attempt": attempt, "filename": current})
-    return [seen[k] for k in sorted(seen)]
+        if not any(e["filename"] == current for e in seen.values()):
+            seen.setdefault(attempt, {"attempt": attempt, "version_key": None,
+                                      "filename": current})
+    return list(seen.values())
 
 
 # ============================================================================
@@ -779,11 +797,34 @@ def score_variant(evidence: Dict[str, Any], **thresholds) -> Dict[str, Any]:
                 "score": 0.0}
     return {
         "attempt": evidence.get("attempt"),
+        "version_key": evidence.get("version_key"),
         "filename": evidence.get("filename"),
         "audio_duration": evidence.get("audio_duration"),
         "asr_text": " ".join(evidence.get("asr_words") or []),
         **best,
     }
+
+
+def selected_take(rows: Sequence[Dict[str, Any]],
+                  clip: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The take the operator is CURRENTLY looking at, out of scored rows.
+
+    `selected_variant` is a 1-indexed POSITION into `versions`; `attempt` is the
+    render attempt. They coincide right up until one attempt returns two takes,
+    and then comparing them picks whichever take was scored first. Measured
+    2026-09-15 on job 47c34ae5: a clip whose selected file FAILED reported PASS
+    because the other take of the same attempt sorted ahead of it.
+
+    `output_filename` names the selected file outright, so prefer it. The
+    attempt match stays for rows and fixtures that carry no filename.
+    """
+    current = clip.get("output_filename")
+    if current:
+        hit = next((r for r in rows if r.get("filename") == current), None)
+        if hit is not None:
+            return hit
+    chosen = clip.get("selected_variant")
+    return next((r for r in rows if r.get("attempt") == chosen), None)
 
 
 def rank_variants(scored: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -836,7 +877,7 @@ def agreement_stats(clips: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         mine = rank_variants(results)
         if len(results) > 1:
             multi += 1
-        picked = next((r for r in results if r.get("attempt") == chosen), None)
+        picked = selected_take(results, clip)
         if picked is None:
             unresolved += 1
             if clip.get("approval_status") == "approved":
@@ -879,7 +920,7 @@ def agreement_stats(clips: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
                     "tail_missing": picked.get("alignment", {}).get("tail_missing"),
                     "wer": picked.get("transcript", {}).get("wer"),
                 })
-        if mine and mine[0].get("attempt") == chosen:
+        if mine and mine[0] is picked:
             pick_match += 1
     return {
         "clips_with_a_chosen_take": considered,
@@ -1106,8 +1147,7 @@ def resolve_clip(clip: Dict[str, Any], now: str) -> Optional[Dict[str, Any]]:
         "pick_meaningful": pick_meaningful,
         "pick_agreement": (recommended == chosen) if pick_meaningful else None,
         "takes": len(takes),
-        "hard": [h for t in takes if t.get("attempt") == chosen
-                 for h in (t.get("hard") or [])],
+        "hard": [h for h in ((selected_take(takes, clip) or {}).get("hard") or [])],
         "line": (qc.get("line") or "")[:160],
     }
 
@@ -1237,8 +1277,7 @@ def discard_candidates(clips: Sequence[Dict[str, Any]],
             continue
         chosen = clip.get("selected_variant")
         takes = qc.get("takes") or []
-        cur = next((t for t in takes if t.get("attempt") == chosen), None) or (
-            takes[0] if takes else {})
+        cur = selected_take(takes, clip) or (takes[0] if takes else {})
         hard = [h for h in (cur.get("hard") or []) if h in reasons]
         # A one-word tail gap flags but does not remove: on real data that is
         # a paraphrase ending on a synonym, not a cut-off clip.
@@ -1813,7 +1852,13 @@ def build_report(clip: Dict[str, Any], results: Sequence[Dict[str, Any]],
     ranked = rank_variants(results)
     top = ranked[0] if ranked else None
     chosen = clip.get("selected_variant")
-    current = next((r for r in results if r.get("attempt") == chosen), None)
+    # WHICH take is the operator looking at? `output_filename` names it
+    # outright. Matching on `attempt` was only ever a stand-in, and it picks
+    # the wrong take as soon as one attempt has two of them: measured
+    # 2026-09-15, a clip whose selected file FAILED reported PASS because the
+    # other take of the same attempt had been scored first. The attempt match
+    # stays as the fallback for payloads that carry no output_filename.
+    current = selected_take(results, clip)
 
     takes = []
     for r in ranked:
@@ -1821,6 +1866,7 @@ def build_report(clip: Dict[str, Any], results: Sequence[Dict[str, Any]],
         t = r.get("transcript") or {}
         takes.append({
             "attempt": r.get("attempt"),
+            "version_key": r.get("version_key"),
             "filename": r.get("filename"),
             "file_sha256": r.get("file_sha256"),
             "verdict": r.get("verdict"),
@@ -1941,6 +1987,9 @@ def score_job(session: Any, base: str, job_id: str,
         for variant in variant_files(clip):
             ev = build_evidence(session, base, job_id, clip, variant, force=force)
             if ev:
+                # From the live clip, not the cache: evidence is keyed by
+                # filename and older cached blobs predate this label.
+                ev["version_key"] = variant.get("version_key")
                 evidence_list.append(ev)
         if not evidence_list:
             skipped.append({"clip_id": clip.get("id"),
@@ -1965,6 +2014,7 @@ def score_job(session: Any, base: str, job_id: str,
             "clip_index": clip.get("clip_index"),
             "line": (clip.get("dialogue_text") or "").strip(),
             "selected_variant": clip.get("selected_variant"),
+            "output_filename": clip.get("output_filename"),
             "approval_status": clip.get("approval_status"),
             "results": results,
             "ranked": [r.get("attempt") for r in rank_variants(results)],
@@ -1983,11 +2033,13 @@ def print_job_report(report: Dict[str, Any]) -> None:
         print(f"\n  clip {clip['clip_index']} (id {clip['clip_id']})  "
               f"operator kept take {clip['selected_variant']}")
         print(f"    line: {line[:88]}{'...' if len(line) > 88 else ''}")
+        picked = selected_take(clip["results"], clip)
         for r in rank_variants(clip["results"]):
             mark = "FAIL" if r["verdict"] == "FAIL" else "pass"
-            star = " <- operator's pick" if r.get("attempt") == clip["selected_variant"] else ""
+            star = " <- operator's pick" if r is picked else ""
             a = r["alignment"]
-            print(f"    [{mark}] take {r['attempt']}  score {r['score']:.3f}  "
+            label = r.get("version_key") or r["attempt"]
+            print(f"    [{mark}] take {label}  score {r['score']:.3f}  "
                   f"coverage {a['coverage']:.2f}  wer {r['transcript']['wer']:.2f}  "
                   f"tail_missing {a['tail_missing']}{star}")
             for h in r["hard"]:
