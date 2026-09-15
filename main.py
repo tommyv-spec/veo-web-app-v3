@@ -18422,7 +18422,11 @@ def _amazon_sales_dir() -> Path:
     return folder
 
 
-@app.post("/api/amazon/sales-report")
+# Under /api/local-worker/ on purpose: that prefix is exempt from the session
+# middleware (PUBLIC_PREFIXES), which then hands over to the Bearer key check
+# below. A route outside it never reaches this function — the middleware
+# answers 401 "Not authenticated" first, whatever key the pusher sends.
+@app.post("/api/local-worker/amazon/sales-report")
 async def receive_amazon_sales_report(
     payload: dict = Body(...),
     authorized: bool = Depends(verify_local_worker_key),
