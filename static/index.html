@@ -20451,7 +20451,15 @@ async function renderAutoEditCard(jobId, hasExport) {
                             escapeHtml(a.platform || 'unknown') + '</span> ' +
                             escapeHtml(a.account || '') +
                             '<span class="perf-tag">' +
-                            escapeHtml((a.tracking_ids || []).join(', ')) + '</span></td>' +
+                            escapeHtml((a.tracking_ids || []).join(', ')) + '</span>' +
+                            '<span class="perf-links">' +
+                            (a.instagram_url ? '<a href="' + escapeHtml(a.instagram_url) +
+                                '" target="_blank" rel="noopener">post ↗</a>' : '') +
+                            (a.tracked_link ? '<a href="' + escapeHtml(a.tracked_link) +
+                                '" target="_blank" rel="noopener">link ↗</a>' : '') +
+                            (a.job_url ? '<a href="' + escapeHtml(a.job_url) +
+                                '" target="_blank" rel="noopener">job ↗</a>' : '') +
+                            '</span></td>' +
                             '<td></td><td>' + perfNum(ap.clicks) + '</td><td></td><td>' +
                             perfNum(ap.items_ordered) + '</td><td></td><td>' +
                             perfMoney(ap.ordered_revenue) + '</td><td>' +
