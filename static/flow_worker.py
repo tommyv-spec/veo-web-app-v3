@@ -5360,7 +5360,11 @@ def _flow_project_state(page, timeout_s=10.0):
 # NOT raw so /\\d+%/ still reaches the browser as /\\d+%/.
 _REDO_TILE_SCAN_JS = """() => {
                     const c = document.querySelector("div[data-index='0']");
-                    if (!c) return {exists: false};
+                    // v1005 — say WHY the anchor is missing. On flow.google.com
+                    // [data-index] does not exist at all, so "not found" here is
+                    // permanent, not early. Python needs the two told apart.
+                    if (!c) return {exists: false,
+                        anchorAttrPresent: document.querySelector("[data-index]") !== null};
                     
                     // Deduplicate tiles by data-tile-id
                     const allTileEls = c.querySelectorAll("[data-tile-id]");
@@ -5444,6 +5448,27 @@ _REDO_TILE_SCAN_JS = """() => {
                         failedCount: failedCount
                     };
                 }"""
+
+
+def _redo_scan_blind(tile_info):
+    """v1005 — True when the scan's own anchor attribute is absent from the page.
+
+    `[data-index]` does not exist on flow.google.com: the selector returns null
+    for a healthy render and a dead one alike. Retrying that reading is what
+    v981/v983/v984 each did before destroying work, and the lesson there was
+    that no threshold helps — the reading is zero at every attempt. So a blind
+    scan must STOP and let the download tab run with its full budget, instead of
+    spending all 300s of it discovering the same null twenty times.
+
+    Deliberately narrow: only an explicit `anchorAttrPresent: False` from the
+    browser counts. A scan that timed out returns a bare {"exists": False} and
+    reports nothing about the page, so it keeps waiting — as does a host that
+    does emit [data-index] but has not drawn tile 0 yet.
+    """
+    if not tile_info:
+        return False
+    return (not tile_info.get("exists")
+            and tile_info.get("anchorAttrPresent") is False)
 
 
 def _redo_tile_info(page):
@@ -24061,6 +24086,14 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                 _tile_info = _redo_tile_info(page)
                 
                 if not _tile_info or not _tile_info.get('exists'):
+                    if _redo_scan_blind(_tile_info):
+                        # v1005 — no [data-index] anywhere on the page. This reads
+                        # the same at attempt 1 and attempt 20, and the 20x15s it
+                        # would burn IS the download tab's whole 300s cap.
+                        print("[REDO] no [data-index] on this page — tile scan is "
+                              "blind here, not early. Skipping to the download tab "
+                              "with the poll budget intact.", flush=True)
+                        break
                     print(f"[REDO] Scan {_scan_attempt + 1}/{_max_scan_attempts}: data-index=0 not found, waiting 15s...", flush=True)
                     time.sleep(15)
                     continue
