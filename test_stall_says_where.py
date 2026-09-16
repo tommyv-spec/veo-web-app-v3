@@ -50,8 +50,11 @@ class TheBreadcrumb(unittest.TestCase):
         self.assertIn("deep-scan refresh (popup) clip 10", self.fw._v978_where())
 
     def test_where_says_how_long_it_has_been_doing_it(self):
+        import threading
         self.fw.activity("submitting clip 4")
-        self.fw._ACTIVITY["at"] = time.time() - 300
+        me = threading.main_thread().ident
+        what, _ = self.fw._ACTIVITY[me]
+        self.fw._ACTIVITY[me] = (what, time.time() - 300)
         where = self.fw._v978_where()
         self.assertIn("300s", where, f"expected an age in seconds, got {where!r}")
 
@@ -112,6 +115,71 @@ class TheHangingPathLeavesCrumbs(unittest.TestCase):
         self.assertIn("activity(", window,
                       "the deep scan is where 10 of 17 deaths happened; it must "
                       "say so in the log")
+
+
+
+
+class TheBreadcrumbMustBePerThread(unittest.TestCase):
+    """v1011 — the watchdog measures the MAIN thread, so it must report the MAIN thread.
+
+    v1007's breadcrumb was a plain module global, and this worker runs seven
+    threads, several of which drive the same browser (`_refresh_and_verify` takes
+    a `frames_busy` threading.Event precisely to coordinate with another one). So
+    any thread calling a decorated page helper overwrites the record.
+
+    The proof it was lying, from the log on 2026-09-16:
+
+        [v978] NO MAIN-THREAD PROGRESS for 248s ...
+        [v978] STUCK IN: check_and_dismiss_popup (started 243s ago)
+
+    The main thread had not moved for 248s, yet the activity it named began 243s
+    ago — five seconds AFTER the freeze. A frozen thread cannot enter a function.
+    Another thread wrote that breadcrumb.
+
+    Two fixes were built on that misreading (v1009's popup deadline, and before it
+    v1008's per-call cap), and the deadline never fired once because the main
+    thread was never in the function the log named. A diagnostic that points at
+    the wrong function is worse than none: it manufactures confident wrong fixes.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.fw = _load()
+
+    def test_the_main_threads_activity_is_what_gets_reported(self):
+        self.fw.activity("main thread work")
+        self.assertIn("main thread work", self.fw._v978_where())
+
+    def test_another_threads_activity_does_not_overwrite_the_report(self):
+        """The exact bug: a busy sibling thread renaming the main thread's stall."""
+        import threading
+        self.fw.activity("what the MAIN thread is doing")
+        done = threading.Event()
+
+        def other():
+            self.fw.activity("what a DOWNLOAD thread is doing")
+            done.set()
+
+        t = threading.Thread(target=other, name="pretend-download")
+        t.start()
+        done.wait(5)
+        t.join(5)
+        where = self.fw._v978_where()
+        self.assertIn("what the MAIN thread is doing", where)
+        self.assertNotIn("DOWNLOAD thread", where,
+                         "a sibling thread must not be able to rename the stall")
+
+    def test_it_says_so_plainly_when_the_main_thread_recorded_nothing(self):
+        """Silence must read as silence, never as a stale label from elsewhere."""
+        self.fw._ACTIVITY.clear()
+        where = self.fw._v978_where()
+        self.assertIsInstance(where, str)
+        self.assertTrue(where.strip())
+
+    def test_it_never_raises(self):
+        self.fw._ACTIVITY.clear()
+        self.fw._ACTIVITY["junk"] = "not a tuple"
+        self.assertIsInstance(self.fw._v978_where(), str)
 
 
 if __name__ == "__main__":

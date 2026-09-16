@@ -411,7 +411,7 @@ def _v978_escalate(exit_fn=None):
     return _exit(75)
 
 
-_ACTIVITY = {"what": "starting up", "at": time.time()}
+_ACTIVITY = {}          # thread ident -> (what, started_at)
 
 
 def activity(what):
@@ -424,20 +424,36 @@ def activity(what):
     function, and finding that the hang was `_refresh_and_verify` took an hour of
     reading the log backwards. One breadcrumb answers it on the first line.
 
-    Deliberately dumb: a dict and a string, no lock. The main thread writes it and
-    the watchdog thread reads it; a torn read costs one wrong label in a
-    diagnostic, which is worth far less than a lock on the hot path.
+    KEYED BY THREAD, and that is the whole point. The watchdog measures the MAIN
+    thread's progress, while this worker runs seven threads and several of them
+    drive the same browser (`_refresh_and_verify` takes a `frames_busy`
+    threading.Event precisely to coordinate with another one). As a plain global,
+    a busy sibling renamed the main thread's stall — on 2026-09-16 the log read
+    "NO MAIN-THREAD PROGRESS for 248s" beside "STUCK IN: check_and_dismiss_popup
+    (started 243s ago)": an activity beginning five seconds AFTER the freeze,
+    which a frozen thread cannot do. Two fixes were then built on that wrong
+    function, and one of them could never fire because the main thread was never
+    in it. A diagnostic that names the wrong place is worse than none — it
+    manufactures confident wrong fixes.
+
+    Still no lock: each thread writes only its own key, the watchdog reads one
+    key, and dict item assignment is atomic under the GIL.
     """
-    _ACTIVITY["what"] = str(what)
-    _ACTIVITY["at"] = time.time()
+    _ACTIVITY[threading.get_ident()] = (str(what), time.time())
 
 
 def _v978_where():
-    """One line: what the worker was last doing, and for how long. Never raises."""
+    """What the MAIN thread was last doing, and for how long. Never raises.
+
+    The main thread specifically, because that is the thread the watchdog is
+    about to kill the worker over.
+    """
     try:
-        what = _ACTIVITY.get("what") or "unknown"
-        at = float(_ACTIVITY.get("at") or time.time())
-        return f"{what} (started {time.time() - at:.0f}s ago)"
+        rec = _ACTIVITY.get(threading.main_thread().ident)
+        if not rec:
+            return "unknown (the main thread has recorded no activity)"
+        what, at = rec
+        return f"{what} (started {time.time() - float(at):.0f}s ago)"
     except Exception:                                   # noqa: BLE001
         return "unknown"
 
