@@ -21971,3 +21971,59 @@ What remains genuinely open is narrower: the uuid binding miss itself (`workflow
 and the fact that a shared-project clip whose render finished has NO delivery path and
 parks rather than saying so. Both are worth a rule of their own; neither is "the render
 is still going".
+
+---
+
+## v975 — FIND THE REAL ROOT CAUSE: AN INSTRUMENT'S LABEL IS NOT A LOCATION (2026-09-17)
+
+**The rule.** Before shipping a fix, name the root cause and say what located it. A label
+printed by our own tooling — a stall's `STUCK IN:`, a status string, a checker's message,
+a stage log — says where the instrument last *stamped*, not where the problem *is*. It is
+a lead. It is never, on its own, the location.
+
+A fix may be shipped on a label only when an **independent locator** agrees with it. Three
+count:
+
+1. a real stack (or equivalent state dump) captured at the moment of failure,
+2. a measurement of the **delivered artifact** rather than of a stage that ran (§v938.1),
+3. a bisect / A-B where removing one thing actually changes the symptom.
+
+If none is available, say so plainly and go get one. "The log names this function" is the
+start of the investigation, not the end of it.
+
+**The stop condition, and it is the operative half.** When a symptom returns after a fix,
+the **diagnosis** is the suspect — not the strength of the fix. Do not patch the same named
+component a second time on the same evidence. Go back and locate it again.
+
+**Where this came from (revs 1012-1014, 2026-09-16/17).** The flow worker kept dying with
+`[v978] STALLED … STUCK IN: check_and_dismiss_popup`. Three sessions shipped three fixes to
+`check_and_dismiss_popup` in one evening — v1009.1 at 18:46, v1009.2 at 23:30, v1009.3 at
+00:15 — each one a better liveness probe than the last, and the same line came back after
+every one. Two of those sessions had already written in their own handoffs that the
+`STUCK IN:` label is the *previous* `activity()` stamp rather than the real location. The
+note was written and not acted on, three times, because the label was right there and the
+stack was not.
+
+When a real stack dump finally landed, the thread was parked in `time.sleep(6)` inside the
+post-job download wait — a different function entirely, and a **healthy** wait. Every one
+of the three fixes was aimed at the wrong place. The cost was an evening across three
+sessions and a day at zero posts.
+
+This is the `§9 "a check that can pass for the wrong reason"` family applied to a
+DIAGNOSIS: the label was never lying about what it measured, only about what we took it
+to mean.
+
+**The enforcement.** `tools/repeat_fix_notice.py`, at SessionStart. It groups the worker
+log's failure signatures by worker run and by build, and speaks only when one signature has
+survived **≥3 runs across ≥2 builds** — the shape of "we fixed it and it came back". On the
+log that produced this rule it named `check_and_dismiss_popup` (12 runs, 6 builds) and said
+nothing about any other signature (all at 1 run), so it fires on the real case without
+becoming noise to scroll past.
+
+**A measurement that killed the first idea, kept here so it is not retried.** The first
+proposed detector counted point-releases of a v-rule (`vNNN.1`, `.2`, `.3`) on the theory
+that a stack of them means symptom-patching. The data says no: 34 base rules carry point
+releases and several carry 7-10 legitimate ones (v892 has 10, v939 and v643 have 9). The
+count separates nothing and would have fired constantly. Measure the discriminating power
+of a gate before shipping it.
+
