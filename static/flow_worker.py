@@ -8003,6 +8003,36 @@ def is_on_flow_not_login(url):
     return is_flow_url(url) and not is_google_login(url)
 
 
+def _run_within_budget(steps, budget_s, label=""):
+    """Run (name, fn) steps in order; skip whatever is left once the budget is spent.
+
+    Every Playwright locator call carries the built-in 30s default timeout, so no
+    single one of them hangs for ever. That is exactly why this is needed: a helper
+    making eight such calls can still burn four minutes, and `_refresh_and_verify`
+    runs three of those helpers back to back — roughly nineteen calls with no
+    ceiling over the lot. On 2026-09-16 that pile-up was 15 of the flow worker's 17
+    deaths, reported by the v978 watchdog as 480s of main-thread silence and paid
+    for with the whole lane (69 restarts, ~0 clips delivered, nothing published).
+
+    A step that raises is logged and the sequence carries on — a popup helper
+    throwing must not cost us the tab selection. Returns the skipped names.
+    """
+    skipped = []
+    deadline = time.time() + budget_s
+    for name, fn in steps:
+        if time.time() >= deadline:
+            skipped.append(name)
+            continue
+        try:
+            fn()
+        except Exception as exc:                        # noqa: BLE001
+            print(f"[budget] {label}{name} raised {type(exc).__name__}", flush=True)
+    if skipped:
+        print(f"[budget] {label}budget of {budget_s}s spent — skipped: "
+              f"{', '.join(skipped)}", flush=True)
+    return skipped
+
+
 def is_page_crashed(page):
     """Detect Chrome 'Aw, Snap!' tab crash.
     
@@ -18402,9 +18432,22 @@ class DownloadHelper:
         try:
             self.page.reload(timeout=30000)
             time.sleep(3)
-            check_and_dismiss_popup(self.page)
-            ensure_videos_tab_selected(self.page)
-            ensure_batch_view_mode(self.page, f"[{self.account_name}-Refresh]")
+            # v1006 — these three helpers make ~19 locator calls between them, and
+            # nothing sets a default timeout, so each may burn Playwright's built-in
+            # 30s. On a wedged page they PILE UP well past the v978 watchdog's 480s
+            # kill: 15 of 17 worker deaths on 2026-09-16 were this function simply
+            # not returning. Cap each call AND the sequence, so a refresh that
+            # cannot finish gives up instead of holding the lane until it is shot.
+            self.page.set_default_timeout(5000)
+            try:
+                _run_within_budget([
+                    ("popup", lambda: check_and_dismiss_popup(self.page)),
+                    ("videos-tab", lambda: ensure_videos_tab_selected(self.page)),
+                    ("batch-view", lambda: ensure_batch_view_mode(
+                        self.page, f"[{self.account_name}-Refresh]")),
+                ], budget_s=45, label=f"[{self.account_name}] ")
+            finally:
+                self.page.set_default_timeout(30000)
             
             # Verify project URL after reload
             if project_url and "/project/" in project_url:
