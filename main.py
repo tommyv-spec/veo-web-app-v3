@@ -21322,8 +21322,13 @@ def _amazon_sales_dir(user_id: str) -> Path:
     # `import main` and then NameErrors the first time a push arrives.
     safe = _re.sub(r"[^A-Za-z0-9_-]", "_", str(user_id))[:64] or "unknown"
     try:
-        from config import config
-        out = getattr(config, "outputs_dir", None)
+        # `app_config`, not `config` — config.py defines the CLASS `AppConfig`
+        # and one instance called `app_config`; there has never been a name
+        # `config` inside it. `from config import config` therefore raised
+        # ImportError on EVERY call, so the snapshot went to /tmp every time and
+        # each deploy wiped it. main.py already imports app_config at the top
+        # (line ~144), and the try/except stays for the mkdir, not the import.
+        out = getattr(app_config, "outputs_dir", None)
         if out:
             root = Path(out).parent
             if root.exists():
