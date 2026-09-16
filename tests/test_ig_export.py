@@ -139,7 +139,7 @@ def test_thirty_day_window_reaches_further_back_and_shortcode_is_the_last_resort
     assert rows[2][1] == "CCC"              # no job, no caption → shortcode
 
 
-def test_endpoint_returns_a_parseable_csv_with_the_six_columns():
+def test_endpoint_returns_a_parseable_csv_with_its_columns():
     db, user = _seed()
     resp = main.export_instagram_videos(1, range="last_month", month=None, db=db, current_user=user)
 
@@ -150,7 +150,15 @@ def test_endpoint_returns_a_parseable_csv_with_the_six_columns():
 
     text = resp.body.decode("utf-8-sig")
     parsed = list(csv.reader(io.StringIO(text)))
-    assert parsed[0] == ["video_title", "video_name", "video_url", "video_id", "posted_at", "views"]
+    # The six identity/views columns come FIRST and keep their order — every
+    # positional reader downstream depends on that. e25fe60 appended five Amazon
+    # columns after them and this assertion was not updated, so the test has been
+    # red since. Pin the prefix, not the exact width, or the next honest addition
+    # breaks it again.
+    assert parsed[0][:6] == ["video_title", "video_name", "video_url", "video_id",
+                             "posted_at", "views"]
+    assert parsed[0][6:] == ["clicks", "click_rate", "items_ordered", "order_rate",
+                             "ordered_revenue"]
     assert len(parsed) == 4
     assert parsed[1][0] == _TITLE
     assert parsed[1][2] == "https://instagram.com/reel/AAA"
