@@ -14941,12 +14941,40 @@ def ensure_videos_tab_selected(page):
         print(f"  (Tab selection: {e})")
 
 
+POPUP_SWEEP_BUDGET_S = 20.0
+
+
+def _popup_time_up(deadline) -> bool:
+    """Has the popup sweep spent its budget? Never raises — this runs on the
+    path that is already in trouble and may not add a second fault."""
+    try:
+        return time.time() > float(deadline)
+    except (TypeError, ValueError):
+        return False
+
+
 @_bounded_page_helper(20)
 def check_and_dismiss_popup(page):
-    """Dismiss Flow's popups if present (Notice, I agree, Chrome sign-in/sync, splash banner, etc.)"""
+    """Dismiss Flow's popups if present (Notice, I agree, Chrome sign-in/sync, splash banner, etc.)
+
+    v1009 — this function is on a DEADLINE, because it is what kills the lane.
+    2026-09-16, death #20: `[v978] STALLED … STUCK IN: check_and_dismiss_popup
+    (started 476s ago)`. It probes about a dozen dialogs that are almost never
+    there — 40 Playwright calls, of which 16 are `locator.count()`, and `count()`
+    neither auto-waits nor takes a timeout, so the 5s per-call cap from
+    `_bounded_page_helper` cannot reach them. On a slow page that is minutes.
+
+    Giving up part-way is safe BY DESIGN: every block already swallows its own
+    errors and the function returns False when it finds nothing, so a caller
+    cannot tell "no popup" from "stopped looking". An undismissed popup costs one
+    retry; a sweep that never returns costs the job and the whole lane.
+    """
+    _deadline = time.time() + POPUP_SWEEP_BUDGET_S
     try:
         # ── Google cookie consent banner ──
         # glue-cookie-notification-bar covers the bottom of the page and blocks clicks
+        if _popup_time_up(_deadline):
+            return False
         try:
             cookie_bar = page.locator("#glue-cookie-notification-bar-1, .glue-cookie-notification-bar").first
             if cookie_bar.count() > 0 and cookie_bar.is_visible(timeout=500):
@@ -14969,6 +14997,8 @@ def check_and_dismiss_popup(page):
             pass
         # ── "Meet the new Flow" splash banner ──
         # New UI shows a large banner with X close button on first visit
+        if _popup_time_up(_deadline):
+            return False
         try:
             close_btn = page.locator("button:has-text('close')").first
             # Only dismiss if "Meet the new Flow" or "what's new" text is visible
@@ -14986,6 +15016,8 @@ def check_and_dismiss_popup(page):
         # These appear as overlays after Google login
         
         # 1. "Sign in to Chrome?" dialog → click "Use Chrome without an account"
+        if _popup_time_up(_deadline):
+            return False
         try:
             no_account_btn = page.locator("button:has-text('Use Chrome without an account')")
             if no_account_btn.count() > 0 and no_account_btn.first.is_visible():
@@ -14997,6 +15029,8 @@ def check_and_dismiss_popup(page):
             pass
         
         # 2. "Turn on sync?" / "Sync is paused" → click "No thanks" / "Dismiss"
+        if _popup_time_up(_deadline):
+            return False
         try:
             for dismiss_text in ["No thanks", "No, thanks", "Dismiss", "Not now", "Skip"]:
                 btn = page.locator(f"button:has-text('{dismiss_text}')")
@@ -15010,6 +15044,8 @@ def check_and_dismiss_popup(page):
         
         # 3. "Continue as X" with "Use Chrome without" → click "Use Chrome without"
         #    "Continue as X" alone → click it (user already picked this profile)
+        if _popup_time_up(_deadline):
+            return False
         try:
             continue_btn = page.locator("button:has-text('Continue as')")
             no_btn = page.locator("button:has-text('Use Chrome without')")
@@ -15027,6 +15063,8 @@ def check_and_dismiss_popup(page):
             pass
         
         # 4. "Customize your Chrome profile" → click "Done" or "Skip"
+        if _popup_time_up(_deadline):
+            return False
         try:
             for done_text in ["Done", "Skip customization"]:
                 btn = page.locator(f"button:has-text('{done_text}')")
@@ -15039,6 +15077,8 @@ def check_and_dismiss_popup(page):
             pass
         
         # ── Flow-specific dialogs ──
+        if _popup_time_up(_deadline):
+            return False
         try:
             dialog = page.locator("div[role='dialog']")
             if dialog.count() > 0 and dialog.first.is_visible():
@@ -15065,6 +15105,8 @@ def check_and_dismiss_popup(page):
             "button:text('I agree')",
         ]
         
+        if _popup_time_up(_deadline):
+            return False
         for selector in selectors:
             try:
                 btn = page.locator(selector)
@@ -15081,6 +15123,8 @@ def check_and_dismiss_popup(page):
                 continue
                 
         # Last resort: look for Notice text and then find agree button nearby
+        if _popup_time_up(_deadline):
+            return False
         try:
             notice = page.locator("text=Notice")
             if notice.count() > 0 and notice.first.is_visible():
