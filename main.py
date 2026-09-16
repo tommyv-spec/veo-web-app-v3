@@ -1317,9 +1317,19 @@ def _valid_tag(s: str) -> bool:
 # taps stay apart in the click log. Unknown persona -> 404, never a guess.
 KORELLA_ASIN = "B0GVKNB82S"
 BIO_TAGS = {
+    # Instagram keeps the tag it has, so nothing already published changes.
     "nuri": "kavenokorel00-20",
     "noemi": "kavenokorella2-20",
     "martha": "kavenokorella3-20",
+    # Facebook gets its OWN id per profile (created in Associates 2026-09-16 and
+    # verified present in the live list). Until these existed, one tag served both
+    # platforms: 284 clicks, 16 items and $550.24 landed on kavenokorel00-20 with
+    # no way to say whether Instagram or Facebook earned it -- 97% of that week's
+    # money. test_bio_tags.py refuses two slugs sharing a tag so this cannot
+    # quietly collapse again.
+    "nuri-fb": "kavenonurifb-20",
+    "noemi-fb": "kavenonoemifb-20",
+    "martha-fb": "kavenomarthafb-20",
 }
 
 
