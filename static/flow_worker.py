@@ -11335,6 +11335,56 @@ def wait_for_end_frame_button(page, timeout=30):
     return page.locator(selector).last
 
 
+def _bounded_page_helper(budget_s, per_call_ms=5000):
+    """Cap a page PROBE from the inside, so all of its callers are covered at once.
+
+    Nothing in this worker calls `set_default_timeout`, so every locator operation
+    inherits Playwright's built-in 30s. These helpers are probes — "is a cookie
+    banner showing", "is the Videos tab selected". Thirty seconds to answer "is
+    this element visible" is not a budget anyone chose, it is the default nobody
+    set, and a helper making eight such probes can burn four minutes. The v978
+    watchdog kills the worker at 480s of silence.
+
+    Why on the FUNCTION and not at the call sites: there are 114 of them between
+    the three helpers (76 + 28 + 10). v1006 guarded exactly one, inside
+    `_refresh_and_verify`, and the worker promptly hung for 251s in the download
+    loop's own bare `check_and_dismiss_popup(self.page)` two statements later.
+    One guard in the shared function is a smaller diff than a guard in every
+    caller, and it is the only one that cannot be forgotten by the next caller.
+
+    A probe that cannot answer returns None rather than raising: these are all
+    best-effort tidy-ups, and none of their callers should lose the lane because
+    a cookie banner could not be read.
+    """
+    def deco(fn):
+        def wrapper(page, *args, **kwargs):
+            activity(fn.__name__)
+            try:
+                page.set_default_timeout(per_call_ms)
+            except Exception:                           # noqa: BLE001
+                pass                                    # a Locator, or a closed page
+            t0 = time.time()
+            try:
+                return fn(page, *args, **kwargs)
+            except Exception as exc:                    # noqa: BLE001
+                print(f"[bounded] {fn.__name__} raised {type(exc).__name__}", flush=True)
+                return None
+            finally:
+                try:
+                    page.set_default_timeout(30000)
+                except Exception:                       # noqa: BLE001
+                    pass
+                spent = time.time() - t0
+                if spent > budget_s:
+                    print(f"[bounded] {fn.__name__} took {spent:.0f}s "
+                          f"(over its {budget_s}s budget)", flush=True)
+        wrapper.__name__ = getattr(fn, "__name__", "page_helper")
+        wrapper.__doc__ = fn.__doc__
+        return wrapper
+    return deco
+
+
+@_bounded_page_helper(20)
 def ensure_batch_view_mode(page, context=""):
     """
     Ensure Batch view mode is selected in the gear/settings dropdown (top bar).
@@ -14808,6 +14858,7 @@ def wait_for_clip_approval(clip_id, clip_index, temp_dir, timeout=600):
 # BROWSER HELPERS
 # ============================================================
 
+@_bounded_page_helper(25)
 def ensure_videos_tab_selected(page):
     """Ensure the 'Videos' view is selected in the project sidebar.
 
@@ -14890,6 +14941,7 @@ def ensure_videos_tab_selected(page):
         print(f"  (Tab selection: {e})")
 
 
+@_bounded_page_helper(20)
 def check_and_dismiss_popup(page):
     """Dismiss Flow's popups if present (Notice, I agree, Chrome sign-in/sync, splash banner, etc.)"""
     try:
