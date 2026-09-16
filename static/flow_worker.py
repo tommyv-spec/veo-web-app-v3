@@ -411,6 +411,37 @@ def _v978_escalate(exit_fn=None):
     return _exit(75)
 
 
+_ACTIVITY = {"what": "starting up", "at": time.time()}
+
+
+def activity(what):
+    """Record what the worker is doing, so a stall can name itself in the log.
+
+    The watchdog prints the MAIN thread's stack, which is useless here and always
+    was: the worker's own frames run inside a Playwright greenlet, so
+    `sys._current_frames()[main]` shows the asyncio dispatcher and nothing else.
+    All 17 stalls on 2026-09-16 printed an identical dump naming no worker
+    function, and finding that the hang was `_refresh_and_verify` took an hour of
+    reading the log backwards. One breadcrumb answers it on the first line.
+
+    Deliberately dumb: a dict and a string, no lock. The main thread writes it and
+    the watchdog thread reads it; a torn read costs one wrong label in a
+    diagnostic, which is worth far less than a lock on the hot path.
+    """
+    _ACTIVITY["what"] = str(what)
+    _ACTIVITY["at"] = time.time()
+
+
+def _v978_where():
+    """One line: what the worker was last doing, and for how long. Never raises."""
+    try:
+        what = _ACTIVITY.get("what") or "unknown"
+        at = float(_ACTIVITY.get("at") or time.time())
+        return f"{what} (started {time.time() - at:.0f}s ago)"
+    except Exception:                                   # noqa: BLE001
+        return "unknown"
+
+
 def _v978_tick(liveness, act_fn=None):
     """One watchdog turn. Warns, then escalates once.
 
@@ -437,7 +468,10 @@ def _v978_tick(liveness, act_fn=None):
             liveness._warned_at = liveness._now()
             _v978_say(f"\n[v978] NO MAIN-THREAD PROGRESS for {quiet:.0f}s "
                       f"(warn at {liveness.warn_s:.0f}s, act at "
-                      f"{liveness.act_s:.0f}s) — the main thread is here:\n{stack}")
+                      f"{liveness.act_s:.0f}s)\n"
+                      f"[v978] STUCK IN: {_v978_where()}\n"
+                      f"[v978] (the stack below is Playwright's greenlet "
+                      f"dispatcher, not the worker — read the line above)\n{stack}")
         return level
     if liveness.acted:
         return level
@@ -447,7 +481,8 @@ def _v978_tick(liveness, act_fn=None):
                   f"FLOW_STALL_ACT=0 — reporting only")
         return level
     _v978_say(f"\n[v978] STALLED — no main-thread progress for {quiet:.0f}s. "
-              f"Releasing the job and exiting so the lane is not held.\n{stack}")
+              f"Releasing the job and exiting so the lane is not held.\n"
+              f"[v978] STUCK IN: {_v978_where()}\n{stack}")
     (act_fn or _v978_escalate)()
     return level
 
@@ -8023,6 +8058,9 @@ def _run_within_budget(steps, budget_s, label=""):
         if time.time() >= deadline:
             skipped.append(name)
             continue
+        # One call here gives per-helper granularity exactly where the pile-up
+        # happened, so a stall says "popup" or "videos-tab" instead of nothing.
+        activity(f"{label}{name}")
         try:
             fn()
         except Exception as exc:                        # noqa: BLE001
@@ -18639,6 +18677,7 @@ class DownloadHelper:
                 dialogue_to_clip[dialogue_key] = clip
         
         print(f"\n[{self.account_name}] ═══ Download loop: {num_clips} clips ═══", flush=True)
+        activity(f"download loop, {num_clips} clip(s)")
         print(f"[{self.account_name}] Wait {CLIP_READY_WAIT}s per clip after submission", flush=True)
         for dk, dc in dialogue_to_clip.items():
             print(f"[{self.account_name}]   dialogue_key[{dc.get('clip_index')}]: '{dk[:60]}'", flush=True)
@@ -19015,6 +19054,7 @@ class DownloadHelper:
                     break
                 
                 print(f"[{self.account_name}] Deep scan attempt {attempt + 1}/3...", flush=True)
+                activity(f"deep scan {attempt + 1}/3 for clip(s) {sorted(missing_pending)}")
                 self._refresh_and_verify(project_url)
                 time.sleep(2)
                 
@@ -24095,6 +24135,7 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
     # the HTTP download worker. Page2 never touches Flow.
     if http_dl_queue is not None:
         print(f"[REDO] Waiting {CLIP_READY_WAIT}s for clip to generate (HTTP path)...", flush=True)
+        activity(f"redo: waiting {CLIP_READY_WAIT}s for the render (HTTP path)")
         _fidget_deadline = time.time() + CLIP_READY_WAIT
         while time.time() < _fidget_deadline:
             _rem = _fidget_deadline - time.time()
