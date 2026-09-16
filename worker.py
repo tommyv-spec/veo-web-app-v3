@@ -746,6 +746,19 @@ class JobWorker:
                 except Exception as sync_exc:
                     print(f"[worker] instagram autosync pass error: {sync_exc}", flush=True)
 
+                # Instagram view-count refresh (2026-09-17). The pass above finds
+                # NEW reels; it does not keep the numbers on known reels current.
+                # /refresh-stats did that and its only caller was a button in the
+                # page, so every view count on the platform — cards, CSV export,
+                # Performance tab — was as old as the last human click. One
+                # account per tick, a 7-day window, 1-3 HikerAPI pages.
+                try:
+                    from instagram_autosync import process_instagram_stats_refresh
+                    with get_db() as stats_db:
+                        process_instagram_stats_refresh(stats_db)
+                except Exception as stats_exc:
+                    print(f"[worker] instagram stats pass error: {stats_exc}", flush=True)
+
                 # Drive folder watcher pass (sync + transcribe, one pending per tick)
                 try:
                     from drive_transcribe import process_drive_transcriptions

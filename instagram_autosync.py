@@ -409,3 +409,140 @@ def process_instagram_autosync(db, interval_hours=None, retry_minutes=None,
         print(f"[ig-autosync] pass error: {type(exc).__name__}: {str(exc)[:200]}",
               flush=True)
         return 0
+
+
+# ---------------------------------------------------------------------------
+# FRESH NUMBERS, which is a different job from finding new reels (2026-09-17)
+#
+# The sync above answers "is there a reel we have not seen?". It does not answer
+# "how many views does that reel have NOW", except as a side effect of a full
+# walk it only does when something asks for one.
+#
+# Nothing refreshed the counts on their own. /api/instagram/accounts/{id}/
+# refresh-stats existed and was correct, and its ONLY caller was a button in the
+# page (static/index.html). So every view count on this platform — the Instagram
+# cards, the CSV export, the Performance tab's Views column — was as old as the
+# last time a human clicked, which on 2026-09-17 was about a day for all four
+# accounts. A day-old view count on a reel posted yesterday is not a small error.
+#
+# This pass is the missing caller. It is the CHEAP half on purpose: reels inside
+# a short window, 1-3 HikerAPI pages, no new rows, no pagination walk. It never
+# touches last_synced_at — that clock means "we looked for new reels", and
+# borrowing it here would make the discovery backstop think it had run.
+#
+# The clock is in this process, not in a column. Adding one would be a schema
+# migration for a value whose worst failure is one extra cheap refresh after a
+# worker restart. If a stats clock ever needs to survive a restart, that is the
+# moment to add the column, not before.
+# ---------------------------------------------------------------------------
+
+STATS_ENABLED = os.environ.get("IG_STATS_REFRESH", "1").strip().lower() not in ("0", "false", "no")
+# How often ONE account's recent reels get fresh counts.
+STATS_REFRESH_MINUTES = float(os.environ.get("IG_STATS_REFRESH_MINUTES", "180"))
+# Only reels this recent. An older reel's view count barely moves, and every
+# extra day in the window is another HikerAPI page on every refresh.
+STATS_WINDOW_DAYS = float(os.environ.get("IG_STATS_WINDOW_DAYS", "7"))
+
+_STATS_CLOCK: dict = {}
+
+
+def refresh_stats_for(acc, db, fetcher=None):
+    """Re-pull view/like/comment counts for one account's recent reels.
+
+    Returns {"checked", "updated", "missed"}. Creates nothing: a clip with no
+    stored row belongs to the discovery sync, not here.
+    """
+    from models import InstagramVideo
+    from encryption import decrypt as _enc_decrypt
+    from instagram_client import resolve_user_id, fetch_recent_clips
+
+    cutoff = datetime.utcnow() - timedelta(days=max(1.0, STATS_WINDOW_DAYS))
+    recent = (
+        db.query(InstagramVideo)
+        .filter(InstagramVideo.account_id == acc.id,
+                InstagramVideo.posted_at.isnot(None),
+                InstagramVideo.posted_at >= cutoff)
+        .all()
+    )
+    if not recent:
+        return {"checked": 0, "updated": 0, "missed": 0}
+
+    api_key = _enc_decrypt(acc.api_key_encrypted)
+    if not acc.ig_user_id:
+        acc.ig_user_id = resolve_user_id(acc.handle, api_key)
+    # Fetch past the window so a burst-posting day cannot truncate it — the same
+    # sizing the endpoint uses, for the same reason.
+    limit = len(recent) + 12
+    fetch = fetcher or fetch_recent_clips
+    clips = fetch(acc.ig_user_id, api_key, limit=limit,
+                  max_pages=max(3, -(-limit // 10) + 1)) or []
+
+    by_shortcode = {v.shortcode: v for v in recent}
+    updated = 0
+    for clip in clips:
+        row = by_shortcode.pop(clip.get("shortcode") or "", None)
+        if row is None:
+            continue
+        apply_counts(row, clip)
+        if clip.get("thumb_url"):
+            row.thumb_url = clip["thumb_url"]
+        updated += 1
+    _commit(db)
+    # An in-window reel the fetch never reached is a finding, not a clean run.
+    missed = sorted(by_shortcode.keys())
+    if missed:
+        print(f"[ig-stats] account={acc.id} MISSED {len(missed)} in-window reels: "
+              f"{missed[:10]}", flush=True)
+    return {"checked": len(recent), "updated": updated, "missed": len(missed)}
+
+
+def pick_stats_account(db, now=None, refresh_minutes=None):
+    """The account whose counts are oldest, or None when none is due yet."""
+    from models import InstagramAccount
+    now = now or datetime.utcnow()
+    due = timedelta(minutes=max(1.0, refresh_minutes
+                                if refresh_minutes is not None
+                                else STATS_REFRESH_MINUTES))
+    best = None
+    for acc in db.query(InstagramAccount).all():
+        last = _STATS_CLOCK.get(acc.id)
+        if last is not None and now - last < due:
+            continue
+        key = last or datetime.min
+        if best is None or key < best[0]:
+            best = (key, acc)
+    return best[1] if best else None
+
+
+def process_instagram_stats_refresh(db, fetcher=None, now=None,
+                                    refresh_minutes=None) -> int:
+    """One worker tick: give at most ONE account fresh counts. Returns 1 or 0.
+
+    Wrapped end to end, like the sync pass above: this runs inside the worker's
+    main loop and an exception escaping here would stop job processing.
+    """
+    if not STATS_ENABLED:
+        return 0
+    try:
+        acc = pick_stats_account(db, now=now, refresh_minutes=refresh_minutes)
+        if acc is None:
+            return 0
+        # Stamped BEFORE the call, so a failing account backs off like any other
+        # instead of being retried on every one-second tick.
+        _STATS_CLOCK[acc.id] = now or datetime.utcnow()
+        res = refresh_stats_for(acc, db, fetcher=fetcher)
+        # `[ig-stats-auto]`, NOT `[ig-stats]`. The /refresh-stats endpoint already
+        # logs `[ig-stats] account=N window=7d checked=...` when the button in the
+        # page is pressed. A shared prefix would make "a human clicked it" and
+        # "the platform did it on its own" the same line, and the deploy check
+        # that reads this log went green on a button press from three days
+        # earlier before the prefixes were split.
+        print(f"[ig-stats-auto] account={acc.id} @{acc.handle} window="
+              f"{STATS_WINDOW_DAYS:g}d checked={res['checked']} "
+              f"updated={res['updated']} missed={res['missed']}", flush=True)
+        return 1
+    except Exception as exc:
+        _rollback(db)
+        print(f"[ig-stats-auto] pass error: {type(exc).__name__}: {str(exc)[:200]}",
+              flush=True)
+        return 0

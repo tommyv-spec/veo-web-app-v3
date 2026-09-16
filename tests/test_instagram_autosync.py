@@ -367,3 +367,93 @@ class TestWorkerPass:
             raise RuntimeError("network gone")
 
         assert autosync.process_instagram_autosync(db, fetcher=boom) == 1
+
+
+class TestStatsRefresh:
+    """2026-09-17 — the pass that keeps the NUMBERS current.
+
+    The sync pass finds new reels. Until this existed, nothing refreshed the
+    counts on reels already stored: /refresh-stats was only ever called by a
+    button in the page, so every view count the platform showed was as old as
+    the last human click.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_real_encryption(self, monkeypatch):
+        """The refresh reads the account's stored HikerAPI key, which is
+        encrypted. These tests are about the refresh, not about Fernet."""
+        monkeypatch.setattr("encryption.decrypt", lambda blob: "test-key")
+
+    def _reel(self, db, acc, shortcode, posted, views=0):
+        from models import InstagramVideo
+        v = InstagramVideo(account_id=acc.id, shortcode=shortcode,
+                           url=f"https://www.instagram.com/reel/{shortcode}/",
+                           posted_at=posted, views=views)
+        db.add(v)
+        db.commit()
+        return v
+
+    def test_it_updates_the_counts_on_reels_inside_the_window(self, db):
+        autosync._STATS_CLOCK.clear()
+        acc = account(db, "fresh")
+        reel = self._reel(db, acc, "AAA", datetime.utcnow() - timedelta(days=1), views=10)
+        fetched = [{"shortcode": "AAA", "views": 4321}]
+        res = autosync.refresh_stats_for(acc, db, fetcher=lambda *a, **k: fetched)
+        db.refresh(reel)
+        assert res["updated"] == 1
+        assert reel.views == 4321
+
+    def test_a_reel_outside_the_window_is_left_alone(self, db):
+        autosync._STATS_CLOCK.clear()
+        acc = account(db, "old")
+        stale = self._reel(db, acc, "OLD", datetime.utcnow() - timedelta(days=90), views=7)
+        res = autosync.refresh_stats_for(acc, db, fetcher=lambda *a, **k: [
+            {"shortcode": "OLD", "views": 999999}])
+        db.refresh(stale)
+        assert res["checked"] == 0
+        assert stale.views == 7
+
+    def test_a_clip_with_no_stored_row_creates_nothing(self, db):
+        """Discovery is the sync pass's job. This one only refreshes."""
+        from models import InstagramVideo
+        autosync._STATS_CLOCK.clear()
+        acc = account(db, "discovery")
+        self._reel(db, acc, "AAA", datetime.utcnow() - timedelta(days=1))
+        autosync.refresh_stats_for(acc, db, fetcher=lambda *a, **k: [
+            {"shortcode": "AAA", "views": 5},
+            {"shortcode": "NEVER-SEEN", "views": 900}])
+        assert db.query(InstagramVideo).count() == 1
+
+    def test_one_account_per_tick_and_then_it_backs_off(self, db):
+        autosync._STATS_CLOCK.clear()
+        a = account(db, "one")
+        b = account(db, "two")
+        self._reel(db, a, "A1", datetime.utcnow() - timedelta(days=1))
+        self._reel(db, b, "B1", datetime.utcnow() - timedelta(days=1))
+        fetch = lambda *args, **kw: []
+        assert autosync.process_instagram_stats_refresh(db, fetcher=fetch) == 1
+        assert autosync.process_instagram_stats_refresh(db, fetcher=fetch) == 1
+        # Both are stamped now, so the third tick has nothing due.
+        assert autosync.process_instagram_stats_refresh(db, fetcher=fetch) == 0
+
+    def test_a_failing_account_does_not_retry_on_the_next_tick(self, db):
+        """The clock is stamped BEFORE the call, so a broken account backs off
+        instead of burning a HikerAPI call on every one-second tick."""
+        autosync._STATS_CLOCK.clear()
+        acc = account(db, "broken")
+        self._reel(db, acc, "X1", datetime.utcnow() - timedelta(days=1))
+        def boom(*args, **kw):
+            raise RuntimeError("hiker is down")
+        assert autosync.process_instagram_stats_refresh(db, fetcher=boom) == 0
+        assert autosync.process_instagram_stats_refresh(db, fetcher=boom) == 0
+
+    def test_it_never_touches_the_discovery_clock(self, db):
+        """last_synced_at means 'we looked for NEW reels'. Moving it here would
+        make the discovery backstop think it had run."""
+        autosync._STATS_CLOCK.clear()
+        before = datetime.utcnow() - timedelta(days=3)
+        acc = account(db, "clocks", synced=before)
+        self._reel(db, acc, "C1", datetime.utcnow() - timedelta(days=1))
+        autosync.process_instagram_stats_refresh(db, fetcher=lambda *a, **k: [])
+        db.refresh(acc)
+        assert acc.last_synced_at == before
