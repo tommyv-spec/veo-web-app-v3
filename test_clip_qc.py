@@ -1084,3 +1084,65 @@ def test_attach_repair_plan_passes_the_alt_line_through():
     row = q.attach_repair_plan(rm[0], clip["qc"])
     assert row["all_takes_cut"] is True
     assert row["repair"]["action"] == "reword_and_redo"
+
+
+# ---------------------------------------------------------------------------
+# v1010 — the reworded B line must be findable, or Prompt B rescues nothing
+# ---------------------------------------------------------------------------
+#
+# Measured 2026-09-16 on job 1984be6c (nuri gymclass): 11 clips, 10 spoken,
+# every one carrying a 973-char `prompt_text_b` with a genuinely different
+# line -- and `dialogue_text_b` EMPTY on all of them. Six recent jobs, 21
+# spoken clips, zero populated. The full reworded prompt reaches the renderer
+# (v892.9 fixed that); the reworded LINE never arrives.
+#
+# That breaks the rescue at the last step. v821 exists so a policy-refused line
+# can be re-submitted in different words. When that retry SUCCEEDS, the clip
+# comes back on variant B -- and `auto_approval_decision` reads
+# `dialogue_text_b`, finds nothing, and returns review("clip has no ordinary
+# spoken dialogue"). So the clip survives the refusal and then parks at
+# pending_review for ever, needing a person: exactly the outcome Prompt B was
+# built to prevent.
+#
+# v821 also makes the line RECOVERABLE: Prompt B is Prompt A word-for-word with
+# only the quoted line changed, so the B line is always inside prompt_text_b.
+
+A_PROMPT = 'Animate the frame. The man says, "your energy is gone by three." Hold.'
+B_PROMPT = 'Animate the frame. The man says, "your afternoons fall off a cliff." Hold.'
+
+
+def test_reworded_line_prefers_the_real_field():
+    clip = {"dialogue_text_b": "the stored b line", "prompt_text_b": B_PROMPT}
+    assert q.reworded_line(clip) == "the stored b line"
+
+
+def test_reworded_line_recovers_it_from_the_prompt_when_the_field_is_empty():
+    clip = {"dialogue_text_b": "", "prompt_text_b": B_PROMPT}
+    assert q.reworded_line(clip) == "your afternoons fall off a cliff."
+
+
+def test_reworded_line_is_empty_when_there_is_no_prompt_b_at_all():
+    """A build that authored no Prompt B must not get a fabricated line."""
+    assert q.reworded_line({"dialogue_text_b": "", "prompt_text_b": ""}) == ""
+    assert q.reworded_line({}) == ""
+
+
+def test_reworded_line_never_returns_the_A_line():
+    """Approving a B render against A's words is the bug clip_qc already warns
+    about; recovering the wrong line would be worse than recovering none."""
+    clip = {"dialogue_text_b": "", "prompt_text": A_PROMPT, "prompt_text_b": B_PROMPT}
+    got = q.reworded_line(clip)
+    assert got and got != "your energy is gone by three."
+
+
+def test_a_B_render_with_only_the_prompt_can_be_auto_approved():
+    """The whole point: the rescue must reach the end, not stall one step short."""
+    clip = {
+        "status": "completed", "approval_status": "pending_review",
+        "rendered_prompt_variant": "B",
+        "dialogue_text": "your energy is gone by three.",
+        "dialogue_text_b": "",
+        "prompt_text": A_PROMPT, "prompt_text_b": B_PROMPT,
+    }
+    decision = q.auto_approval_decision(clip)
+    assert decision["reason"] != "clip has no ordinary spoken dialogue", decision

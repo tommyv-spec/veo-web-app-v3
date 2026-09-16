@@ -251,7 +251,7 @@ def auto_approval_decision(clip: Dict[str, Any]) -> Dict[str, str]:
 
     active = str(clip.get("rendered_prompt_variant") or "A").strip().upper()
     active_line = (str(clip.get("dialogue_text") or "").strip()
-                   if active == "A" else str(clip.get("dialogue_text_b") or "").strip())
+                   if active == "A" else reworded_line(clip))
     if active not in {"A", "B"} or not active_line or not looks_like_speech(active_line):
         return review("clip has no ordinary spoken dialogue")
     clip_role = str(clip.get("clip_role") or "").strip().lower()
@@ -337,6 +337,43 @@ SKIP_NO_VARIANTS = "no rendered variants on disk"
 SKIP_NOT_SPEECH = "dialogue_text is build-file syntax, not a spoken line"
 
 
+_B_LINE_RE = re.compile(
+    r'(\bsays(?:\s+exactly)?(?:\s+in\s+[^,\n]+)?\s*,?\s*["“])([^"”]+)(["”])',
+    re.I,
+)
+
+
+def reworded_line(clip: Dict[str, Any]) -> str:
+    """The clip's variant-B line, recovered from Prompt B when the field is empty.
+
+    v821 makes this always possible: Prompt B is Prompt A copied word for word
+    with ONLY the quoted line reworded, so the B line is inside `prompt_text_b`
+    even when `dialogue_text_b` never arrived.
+
+    And it very often has not. Measured 2026-09-16 on job 1984be6c: 11 clips, 10
+    spoken, every one carrying a 973-char `prompt_text_b` with a genuinely
+    different line, and `dialogue_text_b` EMPTY on all of them; six recent jobs,
+    21 spoken clips, none populated. v892.9 fixed the PROMPT's journey to the
+    platform; the LINE's was never wired.
+
+    Why it matters at exactly the wrong moment: v821 exists so a policy-refused
+    line can be re-sent in different words. When that retry SUCCEEDS the clip
+    comes back on variant B — and `auto_approval_decision` reads the empty field,
+    finds no line, and returns review. The clip survives the refusal and then
+    parks at pending_review for ever, which is the one outcome Prompt B was built
+    to prevent. Recovering the line here rescues every such clip, on jobs already
+    rendered as well as new ones, without a deploy.
+
+    Returns "" when the build authored no Prompt B — a clip with no reworded line
+    must get none, never a fabricated or A-side one.
+    """
+    stored = str(clip.get("dialogue_text_b") or "").strip()
+    if stored:
+        return stored
+    hit = _B_LINE_RE.search(str(clip.get("prompt_text_b") or ""))
+    return hit.group(2).strip() if hit else ""
+
+
 def looks_like_speech(text: str) -> bool:
     """Is this actually a line someone says?
 
@@ -372,7 +409,7 @@ def expected_lines(clip: Dict[str, Any]) -> List[Tuple[str, str]]:
     honest about the ambiguity instead of pretending the column is per-variant.
     """
     a = (clip.get("dialogue_text") or "").strip()
-    b = (clip.get("dialogue_text_b") or "").strip()
+    b = reworded_line(clip)        # v1010 — recovered from Prompt B when unset
     declared = (clip.get("rendered_prompt_variant") or "A").upper()
     out: List[Tuple[str, str]] = []
     if declared == "B" and b:
