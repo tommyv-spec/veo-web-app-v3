@@ -521,6 +521,30 @@ def stored_google_password(_read=None) -> str:
         return ""
 
 
+def _v1013_menu_already_open(page) -> bool:
+    """Is Flow's Add-media popover already on screen?
+
+    Because clicking its trigger again TOGGLES IT SHUT. Measured 2026-09-16: the
+    frame-attach path opens the add menu, the diagnostic then reports the pane as
+    `flow-add-menu-popover-content` / `add-menu-popover-container` (44 elements,
+    no image tiles), and v986 clicks the trigger to open a menu that is already
+    open. The `upload` item inside the same `expect_file_chooser` block then
+    times out at exactly its 8000ms, and the state captured afterwards shows
+    `popover: 0` — it had been closed by our own click. That is 26 failed
+    Add-media uploads and the 22% of clips whose start frame never attaches.
+
+    Fails toward the OLD behaviour: if the page cannot be read, report "closed"
+    so the trigger is clicked exactly as before. Guessing "already open" on a
+    dead page would skip the one click that can open it.
+    """
+    try:
+        return page.locator(
+            "flow-add-menu-popover-content, div.add-menu-popover-container"
+        ).count() > 0
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
 def _v1012_try_password(page, label="") -> bool:
     """Answer a PASSWORD wall with the stored credential. True if we got past it.
 
@@ -12452,8 +12476,17 @@ def _v962_pick_asset_in_picker(page, image_path, prefix="", which="start"):
         for _v997_attempt in (1, 2):
             try:
                 with page.expect_file_chooser(timeout=20000) as fc:
-                    page.locator(_v986_btn).first.click(timeout=8000)
-                    time.sleep(1.5)
+                    # v1013 - LOOK BEFORE CLICKING. The trigger TOGGLES, so clicking it
+                    # while the popover is already open closes the menu, and the `upload`
+                    # item below then times out at its full 8000ms. That is 26 failed
+                    # Add-media uploads on 2026-09-16 and the 22% of clips whose start
+                    # frame never attaches.
+                    if _v1013_menu_already_open(page):
+                        print(f"{prefix}[v1013] add menu is already open - not "
+                              f"re-clicking the trigger (that would close it)", flush=True)
+                    else:
+                        page.locator(_v986_btn).first.click(timeout=8000)
+                        time.sleep(1.5)
                     # v975 — match the mat-icon LIGATURE, not the English label.
                     # The item renders as "uploadUpload": ligature + label. The
                     # ligature is identical in every locale; the label is not, and
