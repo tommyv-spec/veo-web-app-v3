@@ -282,30 +282,36 @@
         .app-container.tab-performance .main-content { display: none !important; }
         .app-container.tab-performance #imagesTab { display: none !important; }
         .app-container:not(.tab-performance) #performanceTab { display: none !important; }
-        #performanceTab { padding: 16px 18px; overflow-y: auto; }
-        #performanceTab .perf-health { border-left: 3px solid #d08c2a; background: #fff8ec;
+        /* This panel was written against a light page and the app is dark, so
+           every hard-coded #fff8ec / #666 / #fafafa rendered light-on-light and
+           the whole tab read as blank. Colours come from the theme variables. */
+        #performanceTab { padding: 16px 18px; overflow-y: auto; color: var(--text-primary); }
+        #performanceTab .perf-health { border-left: 3px solid var(--warning);
+            background: rgba(245, 158, 11, 0.12); color: var(--text-primary);
             padding: 8px 12px; margin-bottom: 14px; font-size: 13px; border-radius: 4px; }
+        #performanceTab .perf-health code { background: var(--bg-input); padding: 1px 5px;
+            border-radius: 3px; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
         #performanceTab .perf-totals { display: flex; gap: 22px; flex-wrap: wrap;
             margin-bottom: 16px; }
         #performanceTab .perf-totals div { min-width: 110px; }
         #performanceTab .perf-totals .n { font-size: 20px; font-weight: 600; display: block; }
-        #performanceTab .perf-totals .k { font-size: 11px; color: #666; text-transform: uppercase; }
+        #performanceTab .perf-totals .k { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; }
         #performanceTab table { border-collapse: collapse; width: 100%; font-size: 13px; }
         #performanceTab th, #performanceTab td { padding: 6px 8px; text-align: right;
-            border-bottom: 1px solid #eee; white-space: nowrap; }
+            border-bottom: 1px solid var(--border-color); white-space: nowrap; }
         #performanceTab th:first-child, #performanceTab td:first-child { text-align: left;
             white-space: normal; }
-        #performanceTab th { font-size: 11px; color: #666; text-transform: uppercase; }
-        #performanceTab .unknown { color: #999; font-style: italic; }
-        #performanceTab .perf-links a { font-size: 11px; margin-right: 10px; }
+        #performanceTab th { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; }
+        #performanceTab .unknown { color: var(--text-muted); font-style: italic; }
+        #performanceTab .perf-links a { font-size: 11px; margin-right: 10px; color: var(--accent2); }
         #performanceTab .perf-bucket { margin-top: 20px; font-size: 13px; }
-        #performanceTab .perf-bucket .warn { color: #b3261e; }
-        #performanceTab tr.perf-day td { background: #fafafa; font-size: 12px; color: #555; }
-        #performanceTab tr.perf-account td { background: #f4f7fb; font-size: 12px; }
+        #performanceTab .perf-bucket .warn { color: var(--error); }
+        #performanceTab tr.perf-day td { background: var(--bg-surface); font-size: 12px; color: var(--text-secondary); }
+        #performanceTab tr.perf-account td { background: var(--bg-elevated); font-size: 12px; }
         #performanceTab .perf-platform { display: inline-block; font-size: 10px;
-            text-transform: uppercase; letter-spacing: .04em; background: #dde6f2;
-            color: #33527a; padding: 1px 6px; border-radius: 3px; margin-right: 6px; }
-        #performanceTab .perf-tag { color: #888; font-size: 11px; margin-left: 8px; }
+            text-transform: uppercase; letter-spacing: .04em; background: var(--accent-glow);
+            color: var(--text-primary); padding: 1px 6px; border-radius: 3px; margin-right: 6px; }
+        #performanceTab .perf-tag { color: var(--text-muted); font-size: 11px; margin-left: 8px; }
         .app-container.tab-videos #imagesTab { display: none !important; }
         /* Default state (no class) = videos */
         .app-container:not(.tab-images) #imagesTab { display: none !important; }
@@ -20366,14 +20372,14 @@ async function renderAutoEditCard(jobId, hasExport) {
         async function perfLoad() {
             const el = document.getElementById('performanceTab');
             if (!el) return;
-            el.innerHTML = '<p style="color:#666;">Loading…</p>';
+            el.innerHTML = '<p style="color:var(--text-secondary);">Loading…</p>';
             let data;
             try {
                 const r = await fetch('/api/amazon/sales-report', { credentials: 'include' });
                 if (!r.ok) throw new Error('HTTP ' + r.status);
                 data = await r.json();
             } catch (e) {
-                el.innerHTML = '<p style="color:#b3261e;">Could not read the sales report (' +
+                el.innerHTML = '<p style="color:var(--error);">Could not read the sales report (' +
                     escapeHtml(String(e.message || e)) + ').</p>';
                 return;
             }
@@ -20417,7 +20423,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                 '<th>Clk/view</th><th>Items</th><th>Ord/clk</th><th>Revenue</th>' +
                 '<th>Earnings</th></tr></thead><tbody>');
             if (!videos.length) {
-                out.push('<tr><td colspan="8" style="color:#666;">No videos in this report.</td></tr>');
+                out.push('<tr><td colspan="8" style="color:var(--text-secondary);">No videos in this report.</td></tr>');
             }
             videos.forEach(function (v) {
                 const p = v.period || {};
@@ -20428,7 +20434,7 @@ async function renderAutoEditCard(jobId, hasExport) {
                     '" target="_blank" rel="noopener">job ↗</a>' : '';
                 out.push('<tr>' +
                     '<td><div>' + escapeHtml(v.video || '') + '</div>' +
-                    '<div style="color:#777;font-size:11px;">' +
+                    '<div style="color:var(--text-secondary);font-size:11px;">' +
                     escapeHtml((v.accounts || []).join(', ')) + '</div>' +
                     '<div class="perf-links">' + post + job + '</div></td>' +
                     '<td>' + perfNum(views) + '</td>' +
