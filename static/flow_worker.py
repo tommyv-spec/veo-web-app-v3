@@ -613,6 +613,11 @@ def _v978_tick(liveness, act_fn=None):
         stack = _v978_main_stack() or "(stack unavailable)"
     except Exception:
         stack = "(stack unavailable)"
+    try:
+        stack += (chr(10) + "[v978] WORKER FRAMES (v975 locator - read THIS, "
+                  "not the label):" + chr(10) + _v978_parked_greenlet_stacks())
+    except Exception:                                   # noqa: BLE001
+        stack += chr(10) + "[v978] worker frames unavailable"
     if level == "warn":
         # Throttled. The poll interval is a quarter of the warn budget, so an
         # unthrottled warn printed a full stack on EVERY tick -- measured on the
@@ -626,8 +631,8 @@ def _v978_tick(liveness, act_fn=None):
                       f"(warn at {liveness.warn_s:.0f}s, act at "
                       f"{liveness.act_s:.0f}s)\n"
                       f"[v978] STUCK IN: {_v978_where()}\n"
-                      f"[v978] (the stack below is Playwright's greenlet "
-                      f"dispatcher, not the worker — read the line above)\n{stack}")
+                      f"[v978] (the first stack below is Playwright's greenlet "
+                      f"dispatcher; the WORKER FRAMES section under it is the real locator)\n{stack}")
         return level
     if liveness.acted:
         return level
@@ -650,6 +655,45 @@ def _v978_main_stack():
     if frame is None:
         return None
     return "".join(_tb.format_stack(frame))
+
+
+def _v978_parked_greenlet_stacks(keep_lines=24):
+    """v975 locator - the worker OWN frames, which _v978_main_stack cannot reach.
+
+    Playwright sync API runs our code in one greenlet and its dispatcher in
+    another. While a page call is in flight ours is PARKED, so
+    sys._current_frames() returns the dispatcher idle event loop --
+    GetQueuedCompletionStatus, byte-identical in every stall dump this worker
+    has ever printed. Six kills on 2026-09-16 carried five different STUCK IN
+    labels and that same useless stack, so three sessions in a row read the
+    label instead, and a label is only where activity() last STAMPED.
+
+    A parked greenlet keeps its frames on gr_frame, reachable through the gc.
+    Walking them puts the line the worker is actually blocked on into the log.
+    Best effort by construction: the watchdog must still fire if this fails.
+    """
+    import traceback as _tb
+    try:
+        import gc as _gc
+        import greenlet as _greenlet
+    except Exception:                                   # noqa: BLE001
+        return "(greenlet frames unavailable - module not importable)"
+    out = []
+    try:
+        for obj in _gc.get_objects():
+            if not isinstance(obj, _greenlet.greenlet):
+                continue
+            frame = getattr(obj, "gr_frame", None)
+            if frame is None:
+                continue
+            lines = _tb.format_stack(frame)[-keep_lines:]
+            out.append("  --- parked greenlet %s ---" % hex(id(obj))
+                       + chr(10) + "".join(lines))
+    except Exception as exc:                            # noqa: BLE001
+        return "(greenlet walk raised %s)" % type(exc).__name__
+    if not out:
+        return "(no parked greenlet held frames)"
+    return "".join(out)
 
 
 def _v978_install_liveness_watchdog():
@@ -15124,6 +15168,10 @@ def ensure_videos_tab_selected(page):
 POPUP_SWEEP_BUDGET_S = 20.0
 
 
+class _PageWedged(Exception):
+    """The page failed a bounded liveness probe (v1009.2)."""
+
+
 def _popup_time_up(deadline) -> bool:
     """Has the popup sweep spent its budget? Never raises — this runs on the
     path that is already in trouble and may not add a second fault."""
@@ -15149,6 +15197,29 @@ def check_and_dismiss_popup(page):
     cannot tell "no popup" from "stopped looking". An undismissed popup costs one
     retry; a sweep that never returns costs the job and the whole lane.
     """
+    # v1009.3 — the probe below was wait_for_selector('body', state='attached'),
+    # which a wedged page PASSES: an attached body is answered from the DOM
+    # snapshot without the renderer's JS thread running. Measured 2026-09-17:
+    # the guard fired twice and the worker still died STUCK IN
+    # check_and_dismiss_popup at 486s. wait_for_function('1') needs the JS event
+    # loop to actually execute, so it times out exactly when count() would hang.
+    # A liveness probe that cannot fail on a dead page is not a probe.
+    # v1009.1 — the 20s budget above is COOPERATIVE: it is only read between
+    # blocks, so it cannot stop a single call that never returns. That is what
+    # still killed the lane on 2026-09-16 at 18:39 — `[v978] STALLED ... STUCK IN:
+    # check_and_dismiss_popup (started 482s ago)`, 482s inside a 20s budget.
+    # The docstring above names the reason: `count()` takes no timeout, and this
+    # sweep makes 19 of them. Playwright enforces timeouts DRIVER-side, so an API
+    # that accepts one raises on a wedged page where count() blocks for ever.
+    # So: probe once, bounded, and bail before spending 19 unbounded calls on a
+    # page that cannot answer. Bailing is already safe — see the docstring.
+    try:
+        page.wait_for_function("1", timeout=3000)
+    except Exception:
+        print("[popup] page is not answering within 3s — skipping the sweep "
+              "(v1009.1); an undismissed popup costs one retry, a wedged sweep "
+              "costs the lane", flush=True)
+        return False
     _deadline = time.time() + POPUP_SWEEP_BUDGET_S
     try:
         # ── Google cookie consent banner ──
@@ -18417,7 +18488,7 @@ class DownloadHelper:
                 if wait_attempt > 0 and wait_attempt % 10 == 0:
                     print(f"[{self.account_name}] Still waiting for video... ({wait_attempt * 2}s elapsed)", flush=True)
                     try:
-                        self.page.reload(timeout=30000)
+                        self.page.reload(wait_until="domcontentloaded", timeout=30000)
                         time.sleep(3)
                         check_and_dismiss_popup(self.page)
                         ensure_videos_tab_selected(self.page)
@@ -18744,7 +18815,9 @@ class DownloadHelper:
             print(f"[{self.account_name}] ⏸ Waiting for frame dialog to close before refresh...", flush=True)
             frames_busy.wait(timeout=30)
         try:
-            self.page.reload(timeout=30000)
+            _t0 = time.time()
+            self.page.reload(wait_until="domcontentloaded", timeout=30000)
+            print(f"[{self.account_name}] [v1006.1] reload(domcontentloaded) returned in {time.time() - _t0:.1f}s", flush=True)
             time.sleep(3)
             # v1006 — these three helpers make ~19 locator calls between them, and
             # nothing sets a default timeout, so each may burn Playwright's built-in
@@ -18752,14 +18825,35 @@ class DownloadHelper:
             # kill: 15 of 17 worker deaths on 2026-09-16 were this function simply
             # not returning. Cap each call AND the sequence, so a refresh that
             # cannot finish gives up instead of holding the lane until it is shot.
+            # v1009.2 — ONE probe gates ALL THREE helpers, not just the first.
+            # 2026-09-16 23:2x, with v1009.1 in place: the popup sweep correctly
+            # bailed ("page is not answering within 3s") and the worker then hung
+            # 481s in ensure_batch_view_mode and died anyway. Each helper makes its
+            # own unbounded locator calls, and _run_within_budget's 45s budget is
+            # cooperative like the popup one — it cannot stop a call that never
+            # returns. The probe was already telling us the truth: the PAGE is
+            # wedged. When it is, none of the three can do anything useful, so
+            # skip the sequence instead of feeding it one helper at a time.
+            _page_answers = True
+            try:
+                self.page.wait_for_function("1", timeout=3000)
+            except Exception:
+                _page_answers = False
+                print(f"[{self.account_name}] [v1009.2] page did not answer a 3s "
+                      f"probe — skipping popup/videos-tab/batch-view entirely; a "
+                      f"wedged page cannot be fixed by locator calls", flush=True)
             self.page.set_default_timeout(5000)
             try:
+                if not _page_answers:
+                    raise _PageWedged()
                 _run_within_budget([
                     ("popup", lambda: check_and_dismiss_popup(self.page)),
                     ("videos-tab", lambda: ensure_videos_tab_selected(self.page)),
                     ("batch-view", lambda: ensure_batch_view_mode(
                         self.page, f"[{self.account_name}-Refresh]")),
                 ], budget_s=45, label=f"[{self.account_name}] ")
+            except _PageWedged:
+                pass
             finally:
                 self.page.set_default_timeout(30000)
             
@@ -19618,7 +19712,7 @@ class DownloadHelper:
                 time.sleep(10)
                 
                 # Refresh and check for video or failure
-                self.page.reload(timeout=30000)
+                self.page.reload(wait_until="domcontentloaded", timeout=30000)
                 time.sleep(3)
                 check_and_dismiss_popup(self.page)
                 ensure_videos_tab_selected(self.page)
@@ -20099,7 +20193,7 @@ class DownloadHelper:
             
             # Refresh page
             print(f"[{self.account_name}] Refreshing page...", flush=True)
-            self.page.reload(timeout=30000)
+            self.page.reload(wait_until="domcontentloaded", timeout=30000)
             time.sleep(5)
             check_and_dismiss_popup(self.page)
             
@@ -20139,7 +20233,7 @@ class DownloadHelper:
                 print(f"[{self.account_name}] Retry {retry}/{max_retries-1} - waiting {wait_time}s and refreshing...", flush=True)
                 time.sleep(wait_time)
                 try:
-                    self.page.reload(timeout=30000)
+                    self.page.reload(wait_until="domcontentloaded", timeout=30000)
                     time.sleep(5)  # Wait for page to settle after refresh
                     check_and_dismiss_popup(self.page)
                     ensure_videos_tab_selected(self.page)
