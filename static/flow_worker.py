@@ -458,6 +458,122 @@ def _v978_where():
         return "unknown"
 
 
+# v1012 — the ONE Google challenge a stored password may answer, and the cap.
+PWD_CHALLENGE_MARK = "/signin/challenge/pwd"
+GOOGLE_SECRET_TARGET = "kaveno:google:kaveno.biz@gmail.com"
+PASSWORD_MAX_ATTEMPTS = 2
+
+
+def password_login_allowed(url, attempts) -> bool:
+    """May we type the stored password here? Only on a PASSWORD wall, twice at most.
+
+    Both halves are refusals, and both matter more than the feature.
+
+    The URL must say `pwd` SPECIFICALLY. A 2-Step code page, a device
+    verification and a reCAPTCHA all live under
+    `accounts.google.com/v3/signin/challenge/...`, and typing a password into a
+    2SV field sends it somewhere it does not belong and burns an attempt. "A
+    challenge appeared" is not good enough.
+
+    And it stops at two. This project already measured that rapid automated
+    sign-ins are what CREATE these challenges — eight restarts in four hours
+    produced the wall that was then blamed on a broken session. A password that
+    retries turns one wall into a lockout of the account everything runs on, so
+    the third attempt is a human's, not ours.
+    """
+    try:
+        if int(attempts) >= PASSWORD_MAX_ATTEMPTS:
+            return False
+    except (TypeError, ValueError):
+        return False
+    try:
+        return PWD_CHALLENGE_MARK in str(url or "")
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
+def stored_google_password(_read=None) -> str:
+    """The operator's Google password from Windows Credential Manager, or "".
+
+    Read in-process from the DPAPI store, scoped to this Windows user. NOT from
+    an env var or argv — both are readable by every process on the box, and this
+    repo already runs `credential_read_guard.py` to keep live credentials out of
+    the conversation transcript. Written by `tools/kaveno_secret.py set google`;
+    the target name is shared so there is exactly one owner of the value.
+
+    Returns "" when absent or unreadable rather than raising: every caller is
+    mid-login, where an exception turns "no password stored, hold the lane" into
+    a crash that looks like a different bug.
+    """
+    if _read is not None:
+        try:
+            return _read(GOOGLE_SECRET_TARGET) or ""
+        except Exception:                               # noqa: BLE001
+            return ""
+    try:
+        import win32cred                                # noqa: PLC0415 - lazy
+        row = win32cred.CredRead(GOOGLE_SECRET_TARGET, win32cred.CRED_TYPE_GENERIC)
+        blob = (row or {}).get("CredentialBlob")
+        # CredWrite stores UTF-16-LE; a UTF-8 decode gives the right LENGTH and
+        # the wrong characters, which fails a login while looking like a typo.
+        return blob.decode("utf-16-le") if isinstance(blob, (bytes, bytearray)) else ""
+    except Exception:                                   # noqa: BLE001
+        return ""
+
+
+def _v1012_try_password(page, label="") -> bool:
+    """Answer a PASSWORD wall with the stored credential. True if we got past it.
+
+    Fires only where `password_login_allowed` says so — a `/signin/challenge/pwd`
+    URL, at most twice — and does nothing at all when no password is stored, so a
+    box without one behaves exactly as before.
+
+    The secret is never printed, never formatted into a message, and is dropped
+    from the local name as soon as it has been typed. What DOES get logged is the
+    attempt number and whether the wall cleared, because a fallback nobody can
+    see in the log is a fallback nobody can debug.
+    """
+    try:
+        url = page.url
+    except Exception:                                   # noqa: BLE001
+        return False
+    attempts = getattr(page, "_v1012_pw_attempts", 0)
+    if not password_login_allowed(url, attempts):
+        return False
+    secret = stored_google_password()
+    if not secret:
+        print(f"[{label}] password wall, and no password is stored — holding for a "
+              f"human (store one with: python tools/kaveno_secret.py set google)",
+              flush=True)
+        return False
+    try:
+        page._v1012_pw_attempts = attempts + 1
+    except Exception:                                   # noqa: BLE001
+        pass
+    print(f"[{label}] password wall — attempt {attempts + 1}/{PASSWORD_MAX_ATTEMPTS} "
+          f"with the stored credential", flush=True)
+    try:
+        box = page.locator("input[type='password']").first
+        box.wait_for(state="visible", timeout=15000)
+        box.fill(secret)
+        page.keyboard.press("Enter")
+        page.wait_for_load_state("domcontentloaded", timeout=30000)
+        time.sleep(4)
+    except Exception as exc:                            # noqa: BLE001
+        print(f"[{label}] password fallback could not complete "
+              f"({type(exc).__name__}) — leaving it to a human", flush=True)
+        return False
+    finally:
+        secret = ""
+    try:
+        cleared = PWD_CHALLENGE_MARK not in str(page.url or "")
+    except Exception:                                   # noqa: BLE001
+        cleared = False
+    print(f"[{label}] password submitted — "
+          f"{'moved past the wall' if cleared else 'still on the wall'}", flush=True)
+    return cleared
+
+
 def _v978_tick(liveness, act_fn=None):
     """One watchdog turn. Warns, then escalates once.
 
@@ -5600,6 +5716,21 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
         print(f"[{label}] GOOGLE LOGIN REQUIRED", flush=True)
         print(f"Please complete login in the browser...", flush=True)
         print(f"{'='*50}\n", flush=True)
+        # v1012 — a headless worker has nobody to sign it in, which is why v963
+        # collapses the wait below to zero: the lane simply dies. Measured
+        # 2026-09-16: 7 of these walls in one day, every one a
+        # `/signin/challenge/pwd` password prompt with no 2-Step behind it.
+        # If a password is stored, type it. This refuses every OTHER challenge
+        # and stops after two tries, because rapid automated sign-ins are what
+        # create these walls in the first place.
+        try:
+            if _v1012_try_password(p, label):
+                _publish_flow_auth_ready(p, label)
+                return True
+        except Exception as exc:                        # noqa: BLE001
+            print(f"[{label}] password fallback errored "
+                  f"({type(exc).__name__}) — falling through to the normal wait",
+                  flush=True)
         # v457: bring Chrome forward so the user sees the login prompt,
         # and set stay_visible so the on-load handler doesn't re-minimize
         # during the Google auth flow.
