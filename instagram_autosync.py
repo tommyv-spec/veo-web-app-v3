@@ -436,7 +436,12 @@ def process_instagram_autosync(db, interval_hours=None, retry_minutes=None,
 # moment to add the column, not before.
 # ---------------------------------------------------------------------------
 
-STATS_ENABLED = os.environ.get("IG_STATS_REFRESH", "1").strip().lower() not in ("0", "false", "no")
+# Postproxy is now the normal stats source. The local reporting lane pushes its
+# included view/like/comment feed into KavenoBuilder, so automatically spending
+# HikerAPI calls here would buy the same numbers twice. This stays as an explicit
+# emergency fallback only; reel DISCOVERY above is unchanged.
+STATS_ENABLED = os.environ.get("IG_HIKER_STATS_FALLBACK", "0").strip().lower() in (
+    "1", "true", "yes")
 # How often ONE account's recent reels get fresh counts.
 STATS_REFRESH_MINUTES = float(os.environ.get("IG_STATS_REFRESH_MINUTES", "180"))
 # Only reels this recent. An older reel's view count barely moves, and every

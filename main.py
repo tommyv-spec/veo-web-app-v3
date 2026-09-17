@@ -21336,6 +21336,132 @@ def _amazon_sales_latest(db, user_id: str) -> dict | None:
 _AMAZON_SALES_KEEP = 5
 
 
+# Postproxy stats arrive from the operator's local lane. The API key stays on
+# that machine; KavenoBuilder receives only public reel ids and engagement
+# counts, authenticated with the same per-user worker token as the sales report.
+_POSTPROXY_IG_COUNT_FIELDS = ("views", "likes", "comments")
+
+
+def _postproxy_ig_count(value):
+    """A non-negative integer count, or None when the vendor did not report it."""
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+@app.post("/api/user-worker/instagram/postproxy-stats")
+async def receive_postproxy_instagram_stats(
+    payload: dict = Body(...),
+    user_id: str = Depends(verify_user_worker_token),
+    db: DBSession = Depends(get_db_session),
+):
+    """Refresh existing connected-account reel stats from Postproxy.
+
+    This updates rows the account sync already discovered; it never invents a
+    reel. Shortcode plus the authenticated user's account boundary is the join,
+    so one worker token cannot touch another user's Instagram rows.
+    """
+    import re as _re
+
+    from models import InstagramAccount, InstagramVideo
+
+    if not isinstance(payload, dict) or payload.get("source") != "postproxy":
+        raise HTTPException(status_code=400,
+                            detail="source must be 'postproxy'")
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=400, detail="rows must be a list")
+    if len(rows) > 2000:
+        raise HTTPException(status_code=400, detail="too many stats rows (max 2000)")
+
+    # Take the newest supplied copy of each shortcode. post_stats already picks
+    # the newest vendor record, but deduping here keeps this endpoint safe for a
+    # replayed or hand-built request too.
+    supplied = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        shortcode = str(row.get("shortcode") or "").strip()
+        if not _re.fullmatch(r"[A-Za-z0-9_-]{1,32}", shortcode):
+            continue
+        supplied[shortcode] = row
+
+    stored = []
+    if supplied:
+        stored = (
+            db.query(InstagramVideo)
+            .join(InstagramAccount, InstagramVideo.account_id == InstagramAccount.id)
+            .filter(InstagramAccount.user_id == str(user_id),
+                    InstagramVideo.shortcode.in_(list(supplied)))
+            .all()
+        )
+
+    updated = 0
+    for video in stored:
+        incoming = supplied[video.shortcode]
+        changed = False
+        for field in _POSTPROXY_IG_COUNT_FIELDS:
+            value = _postproxy_ig_count(incoming.get(field))
+            if value is None:
+                continue
+            current = getattr(video, field)
+            # A zero from a sparse stats record must not erase a real count. This
+            # is the same protection the old HikerAPI updater used.
+            if value == 0 and current:
+                continue
+            if current != value:
+                setattr(video, field, value)
+                changed = True
+        if changed:
+            updated += 1
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500,
+                            detail=f"could not store Postproxy stats: {exc}")
+
+    # Prove the committed values can be read back, not merely that commit()
+    # returned. This distinction caught the earlier ephemeral sales snapshot.
+    readback = 0
+    if supplied:
+        db.expire_all()
+        persisted = (
+            db.query(InstagramVideo)
+            .join(InstagramAccount, InstagramVideo.account_id == InstagramAccount.id)
+            .filter(InstagramAccount.user_id == str(user_id),
+                    InstagramVideo.shortcode.in_(list(supplied)))
+            .all()
+        )
+        for video in persisted:
+            incoming = supplied[video.shortcode]
+            verified = True
+            for field in _POSTPROXY_IG_COUNT_FIELDS:
+                value = _postproxy_ig_count(incoming.get(field))
+                current = getattr(video, field)
+                if value is None or (value == 0 and current):
+                    continue
+                if current != value:
+                    verified = False
+                    break
+            if verified:
+                readback += 1
+
+    # Runtime proof for the source switch. Remove only after a real push and DB
+    # readback have both been observed.
+    print(f"[ig-postproxy-stats] user={user_id} received={len(rows)} "
+          f"usable={len(supplied)} matched={len(stored)} updated={updated} "
+          f"readback={readback}",
+          flush=True)
+    return {"source": "postproxy", "received": len(rows),
+            "usable": len(supplied), "matched": len(stored),
+            "updated": updated, "readback": readback}
+
+
 # Under /api/user-worker/ on purpose, for two reasons. The prefix is exempt from
 # the session middleware (PUBLIC_PREFIXES), which then hands over to the token
 # check -- a route outside it never reaches this function, the middleware answers

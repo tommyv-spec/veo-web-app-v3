@@ -381,7 +381,9 @@ class TestStatsRefresh:
     @pytest.fixture(autouse=True)
     def _no_real_encryption(self, monkeypatch):
         """The refresh reads the account's stored HikerAPI key, which is
-        encrypted. These tests are about the refresh, not about Fernet."""
+        encrypted. These tests cover the explicit emergency fallback, not the
+        default Postproxy path and not Fernet."""
+        monkeypatch.setattr(autosync, "STATS_ENABLED", True)
         monkeypatch.setattr("encryption.decrypt", lambda blob: "test-key")
 
     def _reel(self, db, acc, shortcode, posted, views=0):

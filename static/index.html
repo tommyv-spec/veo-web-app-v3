@@ -5471,7 +5471,7 @@ Ambient: same kitchen room tone, soft pour sound.
               <span class="ig-account-handle">@${escapeHtml(acc.handle)}</span>
               <span class="ig-account-meta">${acc.video_count || 0} videos · last sync ${lastSync}</span>
               <button class="btn btn-secondary btn-sm ig-sync-btn" data-id="${acc.id}">Sync</button>
-              <button class="btn btn-secondary btn-sm ig-refresh-views-btn" data-id="${acc.id}" title="Re-pull views/likes for reels posted in the last 7 days">↻ Views 7d</button>
+              <span class="ig-account-meta" title="Views, likes and comments are refreshed from the Postproxy subscription">Stats: Postproxy</span>
               <button class="btn btn-secondary btn-sm ig-retry-failed-btn" data-id="${acc.id}" title="Re-queue every failed video for transcription">Retry failed</button>
               <select class="ig-export-range" data-id="${acc.id}" title="Window to export" style="font-size:11px;padding:2px 4px;">
                 <option value="last_week">Last week</option>
@@ -5512,7 +5512,7 @@ Ambient: same kitchen room tone, soft pour sound.
           return `<div class="ig-video-card" data-id="${safeId}" data-shortcode="${escapeHtml(v.shortcode || '')}">
             <a href="${escapeHtml(v.url || '#')}" target="_blank" rel="noopener">${thumb}</a>
             <div class="ig-video-caption">${cap}</div>
-            <div class="ig-video-meta"><span>${(v.views || 0).toLocaleString()} v</span><span>${(v.likes || 0).toLocaleString()} ♡</span></div>
+            <div class="ig-video-meta"><span>${(v.views || 0).toLocaleString()} v</span><span>${(v.likes || 0).toLocaleString()} ♡</span><span>${(v.comments || 0).toLocaleString()} comments</span></div>
             <div class="ig-video-meta"><span style="opacity:.7;">${escapeHtml(igPostedLabel(v.posted_at))}</span></div>
             ${status}
           </div>`;
@@ -6306,24 +6306,6 @@ Ambient: same kitchen room tone, soft pour sound.
             syncBtn.disabled = true;
             syncBtn.textContent = "Syncing…";
             await igSync(parseInt(syncBtn.dataset.id));
-            await refreshInstagramPanel();
-            return;
-          }
-          const viewsBtn = ev.target.closest(".ig-refresh-views-btn[data-id]");
-          if (viewsBtn) {
-            viewsBtn.disabled = true;
-            viewsBtn.textContent = "Refreshing…";
-            const r = await fetch(`/api/instagram/accounts/${viewsBtn.dataset.id}/refresh-stats?days=7`, {
-              method: "POST", credentials: "include",
-            });
-            if (!r.ok) {
-              const err = await r.json().catch(() => ({}));
-              alert("Views refresh failed: " + (err.detail || r.status));
-            } else {
-              const data = await r.json();
-              console.log(`[ig] refreshed views on ${data.updated}/${data.checked} reels from the last ${data.window_days}d` + (data.missed ? ` — ${data.missed} NOT reached` : ""));
-              if (data.missed) alert(`${data.missed} reel(s) from the last ${data.window_days}d were not reached by the fetch — run Sync.`);
-            }
             await refreshInstagramPanel();
             return;
           }
