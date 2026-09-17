@@ -1774,6 +1774,45 @@ CAPTION_I_FORMS = {"i": "I", "i'm": "I'm", "i've": "I've", "i'd": "I'd",
 _CAPTION_EDGE_RE = re.compile(r"^[^\w']+|[^\w']+$")
 
 
+# --- brand spellings NO BUILD SHOULD HAVE TO DECLARE ------------------------
+# ROOT CAUSE, not another per-build patch. `docs/protected-words.json` records a
+# gate-passing selling video shipping with the brand as "Corella" in three burned
+# captions on 2026-09-04. On 2026-09-17 the same word blocked nuri 1984be6c, and the
+# first fix was to add `autoedit_caption_words` to THAT ONE BUILD -- which leaves
+# every future build one forgotten declaration away from the identical failure.
+#
+# Root CLAUDE.md's own rule (throughput-improvement-plan Item 2): at the SECOND use of
+# the same manual fix, move it into the pipeline default. This is the second use.
+#
+# So the words the DELIVERY GATE protects become the words the caption burner spells,
+# automatically, for every build. One list, both ends, nothing to remember. A build's
+# own `autoedit_caption_words` still wins on any key it declares, because a human
+# saying "this one is different" must outrank a default.
+_BRAND_VOCAB = Path(__file__).resolve().parent.parent / "docs" / "protected-words.json"
+
+
+def brand_caption_fixes() -> dict:
+    """{wrong lowercase: correct spelling} from the protected-words vocabulary.
+
+    Returns {} when the file is missing or malformed: a caption render must never
+    fail because a data file moved.
+    """
+    try:
+        data = json.loads(_BRAND_VOCAB.read_text(encoding="utf-8"))
+    except Exception:                                    # noqa: BLE001
+        return {}
+    out = {}
+    for row in data.get("near_miss_words") or []:
+        right = str(row.get("word") or "").strip()
+        if not right:
+            continue
+        for wrong in row.get("seen_wrong") or []:
+            key = str(wrong).strip().lower()
+            if key and key != right.lower():
+                out[key] = right
+    return out
+
+
 def caption_fix_plan(case, words):
     """v960 — the transcript fix, or None when the build declared neither.
 
@@ -1786,9 +1825,13 @@ def caption_fix_plan(case, words):
         words = validate_caption_words(words)
     except ValueError as exc:
         raise AutoEditError(f"{exc} (v960)")
-    if not case and not words:
+    # The brand defaults apply whether or not the build declared anything, which is
+    # the whole point: a build that says nothing still spells the brand right.
+    merged = dict(brand_caption_fixes())
+    merged.update(words or {})            # a build's own declaration wins
+    if not case and not merged:
         return None
-    return {"case": case, "words": dict(words or {})}
+    return {"case": case, "words": merged}
 
 
 def caption_fix_digest(plan):
