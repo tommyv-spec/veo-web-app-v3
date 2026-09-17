@@ -285,7 +285,7 @@
         /* This panel was written against a light page and the app is dark, so
            every hard-coded #fff8ec / #666 / #fafafa rendered light-on-light and
            the whole tab read as blank. Colours come from the theme variables. */
-        #performanceTab { padding: 16px 18px; overflow-y: auto; color: var(--text-primary); }
+        #performanceTab { padding: 16px 18px 32px; overflow-y: auto; color: var(--text-primary); }
         #performanceTab .perf-health { border-left: 3px solid var(--warning);
             background: rgba(245, 158, 11, 0.12); color: var(--text-primary);
             padding: 8px 12px; margin-bottom: 14px; font-size: 13px; border-radius: 4px; }
@@ -296,22 +296,93 @@
         #performanceTab .perf-totals div { min-width: 110px; }
         #performanceTab .perf-totals .n { font-size: 20px; font-weight: 600; display: block; }
         #performanceTab .perf-totals .k { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; }
-        #performanceTab table { border-collapse: collapse; width: 100%; font-size: 13px; }
-        #performanceTab th, #performanceTab td { padding: 6px 8px; text-align: right;
-            border-bottom: 1px solid var(--border-color); white-space: nowrap; }
+        #performanceTab .perf-controls { display: grid;
+            grid-template-columns: minmax(190px, 2fr) repeat(3, minmax(120px, 1fr)) minmax(155px, 1fr) auto;
+            gap: 8px; align-items: end; padding: 12px; margin: 0 0 8px;
+            background: var(--bg-elevated); border: 1px solid var(--border-color); border-radius: 8px; }
+        #performanceTab .perf-control { display: grid; gap: 4px; min-width: 0; }
+        #performanceTab .perf-control > span { color: var(--text-secondary); font-size: 10px;
+            font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
+        #performanceTab .perf-control input, #performanceTab .perf-control select {
+            width: 100%; min-height: 34px; padding: 6px 8px; color: var(--text-primary);
+            background: var(--bg-input); border: 1px solid var(--border-color); border-radius: 5px; }
+        #performanceTab .perf-control input:focus-visible,
+        #performanceTab .perf-control select:focus-visible,
+        #performanceTab .perf-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+        #performanceTab .perf-check { display: flex; align-items: center; gap: 7px;
+            min-height: 34px; color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
+        #performanceTab .perf-check input { accent-color: var(--accent); }
+        #performanceTab .perf-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
+        #performanceTab .perf-reset { min-height: 32px; padding: 5px 9px; color: var(--text-secondary);
+            background: transparent; border: 1px solid var(--border-color); border-radius: 5px; cursor: pointer; }
+        #performanceTab .perf-reset:hover { color: var(--text-primary); border-color: var(--text-muted); }
+        #performanceTab .perf-results { margin: 6px 2px 10px; color: var(--text-secondary); font-size: 12px; }
+        #performanceTab .perf-table-wrap { overflow-x: auto; border: 1px solid var(--border-color);
+            border-radius: 8px; background: var(--bg-surface); }
+        #performanceTab table { border-collapse: collapse; width: 100%; min-width: 920px; font-size: 13px; }
+        #performanceTab th, #performanceTab td { padding: 10px 9px; text-align: right;
+            border-bottom: 1px solid var(--border-color); white-space: nowrap; vertical-align: middle; }
         #performanceTab th:first-child, #performanceTab td:first-child { text-align: left;
             white-space: normal; }
-        #performanceTab th { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; }
+        #performanceTab th { position: sticky; top: 0; z-index: 1; font-size: 10px;
+            color: var(--text-secondary); text-transform: uppercase; background: var(--bg-elevated); }
+        #performanceTab .perf-sort { appearance: none; border: 0; padding: 0; color: inherit;
+            background: transparent; font: inherit; letter-spacing: inherit; text-transform: inherit;
+            cursor: pointer; }
+        #performanceTab .perf-sort.active { color: var(--accent2); }
+        #performanceTab tr:last-child td { border-bottom: 0; }
+        #performanceTab .perf-video-name { font-weight: 650; overflow-wrap: anywhere; }
+        #performanceTab .perf-video-meta { margin-top: 3px; color: var(--text-secondary); font-size: 11px; }
+        #performanceTab .perf-metric-main { display: block; font-family: 'JetBrains Mono', monospace;
+            font-weight: 650; font-variant-numeric: tabular-nums; }
+        #performanceTab .perf-metric-sub { display: block; margin-top: 2px; color: var(--text-muted);
+            font-size: 10px; font-variant-numeric: tabular-nums; }
         #performanceTab .unknown { color: var(--text-muted); font-style: italic; }
-        #performanceTab .perf-links a { font-size: 11px; margin-right: 10px; color: var(--accent2); }
+        #performanceTab .perf-links { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+        #performanceTab .perf-links a { font-size: 10px; color: var(--accent2); border: 1px solid var(--border-color);
+            border-radius: 4px; padding: 2px 6px; text-decoration: none; }
+        #performanceTab .perf-links a:hover { border-color: var(--accent2); }
         #performanceTab .perf-bucket { margin-top: 20px; font-size: 13px; }
         #performanceTab .perf-bucket .warn { color: var(--error); }
-        #performanceTab tr.perf-day td { background: var(--bg-surface); font-size: 12px; color: var(--text-secondary); }
-        #performanceTab tr.perf-account td { background: var(--bg-elevated); font-size: 12px; }
+        #performanceTab tr.perf-detail-row td { padding: 0; text-align: left; white-space: normal;
+            background: var(--bg-elevated); }
+        #performanceTab .perf-detail { display: grid; gap: 8px; padding: 10px 14px 14px; }
+        #performanceTab .perf-detail-account { padding-top: 8px; border-top: 1px solid var(--border-color); }
+        #performanceTab .perf-detail-head { display: flex; flex-wrap: wrap; gap: 7px; align-items: center;
+            margin-bottom: 6px; font-size: 12px; }
+        #performanceTab .perf-days { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 5px; }
+        #performanceTab .perf-day { padding: 6px 8px; border: 1px solid var(--border-color); border-radius: 5px;
+            color: var(--text-secondary); font-size: 11px; }
         #performanceTab .perf-platform { display: inline-block; font-size: 10px;
             text-transform: uppercase; letter-spacing: .04em; background: var(--accent-glow);
             color: var(--text-primary); padding: 1px 6px; border-radius: 3px; margin-right: 6px; }
         #performanceTab .perf-tag { color: var(--text-muted); font-size: 11px; margin-left: 8px; }
+        @media (max-width: 1180px) {
+            #performanceTab .perf-controls { grid-template-columns: repeat(3, minmax(140px, 1fr)); }
+        }
+        @media (max-width: 760px) {
+            #performanceTab { padding: 10px; }
+            #performanceTab .perf-controls { grid-template-columns: 1fr 1fr; }
+            #performanceTab .perf-control:first-child { grid-column: 1 / -1; }
+            #performanceTab .perf-check { white-space: normal; }
+            #performanceTab .perf-table-wrap { overflow: visible; border: 0; background: transparent; }
+            #performanceTab table { display: block; min-width: 0; }
+            #performanceTab thead { display: none; }
+            #performanceTab tbody { display: grid; gap: 10px; }
+            #performanceTab tr.perf-video-row { display: grid; grid-template-columns: 1fr 1fr;
+                gap: 10px 12px; padding: 12px; border: 1px solid var(--border-color);
+                border-radius: 8px; background: var(--bg-surface); }
+            #performanceTab tr.perf-video-row td { display: block; padding: 0; border: 0;
+                text-align: left; white-space: normal; }
+            #performanceTab tr.perf-video-row td::before { content: attr(data-label); display: block;
+                margin-bottom: 2px; color: var(--text-muted); font-size: 9px; font-weight: 650;
+                letter-spacing: .06em; text-transform: uppercase; }
+            #performanceTab tr.perf-video-row td.perf-video-cell { grid-column: 1 / -1; }
+            #performanceTab tr.perf-video-row td.perf-video-cell::before { display: none; }
+            #performanceTab tr.perf-detail-row { display: block; margin-top: -10px; }
+            #performanceTab tr.perf-detail-row td { display: block; border: 1px solid var(--border-color);
+                border-top: 0; border-radius: 0 0 8px 8px; }
+        }
         .app-container.tab-videos #imagesTab { display: none !important; }
         /* Default state (no class) = videos */
         .app-container:not(.tab-images) #imagesTab { display: none !important; }
@@ -20319,6 +20390,115 @@ async function renderAutoEditCard(jobId, hasExport) {
         // "we cannot see it yet".
         // ---------------------------------------------------------------
         const PERF_UNKNOWN = '<span class="unknown">Unknown</span>';
+        const perfState = {
+            search: '', account: 'all', platform: 'all', outcome: 'all',
+            sort: 'views_desc', showDaily: false,
+        };
+        let perfReport = null;
+
+        function perfSelectVideos(videos, state) {
+            // Pure on purpose: the local/live UI gate can test the same filter and
+            // ordering logic the browser uses without creating a production job.
+            const s = state || {};
+            const raw = function (value) {
+                if (value === null || value === undefined || value === '' || value === 'Unknown') return null;
+                if (typeof value === 'object') value = value.value;
+                const number = Number(value);
+                return Number.isFinite(number) ? number : null;
+            };
+            const metric = function (video, name) {
+                return raw(((video || {}).period || {})[name]);
+            };
+            const platforms = function (video) {
+                const found = new Set((video.by_account || []).map(a => String(a.platform || '').toLowerCase()));
+                if (video.instagram_url) found.add('instagram');
+                if (video.facebook_url) found.add('facebook');
+                return found;
+            };
+            const search = String(s.search || '').trim().toLowerCase();
+            const filtered = (videos || []).filter(function (video) {
+                const accounts = (video.by_account || []).map(a => a.account).concat(video.accounts || []);
+                const tags = (video.tracking_ids || []).concat(
+                    (video.by_account || []).flatMap(a => a.tracking_ids || []));
+                const haystack = [video.video || '', ...accounts, ...tags].join(' ').toLowerCase();
+                if (search && !haystack.includes(search)) return false;
+                if (s.account && s.account !== 'all' && !accounts.includes(s.account)) return false;
+                if (s.platform && s.platform !== 'all' && !platforms(video).has(s.platform)) return false;
+                const clicks = metric(video, 'clicks');
+                const sales = metric(video, 'items_ordered');
+                if (s.outcome === 'sales' && !(sales > 0)) return false;
+                if (s.outcome === 'clicked_no_sale' && !(clicks > 0 && sales === 0)) return false;
+                if (s.outcome === 'no_clicks' && clicks !== 0) return false;
+                if (s.outcome === 'unknown' && clicks !== null && sales !== null) return false;
+                return true;
+            });
+            const sort = String(s.sort || 'views_desc');
+            const cut = sort.lastIndexOf('_');
+            const key = cut > 0 ? sort.slice(0, cut) : sort;
+            const direction = cut > 0 ? sort.slice(cut + 1) : 'desc';
+            const value = function (video) {
+                const views = raw(video.total_views);
+                const clicks = metric(video, 'clicks');
+                const sales = metric(video, 'items_ordered');
+                if (key === 'views') return views;
+                if (key === 'comments') return raw(video.comments);
+                if (key === 'clicks') return clicks;
+                if (key === 'sales') return sales;
+                if (key === 'click_rate') return views > 0 && clicks !== null ? clicks / views : null;
+                if (key === 'conversion') return clicks > 0 && sales !== null ? sales / clicks : null;
+                if (key === 'newest') {
+                    const stamp = Date.parse(video.posted_at || '');
+                    return Number.isFinite(stamp) ? stamp : null;
+                }
+                return null;
+            };
+            return filtered.map((video, index) => ({ video, index })).sort(function (a, b) {
+                if (key === 'video') {
+                    const order = String(a.video.video || '').localeCompare(String(b.video.video || ''));
+                    return direction === 'desc' ? -order : order;
+                }
+                const av = value(a.video), bv = value(b.video);
+                if (av === null && bv === null) return a.index - b.index;
+                if (av === null) return 1;
+                if (bv === null) return -1;
+                if (av === bv) return String(a.video.video || '').localeCompare(String(b.video.video || ''));
+                return direction === 'asc' ? av - bv : bv - av;
+            }).map(row => row.video);
+        }
+
+        function perfSetFilter(name, value) {
+            perfState[name] = value;
+            const wasSearch = name === 'search' && document.activeElement &&
+                document.activeElement.id === 'perfSearch';
+            const cursor = wasSearch ? document.activeElement.selectionStart : null;
+            if (perfReport) perfRender(document.getElementById('performanceTab'), perfReport);
+            if (wasSearch) {
+                const next = document.getElementById('perfSearch');
+                if (next) {
+                    next.focus();
+                    if (cursor !== null) next.setSelectionRange(cursor, cursor);
+                }
+            }
+        }
+
+        function perfResetFilters() {
+            Object.assign(perfState, {
+                search: '', account: 'all', platform: 'all', outcome: 'all',
+                sort: 'views_desc', showDaily: false,
+            });
+            if (perfReport) perfRender(document.getElementById('performanceTab'), perfReport);
+        }
+
+        function perfToggleSort(key) {
+            const desc = key + '_desc', asc = key + '_asc';
+            perfState.sort = perfState.sort === desc ? asc : desc;
+            if (perfReport) perfRender(document.getElementById('performanceTab'), perfReport);
+        }
+
+        function perfSortMark(key) {
+            if (!perfState.sort.startsWith(key + '_')) return '';
+            return perfState.sort.endsWith('_asc') ? ' ↑' : ' ↓';
+        }
 
         function perfVal(v) {
             // The payload carries metrics as {value, complete}; views arrive as a
@@ -20372,15 +20552,27 @@ async function renderAutoEditCard(jobId, hasExport) {
                     'hand: <code>python tools/amazon_sales_push.py</code>.</div>';
                 return;
             }
-            perfRender(el, data.report || {});
+            perfReport = data.report || {};
+            perfRender(el, perfReport);
         }
 
         function perfRender(el, rep) {
             const period = rep.period || {};
             const excluded = rep.excluded_days || [];
-            const videos = rep.videos || [];
+            const allVideos = rep.videos || [];
+            const videos = perfSelectVideos(allVideos, perfState);
             const totals = rep.totals || {};
             const out = [];
+            const option = function (value, label, current) {
+                return '<option value="' + escapeHtml(value) + '"' +
+                    (value === current ? ' selected' : '') + '>' + escapeHtml(label) + '</option>';
+            };
+            const sortHead = function (label, key) {
+                const active = perfState.sort.startsWith(key + '_');
+                return '<button type="button" class="perf-sort' + (active ? ' active' : '') +
+                    '" onclick="perfToggleSort(\'' + key + '\')">' + escapeHtml(label) +
+                    perfSortMark(key) + '</button>';
+            };
 
             // Data health first and prominent: a tab that quietly shows six days
             // as seven is worse than one that shows nothing at all.
@@ -20408,8 +20600,8 @@ async function renderAutoEditCard(jobId, hasExport) {
                             (v.views_matched || 0) + ' view(s) on videos listed below, ' +
                             (v.views_unmatched || 0) + ' on posts with no video record here';
                     }).join(' · ') +
-                    ' · <em>Clk/view divides period clicks by lifetime Instagram views ' +
-                    '— a rough indication, not a rate</em></div>');
+                    ' · <em>View→click divides period clicks by lifetime total views ' +
+                    '— use it as direction, not an exact period rate</em></div>');
             }
             (fb.video_collisions || []).forEach(function (h) {
                 out.push('<div class="perf-health"><strong>Facebook collision</strong> on ' +
@@ -20420,89 +20612,133 @@ async function renderAutoEditCard(jobId, hasExport) {
 
             out.push('<div class="perf-totals">' +
                 '<div><span class="n">' + perfNum(totals.clicks) + '</span><span class="k">clicks</span></div>' +
-                '<div><span class="n">' + perfNum(totals.items_ordered) + '</span><span class="k">items</span></div>' +
+                '<div><span class="n">' + perfNum(totals.items_ordered) + '</span><span class="k">direct sales</span></div>' +
                 '<div><span class="n">' + perfMoney(totals.ordered_revenue) + '</span><span class="k">revenue</span></div>' +
                 '<div><span class="n">' + perfMoney(totals.earnings) + '</span><span class="k">earnings</span></div>' +
                 '</div>');
 
-            out.push('<table><thead><tr><th>Video</th><th>IG views</th>' +
-                '<th>FB views</th><th>Views</th><th>Clicks</th>' +
-                '<th>Clk/view</th><th>Items</th><th>Ord/clk</th><th>Revenue</th>' +
-                '<th>Earnings</th></tr></thead><tbody>');
+            const accounts = Array.from(new Set(allVideos.flatMap(function (v) {
+                return (v.by_account || []).map(a => a.account).concat(v.accounts || []);
+            }).filter(Boolean))).sort();
+            out.push('<div class="perf-controls">' +
+                '<label class="perf-control"><span>Find video</span><input id="perfSearch" type="search" ' +
+                'value="' + escapeHtml(perfState.search) + '" placeholder="Name, account or tracking tag" ' +
+                'oninput="perfSetFilter(\'search\', this.value)"></label>' +
+                '<label class="perf-control"><span>Account</span><select onchange="perfSetFilter(\'account\', this.value)">' +
+                option('all', 'All accounts', perfState.account) + accounts.map(a => option(a, a, perfState.account)).join('') +
+                '</select></label>' +
+                '<label class="perf-control"><span>Platform</span><select onchange="perfSetFilter(\'platform\', this.value)">' +
+                option('all', 'All platforms', perfState.platform) +
+                option('instagram', 'Instagram', perfState.platform) +
+                option('facebook', 'Facebook', perfState.platform) + '</select></label>' +
+                '<label class="perf-control"><span>Outcome</span><select onchange="perfSetFilter(\'outcome\', this.value)">' +
+                option('all', 'All outcomes', perfState.outcome) +
+                option('sales', 'Has direct sales', perfState.outcome) +
+                option('clicked_no_sale', 'Clicks, no sale', perfState.outcome) +
+                option('no_clicks', 'No clicks', perfState.outcome) +
+                option('unknown', 'Missing sales data', perfState.outcome) + '</select></label>' +
+                '<label class="perf-control"><span>Order videos</span><select onchange="perfSetFilter(\'sort\', this.value)">' +
+                option('views_desc', 'Most viewed', perfState.sort) +
+                option('comments_desc', 'Most comments', perfState.sort) +
+                option('clicks_desc', 'Most clicks', perfState.sort) +
+                option('sales_desc', 'Most direct sales', perfState.sort) +
+                option('click_rate_desc', 'Best view → click', perfState.sort) +
+                option('conversion_desc', 'Best click → sale', perfState.sort) +
+                option('newest_desc', 'Newest first', perfState.sort) +
+                option('video_asc', 'Video A–Z', perfState.sort) + '</select></label>' +
+                '<div class="perf-actions"><label class="perf-check"><input type="checkbox" ' +
+                (perfState.showDaily ? 'checked ' : '') +
+                'onchange="perfSetFilter(\'showDaily\', this.checked)">Daily detail</label>' +
+                '<button type="button" class="perf-reset" onclick="perfResetFilters()">Reset</button></div>' +
+                '</div>');
+            out.push('<div class="perf-results">Showing <strong>' + videos.length + '</strong> of ' +
+                allVideos.length + ' videos · Unknown values always sort last.</div>');
+
+            out.push('<div class="perf-table-wrap"><table class="perf-table" aria-label="Video performance">' +
+                '<thead><tr><th scope="col">' + sortHead('Video', 'video') + '</th>' +
+                '<th scope="col">' + sortHead('Published', 'newest') + '</th>' +
+                '<th scope="col">' + sortHead('Views', 'views') + '</th>' +
+                '<th scope="col">' + sortHead('Comments', 'comments') + '</th>' +
+                '<th scope="col">' + sortHead('Clicks', 'clicks') + '</th>' +
+                '<th scope="col">' + sortHead('Direct sales', 'sales') + '</th>' +
+                '<th scope="col">' + sortHead('View → click', 'click_rate') + '</th>' +
+                '<th scope="col">' + sortHead('Click → sale', 'conversion') + '</th></tr></thead><tbody>');
             if (!videos.length) {
-                out.push('<tr><td colspan="10" style="color:var(--text-secondary);">No videos in this report.</td></tr>');
+                out.push('<tr><td colspan="8" style="padding:22px;color:var(--text-secondary);text-align:left;">' +
+                    (allVideos.length ? 'No videos match these filters.' : 'No videos in this report.') + '</td></tr>');
             }
             videos.forEach(function (v) {
                 const p = v.period || {};
-                const views = v.views;
-                const post = v.instagram_url ? '<a href="' + escapeHtml(v.instagram_url) +
-                    '" target="_blank" rel="noopener">post ↗</a>' : '';
+                const links = [];
+                if (v.instagram_url) links.push('<a href="' + escapeHtml(v.instagram_url) +
+                    '" target="_blank" rel="noopener">Instagram ↗</a>');
+                if (v.facebook_url) links.push('<a href="' + escapeHtml(v.facebook_url) +
+                    '" target="_blank" rel="noopener">Facebook ↗</a>');
                 const job = v.job_url ? '<a href="' + escapeHtml(v.job_url) +
-                    '" target="_blank" rel="noopener">job ↗</a>' : '';
-                out.push('<tr>' +
-                    '<td><div>' + escapeHtml(v.video || '') + '</div>' +
-                    '<div style="color:var(--text-secondary);font-size:11px;">' +
-                    escapeHtml((v.accounts || []).join(', ')) + '</div>' +
-                    '<div class="perf-links">' + post + job + '</div></td>' +
-                    '<td>' + perfNum(views) + '</td>' +
-                    '<td>' + perfNum(v.facebook_views) + '</td>' +
-                    '<td>' + perfNum(v.total_views) + '</td>' +
-                    '<td>' + perfNum(p.clicks) + '</td>' +
-                    '<td>' + perfRate(p.clicks, views) + '</td>' +
-                    '<td>' + perfNum(p.items_ordered) + '</td>' +
-                    '<td>' + perfRate(p.items_ordered, p.clicks) + '</td>' +
-                    '<td>' + perfMoney(p.ordered_revenue) + '</td>' +
-                    '<td>' + perfMoney(p.earnings) + '</td>' +
-                    '</tr>');
-                // Each account has its OWN tracking id on its OWN platform, so the
-                // same video is measured twice. Showing only the video total hides
-                // the one comparison that answers "where does this work?".
-                const accounts = v.by_account || [];
-                if (accounts.length) {
-                    accounts.forEach(function (a) {
-                        const ap = a.period || {};
-                        out.push('<tr class="perf-account"><td style="padding-left:20px;">' +
-                            '<span class="perf-platform">' +
-                            escapeHtml(a.platform || 'unknown') + '</span> ' +
-                            escapeHtml(a.account || '') +
-                            '<span class="perf-tag">' +
-                            escapeHtml((a.tracking_ids || []).join(', ')) + '</span>' +
-                            '<span class="perf-links">' +
-                            (a.instagram_url ? '<a href="' + escapeHtml(a.instagram_url) +
-                                '" target="_blank" rel="noopener">post ↗</a>' : '') +
-                            (a.tracked_link ? '<a href="' + escapeHtml(a.tracked_link) +
-                                '" target="_blank" rel="noopener">link ↗</a>' : '') +
-                            (a.job_url ? '<a href="' + escapeHtml(a.job_url) +
-                                '" target="_blank" rel="noopener">job ↗</a>' : '') +
-                            '</span></td>' +
-                            '<td></td><td></td><td></td><td>' +
-                            perfNum(ap.clicks) + '</td><td></td><td>' +
-                            perfNum(ap.items_ordered) + '</td><td></td><td>' +
-                            perfMoney(ap.ordered_revenue) + '</td><td>' +
-                            perfMoney(ap.earnings) + '</td></tr>');
-                        (a.daily || []).forEach(function (d) {
-                            out.push('<tr class="perf-day"><td style="padding-left:40px;">' +
-                                escapeHtml(d.date) + '</td><td></td><td></td><td></td><td>' +
-                                perfNum(d.clicks) +
-                                '</td><td></td><td>' + perfNum(d.items_ordered) +
-                                '</td><td></td><td>' + perfMoney(d.ordered_revenue) +
-                                '</td><td>' + perfMoney(d.earnings) + '</td></tr>');
+                    '" target="_blank" rel="noopener">Kaveno job ↗</a>' : '';
+                if (job) links.push(job);
+                const accountNames = (v.by_account || []).map(a => a.account).filter(Boolean);
+                const shownAccounts = accountNames.length ? accountNames : (v.accounts || []);
+                const posted = String(v.posted_at || '').slice(0, 10);
+                out.push('<tr class="perf-video-row">' +
+                    '<td class="perf-video-cell" data-label="Video"><div class="perf-video-name">' +
+                    escapeHtml(v.video || '') + '</div><div class="perf-video-meta">' +
+                    escapeHtml(shownAccounts.join(' · ') || 'No account recorded') + '</div>' +
+                    '<div class="perf-links">' + links.join('') + '</div></td>' +
+                    '<td data-label="Published"><span class="perf-metric-main">' +
+                    (posted ? escapeHtml(posted) : PERF_UNKNOWN) + '</span></td>' +
+                    '<td data-label="Views"><span class="perf-metric-main">' + perfNum(v.total_views) +
+                    '</span><span class="perf-metric-sub">IG ' + perfNum(v.views) + ' · FB ' +
+                    perfNum(v.facebook_views) + '</span></td>' +
+                    '<td data-label="Comments"><span class="perf-metric-main">' + perfNum(v.comments) +
+                    '</span><span class="perf-metric-sub">IG ' + perfNum(v.instagram_comments) + ' · FB ' +
+                    perfNum(v.facebook_comments) + '</span></td>' +
+                    '<td data-label="Clicks"><span class="perf-metric-main">' + perfNum(p.clicks) + '</span></td>' +
+                    '<td data-label="Direct sales"><span class="perf-metric-main">' +
+                    perfNum(p.items_ordered) + '</span></td>' +
+                    '<td data-label="View → click"><span class="perf-metric-main">' +
+                    perfRate(p.clicks, v.total_views) + '</span></td>' +
+                    '<td data-label="Click → sale"><span class="perf-metric-main">' +
+                    perfRate(p.items_ordered, p.clicks) + '</span></td></tr>');
+
+                if (perfState.showDaily) {
+                    const detail = [];
+                    const accountRows = v.by_account || [];
+                    if (accountRows.length) {
+                        accountRows.forEach(function (a) {
+                            const ap = a.period || {};
+                            const accountLinks = [];
+                            if (a.instagram_url) accountLinks.push('<a href="' + escapeHtml(a.instagram_url) +
+                                '" target="_blank" rel="noopener">post ↗</a>');
+                            if (a.tracked_link) accountLinks.push('<a href="' + escapeHtml(a.tracked_link) +
+                                '" target="_blank" rel="noopener">tracked link ↗</a>');
+                            if (a.job_url) accountLinks.push('<a href="' + escapeHtml(a.job_url) +
+                                '" target="_blank" rel="noopener">job ↗</a>');
+                            detail.push('<div class="perf-detail-account"><div class="perf-detail-head">' +
+                                '<span class="perf-platform">' + escapeHtml(a.platform || 'unknown') + '</span>' +
+                                '<strong>' + escapeHtml(a.account || '') + '</strong>' +
+                                '<span>' + perfNum(ap.clicks) + ' clicks · ' + perfNum(ap.items_ordered) +
+                                ' direct sales · ' + perfMoney(ap.ordered_revenue) + ' revenue</span>' +
+                                '<span class="perf-links">' + accountLinks.join('') + '</span></div>');
+                            const days = a.daily || [];
+                            detail.push('<div class="perf-days">' + (days.length ? days.map(function (d) {
+                                return '<div class="perf-day"><strong>' + escapeHtml(d.date || '') + '</strong><br>' +
+                                    perfNum(d.clicks) + ' clicks · ' + perfNum(d.items_ordered) +
+                                    ' sales · ' + perfMoney(d.ordered_revenue) + '</div>';
+                            }).join('') : '<div class="perf-day">No daily rows for this account.</div>') + '</div></div>');
                         });
-                    });
-                } else {
-                    // No account breakdown (an older snapshot): fall back to the
-                    // video's own days rather than showing nothing.
-                    (v.daily || []).forEach(function (d) {
-                        out.push('<tr class="perf-day"><td style="padding-left:20px;">' +
-                            escapeHtml(d.date) + '</td><td></td><td></td><td></td><td>' +
-                            perfNum(d.clicks) +
-                            '</td><td></td><td>' + perfNum(d.items_ordered) +
-                            '</td><td></td><td>' + perfMoney(d.ordered_revenue) +
-                            '</td><td>' + perfMoney(d.earnings) + '</td></tr>');
-                    });
+                    } else {
+                        detail.push('<div class="perf-days">' + ((v.daily || []).map(function (d) {
+                            return '<div class="perf-day"><strong>' + escapeHtml(d.date || '') + '</strong><br>' +
+                                perfNum(d.clicks) + ' clicks · ' + perfNum(d.items_ordered) +
+                                ' sales · ' + perfMoney(d.ordered_revenue) + '</div>';
+                        }).join('') || '<div class="perf-day">No daily breakdown recorded.</div>') + '</div>');
+                    }
+                    out.push('<tr class="perf-detail-row"><td colspan="8"><div class="perf-detail">' +
+                        detail.join('') + '</div></td></tr>');
                 }
             });
-            out.push('</tbody></table>');
+            out.push('</tbody></table></div>');
 
             // The number this tab must not bury: a click on an account-level tag
             // belongs to no video, so a per-video table on its own reads as
