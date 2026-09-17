@@ -18555,8 +18555,25 @@ class DownloadHelper:
         results = []
         consecutive_missing = 0
         
+        # v975 — this loop was the stall, found 2026-09-17 by the greenlet
+        # locator in _v978_parked_greenlet_stacks: the worker was parked in
+        # `container.count()` on line ~18562, not in check_and_dismiss_popup
+        # and not in page.reload(), which is where three earlier fixes went.
+        # Nothing here sets a default timeout, so every count() inherits
+        # Playwright built-in 30s, and the loop makes up to two per index
+        # over max_index+1 indexes. 16 indexes x 30s is 480s -- which is
+        # exactly the ~485s every one of the six watchdog kills measured.
+        #
+        # Two changes, both small: bound each probe, and stamp activity() per
+        # index so a scan that IS progressing never looks silent to v978 and
+        # the label localises to a container number instead of the whole scan.
+        try:
+            self.page.set_default_timeout(4000)
+        except Exception:                                   # noqa: BLE001
+            pass
         try:
             for idx in range(max_index + 1):
+                activity("scan container %d/%d" % (idx, max_index))
                 # Check if container exists in DOM at all
                 container = self.page.locator(f"div[data-index='{idx}']")
                 if container.count() == 0:
@@ -18636,6 +18653,12 @@ class DownloadHelper:
             
         except Exception as e:
             print(f"[{self.account_name}] Scan error: {e}", flush=True)
+        finally:
+            # v975 — hand the page back at the worker default, whatever happened.
+            try:
+                self.page.set_default_timeout(30000)
+            except Exception:                               # noqa: BLE001
+                pass
         
         return results
 
