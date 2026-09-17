@@ -52,11 +52,78 @@ def _ts(t: float) -> str:
     return f"{int(t // 3600)}:{int(t % 3600 // 60):02d}:{t % 60:05.2f}"
 
 
+# --- brand spellings the transcriber gets wrong -----------------------------
+# WHY THIS IS HERE AND NOT LEFT TO THE GATE. `docs/protected-words.json` records
+# 2026-09-04: "a finished, gate-passing selling video shipped with the brand
+# spelled 'Corella' in three burned captions". A gate was built and it works --
+# it blocked nuri 1984be6c on 2026-09-17 for exactly the same word. But a gate
+# only stops the bad delivery; something still has to SPELL IT RIGHT, and until
+# now nothing did, so every video with the brand spoken aloud needed a person to
+# catch it. faster-whisper hears a made-up proper noun phonetically and writes it
+# however it likes.
+#
+# One list, both ends: the words the delivery gate protects are the words the
+# caption burner is now required to spell, read from the same file. Only the
+# EXACT wrong spellings already recorded there are replaced -- never a fuzzy
+# match, because a transcriber writing a genuinely different word must stay
+# visible rather than be silently rewritten into the brand.
+_VOCAB = Path(__file__).resolve().parent.parent / "docs" / "protected-words.json"
+
+
+def _brand_fixes() -> dict:
+    """{wrong lowercase: correct spelling}. Empty when the file is unreadable."""
+    try:
+        data = json.loads(_VOCAB.read_text(encoding="utf-8"))
+    except Exception:
+        return {}          # never let a missing data file break a render
+    out = {}
+    for row in data.get("near_miss_words") or []:
+        right = str(row.get("word") or "").strip()
+        if not right:
+            continue
+        for wrong in row.get("seen_wrong") or []:
+            w = str(wrong).strip().lower()
+            if w and w != right.lower():
+                out[w] = right
+    return out
+
+
+def fix_brand_words(words):
+    """Re-spell known-wrong brand hearings, keeping timings and CASE STYLE.
+
+    The caption band is upper-cased downstream, but this also runs for styles
+    that are not, so an all-caps hearing stays all-caps and a capitalised one
+    stays capitalised. Punctuation on the token is preserved.
+    """
+    fixes = _brand_fixes()
+    if not fixes:
+        return words
+    out = []
+    for start, end, word in words:
+        bare = word.strip()
+        lead = word[:len(word) - len(word.lstrip())]
+        trail = word[len(word.rstrip()):]
+        core = bare.strip(".,!?;:’'\"")
+        pre = bare[:len(bare) - len(bare.lstrip(".,!?;:’'\""))]
+        post = bare[len(bare.rstrip(".,!?;:’'\"")):]
+        right = fixes.get(core.lower())
+        if right:
+            if core.isupper():
+                right = right.upper()
+            elif core.islower():
+                right = right.lower()
+            word = f"{lead}{pre}{right}{post}{trail}"
+        out.append((start, end, word))
+    return out
+
+
 def transcribe_words(audio_path: Path, cache: Path):
     """Word-level timings, cached so re-rendering never re-transcribes."""
     if cache.exists():
         try:
-            return [tuple(w) for w in json.loads(cache.read_text())]
+            # Corrections run AFTER the cache read, not before the write: a cache
+            # made before this existed must still come back spelled right.
+            return fix_brand_words([tuple(w) for w in json.loads(cache.read_text())])
         except Exception:
             pass  # a corrupt cache should cost a re-run, not a failure
     from faster_whisper import WhisperModel
@@ -64,7 +131,7 @@ def transcribe_words(audio_path: Path, cache: Path):
     segments, _ = model.transcribe(str(audio_path), word_timestamps=True, vad_filter=False)
     words = [(w.start, w.end, w.word.strip()) for s in segments for w in (s.words or [])]
     cache.write_text(json.dumps(words))
-    return words
+    return fix_brand_words(words)
 
 
 def build_cards(words, max_words=3, gap=0.55):
