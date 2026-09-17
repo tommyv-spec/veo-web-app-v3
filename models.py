@@ -1152,6 +1152,39 @@ class LocalVideo(Base):
         }
 
 
+class AmazonSalesSnapshot(Base):
+    """One pushed sales-per-video snapshot, for the Performance tab.
+
+    IN THE DATABASE, NOT ON DISK, and that is the whole point of this table.
+    The snapshot used to be a JSON file on the container. It went to /tmp first,
+    then — after that was "fixed" — to /app/data, which render.yaml declares as a
+    mounted disk. The live service has no disk: `GET /services/<id>/disk` answers
+    404. So both paths were ephemeral, every deploy wiped the snapshot, and the
+    tab read "No sales report yet" until somebody pushed again. The log line
+    naming /app/data looked like proof and was not: it says where the bytes went,
+    never that they survive.
+
+    Postgres is a separate Render service. It is the only storage this app has
+    that outlives a container.
+
+    Rows are kept, newest read: `previous` used to sit beside `current` as a file
+    for the same reason, because when a push lands wrong the only way to see WHAT
+    changed is to still hold the thing it replaced.
+    """
+    __tablename__ = "amazon_sales_snapshots"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    user_id      = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    # The payload as pushed, verbatim. Text rather than JSON so a payload this
+    # server cannot parse is still stored and still readable by hand.
+    payload      = Column(Text, nullable=False)
+    # The builder's own stamp, carried so two rows can be told apart without
+    # parsing the payload.
+    generated_at = Column(String(64), nullable=True)
+    videos       = Column(Integer, nullable=True)
+    stored_at    = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 # Database setup
 engine = None
 SessionLocal = None

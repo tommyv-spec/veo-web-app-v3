@@ -6159,7 +6159,7 @@ def _ig_export_rows(db, account_id: int, start, end):
     return rows, undated
 
 
-def _ig_export_sales(user_id: str) -> dict:
+def _ig_export_sales(db, user_id: str) -> dict:
     """Reel URL -> that video's Amazon numbers, from the stored snapshot.
 
     The export answers "how did this reel do" and could only ever say views. The
@@ -6171,14 +6171,8 @@ def _ig_export_sales(user_id: str) -> dict:
     Unknown marker rather than 0: a zero here would read as "this reel sold
     nothing" when the truth is that nothing has been pushed yet.
     """
-    current = _amazon_sales_dir(user_id) / "sales-report.json"
-    if not current.is_file():
-        return {}
-    try:
-        report = json.loads(current.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"[ig-export] sales snapshot unreadable ({exc}); columns left Unknown",
-              flush=True)
+    report = _amazon_sales_latest(db, user_id)
+    if not report:
         return {}
     by_url = {}
     for video in report.get("videos") or []:
@@ -6224,7 +6218,7 @@ def export_instagram_videos(
                 "clicks", "click_rate", "items_ordered", "order_rate", "ordered_revenue"])
     # Join on the reel URL, the one key both halves carry. A reel with no sales
     # row gets Unknown, never 0.
-    sales = _ig_export_sales(str(current_user.id))
+    sales = _ig_export_sales(db, str(current_user.id))
     matched = 0
     for row in rows:
         video = sales.get(str(row[2]).strip().rstrip("/"))
@@ -21305,45 +21299,41 @@ def verify_user_worker_token(
 
 
 
-def _amazon_sales_dir(user_id: str) -> Path:
-    """Where ONE user's sales snapshot lives — the PERSISTENT disk when there is one.
+def _amazon_sales_latest(db, user_id: str) -> dict | None:
+    """The newest pushed snapshot for ONE user, or None when there is none.
 
-    Per user, not one shared file. These are somebody's Amazon earnings, tied to
+    Per user, not one shared row. These are somebody's Amazon earnings, tied to
     their own Associates account and their own tracking ids; a single global
     snapshot would show whoever logged in first the numbers of whoever pushed
     last. The worker already authenticates per user (`USER_WORKER_TOKEN`), so the
     identity is available and there is no reason to flatten it.
 
-    Losing it on a deploy would blank the tab until the next daily run, so it goes
-    on the disk that survives a restart. The temp fallback SAYS SO rather than
-    failing quietly.
+    Reads the DATABASE. This lived on the container's filesystem until
+    2026-09-17, first under /tmp and then under /app/data, and neither survived a
+    deploy: render.yaml declares a disk at /app/data but the live service has
+    none (`GET /services/<id>/disk` -> 404). So every deploy silently emptied the
+    Performance tab, and the push's own "stored" answer stayed honest the whole
+    time -- it DID store the file, somewhere that was about to be thrown away.
     """
-    # main.py imports the module as `_re`, not `re` — a bare `re` here passes
-    # `import main` and then NameErrors the first time a push arrives.
-    safe = _re.sub(r"[^A-Za-z0-9_-]", "_", str(user_id))[:64] or "unknown"
+    from models import AmazonSalesSnapshot
+    row = (db.query(AmazonSalesSnapshot)
+             .filter(AmazonSalesSnapshot.user_id == str(user_id))
+             .order_by(AmazonSalesSnapshot.id.desc())
+             .first())
+    if row is None:
+        return None
     try:
-        # `app_config`, not `config` — config.py defines the CLASS `AppConfig`
-        # and one instance called `app_config`; there has never been a name
-        # `config` inside it. `from config import config` therefore raised
-        # ImportError on EVERY call, so the snapshot went to /tmp every time and
-        # each deploy wiped it. main.py already imports app_config at the top
-        # (line ~144), and the try/except stays for the mkdir, not the import.
-        out = getattr(app_config, "outputs_dir", None)
-        if out:
-            root = Path(out).parent
-            if root.exists():
-                folder = root / "amazon" / safe
-                folder.mkdir(parents=True, exist_ok=True)
-                return folder
-    except Exception as exc:
-        print(f"[amazon-sales] persistent disk unavailable ({type(exc).__name__}: {exc})",
+        return json.loads(row.payload)
+    except (TypeError, ValueError) as exc:
+        print(f"[amazon-sales] stored snapshot {row.id} is unreadable ({exc})",
               flush=True)
-    import tempfile
-    folder = Path(tempfile.gettempdir()) / "amazon" / safe
-    folder.mkdir(parents=True, exist_ok=True)
-    print(f"[amazon-sales] storing in {folder} — wiped on restart, so the tab "
-          f"goes blank after a deploy until the next push.", flush=True)
-    return folder
+        return None
+
+
+# How many snapshots to keep per user. Not history for its own sake: when a push
+# lands wrong, the only way to see WHAT changed is to still hold what it
+# replaced. Bounded so a daily push cannot grow the table without limit.
+_AMAZON_SALES_KEEP = 5
 
 
 # Under /api/user-worker/ on purpose, for two reasons. The prefix is exempt from
@@ -21356,55 +21346,64 @@ def _amazon_sales_dir(user_id: str) -> Path:
 async def receive_amazon_sales_report(
     payload: dict = Body(...),
     user_id: str = Depends(verify_user_worker_token),
+    db: DBSession = Depends(get_db_session),
 ):
     """Store the newest sales-per-video snapshot pushed from the operator's machine.
 
-    Keeps the previous snapshot beside it. That is not history for its own sake:
-    when a push lands wrong the only way to see WHAT changed is to still have the
-    thing it replaced.
+    Keeps the previous few rows. That is not history for its own sake: when a push
+    lands wrong the only way to see WHAT changed is to still hold the thing it
+    replaced.
     """
+    from models import AmazonSalesSnapshot
     if not isinstance(payload, dict) or "videos" not in payload:
         raise HTTPException(status_code=400,
                             detail="payload must be the object built by "
                                    "tools/amazon_sales_payload.py (no 'videos' key found)")
-    folder = _amazon_sales_dir(user_id)
-    current, previous = folder / "sales-report.json", folder / "sales-report.prev.json"
     body = json.dumps(payload, ensure_ascii=False)
+    videos = len(payload.get("videos") or [])
     try:
-        if current.is_file():
-            previous.write_text(current.read_text(encoding="utf-8"), encoding="utf-8")
-        # Write beside, then replace: a crash mid-write must not leave the tab
-        # reading half a file.
-        staging = current.with_suffix(".json.tmp")
-        staging.write_text(body, encoding="utf-8")
-        staging.replace(current)
-    except OSError as exc:
+        db.add(AmazonSalesSnapshot(
+            user_id=str(user_id), payload=body, videos=videos,
+            generated_at=str(payload.get("generated_at") or "")[:64]))
+        db.commit()
+        # Prune AFTER the insert, never before: a failure here must leave the new
+        # snapshot stored, because the newest row is the one the tab reads.
+        keep = [r.id for r in db.query(AmazonSalesSnapshot)
+                .filter(AmazonSalesSnapshot.user_id == str(user_id))
+                .order_by(AmazonSalesSnapshot.id.desc())
+                .limit(_AMAZON_SALES_KEEP).all()]
+        if keep:
+            (db.query(AmazonSalesSnapshot)
+               .filter(AmazonSalesSnapshot.user_id == str(user_id),
+                       ~AmazonSalesSnapshot.id.in_(keep))
+               .delete(synchronize_session=False))
+            db.commit()
+    except Exception as exc:
+        db.rollback()
         raise HTTPException(status_code=500, detail=f"could not store snapshot: {exc}")
     # v994 DIAGNOSTIC — remove once a real push has been seen in the logs.
-    print(f"[amazon-sales] stored {len(payload.get('videos') or [])} video(s), "
+    print(f"[amazon-sales] stored {videos} video(s), "
           f"period {(payload.get('period') or {}).get('from')}..."
           f"{(payload.get('period') or {}).get('to')}, "
           f"{len(payload.get('excluded_days') or [])} day(s) held back, "
-          f"{len(body)} bytes -> {current}", flush=True)
-    return {"stored": True, "videos": len(payload.get("videos") or []),
+          f"{len(body)} bytes -> database (survives a deploy)", flush=True)
+    return {"stored": True, "videos": videos,
             "generated_at": payload.get("generated_at")}
 
 
 @app.get("/api/amazon/sales-report")
-async def read_amazon_sales_report(current_user: User = Depends(get_current_user)):
+async def read_amazon_sales_report(current_user: User = Depends(get_current_user),
+                                   db: DBSession = Depends(get_db_session)):
     """The stored snapshot, for the Performance tab.
 
     Returns `stored: false` rather than 404 when nothing has been pushed yet: the
     tab has to tell "no data yet" apart from "the endpoint is broken", and a 404
     cannot say which.
     """
-    current = _amazon_sales_dir(str(current_user.id)) / "sales-report.json"
-    if not current.is_file():
+    report = _amazon_sales_latest(db, str(current_user.id))
+    if report is None:
         return {"stored": False, "reason": "no sales report has been pushed yet"}
-    try:
-        return {"stored": True, "report": json.loads(current.read_text(encoding="utf-8"))}
-    except (OSError, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=500, detail=f"stored snapshot unreadable: {exc}")
+    return {"stored": True, "report": report}
 
 
 
