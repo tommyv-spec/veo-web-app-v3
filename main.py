@@ -21391,6 +21391,57 @@ async def receive_amazon_sales_report(
             "generated_at": payload.get("generated_at")}
 
 
+@app.get("/api/user-worker/amazon/sales-report")
+async def read_amazon_sales_report_for_worker(
+    full: int = 0,
+    user_id: str = Depends(verify_user_worker_token),
+    db: DBSession = Depends(get_db_session),
+):
+    """The stored snapshot read BACK OUT of the database, for a caller with no browser.
+
+    The browser route below needs a logged-in session, so until this existed nothing
+    outside a browser could check what the platform actually holds — and "I pushed it
+    and the push answered stored" is not that check. rev 1021 was written about exactly
+    that mistake: the push had been honestly reporting a successful write to a
+    directory every deploy threw away, and the log line read like proof.
+
+    Every counter here is computed from what came OUT of the database, never echoed
+    from a request, so a number here means the bytes are really there.
+    """
+    from models import AmazonSalesSnapshot
+    report = _amazon_sales_latest(db, str(user_id))
+    if report is None:
+        # _amazon_sales_latest answers None both for "no row at all" and for "the row
+        # will not parse", so ask which one it is instead of guessing. A caller
+        # chasing an empty Performance tab needs those two apart.
+        row_exists = (db.query(AmazonSalesSnapshot.id)
+                        .filter(AmazonSalesSnapshot.user_id == str(user_id))
+                        .first() is not None)
+        return {"stored": False,
+                "reason": ("the newest stored snapshot will not parse"
+                           if row_exists else "no sales report has been pushed yet")}
+    videos = report.get("videos") or []
+    body = {
+        "stored": True,
+        "generated_at": report.get("generated_at"),
+        "videos": len(videos),
+        "videos_with_views": sum(1 for v in videos if isinstance(v.get("views"), int)),
+        "videos_with_facebook_views": sum(
+            1 for v in videos if isinstance(v.get("facebook_views"), int)),
+        # Per publisher, never merged — the two publishers spell a Facebook post's id
+        # in ways that cannot be joined, so one combined figure could count a post
+        # twice and nobody could tell.
+        "facebook": report.get("facebook") or {},
+    }
+    if full:
+        body["report"] = report
+    # v1022 DIAGNOSTIC — remove once a real read-back has been seen in the logs.
+    print(f"[amazon-sales] read back {body['videos']} video(s), "
+          f"{body['videos_with_facebook_views']} with Facebook views, "
+          f"generated {body['generated_at']}", flush=True)
+    return body
+
+
 @app.get("/api/amazon/sales-report")
 async def read_amazon_sales_report(current_user: User = Depends(get_current_user),
                                    db: DBSession = Depends(get_db_session)):

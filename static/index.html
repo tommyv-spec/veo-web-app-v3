@@ -20412,6 +20412,30 @@ async function renderAutoEditCard(jobId, hasExport) {
             }
             out.push(' · generated ' + escapeHtml(rep.generated_at || '?') + '</div>');
 
+            // Facebook, PER PUBLISHER. Never one merged figure: Blotato and Postproxy
+            // spell a Facebook post's id in ways that cannot be converted into each
+            // other, so a combined total could count one post twice and nobody could
+            // tell. Subtotals per publisher are always true.
+            const fb = rep.facebook || {};
+            const fbVendors = Object.keys(fb.by_vendor || {}).sort();
+            if (fbVendors.length) {
+                out.push('<div class="perf-health"><strong>Facebook</strong> · ' +
+                    fbVendors.map(function (name) {
+                        const v = fb.by_vendor[name] || {};
+                        return escapeHtml(name) + ': ' + (v.posts_read || 0) + ' post(s), ' +
+                            (v.views_matched || 0) + ' view(s) on videos listed below, ' +
+                            (v.views_unmatched || 0) + ' on posts with no video record here';
+                    }).join(' · ') +
+                    ' · <em>Clk/view divides period clicks by lifetime Instagram views ' +
+                    '— a rough indication, not a rate</em></div>');
+            }
+            (fb.video_collisions || []).forEach(function (h) {
+                out.push('<div class="perf-health"><strong>Facebook collision</strong> on ' +
+                    escapeHtml(h.video || '') + ': kept ' + h.kept + ', also saw ' +
+                    h.also_seen + ' — two placements for one video, and the publishers ' +
+                    'cannot be joined, so the larger was kept.</div>');
+            });
+
             out.push('<div class="perf-totals">' +
                 '<div><span class="n">' + perfNum(totals.clicks) + '</span><span class="k">clicks</span></div>' +
                 '<div><span class="n">' + perfNum(totals.items_ordered) + '</span><span class="k">items</span></div>' +
@@ -20419,11 +20443,12 @@ async function renderAutoEditCard(jobId, hasExport) {
                 '<div><span class="n">' + perfMoney(totals.earnings) + '</span><span class="k">earnings</span></div>' +
                 '</div>');
 
-            out.push('<table><thead><tr><th>Video</th><th>Views</th><th>Clicks</th>' +
+            out.push('<table><thead><tr><th>Video</th><th>IG views</th>' +
+                '<th>FB views</th><th>Views</th><th>Clicks</th>' +
                 '<th>Clk/view</th><th>Items</th><th>Ord/clk</th><th>Revenue</th>' +
                 '<th>Earnings</th></tr></thead><tbody>');
             if (!videos.length) {
-                out.push('<tr><td colspan="8" style="color:var(--text-secondary);">No videos in this report.</td></tr>');
+                out.push('<tr><td colspan="10" style="color:var(--text-secondary);">No videos in this report.</td></tr>');
             }
             videos.forEach(function (v) {
                 const p = v.period || {};
@@ -20438,6 +20463,8 @@ async function renderAutoEditCard(jobId, hasExport) {
                     escapeHtml((v.accounts || []).join(', ')) + '</div>' +
                     '<div class="perf-links">' + post + job + '</div></td>' +
                     '<td>' + perfNum(views) + '</td>' +
+                    '<td>' + perfNum(v.facebook_views) + '</td>' +
+                    '<td>' + perfNum(v.total_views) + '</td>' +
                     '<td>' + perfNum(p.clicks) + '</td>' +
                     '<td>' + perfRate(p.clicks, views) + '</td>' +
                     '<td>' + perfNum(p.items_ordered) + '</td>' +
@@ -20466,13 +20493,15 @@ async function renderAutoEditCard(jobId, hasExport) {
                             (a.job_url ? '<a href="' + escapeHtml(a.job_url) +
                                 '" target="_blank" rel="noopener">job ↗</a>' : '') +
                             '</span></td>' +
-                            '<td></td><td>' + perfNum(ap.clicks) + '</td><td></td><td>' +
+                            '<td></td><td></td><td></td><td>' +
+                            perfNum(ap.clicks) + '</td><td></td><td>' +
                             perfNum(ap.items_ordered) + '</td><td></td><td>' +
                             perfMoney(ap.ordered_revenue) + '</td><td>' +
                             perfMoney(ap.earnings) + '</td></tr>');
                         (a.daily || []).forEach(function (d) {
                             out.push('<tr class="perf-day"><td style="padding-left:40px;">' +
-                                escapeHtml(d.date) + '</td><td></td><td>' + perfNum(d.clicks) +
+                                escapeHtml(d.date) + '</td><td></td><td></td><td></td><td>' +
+                                perfNum(d.clicks) +
                                 '</td><td></td><td>' + perfNum(d.items_ordered) +
                                 '</td><td></td><td>' + perfMoney(d.ordered_revenue) +
                                 '</td><td>' + perfMoney(d.earnings) + '</td></tr>');
@@ -20483,7 +20512,8 @@ async function renderAutoEditCard(jobId, hasExport) {
                     // video's own days rather than showing nothing.
                     (v.daily || []).forEach(function (d) {
                         out.push('<tr class="perf-day"><td style="padding-left:20px;">' +
-                            escapeHtml(d.date) + '</td><td></td><td>' + perfNum(d.clicks) +
+                            escapeHtml(d.date) + '</td><td></td><td></td><td></td><td>' +
+                            perfNum(d.clicks) +
                             '</td><td></td><td>' + perfNum(d.items_ordered) +
                             '</td><td></td><td>' + perfMoney(d.ordered_revenue) +
                             '</td><td>' + perfMoney(d.earnings) + '</td></tr>');

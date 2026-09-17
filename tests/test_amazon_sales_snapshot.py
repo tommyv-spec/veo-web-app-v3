@@ -62,6 +62,75 @@ def _read(db, user_id):
         current_user=_User(user_id), db=db))
 
 
+def _read_as_worker(db, user_id, full=0):
+    return asyncio.run(main.read_amazon_sales_report_for_worker(
+        full=full, user_id=user_id, db=db))
+
+
+def _fb_payload():
+    """A snapshot shaped the way the push builds one after the Facebook work."""
+    return {
+        "generated_at": "2026-09-17T02:00:00+00:00",
+        "period": {"from": "2026-09-08", "to": "2026-09-15"},
+        "videos": [
+            {"video": "both.mp4", "views": 4000, "facebook_views": 1000,
+             "total_views": 5000},
+            {"video": "ig-only.mp4", "views": 300, "facebook_views": "Unknown",
+             "total_views": 300},
+        ],
+        "facebook": {"by_vendor": {
+            "blotato": {"posts_read": 43, "posts_matched": 43,
+                        "views_matched": 189900, "views_unmatched": 0}}},
+    }
+
+
+def test_the_worker_can_read_the_stored_snapshot_back(db):
+    """Without this route nothing outside a browser could check what the platform
+    actually holds, and "the push said stored" is not that check -- rev 1021."""
+    _store(db, "u1", _fb_payload())
+    got = _read_as_worker(db, "u1")
+    assert got["stored"] is True
+    assert got["videos"] == 2
+    assert got["videos_with_views"] == 2
+    assert got["videos_with_facebook_views"] == 1
+    assert got["facebook"]["by_vendor"]["blotato"]["views_matched"] == 189900
+    assert "report" not in got          # the counters only, unless asked
+
+
+def test_full_returns_the_whole_stored_payload(db):
+    _store(db, "u1", _fb_payload())
+    got = _read_as_worker(db, "u1", full=1)
+    assert [v["video"] for v in got["report"]["videos"]] == ["both.mp4", "ig-only.mp4"]
+
+
+def test_the_worker_route_says_which_kind_of_nothing_it_found(db):
+    """"Nothing pushed" and "the stored bytes will not parse" send a reader to two
+    different places, and _amazon_sales_latest answers None to both."""
+    empty = _read_as_worker(db, "u1")
+    assert empty["stored"] is False and "pushed" in empty["reason"]
+
+    db.add(AmazonSalesSnapshot(user_id="u1", payload="{not json", videos=1))
+    db.commit()
+    corrupt = _read_as_worker(db, "u1")
+    assert corrupt["stored"] is False and "parse" in corrupt["reason"]
+
+
+def test_the_worker_route_never_reads_another_users_snapshot(db):
+    _store(db, "u1", _fb_payload())
+    assert _read_as_worker(db, "u2")["stored"] is False
+    assert _read_as_worker(db, "u1")["stored"] is True
+
+
+def test_an_unknown_facebook_cell_is_never_counted_as_a_number(db):
+    """Unknown, never 0 -- the whole rule this panel exists to keep."""
+    _store(db, "u1", {"generated_at": "x", "videos": [
+        {"video": "a", "views": "Unknown", "facebook_views": "Unknown"}]})
+    got = _read_as_worker(db, "u1")
+    assert got["videos"] == 1
+    assert got["videos_with_views"] == 0
+    assert got["videos_with_facebook_views"] == 0
+
+
 def test_a_pushed_snapshot_comes_back_out(db):
     answer = _store(db, "u1", _payload(videos=3))
     assert answer["stored"] is True and answer["videos"] == 3
