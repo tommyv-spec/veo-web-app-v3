@@ -26,7 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import image_platform  # noqa: F401 -- registers image_nodes, which other FKs point at
 import main
-from models import Base, User, AmazonSalesSnapshot
+from models import (Base, User, AmazonSalesSnapshot, InstagramAccount,
+                    InstagramVideo)
 
 
 @pytest.fixture
@@ -101,6 +102,65 @@ def test_full_returns_the_whole_stored_payload(db):
     _store(db, "u1", _fb_payload())
     got = _read_as_worker(db, "u1", full=1)
     assert [v["video"] for v in got["report"]["videos"]] == ["both.mp4", "ig-only.mp4"]
+
+
+def test_full_overlays_connected_postproxy_stats_without_replacing_sales(db):
+    payload = _payload(videos=0)
+    payload["videos"] = [{
+        "video": "reel.mp4",
+        "instagram_url": "https://www.instagram.com/reel/ABC/",
+        "views": 100,
+        "facebook_views": 25,
+        "facebook_comments": 2,
+        "total_views": 125,
+        "period": {"clicks": 4, "items_ordered": 1},
+    }]
+    _store(db, "u1", payload)
+
+    account = InstagramAccount(user_id="u1", handle="martha_health_style",
+                               api_key_encrypted="test")
+    other = InstagramAccount(user_id="u2", handle="other",
+                             api_key_encrypted="test")
+    db.add_all([account, other])
+    db.flush()
+    db.add_all([
+        InstagramVideo(account_id=account.id, shortcode="ABC",
+                       url="https://instagram.com/reel/ABC/",
+                       views=4321, comments=7),
+        InstagramVideo(account_id=other.id, shortcode="ABC",
+                       url="https://instagram.com/reel/ABC/",
+                       views=999999, comments=999),
+    ])
+    db.commit()
+
+    video = _read_as_worker(db, "u1", full=1)["report"]["videos"][0]
+    assert video["views"] == 4321
+    assert video["total_views"] == 4346
+    assert video["instagram_comments"] == 7
+    assert video["comments"] == 9
+    assert video["period"] == {"clicks": 4, "items_ordered": 1}
+    assert video["instagram_stats_source"] == "postproxy"
+
+
+def test_an_ambiguous_connected_zero_never_erases_a_measured_view(db):
+    payload = _payload(videos=0)
+    payload["videos"] = [{"video": "reel.mp4",
+                          "instagram_url": "https://instagram.com/p/ZERO/",
+                          "views": 88, "total_views": 88}]
+    _store(db, "u1", payload)
+    account = InstagramAccount(user_id="u1", handle="martha",
+                               api_key_encrypted="test")
+    db.add(account)
+    db.flush()
+    db.add(InstagramVideo(account_id=account.id, shortcode="ZERO",
+                          url="https://instagram.com/p/ZERO/",
+                          views=0, comments=0))
+    db.commit()
+
+    video = _read(db, "u1")["report"]["videos"][0]
+    assert video["views"] == 88
+    assert video["total_views"] == 88
+    assert video["comments"] == 0
 
 
 def test_the_worker_route_says_which_kind_of_nothing_it_found(db):

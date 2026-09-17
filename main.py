@@ -21353,6 +21353,84 @@ def _postproxy_ig_count(value):
     return parsed if parsed >= 0 else None
 
 
+def _instagram_shortcode(url) -> str:
+    """The public shortcode in an Instagram post URL, or an empty string."""
+    import re as _re
+
+    match = _re.search(r"instagram\.com/(?:reel|p)/([A-Za-z0-9_-]{1,32})",
+                       str(url or ""), _re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def _amazon_sales_with_connected_instagram(report: dict, db, user_id: str) -> dict:
+    """Overlay current connected-account stats onto an older sales snapshot.
+
+    Clicks and sales remain the immutable pushed snapshot. Instagram views,
+    comments and job links come from the user's connected-account rows, which the
+    Postproxy-only refresh updates independently. This keeps the Performance tab
+    fresh without sending the sales snapshot again.
+    """
+    from models import InstagramAccount, InstagramVideo
+
+    videos = report.get("videos") if isinstance(report, dict) else None
+    if not isinstance(videos, list) or not videos:
+        return report
+
+    codes = {_instagram_shortcode(video.get("instagram_url"))
+             for video in videos if isinstance(video, dict)}
+    codes.discard("")
+    if not codes:
+        return report
+
+    rows = (
+        db.query(InstagramVideo)
+        .join(InstagramAccount, InstagramVideo.account_id == InstagramAccount.id)
+        .filter(InstagramAccount.user_id == str(user_id),
+                InstagramVideo.shortcode.in_(list(codes)))
+        .all()
+    )
+    by_code = {row.shortcode: row for row in rows}
+    matched = with_views = with_comments = 0
+    for video in videos:
+        if not isinstance(video, dict):
+            continue
+        row = by_code.get(_instagram_shortcode(video.get("instagram_url")))
+        if row is None:
+            continue
+        matched += 1
+
+        live_views = _postproxy_ig_count(row.views)
+        # The model predates nullable counters and uses 0 as its default. Do not
+        # let that ambiguous zero erase a measured value in the snapshot.
+        if live_views and live_views > 0:
+            video["views"] = live_views
+            with_views += 1
+
+        live_comments = _postproxy_ig_count(row.comments)
+        if live_comments is not None:
+            video["instagram_comments"] = live_comments
+            with_comments += 1
+
+        ig_views = _postproxy_ig_count(video.get("views"))
+        fb_views = _postproxy_ig_count(video.get("facebook_views"))
+        if ig_views is not None or fb_views is not None:
+            video["total_views"] = (ig_views or 0) + (fb_views or 0)
+
+        ig_comments = _postproxy_ig_count(video.get("instagram_comments"))
+        fb_comments = _postproxy_ig_count(video.get("facebook_comments"))
+        if ig_comments is not None or fb_comments is not None:
+            video["comments"] = (ig_comments or 0) + (fb_comments or 0)
+
+        if row.matched_job_id and not video.get("job_url"):
+            video["job_id"] = row.matched_job_id
+            video["job_url"] = f"/?mode=review&job={row.matched_job_id}"
+        video["instagram_stats_source"] = "postproxy"
+
+    print(f"[performance-connected-stats] user={user_id} matched={matched} "
+          f"views={with_views} comments={with_comments}", flush=True)
+    return report
+
+
 @app.post("/api/user-worker/instagram/postproxy-stats")
 async def receive_postproxy_instagram_stats(
     payload: dict = Body(...),
@@ -21546,6 +21624,7 @@ async def read_amazon_sales_report_for_worker(
         return {"stored": False,
                 "reason": ("the newest stored snapshot will not parse"
                            if row_exists else "no sales report has been pushed yet")}
+    report = _amazon_sales_with_connected_instagram(report, db, str(user_id))
     videos = report.get("videos") or []
     body = {
         "stored": True,
@@ -21580,6 +21659,8 @@ async def read_amazon_sales_report(current_user: User = Depends(get_current_user
     report = _amazon_sales_latest(db, str(current_user.id))
     if report is None:
         return {"stored": False, "reason": "no sales report has been pushed yet"}
+    report = _amazon_sales_with_connected_instagram(
+        report, db, str(current_user.id))
     return {"stored": True, "report": report}
 
 
