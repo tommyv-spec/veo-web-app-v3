@@ -17,6 +17,7 @@ import asyncio
 import json
 import sys
 import os
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
@@ -140,6 +141,17 @@ def test_full_overlays_connected_postproxy_stats_without_replacing_sales(db):
     assert video["comments"] == 9
     assert video["period"] == {"clicks": 4, "items_ordered": 1}
     assert video["instagram_stats_source"] == "postproxy"
+    assert video["accounts"] == ["martha_health_style"]
+    assert video["by_account"] == [{
+        "account": "martha_health_style",
+        "platform": "instagram",
+        "tracking_ids": [],
+        "period": {},
+        "daily": [],
+        "instagram_url": "https://instagram.com/reel/ABC/",
+        "job_url": "",
+        "stats_source": "postproxy",
+    }]
 
 
 def test_an_ambiguous_connected_zero_never_erases_a_measured_view(db):
@@ -268,3 +280,13 @@ def test_storing_writes_no_file_anywhere(db, tmp_path, monkeypatch):
     assert list(tmp_path.rglob("*.json")) == []
     assert json.loads(db.query(AmazonSalesSnapshot)
                       .filter_by(user_id="u1").one().payload)["videos"]
+
+
+def test_performance_ui_shows_historical_posts_without_exposing_internal_keys():
+    page = (Path(__file__).resolve().parents[1] / "static" / "index.html").read_text(
+        encoding="utf-8")
+    assert "v.display_name || v.video" in page
+    assert "v.source_status ? ' · '" in page
+    assert "posts_unlinked" in page and "views_unlinked" in page
+    assert "posts with no video record here" not in page
+    assert "v.complete === false ? '≥'" in page

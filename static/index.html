@@ -20420,7 +20420,8 @@ async function renderAutoEditCard(jobId, hasExport) {
                 const accounts = (video.by_account || []).map(a => a.account).concat(video.accounts || []);
                 const tags = (video.tracking_ids || []).concat(
                     (video.by_account || []).flatMap(a => a.tracking_ids || []));
-                const haystack = [video.video || '', ...accounts, ...tags].join(' ').toLowerCase();
+                const haystack = [video.display_name || '', video.video || '', ...accounts, ...tags]
+                    .join(' ').toLowerCase();
                 if (search && !haystack.includes(search)) return false;
                 if (s.account && s.account !== 'all' && !accounts.includes(s.account)) return false;
                 if (s.platform && s.platform !== 'all' && !platforms(video).has(s.platform)) return false;
@@ -20454,14 +20455,16 @@ async function renderAutoEditCard(jobId, hasExport) {
             };
             return filtered.map((video, index) => ({ video, index })).sort(function (a, b) {
                 if (key === 'video') {
-                    const order = String(a.video.video || '').localeCompare(String(b.video.video || ''));
+                    const order = String(a.video.display_name || a.video.video || '')
+                        .localeCompare(String(b.video.display_name || b.video.video || ''));
                     return direction === 'desc' ? -order : order;
                 }
                 const av = value(a.video), bv = value(b.video);
                 if (av === null && bv === null) return a.index - b.index;
                 if (av === null) return 1;
                 if (bv === null) return -1;
-                if (av === bv) return String(a.video.video || '').localeCompare(String(b.video.video || ''));
+                if (av === bv) return String(a.video.display_name || a.video.video || '')
+                    .localeCompare(String(b.video.display_name || b.video.video || ''));
                 return direction === 'asc' ? av - bv : bv - av;
             }).map(row => row.video);
         }
@@ -20513,14 +20516,16 @@ async function renderAutoEditCard(jobId, hasExport) {
             if (n === null || n === undefined || n === '' || n === 'Unknown') return PERF_UNKNOWN;
             const f = Number(n);
             if (!isFinite(f)) return escapeHtml(String(n));
-            return Number.isInteger(f) ? String(f) : f.toFixed(2);
+            const shown = Number.isInteger(f) ? String(f) : f.toFixed(2);
+            return (typeof v === 'object' && v.complete === false ? '≥' : '') + shown;
         }
 
         function perfMoney(v) {
             const n = perfVal(v);
             if (n === null || n === undefined || n === '' || n === 'Unknown') return PERF_UNKNOWN;
             const f = Number(n);
-            return isFinite(f) ? f.toFixed(2) : PERF_UNKNOWN;
+            if (!isFinite(f)) return PERF_UNKNOWN;
+            return (typeof v === 'object' && v.complete === false ? '≥' : '') + f.toFixed(2);
         }
 
         function perfRate(top, bottom) {
@@ -20592,13 +20597,19 @@ async function renderAutoEditCard(jobId, hasExport) {
             // tell. Subtotals per publisher are always true.
             const fb = rep.facebook || {};
             const fbVendors = Object.keys(fb.by_vendor || {}).sort();
-            if (fbVendors.length) {
+            const fbNotListed = fbVendors.reduce(function (total, name) {
+                const v = fb.by_vendor[name] || {};
+                return total + Math.max(0, (v.posts_unmatched || 0) - (v.posts_unlinked || 0));
+            }, 0);
+            if (fbNotListed) {
                 out.push('<div class="perf-health"><strong>Facebook</strong> · ' +
                     fbVendors.map(function (name) {
                         const v = fb.by_vendor[name] || {};
+                        const viewsNotListed = Math.max(0,
+                            (v.views_unmatched || 0) - (v.views_unlinked || 0));
                         return escapeHtml(name) + ': ' + (v.posts_read || 0) + ' post(s), ' +
                             (v.views_matched || 0) + ' view(s) on videos listed below, ' +
-                            (v.views_unmatched || 0) + ' on posts with no video record here';
+                            viewsNotListed + ' view(s) not represented by any row';
                     }).join(' · ') +
                     ' · <em>View→click divides period clicks by lifetime total views ' +
                     '— use it as direction, not an exact period rate</em></div>');
@@ -20616,12 +20627,18 @@ async function renderAutoEditCard(jobId, hasExport) {
                 '<div><span class="n">' + perfMoney(totals.ordered_revenue) + '</span><span class="k">revenue</span></div>' +
                 '<div><span class="n">' + perfMoney(totals.earnings) + '</span><span class="k">earnings</span></div>' +
                 '</div>');
+            if (Object.values(totals).some(v => v && typeof v === 'object' && v.complete === false)) {
+                out.push('<div class="perf-results">≥ marks a known subtotal; Amazon did not expose ' +
+                    'every cell for this period.</div>');
+            }
+            out.push('<div class="perf-results">View → click compares period clicks with lifetime ' +
+                'platform views, so use it as direction rather than an exact period rate.</div>');
 
             const accounts = Array.from(new Set(allVideos.flatMap(function (v) {
                 return (v.by_account || []).map(a => a.account).concat(v.accounts || []);
             }).filter(Boolean))).sort();
             out.push('<div class="perf-controls">' +
-                '<label class="perf-control"><span>Find video</span><input id="perfSearch" type="search" ' +
+                '<label class="perf-control"><span>Find video or post</span><input id="perfSearch" type="search" ' +
                 'value="' + escapeHtml(perfState.search) + '" placeholder="Name, account or tracking tag" ' +
                 'oninput="perfSetFilter(\'search\', this.value)"></label>' +
                 '<label class="perf-control"><span>Account</span><select onchange="perfSetFilter(\'account\', this.value)">' +
@@ -20652,10 +20669,17 @@ async function renderAutoEditCard(jobId, hasExport) {
                 '<button type="button" class="perf-reset" onclick="perfResetFilters()">Reset</button></div>' +
                 '</div>');
             out.push('<div class="perf-results">Showing <strong>' + videos.length + '</strong> of ' +
-                allVideos.length + ' videos · Unknown values always sort last.</div>');
+                allVideos.length + ' records · Unknown values always sort last.</div>');
+            const unlinkedPosts = allVideos.filter(v =>
+                v.source_status === 'source video not linked').length;
+            if (unlinkedPosts) {
+                out.push('<div class="perf-results"><strong>' + unlinkedPosts +
+                    '</strong> historical Facebook post(s) are listed with their platform stats. ' +
+                    'Their source video and sales tracking were never linked, so those fields stay Unknown.</div>');
+            }
 
             out.push('<div class="perf-table-wrap"><table class="perf-table" aria-label="Video performance">' +
-                '<thead><tr><th scope="col">' + sortHead('Video', 'video') + '</th>' +
+                '<thead><tr><th scope="col">' + sortHead('Video / post', 'video') + '</th>' +
                 '<th scope="col">' + sortHead('Published', 'newest') + '</th>' +
                 '<th scope="col">' + sortHead('Views', 'views') + '</th>' +
                 '<th scope="col">' + sortHead('Comments', 'comments') + '</th>' +
@@ -20682,8 +20706,9 @@ async function renderAutoEditCard(jobId, hasExport) {
                 const posted = String(v.posted_at || '').slice(0, 10);
                 out.push('<tr class="perf-video-row">' +
                     '<td class="perf-video-cell" data-label="Video"><div class="perf-video-name">' +
-                    escapeHtml(v.video || '') + '</div><div class="perf-video-meta">' +
-                    escapeHtml(shownAccounts.join(' · ') || 'No account recorded') + '</div>' +
+                    escapeHtml(v.display_name || v.video || '') + '</div><div class="perf-video-meta">' +
+                    escapeHtml(shownAccounts.join(' · ') || 'No account recorded') +
+                    (v.source_status ? ' · ' + escapeHtml(v.source_status) : '') + '</div>' +
                     '<div class="perf-links">' + links.join('') + '</div></td>' +
                     '<td data-label="Published"><span class="perf-metric-main">' +
                     (posted ? escapeHtml(posted) : PERF_UNKNOWN) + '</span></td>' +
@@ -20709,6 +20734,8 @@ async function renderAutoEditCard(jobId, hasExport) {
                             const ap = a.period || {};
                             const accountLinks = [];
                             if (a.instagram_url) accountLinks.push('<a href="' + escapeHtml(a.instagram_url) +
+                                '" target="_blank" rel="noopener">post ↗</a>');
+                            if (a.facebook_url) accountLinks.push('<a href="' + escapeHtml(a.facebook_url) +
                                 '" target="_blank" rel="noopener">post ↗</a>');
                             if (a.tracked_link) accountLinks.push('<a href="' + escapeHtml(a.tracked_link) +
                                 '" target="_blank" rel="noopener">tracked link ↗</a>');

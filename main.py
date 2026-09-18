@@ -21383,20 +21383,21 @@ def _amazon_sales_with_connected_instagram(report: dict, db, user_id: str) -> di
         return report
 
     rows = (
-        db.query(InstagramVideo)
+        db.query(InstagramVideo, InstagramAccount)
         .join(InstagramAccount, InstagramVideo.account_id == InstagramAccount.id)
         .filter(InstagramAccount.user_id == str(user_id),
                 InstagramVideo.shortcode.in_(list(codes)))
         .all()
     )
-    by_code = {row.shortcode: row for row in rows}
-    matched = with_views = with_comments = 0
+    by_code = {row.shortcode: (row, account) for row, account in rows}
+    matched = with_views = with_comments = identity_added = 0
     for video in videos:
         if not isinstance(video, dict):
             continue
-        row = by_code.get(_instagram_shortcode(video.get("instagram_url")))
-        if row is None:
+        connected = by_code.get(_instagram_shortcode(video.get("instagram_url")))
+        if connected is None:
             continue
+        row, account = connected
         matched += 1
 
         live_views = _postproxy_ig_count(row.views)
@@ -21424,10 +21425,44 @@ def _amazon_sales_with_connected_instagram(report: dict, db, user_id: str) -> di
         if row.matched_job_id and not video.get("job_url"):
             video["job_id"] = row.matched_job_id
             video["job_url"] = f"/?mode=review&job={row.matched_job_id}"
+
+        # Identity is public post metadata, not Amazon attribution. Add the
+        # connected handle when the old snapshot did not know it, but keep an
+        # empty period/tracking-id set so no click or sale is assigned by guess.
+        accounts = video.get("accounts")
+        if not isinstance(accounts, list):
+            accounts = []
+        if account.handle and account.handle not in accounts:
+            accounts.append(account.handle)
+        video["accounts"] = accounts
+
+        breakdown = video.get("by_account")
+        if not isinstance(breakdown, list):
+            breakdown = []
+        has_instagram = any(
+            isinstance(item, dict) and (
+                item.get("account") == account.handle
+                or item.get("platform") == "instagram")
+            for item in breakdown)
+        if not has_instagram:
+            breakdown.append({
+                "account": account.handle,
+                "platform": "instagram",
+                "tracking_ids": [],
+                "period": {},
+                "daily": [],
+                "instagram_url": row.url or video.get("instagram_url") or "",
+                "job_url": (f"/?mode=review&job={row.matched_job_id}"
+                            if row.matched_job_id else ""),
+                "stats_source": "postproxy",
+            })
+            identity_added += 1
+        video["by_account"] = breakdown
         video["instagram_stats_source"] = "postproxy"
 
     print(f"[performance-connected-stats] user={user_id} matched={matched} "
-          f"views={with_views} comments={with_comments}", flush=True)
+          f"views={with_views} comments={with_comments} "
+          f"identity_added={identity_added}", flush=True)
     return report
 
 
