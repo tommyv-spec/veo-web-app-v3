@@ -2361,8 +2361,19 @@ def _apply_worker_status(node, backend, status, has_variants, error):
                 node.status = "ready"
                 node.error_message = "Banana failed; ChatGPT variant ready for review"
         else:
-            node.status = done
-            node.error_message = None if has_variants else "Worker reported completion but no variants uploaded"
+            if done == "failed" and node.cg_status == "ready":
+                # A Banana worker can finish without uploading a usable file.
+                # Do not hide a valid ChatGPT result behind the shared failed
+                # status: the approval queue is keyed from node.status.
+                node.status = "ready"
+                node.error_message = (
+                    "Banana completed without a variant; "
+                    "ChatGPT variant ready for review")
+            else:
+                node.status = done
+                node.error_message = (
+                    None if has_variants
+                    else "Worker reported completion but no variants uploaded")
             node.claimed_by_worker = None
             node.claimed_at = None
     elif status == "failed":
@@ -14556,13 +14567,13 @@ def _promote_ready_children(db: Session, parent_node_id: int):
 
         try:
             child.status = "queued"
-            # Every image gets both render lanes. A dependent child reaches this
-            # point only after every parent has a chosen variant, so ChatGPT can
-            # consume the same resolved chain references as Banana.
-            _seed_chatgpt_lane(child)
             child.error_message = None
             db.flush()
             write_generation_job(db, child)
+            # Open the second lane only after the primary job was written. If
+            # that write fails, the child returns to draft with no claimable
+            # ChatGPT work left behind for a later sibling commit to persist.
+            _seed_chatgpt_lane(child)
             promoted += 1
             log.info(f"[image_platform] Auto-promoted child node {child.id} (parent {parent_node_id} became ready)")
         except Exception as e:

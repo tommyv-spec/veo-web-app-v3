@@ -67,6 +67,24 @@ def test_login_required_is_quarantined_without_six_restarts():
     assert handlers.index("FlowLoginRequired") < handlers.index("Exception")
 
 
+def test_profile_source_failure_is_quarantined_without_stopping_peer_accounts():
+    run = next(
+        node for node in _node("AccountWorker").body
+        if isinstance(node, ast.FunctionDef) and node.name == "run"
+    )
+    handlers = [
+        ast.unparse(node.type) if node.type is not None else ""
+        for node in ast.walk(run) if isinstance(node, ast.ExceptHandler)
+    ]
+    assert "FirefoxProfileSourceUnavailable" in handlers
+    assert handlers.index("FirefoxProfileSourceUnavailable") < handlers.index("Exception")
+
+    main = _source("main_multi_account")
+    assert "account['_profile_prepare_failed'] = True" in main
+    assert "Profile preparation failed — isolating this " in main
+    assert "not account.get('_profile_prepare_failed', False)" in main
+
+
 def test_idle_pool_contains_only_live_workers():
     idle = _function("_idle_live_account_names", {"account_health": SimpleNamespace(
         is_busy=lambda name: name == "Account3",

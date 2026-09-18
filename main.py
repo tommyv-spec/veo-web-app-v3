@@ -19146,6 +19146,25 @@ def _parse_worker_clip_ids(raw: Optional[str]):
     return sorted(set(values))
 
 
+def _parse_worker_job_ids(raw: Optional[str]):
+    """Parse an exact worker job allowlist without ever widening bad input."""
+    if raw is None or not str(raw).strip():
+        return None
+    values = []
+    for token in str(raw).split(","):
+        token = token.strip()
+        try:
+            values.append(str(uuid.UUID(token)))
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(
+                status_code=422,
+                detail="job_ids must be a comma-separated list of UUIDs",
+            )
+    if not values:
+        raise HTTPException(status_code=422, detail="job_ids contained no job IDs")
+    return sorted(set(values))
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # EXACT-CLIP FIRST GENERATION — scoped claim + scoped release.
 #
@@ -19376,6 +19395,7 @@ async def local_worker_get_redo_clips(
     worker_id: Optional[str] = Query(None, description="Worker ID for claiming"),
     arms: Optional[str] = Query(None, description="v959: comma-separated render arms this worker build carries"),
     clip_ids: Optional[str] = Query(None, description="Exact comma-separated clip allowlist for a scoped worker run"),
+    job_ids: Optional[str] = Query(None, description="Exact comma-separated job allowlist for a scoped worker run"),
     db: DBSession = Depends(get_db_session),
     authorized: bool = Depends(verify_local_worker_key)
 ):
@@ -19393,6 +19413,7 @@ async def local_worker_get_redo_clips(
     # NOTE: Now filtering for flow_redo_queued instead of redo_queued
     claim_timeout = datetime.utcnow() - timedelta(minutes=10)
     allowed_clip_ids = _parse_worker_clip_ids(clip_ids)
+    allowed_job_ids = _parse_worker_job_ids(job_ids)
     _stale_q = db.query(Clip).join(Job).filter(
         Job.backend == 'flow',
         Clip.status == ClipStatus.FLOW_REDO_QUEUED.value,  # Changed from 'redo_queued'
@@ -19401,6 +19422,8 @@ async def local_worker_get_redo_clips(
     )
     if allowed_clip_ids is not None:
         _stale_q = _stale_q.filter(Clip.id.in_(allowed_clip_ids))
+    if allowed_job_ids is not None:
+        _stale_q = _stale_q.filter(Job.id.in_(allowed_job_ids))
     stale_clips = _stale_q.all()
     
     for stale_clip in stale_clips:
@@ -19477,6 +19500,8 @@ async def local_worker_get_redo_clips(
             _q = _q.filter(Job.created_at >= _age_cutoff)
         if allowed_clip_ids is not None:
             _q = _q.filter(Clip.id.in_(allowed_clip_ids))
+        if allowed_job_ids is not None:
+            _q = _q.filter(Job.id.in_(allowed_job_ids))
         redo_clips = _q.order_by(Clip.id.asc()).all()
     else:
         # No worker_id - get unclaimed only (legacy behavior)
@@ -19499,6 +19524,8 @@ async def local_worker_get_redo_clips(
             _q = _q.filter(Job.created_at >= _age_cutoff)
         if allowed_clip_ids is not None:
             _q = _q.filter(Clip.id.in_(allowed_clip_ids))
+        if allowed_job_ids is not None:
+            _q = _q.filter(Job.id.in_(allowed_job_ids))
         redo_clips = _q.order_by(Clip.id.asc()).all()
 
     if allowed_clip_ids is not None:
@@ -22293,6 +22320,7 @@ async def user_worker_get_redo_clips(
     worker_id: Optional[str] = Query(None),
     arms: Optional[str] = Query(None, description="v959: comma-separated render arms this worker build carries"),
     clip_ids: Optional[str] = Query(None, description="Exact comma-separated clip allowlist for a scoped worker run"),
+    job_ids: Optional[str] = Query(None, description="Exact comma-separated job allowlist for a scoped worker run"),
     db: DBSession = Depends(get_db_session),
     user_id: str = Depends(verify_user_worker_token)
 ):
@@ -22301,6 +22329,7 @@ async def user_worker_get_redo_clips(
     
     claim_timeout = datetime.utcnow() - timedelta(minutes=10)
     allowed_clip_ids = _parse_worker_clip_ids(clip_ids)
+    allowed_job_ids = _parse_worker_job_ids(job_ids)
     _stale_q = db.query(Clip).join(Job).filter(
         Job.user_id == user_id,
         Job.backend == 'flow',
@@ -22310,6 +22339,8 @@ async def user_worker_get_redo_clips(
     )
     if allowed_clip_ids is not None:
         _stale_q = _stale_q.filter(Clip.id.in_(allowed_clip_ids))
+    if allowed_job_ids is not None:
+        _stale_q = _stale_q.filter(Job.id.in_(allowed_job_ids))
     stale_clips = _stale_q.all()
     
     # v468: zombie-loop prevention (mirror of local-worker endpoint).
@@ -22379,6 +22410,8 @@ async def user_worker_get_redo_clips(
                                Clip.redo_reason.like('v933 modify%')))
         if allowed_clip_ids is not None:
             _q = _q.filter(Clip.id.in_(allowed_clip_ids))
+        if allowed_job_ids is not None:
+            _q = _q.filter(Job.id.in_(allowed_job_ids))
         redo_clips = _q.order_by(Clip.id.asc()).all()
     else:
         redo_cutoff = datetime.utcnow() - timedelta(hours=24)
@@ -22402,6 +22435,8 @@ async def user_worker_get_redo_clips(
                                Clip.redo_reason.like('v933 modify%')))
         if allowed_clip_ids is not None:
             _q = _q.filter(Clip.id.in_(allowed_clip_ids))
+        if allowed_job_ids is not None:
+            _q = _q.filter(Job.id.in_(allowed_job_ids))
         redo_clips = _q.order_by(Clip.id.asc()).all()
 
     if allowed_clip_ids is not None:

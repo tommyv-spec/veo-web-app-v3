@@ -45,6 +45,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 
 # Data files that carry the session and survive a version gap. Deliberately does
 # NOT include compatibility.ini / prefs.js / extensions / storage — those are
@@ -82,13 +83,13 @@ def worker_profile_needs_seed(session_folder, golden_folder):
 
 
 def flow_cookie_count(profile_folder):
-    """Count Flow app cookies without ever reading or logging their values.
+    """Count unexpired Flow session cookies without reading or logging values.
 
     A copied Google SSO jar can still land on ``challenge/pwd``.  Flow's own
-    ``labs.google`` session cookie is the authority the operator already proved
-    in normal Firefox, so a Flow worker profile is not prepared until it carries
-    that cookie.  Read through a SQLite snapshot so a live source WAL is folded
-    in and the source profile remains read-only.
+    ``__Secure-next-auth.session-token`` on ``labs.google`` is the authority the
+    operator already proved in normal Firefox. Other labs cookies, or an expired
+    session token, must not suppress repair. Read through a SQLite snapshot so a
+    live source WAL is folded in and the source profile remains read-only.
     """
     source = os.path.join(os.fspath(profile_folder), "cookies.sqlite")
     if not os.path.isfile(source):
@@ -101,8 +102,17 @@ def flow_cookie_count(profile_folder):
         snapshot_sqlite_database(source, staged)
         con = sqlite3.connect(staged)
         try:
+            columns = {str(row[1]) for row in con.execute(
+                "pragma table_info(moz_cookies)"
+            ).fetchall()}
+            if not {"host", "name", "expiry"}.issubset(columns):
+                return 0
             return int(con.execute(
-                "select count(*) from moz_cookies where host like '%labs.google%'"
+                "select count(*) from moz_cookies "
+                "where host like '%labs.google%' "
+                "and name = '__Secure-next-auth.session-token' "
+                "and expiry > ?",
+                (int(time.time()),),
             ).fetchone()[0])
         finally:
             con.close()

@@ -14221,6 +14221,8 @@ def get_redo_clips():
     url = f"/clips/redo-pending?worker_id={WORKER_ID}&{_worker_arms_q()}"
     if FLOW_ONLY_CLIP_IDS:
         url += f"&clip_ids={_url_quote(_flow_only_clip_ids_q())}"
+    if FLOW_ONLY_JOB_IDS:
+        url += f"&job_ids={_url_quote(','.join(sorted(FLOW_ONLY_JOB_IDS)))}"
     result = api_request("GET", url)
     if result and result.get("clips"):
         clips = result["clips"]
@@ -14246,7 +14248,11 @@ def get_redo_clips():
             if before != len(clips):
                 print(f"[Scope] dropped {before - len(clips)} redo clip(s) outside "
                       f"the job allowlist", flush=True)
-        return interleave_redo_clips_by_model(clips)
+        # If the server returned only other jobs' redos, fall through to this
+        # scoped job's terminal check. Returning [] here kept a completed child
+        # alive whenever an unrelated job still had redo work.
+        if clips:
+            return interleave_redo_clips_by_model(clips)
     if FLOW_ONLY_CLIP_IDS and _scoped_flow_work_is_terminal():
         print(f"[Scope] Exact clip run finished: {_flow_only_clip_ids_q()}; "
               "exiting cleanly", flush=True)
@@ -32218,6 +32224,17 @@ class AccountWorker(threading.Thread):
                 except Exception:
                     pass
                 return
+            except FirefoxProfileSourceUnavailable as e:
+                _clear_flow_auth_ready(self.name)
+                self.ready_flag.set()
+                print(f"[{self.name}] FLOW PROFILE UNAVAILABLE — quarantining only "
+                      f"this account ({e}); other accounts keep running.", flush=True)
+                try:
+                    if getattr(self, 'browser', None):
+                        self.browser.close()
+                except Exception:
+                    pass
+                return
             except Exception as e:
                 restarts += 1
                 if restarts > MAX_WORKER_RESTARTS:
@@ -33844,20 +33861,31 @@ def main_multi_account(accounts_override=None):
         session_folder = account['session_folder']
         account_label = account['name']
         golden = get_golden_folder(session_folder)
-        # Per-account laptop-profile copy-mode (rebuilds golden from the operator's
-        # trusted Chrome login). Runs BEFORE the restore so golden exists below.
-        _maybe_pull_laptop_profile(session_folder, golden, label=account_label)
-        if account_label not in _active_names:
-            # Standby: golden built + guarded now; its session restore happens at
-            # activation (the copy-once guard then skips the channel-close).
-            print(f"[{account_label}] Standby — golden pre-built ({'ok' if os.path.exists(golden) else 'none, will login on activation'})", flush=True)
+        try:
+            # Per-account laptop-profile copy-mode (rebuilds golden from the
+            # operator's trusted Firefox login). Runs BEFORE the restore so the
+            # golden exists below.
+            _maybe_pull_laptop_profile(session_folder, golden, label=account_label)
+            if account_label not in _active_names:
+                # Standby: golden built + guarded now; its session restore happens
+                # at activation (the copy-once guard then skips the channel-close).
+                print(f"[{account_label}] Standby — golden pre-built ({'ok' if os.path.exists(golden) else 'none, will login on activation'})", flush=True)
+                continue
+            if os.path.exists(golden):
+                print(f"[{account_label}] Killing stale Chrome and restoring from golden...", flush=True)
+                kill_chrome_using_profile(session_folder, label=account_label)
+                restore_from_golden(session_folder, account_label=account_label)
+            else:
+                print(f"[{account_label}] No golden folder — will login on first start", flush=True)
+        except Exception as exc:
+            # Account preparation is an account-scoped fault. Record it and let
+            # every other account start. This worker retries once inside its own
+            # thread, where a persistent source failure quarantines only it.
+            account['_profile_prepare_failed'] = True
+            print(f"[{account_label}] Profile preparation failed — isolating this "
+                  f"account while the others start ({type(exc).__name__}: {exc})",
+                  flush=True)
             continue
-        if os.path.exists(golden):
-            print(f"[{account_label}] Killing stale Chrome and restoring from golden...", flush=True)
-            kill_chrome_using_profile(session_folder, label=account_label)
-            restore_from_golden(session_folder, account_label=account_label)
-        else:
-            print(f"[{account_label}] No golden folder — will login on first start", flush=True)
     time.sleep(1)
 
     # Shared queue: AccountWorkers put job_ids here after golden restore
@@ -33892,7 +33920,7 @@ def main_multi_account(accounts_override=None):
             all_download_queues=account_download_queues,
             is_failover_to_standby=is_failover_to_standby,
         )
-        worker.golden_restored = True  # Already restored above — skip in thread
+        worker.golden_restored = not account.get('_profile_prepare_failed', False)
         worker.redispatch_queue = redispatch_queue  # Signal main loop to re-dispatch jobs after restore
         worker.start()
         account_workers.append(worker)

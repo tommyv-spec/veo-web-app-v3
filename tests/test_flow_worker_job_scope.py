@@ -161,8 +161,21 @@ class JobScopeAutoExit(unittest.TestCase):
     def test_empty_redo_poll_uses_the_job_terminal_check(self):
         block = SOURCE[SOURCE.index("def get_redo_clips("):]
         block = block[:block.index("def ", 10)]
+        self.assertIn(
+            "if clips:\n            return interleave_redo_clips_by_model(clips)",
+            block,
+        )
         self.assertIn("_job_scoped_work_is_terminal()", block)
         self.assertIn("Job run finished", block)
+
+    def test_redo_poll_sends_job_scope_to_server(self):
+        block = SOURCE[SOURCE.index("def get_redo_clips("):]
+        block = block[:block.index("def ", 10)]
+        self.assertIn('url += f"&job_ids=', block)
+        self.assertLess(
+            block.index('url += f"&job_ids='),
+            block.index('result = api_request("GET", url)'),
+        )
 
 
 if __name__ == "__main__":

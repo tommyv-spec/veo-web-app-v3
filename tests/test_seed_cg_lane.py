@@ -71,3 +71,40 @@ def test_parent_choice_promotes_chain_child_to_both_lanes(monkeypatch):
     assert child.status == "queued"
     assert child.cg_status == "queued"
     assert written == [2]
+
+
+def test_failed_chain_job_write_does_not_leave_chatgpt_lane_claimable(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    ip.ImageNode.__table__.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    parent = ip.ImageNode(
+        id=1, user_id="u1", kind="generated", name="parent",
+        prompt="p", status="ready",
+    )
+    child = ip.ImageNode(
+        id=2, user_id="u1", kind="generated", name="child",
+        prompt="p", status="draft",
+    )
+    chosen = ip.ImageVariant(
+        id=11, node_id=1, variant_index=1,
+        image_path="nodes/1/variant_1.png",
+    )
+    parent.chosen_variant_id = 11
+    db.add_all([parent, child, chosen])
+    db.add(ip.ImageEdge(
+        parent_node_id=1, child_node_id=2,
+        role="chain_from_image_1", slot_order=0,
+    ))
+    db.commit()
+
+    def fail_write(_db, _node):
+        raise OSError("queue unavailable")
+
+    monkeypatch.setattr(ip, "write_generation_job", fail_write)
+    ip._promote_ready_children(db, 1)
+    # A later sibling promotion may commit this session. The failed child must
+    # still be draft with no backend lane claimable.
+    db.commit()
+    db.refresh(child)
+    assert child.status == "draft"
+    assert child.cg_status is None

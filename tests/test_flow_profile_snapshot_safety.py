@@ -35,8 +35,11 @@ def _function_source(name: str) -> str:
 
 def _cookie_db(path: Path) -> None:
     con = sqlite3.connect(path)
-    con.execute("create table moz_cookies (host text, name text, value text)")
-    con.execute("insert into moz_cookies values ('.google.com', 'SID', 'not-printed')")
+    con.execute(
+        "create table moz_cookies (host text, name text, value text, expiry integer)")
+    con.execute(
+        "insert into moz_cookies values "
+        "('.google.com', 'SID', 'not-printed', 4102444800)")
     con.commit()
     con.close()
 
@@ -251,9 +254,11 @@ class ProfileSnapshotSafety(unittest.TestCase):
             src = root / "source"
             src.mkdir()
             con = sqlite3.connect(src / "cookies.sqlite")
-            con.execute("create table moz_cookies (host text, name text, value text)")
+            con.execute(
+                "create table moz_cookies "
+                "(host text, name text, value text, expiry integer)")
             con.executemany(
-                "insert into moz_cookies values (?, ?, 'not-printed')",
+                "insert into moz_cookies values (?, ?, 'not-printed', 4102444800)",
                 [(".google.com", "SID"),
                  ("labs.google", "__Secure-next-auth.session-token")])
             con.commit()
@@ -277,10 +282,29 @@ class ProfileSnapshotSafety(unittest.TestCase):
             con = sqlite3.connect(session / "cookies.sqlite")
             con.execute(
                 "insert into moz_cookies values ('labs.google', "
-                "'__Secure-next-auth.session-token', 'not-printed')")
+                "'__Secure-next-auth.session-token', 'not-printed', 4102444800)")
             con.commit()
             con.close()
             self.assertFalse(ffpull.worker_flow_profile_needs_seed(session, golden))
+
+    def test_flow_worker_seed_rejects_unrelated_or_expired_labs_cookies(self):
+        with tempfile.TemporaryDirectory() as td:
+            profile = Path(td) / "firefox-session-2"
+            profile.mkdir()
+            con = sqlite3.connect(profile / "cookies.sqlite")
+            con.execute(
+                "create table moz_cookies "
+                "(host text, name text, value text, expiry integer)")
+            con.executemany(
+                "insert into moz_cookies values (?, ?, 'not-printed', ?)",
+                [
+                    ("labs.google", "unrelated", 4102444800),
+                    ("labs.google", "__Secure-next-auth.session-token", 1),
+                ],
+            )
+            con.commit()
+            con.close()
+            self.assertEqual(0, ffpull.flow_cookie_count(profile))
 
     def test_disabled_image_pull_still_allows_one_empty_profile_seed(self):
         tree = ast.parse(IMAGE_SOURCE)

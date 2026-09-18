@@ -2,6 +2,7 @@
 
 import ast
 import os
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -71,6 +72,25 @@ def test_server_scope_parser_rejects_bad_input():
     assert parse("14935,14907,14935") == [14907, 14935]
     with pytest.raises(HTTPException) as exc:
         parse("14907,bad")
+    assert exc.value.status_code == 422
+
+
+def test_server_job_scope_parser_accepts_uuids_and_fails_closed():
+    class HTTPException(Exception):
+        def __init__(self, status_code, detail):
+            self.status_code = status_code
+            self.detail = detail
+
+    parse = _function(
+        MAIN,
+        "_parse_worker_job_ids",
+        {"HTTPException": HTTPException, "Optional": Optional, "uuid": uuid},
+    )
+    first = "0c04cc1c-d331-4578-8340-d5238f5fdedb"
+    second = "f721dae7-1a5d-4900-b609-c4e80bb2a0f7"
+    assert parse(f"{second},{first},{second}") == [first, second]
+    with pytest.raises(HTTPException) as exc:
+        parse(f"{first},not-a-job")
     assert exc.value.status_code == 422
 
 
@@ -188,5 +208,21 @@ def test_both_redo_endpoints_filter_before_claiming():
         assert "allowed_clip_ids = _parse_worker_clip_ids(clip_ids)" in endpoint
         assert "_q = _q.filter(Clip.id.in_(allowed_clip_ids))" in endpoint
         assert endpoint.index("_q = _q.filter(Clip.id.in_(allowed_clip_ids))") < endpoint.index(
+            "clip.claimed_by_worker = worker_id"
+        )
+
+
+def test_both_redo_endpoints_filter_job_scope_before_claiming():
+    source = MAIN.read_text(encoding="utf-8")
+    local = source.split("async def local_worker_get_redo_clips(", 1)[1].split(
+        "\nclass LocalWorkerJobUpdate", 1
+    )[0]
+    user = source.split("async def user_worker_get_redo_clips(", 1)[1].split(
+        '\n@app.get("/api/user-worker/clips/kling-pending")', 1
+    )[0]
+    for endpoint in (local, user):
+        assert "allowed_job_ids = _parse_worker_job_ids(job_ids)" in endpoint
+        assert "_q = _q.filter(Job.id.in_(allowed_job_ids))" in endpoint
+        assert endpoint.index("_q = _q.filter(Job.id.in_(allowed_job_ids))") < endpoint.index(
             "clip.claimed_by_worker = worker_id"
         )
