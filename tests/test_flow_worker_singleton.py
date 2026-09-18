@@ -24,6 +24,13 @@ class FlowWorkerSingletonTests(unittest.TestCase):
         self.assertLess(SOURCE.index(GUARD_CALL), SOURCE.index(BOOTSTRAP_CALL))
         self.assertIn(BUSY_MESSAGE, SOURCE[:SOURCE.index(BOOTSTRAP_CALL)])
 
+    def test_runtime_dir_never_splits_the_authoritative_singleton(self):
+        start = SOURCE.index("def _flow_worker_singleton_path")
+        end = SOURCE.index("def _flow_worker_hold_path", start)
+        body = SOURCE[start:end]
+        self.assertIn("base = _KAVENO_DIR", body)
+        self.assertNotIn("base = _KAVENO_RUNTIME_DIR", body)
+
     def test_second_direct_process_exits_cleanly_while_owner_lives(self):
         if GUARD_CALL not in SOURCE:
             self.skipTest("RED: worker has no early singleton guard yet")
@@ -53,7 +60,13 @@ class FlowWorkerSingletonTests(unittest.TestCase):
                 env=env,
             )
             try:
-                self.assertEqual("SINGLETON_OWNER_READY", owner.stdout.readline().strip())
+                startup = []
+                for _ in range(10):
+                    line = owner.stdout.readline().strip()
+                    startup.append(line)
+                    if line == "SINGLETON_OWNER_READY":
+                        break
+                self.assertIn("SINGLETON_OWNER_READY", startup)
                 contender = subprocess.run(
                     [sys.executable, str(probe_path), "0"],
                     capture_output=True,

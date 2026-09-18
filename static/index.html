@@ -25689,10 +25689,10 @@ async function renderAutoEditCard(jobId, hasExport) {
         // or '' when there is nothing to wait for.
         //
         // node.cg_status is the ChatGPT satellite lane (ImageNode.cg_status):
-        // null | 'queued' | 'generating' | 'ready' | 'failed'. null means this
-        // node has no GPT lane at all (the auto-seed skips chain nodes; the
-        // manual "Generate with ChatGPT" button can still open one). The lane
-        // is independent of node.status, which the Banana lane owns.
+        // null | 'queued' | 'generating' | 'ready' | 'failed'. New generated
+        // nodes, including chained nodes, auto-seed this lane once their parent
+        // references are resolved. The lane is independent of node.status,
+        // which the Banana lane owns while both are active.
         //
         // Show the loader only while the lane is queued/generating AND no
         // backend='chatgpt' variant has actually landed — the worker can upload

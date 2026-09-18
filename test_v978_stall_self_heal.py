@@ -69,6 +69,19 @@ def test_a_background_thread_cannot_refresh_liveness():
     assert lv.level() == "act", "a background thread must not prove liveness"
 
 
+def test_a_live_multi_account_coordinator_can_stamp_progress():
+    fw = _load()
+    clock = {"t": 1000.0}
+    lv = fw._V978Liveness(warn_s=10, act_s=20, now=lambda: clock["t"])
+    fw._V978_LIVENESS = lv
+    clock["t"] += 15
+    fw._v978_progress()
+    assert lv.level() == "ok"
+    source = pathlib.Path(fw.__file__).read_text(encoding="utf-8")
+    main_multi = source[source.index("def main_multi_account"):source.index("def main(", source.index("def main_multi_account"))]
+    assert "_v978_progress()" in main_multi
+
+
 def test_the_clock_is_monotonic_by_default():
     """A system clock change must not fake progress or fake a stall."""
     import time as _time

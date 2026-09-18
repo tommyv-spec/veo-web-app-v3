@@ -12,6 +12,7 @@ import os
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 WORKER = Path(__file__).resolve().parents[1] / "static" / "flow_worker.py"
 SOURCE = WORKER.read_text(encoding="utf-8")
@@ -102,6 +103,66 @@ class JobScopeWiring(unittest.TestCase):
     def test_the_scope_announces_itself_at_startup(self):
         """A silent scope is unverifiable in a log after the fact."""
         self.assertIn("[Scope] Flow JOB allowlist active:", SOURCE)
+
+
+class JobScopeAutoExit(unittest.TestCase):
+    def _check(self, states):
+        def api_request(_method, url):
+            job_id = url.rsplit("/", 1)[-1]
+            return states.get(job_id)
+
+        mod = types.ModuleType("_job_scope_exit_probe")
+        mod.__dict__.update({
+            "os": os,
+            "FLOW_ONLY_JOB_IDS": frozenset({JOB_A, JOB_B}),
+            "api_request": api_request,
+        })
+        start = SOURCE.index("def _job_scoped_work_is_terminal")
+        end = SOURCE.index("# A scoped firstgen run", start)
+        exec(compile(SOURCE[start:end], "<job-scope-exit>", "exec"), mod.__dict__)
+        return mod.__dict__["_job_scoped_work_is_terminal"]
+
+    def test_every_named_job_must_be_terminal(self):
+        states = {
+            JOB_A: {"status": "completed", "clips": [
+                {"status": "completed"}, {"status": "approved"},
+            ]},
+            JOB_B: {"status": "processing", "clips": [
+                {"status": "generating"},
+            ]},
+        }
+        check = self._check(states)
+        self.assertFalse(check())
+        states[JOB_B] = {"status": "failed", "clips": [{"status": "failed"}]}
+        self.assertTrue(check())
+
+    def test_unknown_api_state_keeps_the_worker_alive(self):
+        states = {
+            JOB_A: {"status": "completed", "clips": [{"status": "completed"}]},
+        }
+        self.assertFalse(self._check(states)())
+
+    def test_auto_exit_can_be_disabled(self):
+        def api_request(_method, _url):
+            raise AssertionError("API must not run when job auto-exit is disabled")
+
+        mod = types.ModuleType("_job_scope_exit_disabled_probe")
+        mod.__dict__.update({
+            "os": os,
+            "FLOW_ONLY_JOB_IDS": frozenset({JOB_A}),
+            "api_request": api_request,
+        })
+        start = SOURCE.index("def _job_scoped_work_is_terminal")
+        end = SOURCE.index("# A scoped firstgen run", start)
+        exec(compile(SOURCE[start:end], "<job-scope-exit>", "exec"), mod.__dict__)
+        with mock.patch.dict(os.environ, {"FLOW_JOB_SCOPE_AUTO_EXIT": "0"}):
+            self.assertFalse(mod.__dict__["_job_scoped_work_is_terminal"]())
+
+    def test_empty_redo_poll_uses_the_job_terminal_check(self):
+        block = SOURCE[SOURCE.index("def get_redo_clips("):]
+        block = block[:block.index("def ", 10)]
+        self.assertIn("_job_scoped_work_is_terminal()", block)
+        self.assertIn("Job run finished", block)
 
 
 if __name__ == "__main__":

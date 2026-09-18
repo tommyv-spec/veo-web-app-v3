@@ -2321,15 +2321,14 @@ def _node_has_chain_dependency(node) -> bool:
 
 def _select_for_backend(candidates, backend):
     """First claimable node for `backend` from an ordered candidate list.
-    chatgpt -> first base node whose cg lane is 'queued'. banana -> first node
+    chatgpt -> first node whose cg lane is 'queued'. banana -> first node
     whose main status is 'queued'. Returns None if none."""
     be = (backend or "banana")
     for n in candidates:
         if be == "chatgpt":
-            # cg_status=='queued' is enough. Auto-seed (_seed_chatgpt_lane) only
-            # queues BASE nodes, so a CHAIN node in the cg queue got there via the
-            # explicit "Generate with ChatGPT" button — honor that (its parent's
-            # chosen variant resolves as a ref, same as the banana lane).
+            # cg_status=='queued' is enough. Base and chain nodes use the same
+            # ordered reference contract; a chain node's chosen parent variant
+            # resolves as a ChatGPT attachment just as it does for Banana.
             if getattr(n, "cg_status", None) == "queued":
                 return n
         else:
@@ -2355,6 +2354,12 @@ def _apply_worker_status(node, backend, status, has_variants, error):
             node.cg_status = done
             node.cg_claimed_by = None
             node.cg_claimed_at = None
+            # Banana may already have failed. A real ChatGPT variant is still a
+            # reviewable image, so expose the node to the normal approval queue
+            # instead of letting one backend stop the whole image chain.
+            if done == "ready" and node.status == "failed":
+                node.status = "ready"
+                node.error_message = "Banana failed; ChatGPT variant ready for review"
         else:
             node.status = done
             node.error_message = None if has_variants else "Worker reported completion but no variants uploaded"
@@ -2367,6 +2372,15 @@ def _apply_worker_status(node, backend, status, has_variants, error):
             node.cg_claimed_at = None
         else:
             if node.status == "ready" and node.chosen_variant_id is not None:
+                node.claimed_by_worker = None
+                node.claimed_at = None
+            elif node.cg_status == "ready":
+                # Keep the successful ChatGPT result reviewable. node.status
+                # also drives the shared approval queue, while cg_status keeps
+                # the backend-specific success visible.
+                node.status = "ready"
+                node.error_message = (
+                    f"{error or 'Banana failed'}; ChatGPT variant ready for review")
                 node.claimed_by_worker = None
                 node.claimed_at = None
             else:
@@ -2402,18 +2416,26 @@ def _release_claim_to(node, *, cg: bool) -> str:
 
 
 def _seed_chatgpt_lane(node) -> None:
-    """Best-effort: on a BASE node (no chain dependency), open the ChatGPT lane so
-    a chatgpt worker will also render it. Skips dependent/chain nodes (Flow-only)
-    and never clobbers a lane already generating/ready/failed. Idempotent.
-    Never opens the lane on an already-approved node."""
-    if _node_has_chain_dependency(node):
-        return
+    """Open the ChatGPT lane for every generated image node.
+
+    This includes dependent/chain nodes: the worker already accepts ordered
+    reference images, so the chosen parent variant is attached to ChatGPT as
+    well as Banana. Never clobbers a lane already generating/ready/failed and
+    never opens the lane on an already-approved node. Idempotent.
+    """
     if _is_approved(node):
         return
     if node.cg_status in (None, "queued"):
+        newly_queued = node.cg_status is None
         node.cg_status = "queued"
         node.cg_claimed_by = None
         node.cg_claimed_at = None
+        if newly_queued:
+            log.info(
+                "[dual-image-diag] queued ChatGPT lane for image node %s "
+                "(Banana status=%s; base and chain nodes share this path)",
+                getattr(node, "id", None), getattr(node, "status", None),
+            )
 
 
 def _resolve_flow_prompt_bindings(node: "ImageNode") -> str:
@@ -14534,6 +14556,10 @@ def _promote_ready_children(db: Session, parent_node_id: int):
 
         try:
             child.status = "queued"
+            # Every image gets both render lanes. A dependent child reaches this
+            # point only after every parent has a chosen variant, so ChatGPT can
+            # consume the same resolved chain references as Banana.
+            _seed_chatgpt_lane(child)
             child.error_message = None
             db.flush()
             write_generation_job(db, child)
@@ -16340,8 +16366,9 @@ def worker_get_pending_job(
     if stale_jobs or cg_stale_jobs:
         db.commit()
 
-    # backend routing: chatgpt claims via cg_status lane (base nodes only),
-    # banana/default via node.status (all nodes).
+    # Backend routing: both lanes may claim every generated image. ChatGPT owns
+    # cg_status; Banana/default owns node.status, so either lane can fail without
+    # cancelling the other.
     is_cg = (backend or "banana") == "chatgpt"
 
     # Prefer same-batch nodes when the worker tells us which batch it's on.
@@ -16369,9 +16396,9 @@ def worker_get_pending_job(
                 q = q.filter(ImageNode.chosen_variant_id.is_(None))
             if exclude_ids:
                 q = q.filter(ImageNode.id.notin_(exclude_ids))
-            # backend routing: chatgpt claims cg-lane base nodes, banana claims
+            # Backend routing: ChatGPT claims cg-lane nodes, Banana claims
             # status-queued nodes. The helper scans the ordered query and
-            # returns the first claimable node.
+            # returns the first claimable node, including dependent nodes.
             node = _select_for_backend(q.order_by(ImageNode.created_at.asc()), backend)
 
     # Fall back to any queued node if no same-batch match (or no preference)

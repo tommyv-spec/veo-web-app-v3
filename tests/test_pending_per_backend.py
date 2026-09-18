@@ -7,10 +7,10 @@ class FakeNode:
         self.parent_edges = ([types.SimpleNamespace(kind=None, role="variant_chain:1")]
                              if chain else [])
 
-def test_chatgpt_lane_selects_cg_queued_base_node():
+def test_chatgpt_lane_selects_first_cg_queued_node_including_chain_nodes():
     base = FakeNode(1, status="ready", cg_status="queued")
-    dep = FakeNode(2, status="queued", cg_status=None, chain=True)
-    assert ip._select_for_backend([dep, base], "chatgpt") is base
+    dep = FakeNode(2, status="queued", cg_status="queued", chain=True)
+    assert ip._select_for_backend([dep, base], "chatgpt") is dep
 
 def test_chatgpt_lane_skips_node_without_cg_queued():
     n = FakeNode(1, status="queued", cg_status=None)

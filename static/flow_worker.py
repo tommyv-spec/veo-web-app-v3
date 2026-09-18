@@ -237,6 +237,7 @@ _V978_SELF_HEAL_MAX = 3
 # meant sixteen full stack dumps between warn and act.
 _V978_WARN_REPEAT_S = float(os.environ.get("FLOW_STALL_WARN_REPEAT_S") or 60)
 _V978_self_heals = [0]
+_V978_LIVENESS = None
 
 # Kept aside at install time so the watchdog can report WITHOUT refreshing the
 # liveness stamp it is reporting on. Codex pass-1 finding 2: the warning used to
@@ -731,6 +732,15 @@ def _v978_install_liveness_watchdog():
     return liveness
 
 
+def _v978_progress():
+    """Explicitly refresh v978 after one coordinator turn makes progress."""
+    liveness = _V978_LIVENESS
+    if liveness is None:
+        return False
+    liveness.stamp()
+    return True
+
+
 def _install_stall_watchdog():
     import threading as _th
     import time as _time
@@ -783,7 +793,7 @@ _install_stall_watchdog()
 # The stack-diff watchdog above answers WHERE the main thread is parked; this
 # answers WHETHER the run is still moving, and it is the one allowed to act.
 # Both, because today each caught a failure the other missed.
-_v978_install_liveness_watchdog()
+_V978_LIVENESS = _v978_install_liveness_watchdog()
 
 
 # The lifecycle launcher serializes normal starts, but this file is also often
@@ -791,6 +801,14 @@ _v978_install_liveness_watchdog()
 # one OS lock, acquired before dependency bootstrap or any browser/profile use.
 # The open handle keeps the lock alive and the OS releases it after a crash.
 _FLOW_WORKER_SINGLETON_HANDLE = None
+_KAVENO_DIR = os.path.join(os.path.expanduser("~"), ".kaveno")
+_KAVENO_RUNTIME_DIR = os.environ.get("KAVENO_RUNTIME_DIR", "").strip() or _KAVENO_DIR
+
+
+def _kaveno_runtime_file(name):
+    """Mutable worker state, isolated from tokens and operator-owned holds."""
+    os.makedirs(_KAVENO_RUNTIME_DIR, exist_ok=True)
+    return os.path.join(_KAVENO_RUNTIME_DIR, name)
 
 
 def _flow_worker_singleton_path(scope_raw=None):
@@ -820,7 +838,15 @@ def _flow_worker_singleton_path(scope_raw=None):
     the job it was built for. The default profile keeps the original file name,
     so nothing about the primary's behaviour changes.
     """
-    base = os.path.join(os.path.expanduser("~"), ".kaveno")
+    # This is intentionally NOT under KAVENO_RUNTIME_DIR.  That directory is
+    # writable inside the Codex fallback sandbox, while the normal trusted
+    # worker historically owns the lock under ~/.kaveno.  Splitting the path by
+    # caller let both workers acquire a different lock and open the same queue
+    # and Firefox profile.  One operator-owned path is the authoritative guard;
+    # a sandboxed direct start cannot acquire it and therefore exits before any
+    # browser/profile work.
+    base = _KAVENO_DIR
+    os.makedirs(base, exist_ok=True)
     profile = (os.environ.get("SESSION_FOLDER") or "").strip()
     if not profile:
         return os.path.join(base, "flow_worker.singleton.lock")
@@ -838,7 +864,7 @@ def _flow_worker_singleton_path(scope_raw=None):
 
 
 def _flow_worker_hold_path():
-    return os.path.join(os.path.expanduser("~"), ".kaveno", "hold", "flow")
+    return os.path.join(_KAVENO_DIR, "hold", "flow")
 
 
 def _flow_worker_hold_blocks_start(hold_path=None, scope_raw=None):
@@ -1187,8 +1213,7 @@ from datetime import datetime, timedelta
 # stdout log can be owned by a detached cmd wrapper on Windows, so a second
 # Codex/Claude session needs a direct source of truth for which clip/model made
 # it as far as Flow. This file contains no prompts, cookies, or response bodies.
-_FLOW_MODEL_EVENT_FILE = os.path.join(
-    os.path.expanduser("~"), ".kaveno", "flow_model_events.jsonl")
+_FLOW_MODEL_EVENT_FILE = _kaveno_runtime_file("flow_model_events.jsonl")
 _FLOW_MODEL_EVENT_LOCK = threading.Lock()
 
 
@@ -3679,7 +3704,7 @@ _V963_SUBMIT_RPCIDS = (
 _V963_SUBMIT_RPCID = _V963_SUBMIT_RPCIDS[0]   # for logs and dumps only
 _V963_UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
-_V963_BX_DUMP = os.path.expanduser("~/.kaveno/flow_batchexecute_submit.txt")
+_V963_BX_DUMP = _kaveno_runtime_file("flow_batchexecute_submit.txt")
 
 
 def _v975_page_of(resp):
@@ -5271,46 +5296,120 @@ def _flow_entry_login_click(page, label="Flow"):
     return False
 
 
-_FLOW_AUTH_READY_FILE = os.path.join(
-    os.path.expanduser("~"), ".kaveno", "flow_auth_ready.json")
+_FLOW_AUTH_READY_FILE = _kaveno_runtime_file("flow_auth_ready.json")
+_FLOW_AUTH_READY_LOCK = threading.Lock()
+
+
+def _flow_auth_marker_add(row, pid, label, proof):
+    """Return a marker with one ready proof per account for this process."""
+    accounts = {}
+    try:
+        same_process = isinstance(row, dict) and int(row.get("pid") or 0) == int(pid)
+    except (TypeError, ValueError):
+        same_process = False
+    if same_process:
+        current = row.get("accounts")
+        if isinstance(current, dict):
+            accounts.update({str(name): dict(value) for name, value in current.items()
+                             if isinstance(value, dict)})
+        elif row.get("label"):
+            accounts[str(row["label"])] = {
+                key: value for key, value in row.items()
+                if key not in ("pid", "label", "accounts")
+            }
+    accounts[str(label)] = dict(proof or {})
+    selected = max(
+        accounts,
+        key=lambda name: float(accounts[name].get("authenticated_at") or 0),
+    )
+    result = {"pid": int(pid), "accounts": accounts}
+    result.update(accounts[selected])
+    result["pid"] = int(pid)
+    result["label"] = selected
+    return result
+
+
+def _flow_auth_marker_remove(row, pid, label):
+    """Remove only label's proof; return None when no ready account remains."""
+    try:
+        if not isinstance(row, dict) or int(row.get("pid") or 0) != int(pid):
+            return row
+    except (TypeError, ValueError):
+        return row
+    current = row.get("accounts")
+    if isinstance(current, dict):
+        accounts = {str(name): dict(value) for name, value in current.items()
+                    if isinstance(value, dict)}
+    elif row.get("label"):
+        accounts = {str(row["label"]): {
+            key: value for key, value in row.items()
+            if key not in ("pid", "label", "accounts")
+        }}
+    else:
+        accounts = {}
+    accounts.pop(str(label), None)
+    if not accounts:
+        return None
+    selected = max(
+        accounts,
+        key=lambda name: float(accounts[name].get("authenticated_at") or 0),
+    )
+    result = {"pid": int(pid), "accounts": accounts}
+    result.update(accounts[selected])
+    result["pid"] = int(pid)
+    result["label"] = selected
+    return result
 
 
 def _publish_flow_auth_ready(page, label):
     """Publish PID-bound DOM auth proof without depending on redirected stdout."""
     try:
-        folder = os.path.dirname(_FLOW_AUTH_READY_FILE)
-        os.makedirs(folder, exist_ok=True)
-        tmp = _FLOW_AUTH_READY_FILE + f".{os.getpid()}.tmp"
         try:
             url = str(page.url or "")
         except Exception:
             url = ""
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({
-                "pid": os.getpid(),
-                "authenticated_at": time.time(),
-                "label": label,
-                "url": url,
-                "build": WORKER_BUILD,
-                "proof": getattr(
-                    page, "_flow_auth_proof", "verified signed-in Flow state"),
-            }, f)
-        os.replace(tmp, _FLOW_AUTH_READY_FILE)
+        proof = {
+            "authenticated_at": time.time(),
+            "url": url,
+            "build": WORKER_BUILD,
+            "proof": getattr(
+                page, "_flow_auth_proof", "verified signed-in Flow state"),
+        }
+        with _FLOW_AUTH_READY_LOCK:
+            try:
+                with open(_FLOW_AUTH_READY_FILE, "r", encoding="utf-8") as f:
+                    current = json.load(f)
+            except (OSError, ValueError, TypeError):
+                current = None
+            row = _flow_auth_marker_add(current, os.getpid(), label, proof)
+            folder = os.path.dirname(_FLOW_AUTH_READY_FILE)
+            os.makedirs(folder, exist_ok=True)
+            tmp = _FLOW_AUTH_READY_FILE + f".{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(row, f)
+            os.replace(tmp, _FLOW_AUTH_READY_FILE)
         return True
     except Exception as exc:
         print(f"[{label}] could not publish Flow auth proof: {exc}", flush=True)
         return False
 
 
-def _clear_flow_auth_ready():
-    """A login wall must revoke this process's earlier ready proof."""
+def _clear_flow_auth_ready(label):
+    """A login wall revokes only this account's ready proof."""
     try:
-        if not os.path.isfile(_FLOW_AUTH_READY_FILE):
-            return
-        with open(_FLOW_AUTH_READY_FILE, "r", encoding="utf-8") as f:
-            row = json.load(f)
-        if int(row.get("pid") or 0) == os.getpid():
-            os.remove(_FLOW_AUTH_READY_FILE)
+        with _FLOW_AUTH_READY_LOCK:
+            if not os.path.isfile(_FLOW_AUTH_READY_FILE):
+                return
+            with open(_FLOW_AUTH_READY_FILE, "r", encoding="utf-8") as f:
+                current = json.load(f)
+            row = _flow_auth_marker_remove(current, os.getpid(), label)
+            if row is None:
+                os.remove(_FLOW_AUTH_READY_FILE)
+                return
+            tmp = _FLOW_AUTH_READY_FILE + f".{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(row, f)
+            os.replace(tmp, _FLOW_AUTH_READY_FILE)
     except Exception:
         pass
 
@@ -5779,7 +5878,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
     
     def _wait_for_user_login(p):
         """Wait for user to complete Google login."""
-        _clear_flow_auth_ready()
+        _clear_flow_auth_ready(label)
         print(f"\n{'='*50}", flush=True)
         print(f"[{label}] GOOGLE LOGIN REQUIRED", flush=True)
         print(f"Please complete login in the browser...", flush=True)
@@ -6149,7 +6248,7 @@ def ensure_logged_into_flow(page, label="Flow", timeout_minutes=10):
             state = _navigate_to_flow(page)
             continue
     
-    _clear_flow_auth_ready()
+    _clear_flow_auth_ready(label)
     raise FlowLoginRequired(f"{label}: Flow login could not be verified")
 
 
@@ -7718,7 +7817,8 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
                 import sys as _sys
                 _sys.modules.pop("firefox_profile_pull", None)
                 from firefox_profile_pull import (build_firefox_golden_from_profile,
-                                                  hold_flow_backed_lanes)
+                                                  hold_flow_backed_lanes,
+                                                  worker_flow_profile_needs_seed)
                 from worker_profile_pull import load_laptop_email as _lle_ff
 
                 _acct_num, _ff_acct = None, None
@@ -7729,6 +7829,15 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
                 if _ff_acct is None:
                     print(f"[{label}] firefox pull: session {session_folder} not in "
                           f"ACCOUNTS - skip", flush=True)
+                    return
+                # A normal restart reuses this slot's private Flow session.  Pull
+                # from the operator only when neither the session nor its golden
+                # carries Flow's own labs.google cookie.  Google SSO by itself is
+                # not enough: Account2 reached challenge/pwd with five valid-looking
+                # Google cookies after the old repair deliberately pruned Flow.
+                if not worker_flow_profile_needs_seed(session_folder, golden_folder):
+                    print(f"[{label}] firefox pull: private Flow session present — reusing",
+                          flush=True)
                     return
                 # One fresh source snapshot per process. Existing private state
                 # may be the signed-out golden from the previous run; treating
@@ -7752,7 +7861,8 @@ def _maybe_pull_laptop_profile(session_folder, golden_folder, label=""):
                         "operator Firefox source is not configured; Flow-backed lanes held")
                 if not build_firefox_golden_from_profile(
                         _ff_email, golden_folder, label=label,
-                        account_num=_acct_num, log=lambda m: print(m, flush=True)):
+                        account_num=_acct_num, log=lambda m: print(m, flush=True),
+                        preserve_flow_session=True):
                     hold_flow_backed_lanes(
                         "operator Firefox source is signed out or could not be verified")
                     raise FirefoxProfileSourceUnavailable(
@@ -13779,6 +13889,41 @@ def _scoped_flow_work_is_terminal():
     return True
 
 
+def _job_scoped_work_is_terminal():
+    """True only when every named job has reached a final state.
+
+    Job-scoped workers are short-lived by design: one process owns one account
+    profile and one named job, then closes its browser when that job has no more
+    work. An unreadable or incomplete API response keeps the worker alive. This
+    fails open for availability without ever widening the job allowlist.
+    """
+    if os.environ.get("FLOW_JOB_SCOPE_AUTO_EXIT", "1").strip() == "0":
+        return False
+    if not FLOW_ONLY_JOB_IDS:
+        return False
+    terminal = {"completed", "approved", "failed", "skipped", "cancelled"}
+    for job_id in FLOW_ONLY_JOB_IDS:
+        state = api_request("GET", f"/jobs/{job_id}")
+        if not isinstance(state, dict):
+            return False
+        job_status = str(state.get("status") or "").strip().lower()
+        clips = state.get("clips")
+        if clips is None:
+            if job_status in terminal:
+                continue
+            return False
+        if not isinstance(clips, list) or not clips:
+            if job_status in terminal:
+                continue
+            return False
+        if any(str(clip.get("status") or "").strip().lower() not in terminal
+               for clip in clips if isinstance(clip, dict)):
+            return False
+        if any(not isinstance(clip, dict) for clip in clips):
+            return False
+    return True
+
+
 # A scoped firstgen run that keeps being told JOB_NOT_CLAIMABLE is waiting on
 # something that may never free up (e.g. the job already ended). Bounded, so it
 # stops instead of polling forever.
@@ -14105,6 +14250,11 @@ def get_redo_clips():
     if FLOW_ONLY_CLIP_IDS and _scoped_flow_work_is_terminal():
         print(f"[Scope] Exact clip run finished: {_flow_only_clip_ids_q()}; "
               "exiting cleanly", flush=True)
+        raise SystemExit(0)
+    if FLOW_ONLY_JOB_IDS and _job_scoped_work_is_terminal():
+        print(f"[job-worker-diag] Job run finished: "
+              f"{','.join(sorted(FLOW_ONLY_JOB_IDS))}; closing this worker cleanly",
+              flush=True)
         raise SystemExit(0)
     return []
 
@@ -32057,6 +32207,17 @@ class AccountWorker(threading.Thread):
             try:
                 self._run_once()
                 return  # clean exit — shutdown requested or account permanently stopped
+            except FlowLoginRequired as e:
+                _clear_flow_auth_ready(self.name)
+                self.ready_flag.set()
+                print(f"[{self.name}] GOOGLE LOGIN REQUIRED — quarantining only "
+                      f"this account ({e}); other accounts keep running.", flush=True)
+                try:
+                    if getattr(self, 'browser', None):
+                        self.browser.close()
+                except Exception:
+                    pass
+                return
             except Exception as e:
                 restarts += 1
                 if restarts > MAX_WORKER_RESTARTS:
@@ -33559,6 +33720,25 @@ def _setup_worker_dl_tab(dl_page, submit_page):
 
 
 
+def _idle_live_account_names(active_accounts, account_workers,
+                             account_job_queues, exclude_restoring=False):
+    """Account names safe to dispatch now; dead workers are never idle."""
+    alive = {worker.name for worker in account_workers if worker.is_alive()}
+    idle = []
+    for account in active_accounts:
+        name = account['name']
+        if name not in alive:
+            continue
+        if account_health.is_busy(name) or account_job_queues[name].qsize() != 0:
+            continue
+        if exclude_restoring and (
+                account_health.needs_proactive_restore(name)
+                or account_health.is_hot(name)):
+            continue
+        idle.append(name)
+    return idle
+
+
 def main_multi_account(accounts_override=None):
     """Multi-account mode - runs multiple submission browsers in parallel
     
@@ -33781,6 +33961,7 @@ def main_multi_account(accounts_override=None):
                 print(f"   Fix account access and restart the worker.", flush=True)
                 print(f"{'='*50}", flush=True)
                 break
+            _v978_progress()
             
             # Drain redispatch queue — AccountWorkers put job_ids here after
             # golden restore resets a job to pending. Remove from queued_job_ids
@@ -33796,13 +33977,8 @@ def main_multi_account(accounts_override=None):
 
             # Check which accounts are idle BEFORE polling — no point
             # hitting the API when nobody is free to take a job.
-            alive_account_names = {w.name for w in alive_workers}
-            idle_accounts_now = [
-                acc['name'] for acc in active_accounts
-                if acc['name'] in alive_account_names
-                and not account_health.is_busy(acc['name'])
-                and account_job_queues[acc['name']].qsize() == 0
-            ]
+            idle_accounts_now = _idle_live_account_names(
+                active_accounts, account_workers, account_job_queues)
             all_busy = len(idle_accounts_now) == 0 and not held_jobs
 
             if all_busy:
@@ -33869,13 +34045,9 @@ def main_multi_account(accounts_override=None):
                     # reset_failures() runs post-relaunch, so this gates the whole
                     # window; the redo stays flow_redo_queued and is picked up next
                     # poll once the account is healthy again.
-                    idle_for_redo = [
-                        acc['name'] for acc in active_accounts
-                        if not account_health.is_busy(acc['name'])
-                        and account_job_queues[acc['name']].qsize() == 0
-                        and not account_health.needs_proactive_restore(acc['name'])
-                        and not account_health.is_hot(acc['name'])
-                    ]
+                    idle_for_redo = _idle_live_account_names(
+                        active_accounts, account_workers, account_job_queues,
+                        exclude_restoring=True)
                     
                     if idle_for_redo:
                         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Found {len(new_redo_clips)} NEW clip(s) needing redo ({len(idle_for_redo)} idle accounts)")
@@ -33892,8 +34064,8 @@ def main_multi_account(accounts_override=None):
             
             # Re-try held jobs before fetching new ones
             if held_jobs:
-                idle_now = [acc['name'] for acc in active_accounts
-                            if not account_health.is_busy(acc['name']) and account_job_queues[acc['name']].qsize() == 0]
+                idle_now = _idle_live_account_names(
+                    active_accounts, account_workers, account_job_queues)
                 if idle_now:
                     held_id, held_job = next(iter(held_jobs.items()))
                     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Retrying held job {held_id[:8]}... ({len(idle_now)} idle accounts)")
@@ -33925,13 +34097,8 @@ def main_multi_account(accounts_override=None):
                     chains = analyze_continue_mode_chains(clips)
                     
                     # Check which accounts are idle (not busy AND empty queue)
-                    idle_accounts = []
-                    for acc in active_accounts:
-                        acc_name = acc['name']
-                        is_busy = account_health.is_busy(acc_name)
-                        queue_size = account_job_queues[acc_name].qsize()
-                        if not is_busy and queue_size == 0:
-                            idle_accounts.append(acc_name)
+                    idle_accounts = _idle_live_account_names(
+                        active_accounts, account_workers, account_job_queues)
                     
                     busy_count = num_accounts - len(idle_accounts)
                     print(f"  📋 Account status: {len(idle_accounts)} idle, {busy_count} busy")

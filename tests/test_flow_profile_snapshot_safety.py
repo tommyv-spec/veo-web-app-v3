@@ -83,20 +83,21 @@ class ProfileSnapshotSafety(unittest.TestCase):
         login = _function_source("ensure_logged_into_flow")
         publish = _function_source("_publish_flow_auth_ready")
         self.assertIn("_publish_flow_auth_ready(page, label)", login)
-        self.assertIn('"pid": os.getpid()', publish)
+        self.assertIn("_flow_auth_marker_add(current, os.getpid(), label, proof)", publish)
         self.assertIn('"authenticated_at": time.time()', publish)
-        self.assertIn('getattr(\n                    page, "_flow_auth_proof"', publish)
+        self.assertIn('page, "_flow_auth_proof"', publish)
 
     def test_login_wall_revokes_this_process_ready_marker(self):
         login = _function_source("ensure_logged_into_flow")
-        self.assertIn("_clear_flow_auth_ready()", login)
+        self.assertIn("_clear_flow_auth_ready(label)", login)
 
-    def test_flow_refreshes_private_golden_once_per_process(self):
+    def test_flow_refreshes_only_a_slot_without_a_private_flow_session(self):
         body = _function_source("_maybe_pull_laptop_profile")
         firefox_branch = body.split("if _bd.is_firefox_mode(BROWSER_MODE):", 1)[1]
-        self.assertNotIn("worker_profile_needs_seed", firefox_branch)
+        self.assertIn("worker_flow_profile_needs_seed", firefox_branch)
         self.assertIn("if golden_folder in _LAPTOP_COPIED_GOLDENS", firefox_branch)
         self.assertIn("build_firefox_golden_from_profile", firefox_branch)
+        self.assertIn("preserve_flow_session=True", firefox_branch)
 
     def test_login_wall_never_copies_the_operator_profile_automatically(self):
         body = _function_source("ensure_logged_into_flow")
@@ -193,6 +194,93 @@ class ProfileSnapshotSafety(unittest.TestCase):
         self.assertIn("snapshot_firefox_profile", body)
         self.assertNotIn("shutil.copy", body)
         self.assertIn('choices=["swap", "image", "flow"]', PROFILE_TOOL_SOURCE)
+
+    def test_default_snapshot_for_non_flow_consumers_is_sso_only(self):
+        """v914 on the recovery path (2026-09-10).
+
+        The labs.google prune lived only inside build_firefox_golden_from_profile,
+        which flow_profile.py does not call — so every `rebuild` copied the
+        operator's LIVE Flow session into the worker profile. Two browsers then
+        rotated one set of app tokens and Google revoked both: the sign-out that
+        kept returning with "cause unknown". A snapshot is finished only when it
+        is SSO-only, so assert the OUTPUT, not that some function was mentioned.
+        """
+        spec = importlib.util.spec_from_file_location(
+            "flow_profile_under_test", ROOT / "tools" / "flow_profile.py")
+        flow_profile = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(flow_profile)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "source"
+            src.mkdir()
+            con = sqlite3.connect(src / "cookies.sqlite")
+            con.execute("create table moz_cookies (host text, name text, value text)")
+            con.executemany(
+                "insert into moz_cookies values (?, ?, 'not-printed')",
+                [(".google.com", "SID"), (".google.com", "__Secure-1PSID"),
+                 ("accounts.google.com", "LSID"),
+                 ("labs.google", "flow-session"), (".labs.google", "flow-token")])
+            con.commit()
+            con.close()
+
+            dst = root / "worker-profile"
+            copied = flow_profile.build_minimal(src, dst)
+            self.assertTrue(copied, "snapshot copied nothing")
+
+            con = sqlite3.connect(dst / "cookies.sqlite")
+            labs = con.execute(
+                "select count(*) from moz_cookies where host like '%labs.google%'"
+            ).fetchone()[0]
+            google = con.execute(
+                "select count(*) from moz_cookies where host like '%google.com%'"
+            ).fetchone()[0]
+            con.close()
+
+            self.assertEqual(0, labs, "rebuilt profile still carries a live Flow session")
+            self.assertEqual(3, google, "the Google SSO cookies must survive the prune")
+
+    def test_flow_account_snapshot_preserves_the_proven_flow_session(self):
+        spec = importlib.util.spec_from_file_location(
+            "flow_profile_flow_seed_under_test", ROOT / "tools" / "flow_profile.py")
+        flow_profile = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(flow_profile)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "source"
+            src.mkdir()
+            con = sqlite3.connect(src / "cookies.sqlite")
+            con.execute("create table moz_cookies (host text, name text, value text)")
+            con.executemany(
+                "insert into moz_cookies values (?, ?, 'not-printed')",
+                [(".google.com", "SID"),
+                 ("labs.google", "__Secure-next-auth.session-token")])
+            con.commit()
+            con.close()
+
+            dst = root / "flow-account"
+            copied = flow_profile.build_minimal(
+                src, dst, preserve_flow_session=True)
+            self.assertTrue(copied)
+            self.assertEqual(1, ffpull.flow_cookie_count(dst))
+
+    def test_flow_worker_seed_requires_flow_cookie_not_just_any_private_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session = root / "firefox-session-2"
+            golden = root / "firefox-golden-2"
+            session.mkdir()
+            _cookie_db(session / "cookies.sqlite")
+            self.assertTrue(ffpull.worker_flow_profile_needs_seed(session, golden))
+
+            con = sqlite3.connect(session / "cookies.sqlite")
+            con.execute(
+                "insert into moz_cookies values ('labs.google', "
+                "'__Secure-next-auth.session-token', 'not-printed')")
+            con.commit()
+            con.close()
+            self.assertFalse(ffpull.worker_flow_profile_needs_seed(session, golden))
 
     def test_disabled_image_pull_still_allows_one_empty_profile_seed(self):
         tree = ast.parse(IMAGE_SOURCE)

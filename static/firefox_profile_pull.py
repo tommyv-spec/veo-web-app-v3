@@ -81,6 +81,53 @@ def worker_profile_needs_seed(session_folder, golden_folder):
     return True
 
 
+def flow_cookie_count(profile_folder):
+    """Count Flow app cookies without ever reading or logging their values.
+
+    A copied Google SSO jar can still land on ``challenge/pwd``.  Flow's own
+    ``labs.google`` session cookie is the authority the operator already proved
+    in normal Firefox, so a Flow worker profile is not prepared until it carries
+    that cookie.  Read through a SQLite snapshot so a live source WAL is folded
+    in and the source profile remains read-only.
+    """
+    source = os.path.join(os.fspath(profile_folder), "cookies.sqlite")
+    if not os.path.isfile(source):
+        return 0
+    staged = os.path.join(
+        tempfile.gettempdir(),
+        f"ffpull_flow_count_{os.getpid()}_{abs(hash(os.path.abspath(source)))}.sqlite",
+    )
+    try:
+        snapshot_sqlite_database(source, staged)
+        con = sqlite3.connect(staged)
+        try:
+            return int(con.execute(
+                "select count(*) from moz_cookies where host like '%labs.google%'"
+            ).fetchone()[0])
+        finally:
+            con.close()
+    except Exception:
+        return 0
+    finally:
+        try:
+            os.remove(staged)
+        except OSError:
+            pass
+
+
+def worker_flow_profile_needs_seed(session_folder, golden_folder):
+    """True when neither private copy carries a reusable Flow app session.
+
+    This is deliberately stronger than ``worker_profile_needs_seed``.  A
+    cookies.sqlite file containing only Google SSO is durable state, but it is
+    not enough to start a second unattended Flow browser: measured on Account2
+    on 2026-09-18, it reached Google's password wall.  Existing private Flow
+    cookies win, so normal restarts never re-copy the operator profile.
+    """
+    return not any(flow_cookie_count(path) > 0
+                   for path in (session_folder, golden_folder))
+
+
 def replace_golden_atomically(staged, golden_folder):
     """Publish a staged private golden, restoring the prior one on failure."""
     staged = os.fspath(staged)
@@ -165,7 +212,10 @@ def snapshot_firefox_profile(source_profile, destination_profile, log=print):
 
 def hold_flow_backed_lanes(reason, state_dir=None):
     """Hold Flow and image starts without overwriting an owner's existing hold."""
-    state_dir = state_dir or os.path.join(os.path.expanduser("~"), ".kaveno", "hold")
+    if state_dir is None:
+        runtime_dir = os.environ.get("KAVENO_RUNTIME_DIR", "").strip()
+        state_dir = (os.path.join(runtime_dir, "hold-requests") if runtime_dir
+                     else os.path.join(os.path.expanduser("~"), ".kaveno", "hold"))
     os.makedirs(state_dir, exist_ok=True)
     for lane in ("flow", "image"):
         path = os.path.join(state_dir, lane)
@@ -525,7 +575,8 @@ def _prune_labs_cookies_firefox(cookies_db, log=print):
 
 
 def build_firefox_golden_from_profile(email, golden_folder, label="",
-                                      account_num=None, log=print):
+                                      account_num=None, log=print,
+                                      preserve_flow_session=False):
     """Build `golden_folder` as a Firefox profile carrying `email`'s session.
 
     Copies the durable DATA files only (see _DURABLE_FILES). Returns True on
@@ -565,25 +616,26 @@ def build_firefox_golden_from_profile(email, golden_folder, label="",
         log(f"{tag}ff-pull: cookies.sqlite snapshotted via SQLite backup "
             f"(WAL applied; -wal/-shm intentionally not copied)")
 
-        # v914 FOR FIREFOX (added 2026-09-07). The labs.google prune existed only
-        # on the CHROME path (`worker_profile_pull._prune_labs_session_cookies`,
-        # which speaks the Chrome schema `cookies.host_key`). Firefox is what the
-        # workers actually run now, and this builder never stripped anything, so
-        # every Firefox golden inherited whatever Flow session the source profile
-        # held. Per [[flow-golden-must-ship-sso-only]] that session arrives
-        # ALREADY FLAGGED and no golden restore can fix it — each restore
-        # faithfully restores the flagged session. Stripped, the first entry into
-        # Flow makes Google SSO mint a fresh one.
-        #
-        # Measured today: a second Flow worker seeded from a profile holding a
-        # live labs session landed straight on the account chooser, reporting
-        # "the Google session in this profile is dead", with all 66 Google
+        # Non-Flow consumers do not need Flow app state, so they still receive an
+        # SSO-only profile. Flow workers explicitly preserve labs.google. This
+        # distinction was measured on Account2 on 2026-09-18: deleting Flow's
+        # cookies kept five Google session cookies but reached challenge/pwd;
+        # preserving the six Flow cookies opened the authenticated composer.
         # cookies present. Firefox schema is `moz_cookies.host`, not Chrome's.
-        pruned = _prune_labs_cookies_firefox(
-            os.path.join(golden_folder, "cookies.sqlite"), log=log)
-        if pruned >= 0:
-            log(f"{tag}ff-pull: v914 stripped {pruned} labs.google cookie(s) "
-                f"— golden ships Google SSO only")
+        if preserve_flow_session:
+            flow_cookies = flow_cookie_count(golden_folder)
+            if flow_cookies <= 0:
+                log(f"{tag}ff-pull: source has no reusable labs.google session; "
+                    "refusing an SSO-only Flow worker seed")
+                return False
+            log(f"{tag}ff-pull: preserved {flow_cookies} labs.google cookie(s) "
+                "for this private Flow profile")
+        else:
+            pruned = _prune_labs_cookies_firefox(
+                os.path.join(golden_folder, "cookies.sqlite"), log=log)
+            if pruned >= 0:
+                log(f"{tag}ff-pull: v914 stripped {pruned} labs.google cookie(s) "
+                    f"— golden ships Google SSO only")
 
         log(f"{tag}ff-pull: golden built from {os.path.basename(src)} "
             f"({copied} durable files)")

@@ -53,6 +53,30 @@ def test_apply_banana_completion_no_variants_fails():
     assert "no variants" in (n.error_message or "").lower()
 
 
+def test_banana_failure_with_ready_chatgpt_stays_reviewable():
+    class N:
+        status="generating"; cg_status="ready"; claimed_by_worker="w"; claimed_at=1
+        chosen_variant_id=None; error_message=None; cg_claimed_by=None; cg_claimed_at=None
+    n = N()
+    ip._apply_worker_status(n, "banana", "failed", has_variants=False,
+                            error="banana failed")
+    assert n.status == "ready"
+    assert n.cg_status == "ready"
+    assert "ChatGPT variant ready" in n.error_message
+
+
+def test_chatgpt_success_after_banana_failure_stays_reviewable():
+    class N:
+        status="failed"; cg_status="generating"; claimed_by_worker=None; claimed_at=None
+        chosen_variant_id=None; error_message="banana failed"; cg_claimed_by="w"; cg_claimed_at=1
+    n = N()
+    ip._apply_worker_status(n, "chatgpt", "completed", has_variants=True,
+                            error=None)
+    assert n.status == "ready"
+    assert n.cg_status == "ready"
+    assert "ChatGPT variant ready" in n.error_message
+
+
 def test_apply_unknown_status_raises():
     class N:
         status="generating"; cg_status=None; claimed_by_worker=None; claimed_at=None
