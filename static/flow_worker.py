@@ -18484,10 +18484,9 @@ class DownloadHelper:
                     mark_job_completed(self.cache, job_id)
         
         except Exception as e:
-            err_str = str(e)
             # CDP disconnect during golden restore — re-raise silently so the reconnect
             # loop in process_download can catch it. No error log needed; it's intentional.
-            if any(x in err_str for x in ("browser has been closed", "Target page", "context or browser", "TargetClosedError")):
+            if self._is_cdp_disconnect(e):
                 raise
             print(f"[{self.account_name}] ❌ ERROR in download process: {e}", flush=True)
             import traceback
@@ -19032,7 +19031,10 @@ class DownloadHelper:
                         self.page, f"[{self.account_name}-Refresh]")),
                 ], budget_s=45, label=f"[{self.account_name}] ")
             except _PageWedged:
-                pass
+                # The caller must replace this tab before it asks the DOM for
+                # tile counts.  Returning success here used to feed the same
+                # dead renderer into an unbounded locator.count() call.
+                return False
             finally:
                 self.page.set_default_timeout(30000)
             
@@ -19057,6 +19059,45 @@ class DownloadHelper:
             return True
         except Exception as e:
             print(f"[{self.account_name}] Refresh error: {e}", flush=True)
+            return False
+
+    def _replace_wedged_page(self, project_url):
+        """Open the same project in a fresh tab after the renderer stops answering."""
+        old_page = self.page
+        replacement = None
+        try:
+            replacement = old_page.context.new_page()
+            self.page = replacement
+            if not self._navigate_to_project(project_url, max_retries=1):
+                browser = getattr(replacement.context, "browser", None)
+                if browser is not None and not browser.is_connected():
+                    raise RuntimeError("browser disconnected during download-tab replacement")
+                raise RuntimeError("replacement tab did not reach the requested Flow project")
+            replacement.wait_for_function("1", timeout=10000)
+            replacement.set_default_timeout(5000)
+            try:
+                check_and_dismiss_popup(replacement)
+                ensure_videos_tab_selected(replacement)
+                ensure_batch_view_mode(replacement, f"[{self.account_name}-Replace]")
+            finally:
+                replacement.set_default_timeout(30000)
+            try:
+                old_page.close(run_before_unload=False)
+            except Exception:
+                pass
+            print(f"[{self.account_name}] [v1009.4] replaced the wedged download tab", flush=True)
+            return True
+        except Exception as exc:
+            if self._is_cdp_disconnect(exc):
+                raise
+            if replacement is not None:
+                try:
+                    replacement.close(run_before_unload=False)
+                except Exception:
+                    pass
+            self.page = old_page
+            print(f"[{self.account_name}] [v1009.4] could not replace the wedged "
+                  f"download tab: {str(exc)[:160]}", flush=True)
             return False
 
     def _download_from_project_dynamic(self, project_url, clips, job_id, temp_dir,
@@ -19133,11 +19174,10 @@ class DownloadHelper:
             return downloaded_count, failed_clips
             
         except Exception as e:
-            err_str = str(e)
             # CDP disconnect (Chrome killed for golden restore).
             # Before re-raising to reconnect loop, drain any ready clips from cache
             # using the fallback session — pure HTTP, no browser needed.
-            if any(x in err_str for x in ("browser has been closed", "Target page", "context or browser", "TargetClosedError")):
+            if self._is_cdp_disconnect(e):
                 if self._ready_url_cache and self._fallback_session is not None:
                     print(f"[{self.account_name}] Chrome dead — draining {len(self._ready_url_cache)} cached clip URL(s) via fallback session...", flush=True)
                     for _ci, _urls in list(self._ready_url_cache.items()):
@@ -19355,9 +19395,18 @@ class DownloadHelper:
                 # Note: failure detection is handled by the submit browser.
                 # The download browser only looks for completed videos.
                 print(f"[{self.account_name}] {refresh_reason} — refreshing page...", flush=True)
-                self._refresh_and_verify(project_url, frames_busy=getattr(self, "_frames_busy_flag", None))
+                refreshed = self._refresh_and_verify(
+                    project_url,
+                    frames_busy=getattr(self, "_frames_busy_flag", None),
+                )
                 for ci in pending:
                     last_refresh_times[ci] = datetime.now()
+                if not refreshed:
+                    print(f"[{self.account_name}] [v1009.4] refresh found a wedged page; "
+                          "replacing it before the tile scan", flush=True)
+                    if not self._replace_wedged_page(project_url):
+                        time.sleep(5)
+                    continue
             
             # ── Progress log (only when status changes) ──
             submitted = len([c for c in clips if c.get('clip_index') in clip_submit_times])
@@ -19369,6 +19418,18 @@ class DownloadHelper:
                 self._last_status = status_key
             
             check_and_dismiss_popup(self.page)
+
+            # count() has no Playwright timeout.  The popup sweep also probes
+            # liveness, but False means both "no popup" and "page wedged", so
+            # prove the renderer answers once more before any tile count.
+            try:
+                self.page.wait_for_function("1", timeout=3000)
+            except Exception:
+                print(f"[{self.account_name}] [v1009.4] page stopped answering before "
+                      "the tile scan; replacing the tab", flush=True)
+                if not self._replace_wedged_page(project_url):
+                    time.sleep(5)
+                continue
             
             if not pending:
                 time.sleep(5)
@@ -19604,7 +19665,13 @@ class DownloadHelper:
                 
                 print(f"[{self.account_name}] Deep scan attempt {attempt + 1}/3...", flush=True)
                 activity(f"deep scan {attempt + 1}/3 for clip(s) {sorted(missing_pending)}")
-                self._refresh_and_verify(project_url)
+                refreshed = self._refresh_and_verify(project_url)
+                if not refreshed:
+                    print(f"[{self.account_name}] [v1009.4] deep scan found a wedged "
+                          "page; replacing it before scanning", flush=True)
+                    if not self._replace_wedged_page(project_url):
+                        time.sleep(5)
+                    continue
                 time.sleep(2)
                 
                 containers = self._scan_all_containers(max_index=num_clips + 5)
