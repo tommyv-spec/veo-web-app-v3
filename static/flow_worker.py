@@ -2951,6 +2951,10 @@ def _fa_or_dom_new_project_click(page, dom_label="New project button", context="
                 print(f"[{context}] [flow_api] [v962.6] on {page.url[:80]}", flush=True)
             except Exception as _e:
                 print(f"[{context}] [flow_api] [v962.6] canonical project navigation: {str(_e)[:100]}", flush=True)
+            _final_dom_pid = _v962_project_id_from_dom(page)
+            if _pid not in (page.url or "") and _final_dom_pid != _pid:
+                raise RuntimeError(
+                    f"Flow project {_pid} was found but canonical navigation was not proven")
         elif not _pid:
             print(f"[{context}] [flow_api] [v962.2] clicked New project but no /project/<uuid> URL and no "
                   f"project page in the DOM within 30s (url={(page.url or '')[:80]})", flush=True)

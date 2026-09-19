@@ -130,3 +130,6 @@ def test_new_project_click_never_reports_home_as_a_project():
     recovery = body.index("project DOM is late; reloading Flow once")
     activity_probe = body.index('activity("waiting for late new-project DOM")')
     assert recovery < activity_probe < refusal
+    canonical_refusal = body.index("canonical navigation was not proven")
+    final_dom_proof = body.index("_final_dom_pid = _v962_project_id_from_dom(page)")
+    assert final_dom_proof < canonical_refusal
