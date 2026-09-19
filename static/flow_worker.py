@@ -9062,6 +9062,7 @@ def _recover_pending_clip_downloads(page, job_id, clips, http_dl_queue,
                 continue
             http_dl_queue.put({'job_id': job_id, 'clip_index': _ci,
                 'clip_id': _c.get('id'), 'urls': _ready, 'temp_dir': temp_dir,
+                'generation_attempt': _c.get('generation_attempt', 1),
                 'trust_position': True})
             if http_enqueued_clips is not None:
                 http_enqueued_clips.add(_ci)
@@ -24817,6 +24818,35 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                     scroll_randomly(page)
                 except Exception:
                     pass
+
+        # flow.google.com has no data-index tiles. Its media listing is the
+        # authoritative uuid -> mp4 source, so a redo must use the same bound-
+        # media recovery as the main submission path before it opens the legacy
+        # download tab. Revisit the project on a bounded cadence because that is
+        # what makes Flow fetch a fresh listing after the render completes.
+        _urls_found = False
+        if _v962_on_new_host(page):
+            _redo_listing_deadline = time.time() + 240
+            _redo_http_enqueued = set()
+            while time.time() < _redo_listing_deadline and not _urls_found:
+                activity("redo: refreshing Flow media listing")
+                try:
+                    _v995_reload(page, wait_until='domcontentloaded', timeout=30000)
+                    time.sleep(4)
+                except Exception as _listing_err:
+                    print(f"[REDO] media-listing refresh failed (will retry): "
+                          f"{str(_listing_err)[:120]}", flush=True)
+                _urls_found = bool(_recover_pending_clip_downloads(
+                    page, job_id, [clip], http_dl_queue,
+                    _redo_http_enqueued, temp_dir, context="REDO"))
+                if _urls_found:
+                    print(f"[REDO] ✓ Clip {clip_index+1} recovered from its bound "
+                          "media listing before the download tab", flush=True)
+                    break
+                _remaining = _redo_listing_deadline - time.time()
+                if _remaining <= 0:
+                    break
+                time.sleep(min(20, _remaining))
         
         # ── REDO SCAN: data-index=0 ONLY ──
         # The redo clip is always the NEWEST submission → always at data-index=0.
@@ -24825,9 +24855,10 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
         # would return the OLD tile's videos instead of the new redo's.
         # This mirrors check_recent_clip_failure() which also targets data-index=0.
         _max_scan_attempts = 20  # v870: MAIN parity exits on first good scan; headroom kept for empty-batch retries
-        _urls_found = False
         _retried_in_place = False
         for _scan_attempt in range(_max_scan_attempts):
+            if _urls_found:
+                break
             try:
                 ensure_videos_tab_selected(page)
                 

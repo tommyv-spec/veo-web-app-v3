@@ -133,3 +133,19 @@ def test_new_project_click_never_reports_home_as_a_project():
     canonical_refusal = body.index("canonical navigation was not proven")
     final_dom_proof = body.index("_final_dom_pid = _v962_project_id_from_dom(page)")
     assert final_dom_proof < canonical_refusal
+
+
+def test_redo_recovers_bound_media_before_using_download_tab():
+    body = _method("_process_redo_clip_impl")
+    wait = body.index("Waiting {CLIP_READY_WAIT}s for clip to generate (HTTP path)")
+    recovery = body.index("_recover_pending_clip_downloads(", wait)
+    blind_scan = body.index("REDO SCAN: data-index=0 ONLY", wait)
+    fallback = body.index("HTTP scan failed — falling back to download tab", wait)
+    assert wait < recovery < blind_scan < fallback
+    assert "redo: refreshing Flow media listing" in body[recovery - 1800:blind_scan]
+    assert "_urls_found = bool(_recover_pending_clip_downloads(" in body[recovery - 250:recovery + 350]
+
+
+def test_bound_media_recovery_preserves_generation_attempt():
+    body = _method("_recover_pending_clip_downloads")
+    assert "'generation_attempt': _c.get('generation_attempt', 1)" in body
