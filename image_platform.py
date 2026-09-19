@@ -1345,8 +1345,9 @@ class ImageNode(Base):
     claimed_at = Column(DateTime, nullable=True)
 
     # Dual-backend ChatGPT satellite lane. Independent of status/claimed_by_worker
-    # (which the Banana/Flow lane owns). NULL = no chatgpt lane for this node
-    # (dependent/chain nodes never get one). 'queued'|'generating'|'ready'|'failed'.
+    # (which the Banana lane owns). Every generated node, including a dependent
+    # or chained node, gets this lane after its parents have chosen variants.
+    # Upload/source nodes do not render. 'queued'|'generating'|'ready'|'failed'.
     cg_status = Column(String(16), nullable=True)
     cg_claimed_by = Column(String(100), nullable=True)
     cg_claimed_at = Column(DateTime, nullable=True)
@@ -1583,8 +1584,9 @@ class ImageVariant(Base):
     image_path = Column(String(500), nullable=False)  # relative to images_root()
     # v530: 'ai' | 'manual'. Default 'ai' so existing rows backfill correctly.
     source = Column(String(16), nullable=False, default='ai')
-    # Dual-backend: which renderer produced this variant. 'banana' (Flow/Banana,
-    # default) | 'chatgpt'. Base nodes carry both; the grid badges them.
+    # Dual-backend: which renderer produced this variant. 'banana' (default) |
+    # 'chatgpt'. Every generated base/chained/reference-dependent node carries
+    # both; the grid badges them.
     backend = Column(String(16), nullable=False, default='banana')
     # v940 — the operator's verdict on a variant he did NOT pick:
     # 'still_good' | 'rejected'. NULL means untagged, which is a third state,
@@ -4173,9 +4175,11 @@ def chatgpt_generate_node(
     db: Session = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Manually open the ChatGPT lane on ANY node (incl. non-first / chain
-    scenes, which the auto-seed skips) so a ChatGPT worker renders + uploads a
-    variant for it.
+    """Manually re-open the ChatGPT lane on any generated node.
+
+    Normal production auto-seeds base, chained and reference-dependent nodes
+    once their parents have chosen variants. This endpoint is the manual retry
+    path when a lane failed or the operator asks for another ChatGPT render.
 
     Additive + non-destructive: it only sets the CG lane to 'queued' (a fresh
     claim), never touches node.status, the Banana variants, or the chosen one.

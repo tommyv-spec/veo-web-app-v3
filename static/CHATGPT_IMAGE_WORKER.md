@@ -2,10 +2,19 @@
 
 ## What it is
 
-A local image-generation backend that drives ChatGPT in a real browser (Patchright) to make images. Use it when Banana 2 or the paid image API **refuse** a prompt — ChatGPT's consumer content filter is more lenient and passes prompts (ED / banana-proxy style) the others reject. It runs **only on the operator's machine** with a logged-in ChatGPT session. It NEVER runs on Render.
+A local image-generation backend that drives ChatGPT in a real browser
+(Patchright). In the production route it is not a fallback or a model selected
+for one node. It runs alongside the Banana worker for **every generated base,
+chained and reference-dependent node**. A child becomes claimable only after its
+parents have chosen variants, so ChatGPT receives the same resolved references
+as Banana.
+
+The worker runs only on the operator's machine with a logged-in ChatGPT session.
+It never runs on Render.
 
 Files:
 - `static/chatgpt_image_worker.py` — the worker (CLI + `--watch` loop).
+- `static/chatgpt_http_pull.py` — the production queue client.
 - `static/chatgpt_image_backend.py` — the browser drive core.
 - `static/chatgpt_job_map.py` — pure platform-job → prompt mapping.
 - `static/browser_driver.py` — shared engine switch (same file flow_worker uses).
@@ -39,31 +48,65 @@ Rules (all inherited from `browser_driver.py`, measured on the flow worker):
   missing. The fetch downloads from GitHub — Surfshark's MTU issue blocks it
   (MTU 1280 or VPN off).
 
+## Production contract
+
+- Banana and ChatGPT are separate queue lanes. Each lane owns its own claim,
+  status, files and variants.
+- Both lanes must save a real, non-manual variant for every generated node.
+- Automatic approval checks the current exact variant IDs and refuses stale QC.
+- Approval and promotion fail closed when either backend output is missing,
+  including on chained and reference-dependent nodes.
+- The image workers are shared queue daemons. A pipeline holds a named lease on
+  each lane while its image batch needs them, releases the leases after promotion
+  or failure, and lets the queue-aware lifecycle sweep stop only proven-idle
+  daemons.
+- This is different from Flow clip work. Each Flow clip worker is scoped to one
+  video job and closes at that job's terminal marker.
+
+The production coordinator starts and leases the shared image lanes through:
+
+```bash
+python tools/worker_lifecycle.py ensure image --session <pipeline-session>
+python tools/worker_lifecycle.py ensure chatgpt --session <pipeline-session>
+```
+
+Do not leave a browser tab open as a handoff. Headless mode is the normal route.
+
 ## One-time setup
 
 1. Install Patchright:
    ```bash
    pip install patchright
    ```
-2. Seed the session cookies. The login the worker actually uses is a set of **plaintext cookies** injected on every launch, captured by a **netlog capture** step: a real Chrome (your Default profile, already logged into ChatGPT) is launched with `--log-net-log --net-log-capture-mode=IncludeSensitive`, which writes the *decrypted* Cookie headers to a log; those are parsed and saved to `static/.chatgpt_cookies.json` (gitignored). This is **ABE-immune** — it works even though Chrome's App-Bound Encryption makes copied cookie files undecryptable.
-
-   Today this capture is run as a **separate step** (a netlog-capture script), not a worker subcommand. A `--refresh-cookies` subcommand that runs the same capture is planned (see "When the session expires"). Chrome must be fully closed while the capture runs.
-
-   (`python code/static/chatgpt_image_worker.py --login` is a *different*, optional path — it opens the dedicated `.chatgpt_profile` for a manual interactive login and persists profile cookies there. The `--watch`/gen path relies on `.chatgpt_cookies.json`, not the dedicated profile, so the netlog capture above is the one that matters.)
+2. The installed launcher passes the target account. The worker uses its own
+   engine-tagged, per-account profile. It first tries to copy the existing
+   account session from Chrome Beta. If no usable session exists, it opens its
+   own visible window for a one-time login, verifies the account, persists that
+   profile, then returns to headless runs.
 
 ## Serving platform jobs
 
-Run the watcher alongside your local image platform. It claims ONLY `model=="chatgpt"` jobs, generates ONE image per job (variants clamped to 1), writes `variant_1.png` into the job's `output_dir`, and drops a `node_<id>.done.json` marker the platform polls.
+The production path is HTTP pull. The worker asks for the ChatGPT backend lane,
+downloads every ordered reference in the job payload, generates one image,
+uploads it with `backend=chatgpt`, and reports that lane's status. It does not
+claim or overwrite the Banana lane.
 
 ```bash
-python code/static/chatgpt_image_worker.py --watch
+python code/static/chatgpt_image_worker.py --firefox \
+  --api-url <platform-url> --api-key <worker-key> \
+  --chatgpt-email <account-email>
 ```
 
-The Flow / Banana worker (`code/image_worker.py`) skips `model=="chatgpt"` jobs, so the two workers can run at the same time without stepping on each other.
+Use the lifecycle command above for normal production instead of typing the
+worker key into an interactive shell. `--watch` remains a legacy local-folder
+mode; it is not the production dual-backend handoff.
 
-## Selecting it in the UI
+## Selecting variants in the UI
 
-In the image **Model** dropdown pick **"ChatGPT (web · lenient filter)"**. That sets the node's `model="chatgpt"`, which routes the job JSON to `DATA_DIR/_image_jobs/` where `--watch` picks it up.
+Do not select ChatGPT as an either/or node model. The platform queues the
+ChatGPT lane automatically alongside Banana for every generated node. The UI
+shows backend-tagged results from both lanes; choosing one result supplies the
+resolved reference used by both lanes for the next dependent node.
 
 ## Standalone use (no platform)
 
@@ -79,17 +122,19 @@ python code/static/chatgpt_image_worker.py --jobs jobs.json
 
 ## When the session expires
 
-ChatGPT rotates the session token, so the saved cookies expire (days to weeks). Symptom: jobs fail with `session expired — run --refresh-cookies`.
-
-To refresh **today**: fully close Chrome, then re-run the netlog cookie capture (same step as setup) to rewrite `static/.chatgpt_cookies.json`. The capture relaunches your Default profile briefly, reads the decrypted ChatGPT cookies, and saves them.
-
-> TODO: a dedicated `--refresh-cookies` subcommand that wraps this netlog capture is planned but NOT yet built. Until it lands, run the capture step directly.
+The worker first reuses its verified per-account profile. If that login is no
+longer usable and no saved Chrome Beta session can be copied, it opens its own
+visible one-time login window. No main Chrome or Firefox profile should be
+closed for this repair.
 
 ## Failure behavior
 
-On timeout, refusal, expired session, or selector drift the worker writes `.done.json` with `status="failed"` and the error. The platform marks the node **failed**. There is **no auto-fallback** — regenerate that node with another backend (Banana).
+On timeout, refusal, expired session or selector drift, the worker reports the
+ChatGPT lane as failed. That does not erase Banana's output and does not stop
+other jobs, but this job cannot be auto-approved or promoted until the ChatGPT
+lane produces a real variant and current QC covers the exact saved variant set.
 
 ## Safety
 
-- **LOCAL-ONLY.** Needs your Chrome + logged-in ChatGPT session. NEVER runs on Render.
-- Session files (`static/.chatgpt_profile/`, `static/.chatgpt_cookies.json`) are gitignored in `code/.gitignore`. **Never commit them.**
+- **LOCAL-ONLY.** Needs the operator's saved ChatGPT session. Never runs on Render.
+- Session profiles and cookie files are gitignored in `code/.gitignore`. **Never commit them.**

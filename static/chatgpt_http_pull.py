@@ -1,6 +1,7 @@
 """HTTP-pull mode for the ChatGPT image worker: poll the Render platform's
-/api/images/worker endpoints, claim base images (backend=chatgpt routing),
-download refs, generate via the drive core, upload the result, heartbeat.
+/api/images/worker endpoints, claim every ready generated image node
+(backend=chatgpt routing), download resolved refs, generate via the drive core,
+upload the result, heartbeat.
 Mirrors code/image_worker.py's api_pull_mode contract.
 
 Design note: the pure helpers (make_worker_id / status_body /
