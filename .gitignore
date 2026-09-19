@@ -12,6 +12,10 @@ static/.chatgpt_cookies.json
 # Same deal for the Gemini video worker's own Chrome profile (live Google
 # session cookies). Prefix match so any per-account suffix is covered too.
 static/.gemini_profile*/
+static/.gemini_creative_ff_run_*/
+# Short-lived, private browser clones used by one creative UI run. They contain
+# live session data and are deleted when the run exits; ignore crash leftovers.
+static/.creative_profile_*/
 # Per-job scratch (downloaded frames + rendered mp4s) from --serve mode.
 static/.gemini_work/
 # Dumped StreamGenerate responses from failed submits (diagnostics only).

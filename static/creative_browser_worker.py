@@ -8,10 +8,13 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -69,8 +72,11 @@ EXTERNAL_TOOL_LABELS = (
 )
 DEFERRED_ANSWER_MARKERS = (
     "i'm on it",
+    "i’m on it",
     "check back in a bit",
     "can take some time",
+    "this may take some time",
+    "deep think is working",
 )
 
 
@@ -186,9 +192,108 @@ def clean_answer(text: str) -> str:
 
 def is_deferred_answer(text: str) -> bool:
     folded = (text or "").casefold()
-    return bool(folded) and all(
-        marker in folded for marker in ("i'm on it", "check back")
-    ) or any(marker in folded for marker in DEFERRED_ANSWER_MARKERS[:1])
+    return bool(folded) and any(
+        marker in folded for marker in DEFERRED_ANSWER_MARKERS
+    )
+
+
+def _normalise_prompt_text(value: str) -> str:
+    """Normalise only browser rendering differences, never prompt content."""
+    return (
+        (value or "")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\u00a0", " ")
+        .replace("\u200b", "")
+        .strip()
+    )
+
+
+def prove_full_prompt(actual: str, expected: str, provider: str) -> None:
+    """Fail unless the complete prompt survived insertion into the composer."""
+    got = _normalise_prompt_text(actual)
+    wanted = _normalise_prompt_text(expected)
+    if got != wanted:
+        raise RuntimeError(
+            f"{provider} composer did not retain the exact full prompt before Send "
+            f"(expected {len(wanted)} chars/{sha256_bytes(wanted.encode())[:12]}, "
+            f"got {len(got)} chars/{sha256_bytes(got.encode())[:12]})"
+        )
+
+
+def _visible_email_addresses(page) -> list[str]:
+    """Read only email-shaped account labels; never return page text or tokens."""
+    try:
+        values = page.evaluate(
+            """() => {
+                const values = [];
+                const selectors = [
+                    "button[aria-label*='Google Account' i]",
+                    "[data-identifier]",
+                    "[aria-label*='@']",
+                    "[title*='@']"
+                ];
+                for (const el of document.querySelectorAll(selectors.join(','))) {
+                    for (const value of [
+                        el.getAttribute('data-identifier'),
+                        el.getAttribute('aria-label'),
+                        el.getAttribute('title'),
+                        el.innerText
+                    ]) if (value) values.push(value);
+                }
+                return values;
+            }"""
+        ) or []
+    except Exception:
+        return []
+    emails: list[str] = []
+    for value in values:
+        for match in re.findall(
+            r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", str(value), re.I
+        ):
+            lowered = match.casefold()
+            if lowered not in emails:
+                emails.append(lowered)
+    return emails
+
+
+def prove_gemini_account(page, expected_email: str) -> str:
+    """Prove the exact Google identity from Gemini's account surface."""
+    wanted = expected_email.strip().casefold()
+    seen = _visible_email_addresses(page)
+    if wanted not in seen:
+        account = page.locator("button[aria-label*='Google Account' i]").first
+        try:
+            if account.count() and account.is_visible():
+                account.click(timeout=10000)
+                time.sleep(1)
+                seen = _visible_email_addresses(page)
+        finally:
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+    if wanted not in seen:
+        detail = "no readable account email" if not seen else "a different account"
+        raise RuntimeError(
+            f"Gemini exact-account proof failed for {expected_email}: {detail}"
+        )
+    return wanted
+
+
+def prove_chatgpt_account(page, expected_email: str) -> str:
+    """Require ChatGPT's authenticated session endpoint to name the account."""
+    current = chat_worker._logged_in_email(page)
+    if not current:
+        raise RuntimeError(
+            "ChatGPT is signed in, but its session did not expose an account email; "
+            "refusing an unproved account"
+        )
+    if current.strip().casefold() != expected_email.strip().casefold():
+        raise RuntimeError(
+            f"ChatGPT exact-account proof failed for {expected_email}: a different account is active"
+        )
+    return current.strip().casefold()
 
 
 def attachment_snapshot(page) -> str:
@@ -238,6 +343,60 @@ def wait_for_attachment_names(page, paths: list[str], timeout_s: int = 240) -> N
     )
 
 
+def gemini_chip_snapshot(page) -> str:
+    """Return text from Gemini attachment chips, not the whole page."""
+    try:
+        return page.evaluate(
+            """() => {
+                const selectors = [
+                    "[class*='file-preview']",
+                    "[class*='attachment-']",
+                    "button[aria-label*='remove' i]",
+                    "button[aria-label*='delete' i]"
+                ];
+                const bits = [];
+                for (const el of document.querySelectorAll(selectors.join(','))) {
+                    const rect = el.getBoundingClientRect();
+                    if (!rect.width || !rect.height) continue;
+                    for (const value of [
+                        el.innerText,
+                        el.getAttribute('aria-label'),
+                        el.getAttribute('title')
+                    ]) if (value) bits.push(value);
+                }
+                return bits.join('\n');
+            }"""
+        ) or ""
+    except Exception:
+        return ""
+
+
+def wait_for_gemini_attachment_chips(
+    page, paths: list[str], timeout_s: int = 240
+) -> None:
+    """Prove every selected file became a visible, settled Gemini chip."""
+    deadline = time.time() + timeout_s
+    missing = [Path(path).name for path in paths]
+    while time.time() < deadline:
+        missing = missing_attachment_names(gemini_chip_snapshot(page), paths)
+        busy = False
+        try:
+            bars = page.locator("[role=progressbar]")
+            busy = any(
+                bars.nth(index).is_visible()
+                for index in range(min(bars.count(), 20))
+            )
+        except Exception:
+            busy = True
+        if not missing and not busy:
+            log(f"verified {len(paths)} settled Gemini attachment chips")
+            return
+        time.sleep(2)
+    raise RuntimeError(
+        "Gemini attachment-chip proof failed; missing: " + ", ".join(missing)
+    )
+
+
 def _visible(page, selector: str) -> bool:
     try:
         items = page.locator(selector)
@@ -248,6 +407,13 @@ def _visible(page, selector: str) -> bool:
 
 def _normalise_label(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def model_label_matches(visible: str, requested: str) -> bool:
+    """Allow loose UI labels such as 'Pro' for '3.1 Pro', but never a guess."""
+    shown = _normalise_label(visible)
+    wanted = _normalise_label(requested)
+    return bool(shown and wanted) and (shown in wanted or wanted in shown)
 
 
 def choose_visible_option(options: list[str], priorities: tuple[str, ...]) -> str | None:
@@ -424,7 +590,6 @@ def _chatgpt_submit_probe(page) -> dict:
             ].join(', ');
             const buttons = Array.from(document.querySelectorAll(selector));
             return {
-                path: location.pathname,
                 active: document.activeElement ? {
                     tag: document.activeElement.tagName,
                     id: document.activeElement.id || null,
@@ -465,6 +630,42 @@ def _chatgpt_submit_probe(page) -> dict:
             };
         }"""
     )
+
+
+def _safe_chatgpt_submit_probe(page) -> dict:
+    """A diagnostic must never replace the real submit result with its own error."""
+    try:
+        return _chatgpt_submit_probe(page)
+    except Exception as exc:
+        return {"diagnostic_error": type(exc).__name__}
+
+
+def _safe_screenshot(page, stem: str) -> Path | None:
+    """Do not persist private browser pixels; structured probes are enough."""
+    del page, stem
+    return None
+
+
+def _active_chatgpt_model_label(page) -> str | None:
+    """Return a selected model label only when the DOM marks it active."""
+    try:
+        values = page.evaluate(
+            """() => Array.from(document.querySelectorAll(
+                '[role="menuitemradio"][aria-checked="true"], '
+                + '[role="option"][aria-selected="true"], '
+                + '[data-state="checked"]'
+            )).map(el => [
+                el.innerText || '',
+                el.getAttribute('aria-label') || ''
+            ].filter(Boolean).join(' '))"""
+        ) or []
+    except Exception:
+        return None
+    for value in values:
+        label = " ".join(str(value).split())
+        if label and re.search(r"(?:gpt|model|\b\d[\w. -]*\b)", label, re.I):
+            return label
+    return None
 
 
 def wait_for_answer(page, adapter, before_count: int, timeout_s: int) -> str:
@@ -512,7 +713,17 @@ class GeminiAdapter:
         quality: str,
         thinking: str | None,
     ) -> dict:
-        resolved_model = gemini_worker.select_model(page, model or "Pro") or model or "Pro"
+        requested_model = model or "Pro"
+        resolved_model = gemini_worker.select_model(page, requested_model)
+        if not resolved_model or resolved_model.strip() in {"?", "not shown"}:
+            raise RuntimeError(
+                "Gemini did not expose a model label after selection; refusing to guess"
+            )
+        if not model_label_matches(resolved_model, requested_model):
+            raise RuntimeError(
+                f"Gemini model proof failed: requested {requested_model!r}, "
+                f"visible picker says {resolved_model!r}"
+            )
         if "flash" in resolved_model.casefold() and quality != "fast":
             raise RuntimeError(
                 "Gemini resolved to Flash for a reasoning benchmark; choose Pro or use --quality fast"
@@ -535,19 +746,16 @@ class GeminiAdapter:
                     available.extend(
                         item for item in nested_options if item not in available
                     )
-        if thinking and not resolved_thinking:
-            raise RuntimeError(
-                f"Gemini thinking level {thinking!r} is not available; visible options: {available}"
-            )
         if not resolved_thinking:
-            resolved_thinking = "account default (thinking control not exposed)"
-            log(
-                "Gemini did not expose a thinking-level control; recording the account default"
+            requested = thinking or "/".join(priorities)
+            raise RuntimeError(
+                f"Gemini could not prove an allowed thinking level {requested!r}; "
+                f"visible options: {available}"
             )
         disabled = disable_external_tools(page)
         return {
             "quality_policy": quality,
-            "requested_model": model,
+            "requested_model": requested_model,
             "model": resolved_model,
             "requested_thinking": thinking,
             "thinking": resolved_thinking,
@@ -587,13 +795,36 @@ class GeminiAdapter:
         expected = [Path(path).name for path in paths]
         if self._selected_names != expected:
             raise RuntimeError("Gemini attachment selection proof was lost before Send")
-        log(
-            f"verified all {len(paths)} Gemini file names in the browser file input "
-            "and waited for settled attachment chips"
-        )
+        wait_for_gemini_attachment_chips(page, paths)
 
     def send(self, page, prompt: str) -> None:
-        gemini_worker.send(page, prompt)
+        composer = gemini_worker.find(page, "composer", timeout_ms=15000)
+        try:
+            composer.click(timeout=8000)
+        except Exception:
+            try:
+                composer.evaluate("el => el.focus()")
+            except Exception:
+                composer.click(force=True, timeout=8000)
+        try:
+            composer.fill("")
+        except Exception:
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+        page.keyboard.insert_text(prompt)
+        prove_full_prompt(composer.inner_text() or "", prompt, "Gemini")
+        send = gemini_worker.find(page, "send", timeout_ms=8000, required=False)
+        if send is not None and send.is_enabled():
+            try:
+                send.click(force=True, timeout=8000)
+                return
+            except Exception:
+                pass
+        composer.evaluate("el => el.focus()")
+        page.keyboard.press("Enter")
+
+    def verify_account(self, page, expected_email: str) -> str:
+        return prove_gemini_account(page, expected_email)
 
     def answer_count(self, page) -> int:
         for selector in ("model-response", "message-content"):
@@ -815,18 +1046,11 @@ class ChatGPTAdapter:
                         viewport["height"] * 0.45,
                     )
                     time.sleep(1)
-                    open_debug_path = (
-                        REPO_ROOT
-                        / "output"
-                        / "creative_browser_debug"
-                        / "chatgpt-picker-open.png"
-                    )
-                    open_debug_path.parent.mkdir(parents=True, exist_ok=True)
-                    page.screenshot(path=str(open_debug_path), full_page=False)
+                    open_debug_path = _safe_screenshot(page, "chatgpt-picker-open")
                     log(
                         "ChatGPT coordinate picker attempt at "
                         f"({viewport['width'] * 0.72:.0f}, {viewport['height'] * 0.45:.0f}); "
-                        f"screenshot: {open_debug_path}"
+                        f"masked screenshot: {open_debug_path or 'unavailable'}"
                     )
                     slider_details = page.locator(
                         "[role='slider'], input[type='range']"
@@ -870,12 +1094,23 @@ class ChatGPTAdapter:
                                 "ChatGPT effort slider did not reach the requested value: "
                                 f"wanted {target_value}, got {verified_value}"
                             )
+                        model_proof = _active_chatgpt_model_label(page)
                         page.keyboard.press("Escape")
+                        if not model_proof:
+                            raise RuntimeError(
+                                "ChatGPT reasoning level was set, but the active model "
+                                "was not exposed; refusing to guess the model family"
+                            )
+                        if model and not model_label_matches(model_proof, model):
+                            raise RuntimeError(
+                                f"ChatGPT model proof failed: requested {model!r}, "
+                                f"active option says {model_proof!r}"
+                            )
                         disabled = disable_external_tools(page)
                         return {
                             "quality_policy": quality,
                             "requested_model": model,
-                            "model": "current ChatGPT family; thinking-effort slider",
+                            "model": model_proof,
                             "requested_thinking": thinking,
                             "thinking": slider_choice,
                             "external_tools": "off",
@@ -886,11 +1121,22 @@ class ChatGPTAdapter:
                         }
                     selected, available = _click_priority_option(page, priorities)
                     if selected:
+                        model_proof = _active_chatgpt_model_label(page)
+                        if not model_proof:
+                            raise RuntimeError(
+                                "ChatGPT reasoning option was selected, but the active "
+                                "model was not exposed; refusing to guess"
+                            )
+                        if model and not model_label_matches(model_proof, model):
+                            raise RuntimeError(
+                                f"ChatGPT model proof failed: requested {model!r}, "
+                                f"active option says {model_proof!r}"
+                            )
                         disabled = disable_external_tools(page)
                         return {
                             "quality_policy": quality,
                             "requested_model": model,
-                            "model": "current ChatGPT family; compact composer control",
+                            "model": model_proof,
                             "requested_thinking": thinking,
                             "thinking": selected,
                             "external_tools": "off",
@@ -901,25 +1147,17 @@ class ChatGPTAdapter:
                     page.keyboard.press("Escape")
                 except Exception:
                     pass
-            try:
-                debug_path = REPO_ROOT / "output" / "creative_browser_debug" / "chatgpt-picker.png"
-                debug_path.parent.mkdir(parents=True, exist_ok=True)
-                page.screenshot(path=str(debug_path), full_page=False)
-                log(f"ChatGPT picker screenshot: {debug_path}")
-            except Exception:
-                pass
+            debug_path = _safe_screenshot(page, "chatgpt-picker")
+            log(f"ChatGPT masked picker screenshot: {debug_path or 'unavailable'}")
             raise RuntimeError(
                 "ChatGPT model/reasoning picker is not exposed; cannot prove the requested quality"
             )
 
         current = self._picker_label(picker)
         available: list[str] = []
-        if current.strip() == "Pro":
-            resolved_model = "6 Pro (compact composer label)"
-        elif choose_visible_option([current], tuple(sum(CHATGPT_REASONING_LEVELS.values(), ()) )):
-            resolved_model = f"current ChatGPT family; composer level {current}"
-        else:
-            resolved_model = current or "not shown"
+        if not current.strip():
+            raise RuntimeError("ChatGPT model picker has no visible label; refusing to guess")
+        resolved_model = current.strip()
         if model and _normalise_label(model) not in _normalise_label(current):
             _click_control(picker)
             selected_model, available = _click_priority_option(page, (model,))
@@ -931,6 +1169,11 @@ class ChatGPTAdapter:
             resolved_model = selected_model
             picker = self._picker(page)
             current = self._picker_label(picker) if picker else selected_model
+            if not model_label_matches(current, model):
+                raise RuntimeError(
+                    f"ChatGPT model selection was not reflected by the picker: "
+                    f"requested {model!r}, visible {current!r}"
+                )
 
         current_thinking = choose_visible_option([current], priorities)
         resolved_thinking = (
@@ -1000,11 +1243,8 @@ class ChatGPTAdapter:
             page.keyboard.insert_text(prompt)
         except Exception:
             composer.fill(prompt)
-        inserted = (composer.inner_text() or "").strip()
-        if len(inserted) < min(100, len(prompt.strip())):
-            raise RuntimeError(
-                "ChatGPT composer did not retain the full prompt before Send"
-            )
+        inserted = composer.inner_text() or ""
+        prove_full_prompt(inserted, prompt, "ChatGPT")
         before_users = page.locator(CHATGPT_USER).count()
 
         def wait_for_acceptance(timeout_s: int) -> bool:
@@ -1026,7 +1266,7 @@ class ChatGPTAdapter:
             return False
 
         time.sleep(1)
-        log("ChatGPT submit probe before click: " + repr(_chatgpt_submit_probe(page)))
+        log("ChatGPT submit probe before click: " + repr(_safe_chatgpt_submit_probe(page)))
         sends = page.locator(
             "button[data-testid='send-button'][aria-label='Send prompt'], "
             + chat_backend.SEL["send"]
@@ -1040,7 +1280,7 @@ class ChatGPTAdapter:
                 log("force-clicked the last ChatGPT Send prompt button")
                 log(
                     "ChatGPT submit probe after force-click: "
-                    + repr(_chatgpt_submit_probe(page))
+                    + repr(_safe_chatgpt_submit_probe(page))
                 )
             except Exception:
                 pass
@@ -1093,23 +1333,20 @@ class ChatGPTAdapter:
         log("ChatGPT click was not accepted; pressed Enter in the focused composer")
         log(
             "ChatGPT submit probe after Enter fallback: "
-            + repr(_chatgpt_submit_probe(page))
+            + repr(_safe_chatgpt_submit_probe(page))
         )
         if wait_for_acceptance(20):
             return
 
-        debug_path = (
-            REPO_ROOT
-            / "output"
-            / "creative_browser_debug"
-            / "chatgpt-send-not-accepted.png"
-        )
-        debug_path.parent.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(debug_path), full_page=False)
-        log("ChatGPT submit probe on rejection: " + repr(_chatgpt_submit_probe(page)))
+        debug_path = _safe_screenshot(page, "chatgpt-send-not-accepted")
+        log("ChatGPT submit probe on rejection: " + repr(_safe_chatgpt_submit_probe(page)))
         raise RuntimeError(
-            "ChatGPT did not accept Send within 20s; screenshot: " + str(debug_path)
+            "ChatGPT did not accept Send within 20s; masked screenshot: "
+            + str(debug_path or "unavailable")
         )
+
+    def verify_account(self, page, expected_email: str) -> str:
+        return prove_chatgpt_account(page, expected_email)
 
     def answer_count(self, page) -> int:
         try:
@@ -1195,7 +1432,7 @@ def run_turn(
         while time.time() < url_deadline:
             current_url = adapter.conversation_url(page)
             if current_url != last_url:
-                on_sent(resolved_settings, current_url)
+                on_sent(resolved_settings, current_url, before_count)
                 last_url = current_url
             if re.search(r"/(?:c|app)/[^/?#]+", current_url or ""):
                 break
@@ -1205,171 +1442,324 @@ def run_turn(
     return answer, extraction, resolved_settings, adapter.conversation_url(page)
 
 
-def resume_turn(page, adapter, url: str, settings: dict, timeout_s: int):
+def _conversation_identity(url: str, provider: str) -> tuple[str, str]:
+    parsed = urlparse(url or "")
+    host = (parsed.hostname or "").casefold()
+    pattern = r"^/c/([^/?#]+)" if provider == "chatgpt" else r"^/app/([^/?#]+)"
+    allowed = {"chatgpt.com", "www.chatgpt.com"} if provider == "chatgpt" else {
+        "gemini.google.com"
+    }
+    match = re.match(pattern, parsed.path or "")
+    if parsed.scheme != "https" or host not in allowed or not match:
+        raise RuntimeError(f"invalid {provider} conversation URL for resume")
+    return host, match.group(1)
+
+
+def resume_turn(
+    page,
+    adapter,
+    url: str,
+    settings: dict,
+    timeout_s: int,
+    *,
+    provider: str,
+    expected_email: str,
+    before_count: int,
+):
+    requested_identity = _conversation_identity(url, provider)
     page.goto(url, wait_until="domcontentloaded", timeout=45000)
     time.sleep(3)
-    wait_for_answer(page, adapter, 0, timeout_s)
+    actual_identity = _conversation_identity(page.url or "", provider)
+    if actual_identity != requested_identity:
+        raise RuntimeError("resume navigation did not stay on the checkpointed conversation")
+    adapter.verify_account(page, expected_email)
+    wait_for_answer(page, adapter, before_count, timeout_s)
     answer, extraction = adapter.extract(page)
     return answer, extraction, settings, adapter.conversation_url(page)
 
 
-def existing_result_settings(out_path: str | Path, resume_url: str | None) -> dict:
+def existing_result_settings(
+    out_path: str | Path,
+    resume_url: str | None,
+    *,
+    manifest: dict | None = None,
+    provider: str | None = None,
+    email: str | None = None,
+) -> tuple[dict, int]:
     if not resume_url:
-        return {}
+        return {}, 0
     output = Path(out_path)
-    metadata = None
-    for candidate in (
-        output.with_suffix(output.suffix + ".meta.json"),
-        output.with_suffix(output.suffix + ".pending.json"),
-    ):
-        try:
-            metadata = json.loads(candidate.read_text(encoding="utf-8"))
-            break
-        except (OSError, ValueError):
-            continue
-    if metadata is None:
-        return {
-            "quality_policy": "preserved from resumed conversation",
-            "model": "preserved from resumed conversation",
-            "thinking": "preserved from resumed conversation",
-        }
+    candidate = output.with_suffix(output.suffix + ".pending.json")
+    try:
+        metadata = json.loads(candidate.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            "--resume-url requires the matching pending checkpoint"
+        ) from exc
     if metadata.get("conversation_url") != resume_url:
         raise RuntimeError(
             "--resume-url does not match the conversation in the existing result metadata"
         )
-    return metadata.get("resolved_settings") or {}
+    if provider and metadata.get("provider") != provider:
+        raise RuntimeError("resume checkpoint provider does not match --provider")
+    if manifest and metadata.get("pack_sha256") != manifest.get("pack_sha256"):
+        raise RuntimeError("resume checkpoint belongs to a different creative pack")
+    if manifest and metadata.get("attachments") != manifest.get("files"):
+        raise RuntimeError("resume checkpoint attachment list does not match the creative pack")
+    if email and str(metadata.get("email") or "").casefold() != email.casefold():
+        raise RuntimeError("resume checkpoint belongs to a different account")
+    _conversation_identity(resume_url, provider or str(metadata.get("provider") or ""))
+    before_count = metadata.get("before_answer_count")
+    if not isinstance(before_count, int) or before_count < 0:
+        raise RuntimeError("resume checkpoint has no valid pre-send answer count")
+    return metadata.get("resolved_settings") or {}, before_count
 
 
 def _safe_email(email: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", email.strip().lower())
 
 
+_PROFILE_COPY_IGNORES = (
+    "SingletonLock",
+    "SingletonCookie",
+    "SingletonSocket",
+    "lock",
+    ".parentlock",
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "ShaderCache",
+    "Crashpad",
+)
+
+
+def _new_run_profile(provider: str, email: str, engine: str) -> Path:
+    name = (
+        f".creative_profile_{provider}_{engine}_{_safe_email(email)}_"
+        f"{os.getpid()}_{uuid.uuid4().hex[:10]}"
+    )
+    path = (BASE_DIR / name).resolve()
+    path.mkdir(parents=True, exist_ok=False)
+    return path
+
+
+def _copy_profile(source: str | Path, target: Path) -> None:
+    src = Path(source).resolve()
+    if not src.is_dir():
+        return
+    shutil.copytree(
+        src,
+        target,
+        dirs_exist_ok=True,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(*_PROFILE_COPY_IGNORES),
+    )
+
+
+def _cleanup_run_profile(path: str | Path | None) -> None:
+    if not path:
+        return
+    target = Path(path).resolve()
+    try:
+        target.relative_to(BASE_DIR.resolve())
+    except ValueError as exc:
+        raise RuntimeError("refusing to clean a browser profile outside static/") from exc
+    if not target.name.startswith(".creative_profile_"):
+        raise RuntimeError("refusing to clean a non-run browser profile")
+    for attempt in range(4):
+        try:
+            shutil.rmtree(target)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if attempt == 3:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+
+
+def _prepare_gemini_profile(args) -> Path:
+    engine = "firefox" if args.firefox else "chrome"
+    run_profile = _new_run_profile("gemini", args.email, engine)
+    try:
+        if args.profile_dir:
+            source = Path(args.profile_dir).resolve()
+            if not source.is_dir():
+                raise RuntimeError(f"explicit Gemini profile does not exist: {source}")
+            _copy_profile(source, run_profile)
+            args.no_reseed = True
+        elif args.firefox:
+            if args.no_reseed:
+                raise RuntimeError("Gemini Firefox --no-reseed requires --profile-dir")
+        else:
+            gemini_video.use_account(args.email, seed_only=args.no_reseed)
+            _copy_profile(gemini_video.PROFILE_DIR, run_profile)
+        if args.firefox:
+            gemini_worker.FF_PROFILE_DIR = str(run_profile)
+            if not args.profile_dir and not gemini_worker.pull_firefox_profile(args.email):
+                log(
+                    "Gemini profile pull did not prove a session; "
+                    "the login ladder will decide"
+                )
+        else:
+            gemini_video.PROFILE_DIR = str(run_profile)
+        log(f"Gemini uses private run profile {run_profile.name}")
+        return run_profile
+    except BaseException:
+        _cleanup_run_profile(run_profile)
+        raise
+
+
 def run_gemini(
     args, manifest: dict, paths: list[str], resume_settings: dict, on_sent=None
 ):
-    if args.email:
-        gemini_video.use_account(args.email)
-    if args.firefox:
-        if args.profile_dir:
-            gemini_worker.FF_PROFILE_DIR = os.path.abspath(args.profile_dir)
-            os.makedirs(gemini_worker.FF_PROFILE_DIR, exist_ok=True)
-            args.no_reseed = True
-            log(f"Gemini uses explicit profile {gemini_worker.FF_PROFILE_DIR}")
-        elif args.email:
-            gemini_worker.FF_PROFILE_DIR = os.path.join(
-                str(BASE_DIR), f".gemini_creative_ff_run_{_safe_email(args.email)}_{os.getpid()}"
-            )
-        if not args.no_reseed:
-            if not gemini_worker.pull_firefox_profile(args.email):
-                log("Gemini profile pull did not prove a session; the browser login ladder will decide")
-        playwright_factory = gemini_worker.firefox_playwright()
-    else:
-        playwright_factory = gemini_video._import_playwright()
-
-    with playwright_factory() as playwright:
-        context, page = (
-            gemini_worker.launch_firefox(playwright, headless=args.headless)
+    run_profile = _prepare_gemini_profile(args)
+    try:
+        playwright_factory = (
+            gemini_worker.firefox_playwright()
             if args.firefox
-            else gemini_video.launch(playwright, headless=args.headless)
+            else gemini_video._import_playwright()
         )
-        try:
-            gemini_worker.ensure_session(page, args.email, firefox=args.firefox)
-            if args.resume_url:
-                return resume_turn(
-                    page,
-                    GeminiAdapter(),
-                    args.resume_url,
-                    resume_settings,
-                    args.answer_timeout,
-                )
-            return run_turn(
-                page,
-                GeminiAdapter(),
-                paths,
-                manifest["message"],
-                args.model or os.environ.get("GEMINI_CREATIVE_MODEL") or gemini_worker.DEFAULT_MODEL,
-                args.quality,
-                args.thinking,
-                args.answer_timeout,
-                on_sent,
+        with playwright_factory() as playwright:
+            context, page = (
+                gemini_worker.launch_firefox(playwright, headless=args.headless)
+                if args.firefox
+                else gemini_video.launch(playwright, headless=args.headless)
             )
-        finally:
             try:
-                context.close()
-            except Exception:
-                pass
+                gemini_worker.ensure_session(page, args.email, firefox=args.firefox)
+                adapter = GeminiAdapter()
+                adapter.verify_account(page, args.email)
+                if args.resume_url:
+                    return resume_turn(
+                        page,
+                        adapter,
+                        args.resume_url,
+                        resume_settings,
+                        args.answer_timeout,
+                        provider="gemini",
+                        expected_email=args.email,
+                        before_count=args.resume_before_count,
+                    )
+                return run_turn(
+                    page,
+                    adapter,
+                    paths,
+                    manifest["message"],
+                    args.model
+                    or os.environ.get("GEMINI_CREATIVE_MODEL")
+                    or gemini_worker.DEFAULT_MODEL,
+                    args.quality,
+                    args.thinking,
+                    args.answer_timeout,
+                    on_sent,
+                )
+            finally:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+    finally:
+        _cleanup_run_profile(run_profile)
 
 
-def configure_chatgpt(args) -> None:
+def configure_chatgpt(args) -> Path:
     chat_backend.set_browser_mode("firefox" if args.firefox else "chrome")
     if args.firefox:
         os.environ["FIREFOX_HEADLESS"] = "1" if args.headless else "0"
-    if args.profile_dir:
-        chat_backend.PROFILE_DIR = os.path.abspath(args.profile_dir)
-    elif args.email:
-        prefix = ".chatgpt_profile_firefox_" if args.firefox else ".chatgpt_profile_"
-        chat_backend.PROFILE_DIR = os.path.join(
-            str(BASE_DIR), f"{prefix}{_safe_email(args.email)}"
-        )
-    os.makedirs(chat_backend.PROFILE_DIR, exist_ok=True)
-    chat_backend.COOKIES_FILE = os.path.join(str(BASE_DIR), ".chatgpt_cookies_unused")
+    prefix = ".chatgpt_profile_firefox_" if args.firefox else ".chatgpt_profile_"
+    durable_profile = Path(
+        args.profile_dir
+        or os.path.join(str(BASE_DIR), f"{prefix}{_safe_email(args.email)}")
+    ).resolve()
+    if args.profile_dir and not durable_profile.is_dir():
+        raise RuntimeError(f"explicit ChatGPT profile does not exist: {durable_profile}")
+    run_profile = _new_run_profile(
+        "chatgpt", args.email, "firefox" if args.firefox else "chrome"
+    )
+    try:
+        _copy_profile(durable_profile, run_profile)
+        if args.firefox:
+            # The Chromium bridge is run-private too. Parallel workers must not
+            # rebuild or lock one shared per-account golden directory.
+            chat_backend.CHROME_GOLDEN_DIR = str(run_profile / "_chrome_golden")
+        if args.email and not args.no_reseed and not args.profile_dir:
+            try:
+                import chatgpt_session_pull
 
-    if args.email and args.firefox:
-        chat_backend.CHROME_GOLDEN_DIR = os.path.join(
-            str(BASE_DIR), f".chatgpt_chrome_golden_{_safe_email(args.email)}"
-        )
-    if args.email and not args.no_reseed:
-        try:
-            import chatgpt_session_pull
-
-            target = (
-                chat_backend.CHROME_GOLDEN_DIR
-                if args.firefox
-                else chat_backend.PROFILE_DIR
-            )
-            if chatgpt_session_pull.pull_chatgpt_session(args.email, target):
-                log("ChatGPT session copied from the existing Chrome-Beta source")
-            else:
-                log("ChatGPT session pull found nothing; the saved-profile login ladder will decide")
-        except Exception as exc:
-            log(f"ChatGPT session pull failed ({type(exc).__name__}); using the saved-profile ladder")
+                target = (
+                    chat_backend.CHROME_GOLDEN_DIR
+                    if args.firefox
+                    else str(run_profile)
+                )
+                if chatgpt_session_pull.pull_chatgpt_session(args.email, target):
+                    log(
+                        "ChatGPT session copied into this run's private profile"
+                    )
+                else:
+                    log(
+                        "ChatGPT session pull found nothing; "
+                        "the saved-profile login ladder will decide"
+                    )
+            except Exception as exc:
+                log(
+                    f"ChatGPT session pull failed ({type(exc).__name__}); "
+                    "using the private profile login ladder"
+                )
+    except BaseException:
+        _cleanup_run_profile(run_profile)
+        raise
+    chat_backend.PROFILE_DIR = str(run_profile)
+    chat_backend.COOKIES_FILE = str(run_profile / ".cookies_unused")
+    log(f"ChatGPT uses private run profile {run_profile.name}")
+    return run_profile
 
 
 def run_chatgpt(
     args, manifest: dict, paths: list[str], resume_settings: dict, on_sent=None
 ):
-    configure_chatgpt(args)
-    playwright_factory, _ = chat_worker._import_playwright()
-    with playwright_factory() as playwright:
-        launched = chat_worker.launch_logged_in(playwright, args.email)
-        if launched is None:
-            raise RuntimeError("ChatGPT login ladder did not produce the requested account session")
-        context, page = launched
-        try:
-            if args.resume_url:
-                return resume_turn(
-                    page,
-                    ChatGPTAdapter(),
-                    args.resume_url,
-                    resume_settings,
-                    args.answer_timeout,
+    run_profile = configure_chatgpt(args)
+    try:
+        playwright_factory, _ = chat_worker._import_playwright()
+        with playwright_factory() as playwright:
+            launched = chat_worker.launch_logged_in(playwright, args.email)
+            if launched is None:
+                raise RuntimeError(
+                    "ChatGPT login ladder did not produce the requested account session"
                 )
-            return run_turn(
-                page,
-                ChatGPTAdapter(),
-                paths,
-                manifest["message"],
-                args.model or os.environ.get("CHATGPT_CREATIVE_MODEL") or None,
-                args.quality,
-                args.thinking,
-                args.answer_timeout,
-                on_sent,
-            )
-        finally:
+            context, page = launched
             try:
-                context.close()
-            except Exception:
-                pass
+                adapter = ChatGPTAdapter()
+                adapter.verify_account(page, args.email)
+                if args.resume_url:
+                    return resume_turn(
+                        page,
+                        adapter,
+                        args.resume_url,
+                        resume_settings,
+                        args.answer_timeout,
+                        provider="chatgpt",
+                        expected_email=args.email,
+                        before_count=args.resume_before_count,
+                    )
+                return run_turn(
+                    page,
+                    adapter,
+                    paths,
+                    manifest["message"],
+                    args.model or os.environ.get("CHATGPT_CREATIVE_MODEL") or None,
+                    args.quality,
+                    args.thinking,
+                    args.answer_timeout,
+                    on_sent,
+                )
+            finally:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+    finally:
+        _cleanup_run_profile(run_profile)
 
 
 def write_result(
@@ -1384,6 +1774,7 @@ def write_result(
     resolved_settings: dict,
     extraction: str,
     conversation_url: str,
+    email: str,
 ) -> list[str]:
     output = Path(out_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1395,6 +1786,7 @@ def write_result(
     metadata = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "provider": provider,
+        "email": email,
         "requested_model": requested_model,
         "requested_quality": requested_quality,
         "requested_thinking": requested_thinking,
@@ -1421,6 +1813,8 @@ def write_pending(
     provider: str,
     resolved_settings: dict,
     conversation_url: str,
+    email: str,
+    before_answer_count: int,
 ) -> None:
     """Save enough state to resume a sent turn after a local interruption."""
     output = Path(out_path)
@@ -1429,10 +1823,12 @@ def write_pending(
     payload = {
         "sent_at": datetime.now(timezone.utc).isoformat(),
         "provider": provider,
+        "email": email,
         "pack_sha256": manifest["pack_sha256"],
         "attachments": manifest["files"],
         "resolved_settings": resolved_settings,
         "conversation_url": conversation_url,
+        "before_answer_count": before_answer_count,
         "resumable": bool(
             re.search(r"/(?:c|app)/[^/?#]+", conversation_url or "")
         ),
@@ -1488,15 +1884,23 @@ def main() -> int:
     if args.dry_run:
         return 0
 
-    resume_settings = existing_result_settings(args.out, args.resume_url)
+    resume_settings, args.resume_before_count = existing_result_settings(
+        args.out,
+        args.resume_url,
+        manifest=manifest,
+        provider=args.provider,
+        email=args.email,
+    )
     on_sent = None
     if not args.resume_url:
-        on_sent = lambda settings, url: write_pending(
+        on_sent = lambda settings, url, before_count: write_pending(
             args.out,
             manifest=manifest,
             provider=args.provider,
             resolved_settings=settings,
             conversation_url=url,
+            email=args.email,
+            before_answer_count=before_count,
         )
     if args.provider == "gemini":
         answer, extraction, resolved_settings, conversation_url = run_gemini(
@@ -1517,6 +1921,7 @@ def main() -> int:
         resolved_settings=resolved_settings,
         extraction=extraction,
         conversation_url=conversation_url,
+        email=args.email,
     )
     if missing:
         log("answer saved but failed the requested shape; missing: " + ", ".join(missing))

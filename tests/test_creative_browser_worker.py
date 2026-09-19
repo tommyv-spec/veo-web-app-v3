@@ -4,6 +4,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -95,11 +96,17 @@ def test_missing_headings_is_exact_and_case_insensitive():
     ) == ["### Challenge test"]
 
 
-def test_deep_think_holding_message_is_not_a_final_answer():
-    assert worker.is_deferred_answer(
-        "I'm on it. Responses with Deep Think can take some time, so check back in a bit."
-    )
+@pytest.mark.parametrize("marker", worker.DEFERRED_ANSWER_MARKERS)
+def test_every_deep_think_holding_marker_is_not_a_final_answer(marker):
+    assert worker.is_deferred_answer(f"Status: {marker}. Please wait.")
     assert not worker.is_deferred_answer("### Classification\nMETHOD: STEP-UP-SAME-SOURCE")
+
+
+def test_full_prompt_proof_refuses_a_same_prefix_truncation():
+    prompt = "Read everything.\n" + ("evidence " * 100)
+    worker.prove_full_prompt(prompt, prompt, "test")
+    with pytest.raises(RuntimeError, match="exact full prompt"):
+        worker.prove_full_prompt(prompt[:-20], prompt, "test")
 
 
 def test_attachment_name_check_requires_every_file():
@@ -198,19 +205,227 @@ def test_pending_checkpoint_can_restore_resume_settings():
         provider="chatgpt",
         resolved_settings=settings,
         conversation_url=url,
+        email="owner@example.com",
+        before_answer_count=2,
     )
 
-    assert worker.existing_result_settings(output, url) == settings
+    assert worker.existing_result_settings(
+        output,
+        url,
+        manifest=manifest,
+        provider="chatgpt",
+        email="owner@example.com",
+    ) == (settings, 2)
     pending = json.loads(
         output.with_suffix(".md.pending.json").read_text(encoding="utf-8")
     )
     assert pending["resumable"] is True
     assert pending["pack_sha256"] == manifest["pack_sha256"]
+    assert pending["email"] == "owner@example.com"
+    assert pending["before_answer_count"] == 2
     assert [item["path"] for item in pending["attachments"]] == [
         "task.md",
         "parent-build.md",
         "decoded_parent.md",
     ]
+
+
+def test_resume_requires_checkpoint_pack_provider_and_account_identity():
+    root = _case("resume-identity")
+    manifest = json.loads(_manifest(root).read_text(encoding="utf-8"))
+    output = root / "answer.md"
+    url = "https://chatgpt.com/c/resume-id"
+    worker.write_pending(
+        output,
+        manifest=manifest,
+        provider="chatgpt",
+        resolved_settings={"model": "GPT", "thinking": "High"},
+        conversation_url=url,
+        email="owner@example.com",
+        before_answer_count=0,
+    )
+
+    with pytest.raises(RuntimeError, match="provider"):
+        worker.existing_result_settings(
+            output,
+            url,
+            manifest=manifest,
+            provider="gemini",
+            email="owner@example.com",
+        )
+    with pytest.raises(RuntimeError, match="different account"):
+        worker.existing_result_settings(
+            output,
+            url,
+            manifest=manifest,
+            provider="chatgpt",
+            email="other@example.com",
+        )
+    changed = dict(manifest, pack_sha256="other-pack")
+    with pytest.raises(RuntimeError, match="different creative pack"):
+        worker.existing_result_settings(
+            output,
+            url,
+            manifest=changed,
+            provider="chatgpt",
+            email="owner@example.com",
+        )
+    pending_path = output.with_suffix(".md.pending.json")
+    pending = json.loads(pending_path.read_text(encoding="utf-8"))
+    pending["attachments"] = pending["attachments"][:-1]
+    pending_path.write_text(json.dumps(pending), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="attachment list"):
+        worker.existing_result_settings(
+            output,
+            url,
+            manifest=manifest,
+            provider="chatgpt",
+            email="owner@example.com",
+        )
+
+
+def test_resume_refuses_missing_checkpoint_and_wrong_provider_url():
+    root = _case("resume-missing")
+    with pytest.raises(RuntimeError, match="requires the matching pending"):
+        worker.existing_result_settings(
+            root / "none.md",
+            "https://chatgpt.com/c/id",
+            manifest={"pack_sha256": "pack"},
+            provider="chatgpt",
+            email="owner@example.com",
+        )
+    with pytest.raises(RuntimeError, match="invalid chatgpt conversation URL"):
+        worker._conversation_identity("https://gemini.google.com/app/id", "chatgpt")
+
+
+def test_exact_account_proof_fails_closed(monkeypatch):
+    monkeypatch.setattr(worker.chat_worker, "_logged_in_email", lambda page: None)
+    with pytest.raises(RuntimeError, match="did not expose an account email"):
+        worker.prove_chatgpt_account(object(), "owner@example.com")
+
+    monkeypatch.setattr(
+        worker, "_visible_email_addresses", lambda page: ["other@example.com"]
+    )
+
+    class EmptyAccount:
+        def count(self):
+            return 0
+
+    class Locator:
+        @property
+        def first(self):
+            return EmptyAccount()
+
+    page = SimpleNamespace(locator=lambda selector: Locator())
+    with pytest.raises(RuntimeError, match="different account"):
+        worker.prove_gemini_account(page, "owner@example.com")
+
+
+def test_gemini_model_proof_refuses_missing_or_wrong_visible_label(monkeypatch):
+    monkeypatch.setattr(worker.gemini_worker, "select_model", lambda page, model: None)
+    with pytest.raises(RuntimeError, match="refusing to guess"):
+        worker.GeminiAdapter().select_settings(object(), "3.1 Pro", "best", None)
+
+    monkeypatch.setattr(
+        worker.gemini_worker, "select_model", lambda page, model: "Flash"
+    )
+    with pytest.raises(RuntimeError, match="model proof failed"):
+        worker.GeminiAdapter().select_settings(object(), "3.1 Pro", "best", None)
+
+
+def test_gemini_attachment_proof_requires_visible_chip_names(monkeypatch):
+    adapter = worker.GeminiAdapter()
+    adapter._selected_names = ["a.md", "b.md"]
+    called = []
+    monkeypatch.setattr(
+        worker,
+        "wait_for_gemini_attachment_chips",
+        lambda page, paths: called.append(list(paths)),
+    )
+    adapter.verify_attachments(object(), ["C:/a.md", "C:/b.md"])
+    assert called == [["C:/a.md", "C:/b.md"]]
+
+
+def test_gemini_attachment_proof_does_not_accept_zero_chips(monkeypatch):
+    clock = [0.0]
+
+    class NoBars:
+        def count(self):
+            return 0
+
+    page = SimpleNamespace(locator=lambda selector: NoBars())
+    monkeypatch.setattr(worker, "gemini_chip_snapshot", lambda page: "")
+    monkeypatch.setattr(worker.time, "time", lambda: clock[0])
+    monkeypatch.setattr(
+        worker.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    with pytest.raises(RuntimeError, match="attachment-chip proof failed"):
+        worker.wait_for_gemini_attachment_chips(page, ["C:/a.md"], timeout_s=1)
+
+
+def test_private_run_profiles_are_unique_cloned_and_cleaned(monkeypatch):
+    root = _case("private-run-profile")
+    base = root / "static"
+    base.mkdir(exist_ok=True)
+    source = root / "source"
+    source.mkdir(exist_ok=True)
+    (source / "Cookies").write_text("session", encoding="utf-8")
+    (source / "SingletonLock").write_text("locked", encoding="utf-8")
+    monkeypatch.setattr(worker, "BASE_DIR", base)
+
+    first = worker._new_run_profile("chatgpt", "owner@example.com", "firefox")
+    second = worker._new_run_profile("chatgpt", "owner@example.com", "firefox")
+    worker._copy_profile(source, first)
+
+    assert first != second
+    assert (first / "Cookies").read_text(encoding="utf-8") == "session"
+    assert not (first / "SingletonLock").exists()
+    worker._cleanup_run_profile(first)
+    worker._cleanup_run_profile(second)
+    assert not first.exists()
+    assert not second.exists()
+
+
+def test_parallel_chatgpt_configuration_never_reuses_the_profile(monkeypatch):
+    root = _case("parallel-chatgpt-profiles")
+    base = root / "static"
+    base.mkdir(exist_ok=True)
+    golden = root / "golden"
+    golden.mkdir(exist_ok=True)
+    (golden / "Cookies").write_text("session", encoding="utf-8")
+    monkeypatch.setattr(worker, "BASE_DIR", base)
+    monkeypatch.setattr(worker.chat_backend, "set_browser_mode", lambda mode: None)
+    args = SimpleNamespace(
+        firefox=True,
+        headless=True,
+        profile_dir=str(golden),
+        email="owner@example.com",
+        no_reseed=True,
+    )
+
+    first = worker.configure_chatgpt(args)
+    first_bridge = Path(worker.chat_backend.CHROME_GOLDEN_DIR)
+    second = worker.configure_chatgpt(args)
+    second_bridge = Path(worker.chat_backend.CHROME_GOLDEN_DIR)
+
+    assert first != second
+    assert first_bridge.parent == first
+    assert second_bridge.parent == second
+    assert (first / "Cookies").is_file()
+    assert (second / "Cookies").is_file()
+    worker._cleanup_run_profile(first)
+    worker._cleanup_run_profile(second)
+
+
+def test_submit_probe_failure_is_only_diagnostic(monkeypatch):
+    monkeypatch.setattr(
+        worker,
+        "_chatgpt_submit_probe",
+        lambda page: (_ for _ in ()).throw(RuntimeError("page closed")),
+    )
+    assert worker._safe_chatgpt_submit_probe(object()) == {
+        "diagnostic_error": "RuntimeError"
+    }
 
 
 def test_run_turn_checkpoints_after_send_before_wait(monkeypatch):
@@ -257,10 +472,12 @@ def test_run_turn_checkpoints_after_send_before_wait(monkeypatch):
         "best",
         None,
         5,
-        lambda settings, url: events.append("checkpoint"),
+        lambda settings, url, before_count: events.append(
+            f"checkpoint:{before_count}"
+        ),
     )
 
-    assert events.index("send") < events.index("checkpoint") < events.index("wait")
+    assert events.index("send") < events.index("checkpoint:0") < events.index("wait")
 
 
 def test_chatgpt_send_retries_with_enter_when_button_click_is_not_accepted(monkeypatch):
