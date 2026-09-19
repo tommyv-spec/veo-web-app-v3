@@ -60,6 +60,9 @@ def set_browser_mode(mode):
 USER_DATA_DIR = None          # e.g. C:/Users/tomma/AppData/Local/Google/Chrome/User Data
 PROFILE_DIRECTORY = None      # e.g. "Profile 18"
 CHROME_CHANNEL = os.environ.get("WORKER_CHROME_CHANNEL", "chrome")
+CHROME_HEADLESS = os.environ.get("CHATGPT_CHROME_HEADLESS", "0").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 CHATGPT_URL = "https://chatgpt.com/"
 # Plaintext cookies captured via netlog (ABE-immune). Injected on every launch so
 # login survives App-Bound Encryption (copied v20 cookies never decrypt). Re-run
@@ -237,7 +240,10 @@ def launch(p):
         "user_data_dir": udd,
         "channel": CHROME_CHANNEL,
         "ignore_default_args": _IGNORE_DEFAULT_ARGS,
-        "headless": False,
+        # Firefox applies its own env-controlled headless policy inside the
+        # shared driver. Chrome has no such rewrite, so callers such as the
+        # creative worker must reach this launch argument directly.
+        "headless": False if FIREFOX_MODE else CHROME_HEADLESS,
         "viewport": {"width": 1280, "height": 900},
         "args": args,
     }

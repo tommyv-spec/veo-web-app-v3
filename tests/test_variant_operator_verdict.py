@@ -40,12 +40,14 @@ def _node(db, node_id=1, user_id="u1", n_variants=2, status="ready"):
     n = ip.ImageNode(
         id=node_id, user_id=user_id, kind="generated",
         name=f"node {node_id}", prompt="a prompt", status=status,
+        cg_status="ready" if status == "ready" else None,
     )
     db.add(n)
     for i in range(1, n_variants + 1):
         db.add(ip.ImageVariant(
             id=node_id * 100 + i, node_id=node_id, variant_index=i,
-            image_path=f"nodes/{node_id}/variant_{i}.png",
+            image_path=__file__,
+            backend="chatgpt" if i == n_variants else "banana",
         ))
     db.commit()
     return n
@@ -442,11 +444,13 @@ def test_qc_auto_strict_snapshot_accepts_then_rejects_changed_parent_bytes(
                                      image_path="nodes/50/variant_1.png",
                                      source="manual")
     child = ip.ImageNode(id=1, user_id="u1", kind="generated", status="ready",
+                         cg_status="ready",
                          prompt="a product jar on a counter", n_variants=2)
     child_a = ip.ImageVariant(id=101, node_id=1, variant_index=1,
                               image_path="nodes/1/variant_1.png", source="ai")
     child_b = ip.ImageVariant(id=102, node_id=1, variant_index=2,
-                              image_path="nodes/1/variant_2.png", source="ai")
+                              image_path="nodes/1/variant_2.png", source="ai",
+                              backend="chatgpt")
     edge = ip.ImageEdge(id=700, parent_node_id=50, child_node_id=1,
                         role="product", kind="product", slot_order=0,
                         origin="manual")

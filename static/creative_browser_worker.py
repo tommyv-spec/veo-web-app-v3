@@ -191,9 +191,16 @@ def clean_answer(text: str) -> str:
 
 
 def is_deferred_answer(text: str) -> bool:
-    folded = (text or "").casefold()
-    return bool(folded) and any(
-        marker in folded for marker in DEFERRED_ANSWER_MARKERS
+    value = " ".join((text or "").casefold().split())
+    if not value or len(value) > 600 or re.search(r"(?:^|\n)#{1,6}\s", text or ""):
+        return False
+    # A final answer may discuss phrases such as "this may take some time".
+    # Only a short, status-shaped notice at the start is deferred evidence.
+    value = re.sub(r"^(?:status|update)\s*[:\-]\s*", "", value)
+    return any(
+        re.match(rf"^{re.escape(marker.casefold())}(?:\b|[.!,:;\-])", value)
+        is not None
+        for marker in DEFERRED_ANSWER_MARKERS
     )
 
 
@@ -509,8 +516,10 @@ def active_external_tools(page) -> list[str]:
                 el.getAttribute('title') || ''
             ].filter(Boolean).join(' '))"""
         ) or []
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RuntimeError(
+            "could not inspect external-tool state; refusing to assume tools are off"
+        ) from exc
     return [
         str(value).strip()
         for value in values
@@ -646,6 +655,39 @@ def _safe_screenshot(page, stem: str) -> Path | None:
     return None
 
 
+def _clear_clipboard_for_copy(page) -> str:
+    """Write and verify a unique marker immediately before a Copy action."""
+    marker = f"__creative_copy_{uuid.uuid4().hex}__"
+    observed = page.evaluate(
+        """async marker => {
+            await navigator.clipboard.writeText(marker);
+            return await navigator.clipboard.readText();
+        }""",
+        marker,
+    )
+    if observed != marker:
+        raise RuntimeError("browser clipboard could not be cleared before Copy")
+    return marker
+
+
+def _read_fresh_clipboard(page, marker: str, timeout_s: float = 3.0) -> str | None:
+    """Return only clipboard text written after this turn's Copy click."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        text = page.evaluate("async () => await navigator.clipboard.readText()")
+        if text and text != marker:
+            return text
+        time.sleep(0.2)
+    return None
+
+
+def _click_copy_and_read(page, button) -> str | None:
+    """Bind extraction to a successful current click, never prior clipboard data."""
+    marker = _clear_clipboard_for_copy(page)
+    button.click(timeout=8000)
+    return _read_fresh_clipboard(page, marker)
+
+
 def _active_chatgpt_model_label(page) -> str | None:
     """Return a selected model label only when the DOM marks it active."""
     try:
@@ -673,6 +715,7 @@ def wait_for_answer(page, adapter, before_count: int, timeout_s: int) -> str:
     last = ""
     stable = 0
     deferred_logged = False
+    saw_running = False
     while time.time() < deadline:
         count = adapter.answer_count(page)
         text = adapter.answer_text(page) if count > before_count else ""
@@ -685,12 +728,14 @@ def wait_for_answer(page, adapter, before_count: int, timeout_s: int) -> str:
                 deferred_logged = True
             time.sleep(5)
             continue
+        running = adapter.is_running(page)
+        saw_running = saw_running or running
         completion = adapter.completion_state(page)
         if len(text.strip()) >= 100:
             if completion is True:
                 log(f"{adapter.name} answer complete ({len(text)} visible chars)")
                 return text
-            if completion is None and not adapter.is_running(page) and stable >= 3:
+            if completion is None and saw_running and not running and stable >= 3:
                 log(f"{adapter.name} answer stable ({len(text)} visible chars)")
                 return text
         time.sleep(2)
@@ -853,8 +898,30 @@ class GeminiAdapter:
         return None
 
     def extract(self, page) -> tuple[str, str]:
+        copy_selectors = ",".join(gemini_worker.SELECTORS["copy"])
+        try:
+            buttons = page.locator(copy_selectors)
+            if buttons.count():
+                text = _click_copy_and_read(page, buttons.last)
+                if text and len(text.strip()) >= 100:
+                    return text, "clipboard"
+        except Exception as exc:
+            log(f"Gemini clipboard extraction failed: {type(exc).__name__}")
+        # Some Gemini layouts put Copy inside the final response's More menu.
+        try:
+            more = page.locator(",".join(gemini_worker.SELECTORS["more_options"]))
+            if more.count():
+                more.last.click(timeout=8000)
+                item = page.locator("[role=menuitem]:has-text('Copy')").first
+                if item.count():
+                    text = _click_copy_and_read(page, item)
+                    if text and len(text.strip()) >= 100:
+                        return text, "clipboard"
+                else:
+                    page.keyboard.press("Escape")
+        except Exception as exc:
+            log(f"Gemini more-menu extraction failed: {type(exc).__name__}")
         for name, getter in (
-            ("clipboard", lambda: gemini_worker._from_clipboard(page)),
             ("html", lambda: gemini_worker._from_html(page)),
             ("dom", lambda: gemini_worker._from_dom(page)),
         ):
@@ -1383,9 +1450,7 @@ class ChatGPTAdapter:
                 buttons = page.locator(selector)
                 if not buttons.count():
                     continue
-                buttons.last.click(timeout=8000)
-                time.sleep(1)
-                text = page.evaluate("async () => await navigator.clipboard.readText()")
+                text = _click_copy_and_read(page, buttons.last)
                 if text and len(text.strip()) >= 100:
                     return text, "clipboard"
             except Exception:
@@ -1556,6 +1621,36 @@ def _copy_profile(source: str | Path, target: Path) -> None:
     )
 
 
+def _profile_session_files(profile: str | Path) -> list[Path]:
+    """Credential-bearing files that prove a repaired login was copied."""
+    root = Path(profile)
+    if not root.is_dir():
+        return []
+    names = {"cookies", "cookies.sqlite"}
+    return sorted(
+        path for path in root.rglob("*")
+        if path.is_file() and path.name.casefold() in names
+    )
+
+
+def _persist_chatgpt_profile(run_profile: Path, durable_profile: Path) -> None:
+    """Copy a verified run login back to its reusable profile and prove it."""
+    session_files = _profile_session_files(run_profile)
+    if not session_files:
+        raise RuntimeError(
+            "verified ChatGPT run exposed no reusable cookie store to persist"
+        )
+    durable_profile.mkdir(parents=True, exist_ok=True)
+    _copy_profile(run_profile, durable_profile)
+    for source in session_files:
+        relative = source.relative_to(run_profile)
+        saved = durable_profile / relative
+        if not saved.is_file() or saved.stat().st_size != source.stat().st_size:
+            raise RuntimeError(
+                f"ChatGPT login repair did not persist {relative} to the reusable profile"
+            )
+
+
 def _cleanup_run_profile(path: str | Path | None) -> None:
     if not path:
         return
@@ -1665,6 +1760,7 @@ def run_gemini(
 
 def configure_chatgpt(args) -> Path:
     chat_backend.set_browser_mode("firefox" if args.firefox else "chrome")
+    chat_backend.CHROME_HEADLESS = bool(args.headless)
     if args.firefox:
         os.environ["FIREFOX_HEADLESS"] = "1" if args.headless else "0"
     prefix = ".chatgpt_profile_firefox_" if args.firefox else ".chatgpt_profile_"
@@ -1711,6 +1807,7 @@ def configure_chatgpt(args) -> Path:
         raise
     chat_backend.PROFILE_DIR = str(run_profile)
     chat_backend.COOKIES_FILE = str(run_profile / ".cookies_unused")
+    args._chatgpt_durable_profile = durable_profile
     log(f"ChatGPT uses private run profile {run_profile.name}")
     return run_profile
 
@@ -1719,6 +1816,8 @@ def run_chatgpt(
     args, manifest: dict, paths: list[str], resume_settings: dict, on_sent=None
 ):
     run_profile = configure_chatgpt(args)
+    authenticated = False
+    preserve_run_profile = False
     try:
         playwright_factory, _ = chat_worker._import_playwright()
         with playwright_factory() as playwright:
@@ -1731,6 +1830,7 @@ def run_chatgpt(
             try:
                 adapter = ChatGPTAdapter()
                 adapter.verify_account(page, args.email)
+                authenticated = True
                 if args.resume_url:
                     return resume_turn(
                         page,
@@ -1759,7 +1859,24 @@ def run_chatgpt(
                 except Exception:
                     pass
     finally:
-        _cleanup_run_profile(run_profile)
+        if authenticated:
+            try:
+                _persist_chatgpt_profile(
+                    run_profile, Path(args._chatgpt_durable_profile)
+                )
+                log("saved verified ChatGPT session to the reusable profile")
+            except Exception as exc:
+                preserve_run_profile = True
+                log(
+                    "ChatGPT session persistence failed; preserving the repaired "
+                    f"run profile at {run_profile}: {exc}"
+                )
+                raise RuntimeError(
+                    "ChatGPT login was verified but could not be persisted; "
+                    f"repair profile preserved at {run_profile}"
+                ) from exc
+        if not preserve_run_profile:
+            _cleanup_run_profile(run_profile)
 
 
 def write_result(

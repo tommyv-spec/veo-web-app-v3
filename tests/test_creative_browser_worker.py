@@ -17,10 +17,17 @@ import creative_browser_worker as worker
 
 
 TEST_ROOT = Path(__file__).resolve().parents[2] / "output" / "creative_browser_worker_unit_tests"
+LOCAL_TEST_ROOT = Path(__file__).resolve().parents[1] / "data" / "creative_browser_worker_unit_tests"
 
 
 def _case(name: str) -> Path:
     path = TEST_ROOT / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _local_case(name: str) -> Path:
+    path = LOCAL_TEST_ROOT / name
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -100,6 +107,71 @@ def test_missing_headings_is_exact_and_case_insensitive():
 def test_every_deep_think_holding_marker_is_not_a_final_answer(marker):
     assert worker.is_deferred_answer(f"Status: {marker}. Please wait.")
     assert not worker.is_deferred_answer("### Classification\nMETHOD: STEP-UP-SAME-SOURCE")
+
+
+def test_deferred_phrase_inside_structured_final_answer_is_not_a_hold_notice():
+    answer = (
+        "### Classification\nThe render may take some time in production.\n\n"
+        "### Selected direction\nUse the current parent."
+    )
+    assert not worker.is_deferred_answer(answer)
+
+
+def test_wait_never_accepts_constant_partial_without_run_or_terminal_proof(monkeypatch):
+    clock = [0.0]
+
+    class Adapter:
+        name = "gemini"
+
+        def answer_count(self, page):
+            return 1
+
+        def answer_text(self, page):
+            return "partial answer " * 20
+
+        def is_running(self, page):
+            return False
+
+        def completion_state(self, page):
+            return None
+
+    monkeypatch.setattr(worker.time, "time", lambda: clock[0])
+    monkeypatch.setattr(
+        worker.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    with pytest.raises(RuntimeError, match="did not finish"):
+        worker.wait_for_answer(object(), Adapter(), before_count=0, timeout_s=10)
+
+
+def test_wait_accepts_stable_answer_only_after_observing_run_end(monkeypatch):
+    clock = [0.0]
+
+    class Adapter:
+        name = "gemini"
+
+        def __init__(self):
+            self.poll = 0
+
+        def answer_count(self, page):
+            return 1
+
+        def answer_text(self, page):
+            return "finished answer " * 20
+
+        def is_running(self, page):
+            self.poll += 1
+            return self.poll == 1
+
+        def completion_state(self, page):
+            return None
+
+    monkeypatch.setattr(worker.time, "time", lambda: clock[0])
+    monkeypatch.setattr(
+        worker.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    assert worker.wait_for_answer(
+        object(), Adapter(), before_count=0, timeout_s=20
+    ).startswith("finished answer")
 
 
 def test_full_prompt_proof_refuses_a_same_prefix_truncation():
@@ -417,6 +489,32 @@ def test_parallel_chatgpt_configuration_never_reuses_the_profile(monkeypatch):
     worker._cleanup_run_profile(second)
 
 
+def test_chrome_headless_setting_reaches_the_real_backend_launch(monkeypatch):
+    captured = {}
+    root = _local_case("chrome-headless-launch")
+
+    class Context:
+        pages = []
+
+        def new_page(self):
+            return object()
+
+    monkeypatch.setattr(worker.chat_backend, "FIREFOX_MODE", False)
+    monkeypatch.setattr(worker.chat_backend, "USER_DATA_DIR", None)
+    monkeypatch.setattr(worker.chat_backend, "PROFILE_DIR", str(root / "profile"))
+    monkeypatch.setattr(worker.chat_backend, "CHROME_HEADLESS", True)
+    monkeypatch.setattr(worker.chat_backend, "inject_cookies", lambda context: None)
+    monkeypatch.setattr(
+        worker.chat_backend._bd,
+        "launch_context",
+        lambda playwright, mode, **kwargs: captured.update(kwargs) or Context(),
+    )
+
+    worker.chat_backend.launch(object())
+
+    assert captured["headless"] is True
+
+
 def test_submit_probe_failure_is_only_diagnostic(monkeypatch):
     monkeypatch.setattr(
         worker,
@@ -426,6 +524,65 @@ def test_submit_probe_failure_is_only_diagnostic(monkeypatch):
     assert worker._safe_chatgpt_submit_probe(object()) == {
         "diagnostic_error": "RuntimeError"
     }
+
+
+def test_external_tool_inspection_failure_is_not_treated_as_tools_off():
+    page = SimpleNamespace(
+        evaluate=lambda script: (_ for _ in ()).throw(RuntimeError("DOM gone"))
+    )
+    with pytest.raises(RuntimeError, match="refusing to assume tools are off"):
+        worker.active_external_tools(page)
+
+
+def test_noop_copy_click_cannot_return_previous_job_clipboard(monkeypatch):
+    clock = [0.0]
+
+    class Page:
+        clipboard = "previous job answer " * 20
+
+        def evaluate(self, script, *args):
+            if args:
+                self.clipboard = args[0]
+            return self.clipboard
+
+    class Button:
+        def click(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(worker.time, "time", lambda: clock[0])
+    monkeypatch.setattr(
+        worker.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    assert worker._click_copy_and_read(Page(), Button()) is None
+
+
+def test_copy_result_must_be_a_new_value_written_by_this_click(monkeypatch):
+    page = SimpleNamespace(clipboard="previous")
+
+    def evaluate(script, *args):
+        if args:
+            page.clipboard = args[0]
+        return page.clipboard
+
+    page.evaluate = evaluate
+
+    class Button:
+        def click(self, **kwargs):
+            page.clipboard = "current turn answer " * 20
+
+    assert worker._click_copy_and_read(page, Button()).startswith("current turn")
+
+
+def test_verified_login_profile_is_copied_back_to_reusable_profile():
+    root = _local_case("persist-repaired-login")
+    run_profile = root / "run"
+    durable = root / "durable"
+    run_profile.mkdir(exist_ok=True)
+    (run_profile / "cookies.sqlite").write_bytes(b"verified session")
+
+    worker._persist_chatgpt_profile(run_profile, durable)
+
+    assert (durable / "cookies.sqlite").read_bytes() == b"verified session"
 
 
 def test_run_turn_checkpoints_after_send_before_wait(monkeypatch):

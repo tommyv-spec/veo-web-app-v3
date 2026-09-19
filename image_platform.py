@@ -4209,6 +4209,91 @@ def chatgpt_generate_node(
     return {"ok": True, "node_id": node_id, "cg_status": node.cg_status}
 
 
+def _dual_backend_output_problems(db: Session, node: ImageNode) -> List[str]:
+    """Return why a generated node is not safe to choose or promote.
+
+    Status alone is not output proof. A lane can be marked ready while its row
+    or file is absent, and a manual upload must never impersonate a renderer's
+    result. Query the current rows instead of trusting the relationship cache,
+    then prove one restorable file for each production backend.
+
+    Upload nodes are source material, not render work, so they are deliberately
+    outside the dual-backend contract.
+    """
+    if (getattr(node, "kind", None) or "generated") != "generated":
+        return []
+
+    problems: List[str] = []
+    lane_statuses = {
+        "banana": getattr(node, "status", None),
+        "chatgpt": getattr(node, "cg_status", None),
+    }
+    variants = db.query(ImageVariant).filter(
+        ImageVariant.node_id == node.id,
+    ).all()
+    for backend, status in lane_statuses.items():
+        if status != "ready":
+            problems.append(f"{backend} lane is {status or 'not queued'}")
+            continue
+        candidates = [
+            variant for variant in variants
+            if (getattr(variant, "source", "ai") or "ai") != "manual"
+            and (getattr(variant, "backend", "banana") or "banana") == backend
+        ]
+        if not candidates:
+            problems.append(f"{backend} has no current non-manual variant")
+            continue
+        usable = False
+        missing_ids: List[int] = []
+        for candidate in candidates:
+            if _current_variant_file_exists(candidate):
+                usable = True
+                break
+            missing_ids.append(candidate.id)
+        if not usable:
+            problems.append(
+                f"{backend} current variant file is missing "
+                f"(variant ids {missing_ids})"
+            )
+    return problems
+
+
+def _current_variant_file_exists(variant: ImageVariant) -> bool:
+    """Prove the row's exact file is local or can be restored from storage."""
+    rel = (getattr(variant, "image_path", None) or "").strip()
+    if not rel:
+        return False
+    path = images_root() / rel
+    if not path.is_file():
+        try:
+            _storage_download_to_local(rel)
+        except Exception:
+            return False
+    return path.is_file()
+
+
+def _require_dual_backend_outputs(
+    db: Session, node: ImageNode, *, action: str,
+) -> None:
+    """Fail closed unless both current renderer outputs are real and readable."""
+    problems = _dual_backend_output_problems(db, node)
+    if problems:
+        # TEMP DIAGNOSTIC (dual-image gate): remove after operator-side logs
+        # prove real chained batches wait and then pass on both lanes.
+        log.warning(
+            f"[dual-image-gate] blocked action={action!r} node={node.id} "
+            f"problems={problems}"
+        )
+        raise HTTPException(
+            409,
+            {
+                "error": f"Cannot {action} until Banana and ChatGPT both finish",
+                "node_id": node.id,
+                "problems": problems,
+            },
+        )
+
+
 @router.post("/nodes/{node_id}/choose")
 def choose_variant(
     node_id: int,
@@ -4222,12 +4307,18 @@ def choose_variant(
     # v964: use the same global lock order as generation and regeneration.
     node, locked_by_id = _lock_node_and_parents(db, node_id, current_user.id)
     lock_ids = sorted(locked_by_id)
+    _require_dual_backend_outputs(db, node, action="choose a variant")
     variant = db.query(ImageVariant).filter(
         ImageVariant.id == req.variant_id,
         ImageVariant.node_id == node_id,
     ).first()
     if not variant:
         raise HTTPException(404, "Variant not found on this node")
+    if not _current_variant_file_exists(variant):
+        raise HTTPException(
+            409,
+            f"Variant {variant.id} is not selectable because its current file is missing",
+        )
     if source == "qc_auto":
         if node.status != "ready":
             raise HTTPException(422, "qc_auto requires a ready node")
@@ -13545,7 +13636,35 @@ def promote_batch_to_video(
     if not nodes and not _v945_9_upload_nodes:
         raise HTTPException(400, f"Batch {batch_id} has no scene nodes")
 
-    # 2. Verify every scene is ready + chosen (generated nodes only — an
+    # 2. Prove both renderer lanes produced current, readable files before a
+    # chosen frame can leave the image pipeline. This is deliberately checked
+    # here as well as /choose: legacy choices, direct DB repair and a file lost
+    # after selection must not bypass the production handoff. Upload/source
+    # nodes used by video-led charswap remain exempt.
+    dual_output_missing = []
+    for n in nodes:
+        problems = _dual_backend_output_problems(db, n)
+        if problems:
+            dual_output_missing.append({
+                "node_id": n.id,
+                "scene_index": n.scene_index_in_batch,
+                "name": n.name,
+                "problems": problems,
+            })
+    if dual_output_missing:
+        # TEMP DIAGNOSTIC (dual-image gate): see the matching choose log above.
+        log.warning(
+            f"[dual-image-gate] blocked promotion batch={batch_id} "
+            f"nodes={[(item['node_id'], item['problems']) for item in dual_output_missing]}"
+        )
+        raise HTTPException(409, {
+            "error": "Banana and ChatGPT outputs are required before promotion",
+            "missing_count": len(dual_output_missing),
+            "total_count": len(nodes),
+            "missing": dual_output_missing,
+        })
+
+    # 3. Verify every scene is ready + chosen (generated nodes only — an
     # avatar upload has no variant race to wait on; its chosen image existed
     # before the batch did, and the copy loop 500s loudly if it is missing)
     missing = []
@@ -13566,7 +13685,7 @@ def promote_batch_to_video(
             "missing": missing,
         })
 
-    # 3. Pre-validate: every chosen variant must have a readable file on disk
+    # 4. Pre-validate: every chosen variant must have a readable file on disk
     from shutil import copy2
     import uuid as _uuid
     import json as _json
@@ -13582,7 +13701,7 @@ def promote_batch_to_video(
     job_images_dir.mkdir(parents=True, exist_ok=True)
     job_output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 4. Copy each chosen variant file into the new job's images_dir
+    # 5. Copy each chosen variant file into the new job's images_dir
     #    and build the dialogue + scenes list that Job.dialogue_json needs.
     dialogue_list: List[Dict[str, Any]] = []
     scenes_list: List[Dict[str, Any]] = []
