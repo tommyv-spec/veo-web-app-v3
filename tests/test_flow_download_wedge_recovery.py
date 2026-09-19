@@ -183,3 +183,23 @@ def test_rebuild_clip_opens_a_fresh_submit_response_window_at_click():
     drain = body.index("_drain_submit_responses(", stamp)
     click = body.index("human_click_element(page, _rebuild_generate_btn", drain)
     assert button < stamp < drain < click
+
+
+def test_rebuild_clip_returns_false_when_physical_generate_click_fails():
+    body = _method("rebuild_clip")
+    click = body.index("_rebuild_click_ok = human_click_element(")
+    guard = body.index("if not _rebuild_click_ok:", click)
+    fail_return = body.index("return False", guard)
+    success_log = body.index("Clicked Generate", fail_return)
+    assert click < guard < fail_return < success_log
+
+
+def test_redo_listing_refresh_late_binds_before_recovery_without_purging():
+    body = _method("_process_redo_clip_impl")
+    refresh = body.index("redo: refreshing Flow media listing")
+    late_bind = body.index("_bind_pending_submits_for_page(", refresh)
+    recovery = body.index("_recover_pending_clip_downloads(", late_bind)
+    call = body[late_bind:recovery]
+    assert "drain_timeout=2.0" in call
+    assert "preserve_existing=True" in call
+    assert refresh < late_bind < recovery

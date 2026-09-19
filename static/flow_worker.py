@@ -23969,7 +23969,12 @@ def rebuild_clip(page, start_frame_path, end_frame_path, prompt, is_first_clip=F
                       flush=True)
         except Exception:
             page._v700j_last_click_at = time.time()
-        human_click_element(page, _rebuild_generate_btn, "Generate button", timeout=30000)
+        _rebuild_click_ok = human_click_element(page, _rebuild_generate_btn,
+                                                 "Generate button", timeout=30000)
+        if not _rebuild_click_ok:
+            print(f"{context} ❌ Generate button physical click returned False",
+                  flush=True)
+            return False
         print(f"{context} ✓ Clicked Generate", flush=True)
         human_delay(1, 2)
         
@@ -24883,6 +24888,23 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                         raise
                     print(f"[REDO] media-listing refresh failed (will retry): "
                           f"{str(_listing_err)[:120]}", flush=True)
+                # The initial bounded drain can time out before Flow returns its
+                # submit response. Drain again after each listing refresh using
+                # the SAME click timestamp. The submit parser binds only output
+                # media IDs, unlike listing deltas which can include input UUIDs.
+                try:
+                    _redo_late_bound = _bind_pending_submits_for_page(
+                        page, job_id, clip_index, clip_id=clip_id,
+                        drain_timeout=2.0, expected_min=1,
+                        preserve_existing=True)
+                    if _redo_late_bound:
+                        print(f"[REDO] late-bound {len(_redo_late_bound)} current-submit "
+                              f"media uuid(s) for clip {clip_index+1}", flush=True)
+                except Exception as _late_bind_err:
+                    if DownloadHelper._is_cdp_disconnect(_late_bind_err):
+                        raise
+                    print(f"[REDO] late submit bind skipped (will retry): "
+                          f"{str(_late_bind_err)[:120]}", flush=True)
                 _urls_found = bool(_recover_pending_clip_downloads(
                     page, job_id, [clip], http_dl_queue,
                     _redo_http_enqueued, temp_dir, context="REDO"))
@@ -32374,6 +32396,12 @@ class AccountWorker(threading.Thread):
                         m = _re2.search(r'[?&]name=([a-f0-9-]+)', u)
                         if m:
                             _cap_map[m.group(1)] = u
+                            return
+                    if _V963_MEDIA_LIST_RPCID in u and "batchexecute" in u:
+                        found = _v963_media_urls_from_listing(response.text())
+                        if found:
+                            _cap_map.update(found)
+                            _v963_remember_media_urls(found)
                 except Exception:
                     pass
             self.page.on("response", _cap)
