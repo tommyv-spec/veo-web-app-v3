@@ -63,10 +63,9 @@ CHROME_CHANNEL = os.environ.get("WORKER_CHROME_CHANNEL", "chrome")
 CHROME_HEADLESS = os.environ.get("CHATGPT_CHROME_HEADLESS", "0").strip().lower() in {
     "1", "true", "yes", "on",
 }
-# The creative worker arms this only for a normally-headless Firefox run.
-# launch_logged_in temporarily switches that run headful solely for an actual
-# login repair; observing that transition lets the caller persist the repair
-# without copying every normal authenticated clone back over the durable profile.
+# The creative worker arms this for Firefox repair-ladder relaunches. Chrome's
+# same-launch login transition is reported by chatgpt_image_worker.ensure_logged_in.
+# Both signals still require the caller's exact-account proof before persistence.
 REPAIR_DETECTION_ENABLED = False
 LOGIN_REPAIR_OCCURRED = False
 SESSION_LAUNCH_COUNT = 0

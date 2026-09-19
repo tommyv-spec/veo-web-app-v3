@@ -656,6 +656,99 @@ def test_verified_repair_with_existing_expired_cookies_is_persisted(monkeypatch)
     assert cleaned == [run_profile]
 
 
+def test_chrome_same_launch_login_repair_with_stale_cookies_is_persisted(
+    monkeypatch,
+):
+    root = _local_case(f"persist-chrome-same-launch-repair-{time.time_ns()}")
+    run_profile = root / "run"
+    durable = root / "durable"
+    run_profile.mkdir(exist_ok=True)
+    durable.mkdir(exist_ok=True)
+    (run_profile / "Cookies").write_bytes(b"fresh login after operator repair")
+    (durable / "Cookies").write_bytes(b"expired cookie store")
+    args = SimpleNamespace(
+        resume_url=None,
+        resume_before_count=0,
+        email="owner@example.com",
+        model=None,
+        quality="best",
+        thinking=None,
+        answer_timeout=5,
+    )
+    persisted = []
+
+    def configure(current_args):
+        current_args._chatgpt_durable_profile = durable
+        current_args._chatgpt_repair_started_ns = time.time_ns()
+        current_args._chatgpt_run_had_session_before_launch = True
+        worker.chat_backend.LOGIN_REPAIR_OCCURRED = False
+        return run_profile
+
+    class Page:
+        email = None
+
+        def goto(self, *args, **kwargs):
+            return None
+
+    page = Page()
+
+    class PlaywrightManager:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *args):
+            return False
+
+    class Context:
+        def close(self):
+            pass
+
+    class Adapter:
+        def verify_account(self, current_page, email):
+            assert current_page.email == email
+
+    def launch_logged_in(playwright, email):
+        assert worker.chat_worker.ensure_logged_in(page, email)
+        return Context(), page
+
+    monkeypatch.setattr(worker, "configure_chatgpt", configure)
+    monkeypatch.setattr(
+        worker.chat_worker,
+        "_import_playwright",
+        lambda: (lambda: PlaywrightManager(), False),
+    )
+    checks = [0]
+
+    def is_logged_in(current):
+        checks[0] += 1
+        if checks[0] >= 2:
+            current.email = args.email
+        return bool(current.email)
+
+    monkeypatch.setattr(worker.chat_backend, "FIREFOX_MODE", False)
+    monkeypatch.setattr(worker.chat_worker, "dismiss_cookie_banner", lambda page: None)
+    monkeypatch.setattr(worker.chat_worker, "is_logged_in", is_logged_in)
+    monkeypatch.setattr(worker.chat_worker, "_logged_in_email", lambda current: current.email)
+    monkeypatch.setattr(worker.chat_worker, "launch_logged_in", launch_logged_in)
+    monkeypatch.setattr(worker, "ChatGPTAdapter", Adapter)
+    monkeypatch.setattr(
+        worker,
+        "run_turn",
+        lambda *args, **kwargs: ("answer", "dom", {}, "https://chatgpt.com/c/1"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_persist_chatgpt_profile",
+        lambda run, saved, **kwargs: persisted.append((run, saved)) or True,
+    )
+    monkeypatch.setattr(worker, "_cleanup_run_profile", lambda path: None)
+
+    worker.run_chatgpt(args, {"message": "prompt"}, [], {})
+
+    assert persisted == [(run_profile, durable)]
+    assert worker.chat_backend.LOGIN_REPAIR_OCCURRED is True
+
+
 def test_submit_probe_failure_is_only_diagnostic(monkeypatch):
     monkeypatch.setattr(
         worker,

@@ -139,6 +139,12 @@ def ensure_logged_in(page, email=None, timeout_s=600):
     while _t.time() < deadline:
         r = _ok()
         if r is True:
+            # This call started logged out or on the wrong account and reached
+            # the requested account in the same browser launch. Chrome repairs
+            # stale cookies this way, so relaunch counting cannot see it. The
+            # creative caller still performs its own exact-account proof before
+            # persisting the repaired private profile.
+            backend.LOGIN_REPAIR_OCCURRED = True
             log(f"ChatGPT: logged in{f' as {email}' if email else ''} — session saved, continuing.")
             return True
         if isinstance(r, str) and r != warned:
