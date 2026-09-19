@@ -81,7 +81,8 @@ def _call(db, job_id, claims):
     ))
 
 
-def _silent_clip(db, job_id, index=2, *, dialogue="", versions=1):
+def _silent_clip(db, job_id, index=2, *, dialogue="", versions=1,
+                 selected_variant=1):
     rows = [
         {"attempt": n + 1, "filename": f"silent-{index}-{n + 1}.mp4"}
         for n in range(versions)
@@ -90,7 +91,7 @@ def _silent_clip(db, job_id, index=2, *, dialogue="", versions=1):
         job_id=job_id, clip_index=index, dialogue_id=f"d{index}",
         dialogue_text=dialogue, status=ClipStatus.COMPLETED.value,
         approval_status="pending_review", scene_type="shot",
-        output_filename=rows[0]["filename"], selected_variant=1,
+        output_filename=rows[0]["filename"], selected_variant=selected_variant,
         versions_json=json.dumps(rows), qc_json=None,
     )
     db.add(row)
@@ -127,10 +128,17 @@ def test_batch_accepts_explicit_structurally_silent_clip_without_qc():
     assert {c.approval_status for c in db.query(Clip).all()} == {"approved"}
 
 
-@pytest.mark.parametrize("dialogue,versions", [("spoken", 1), ("", 2)])
-def test_silent_exemption_rejects_dialogue_or_ambiguous_versions(dialogue, versions):
+@pytest.mark.parametrize("dialogue,versions,selected_variant", [
+    ("spoken", 1, 1),
+    ("", 2, 1),
+    ("", 1, 2),
+])
+def test_silent_exemption_rejects_dialogue_or_ambiguous_versions(
+        dialogue, versions, selected_variant):
     db, job_id, claims, _ = _setup()
-    silent_id = _silent_clip(db, job_id, dialogue=dialogue, versions=versions)
+    silent_id = _silent_clip(
+        db, job_id, dialogue=dialogue, versions=versions,
+        selected_variant=selected_variant)
     with pytest.raises(main.HTTPException) as exc:
         asyncio.run(main.auto_approve_clips(
             job_id=job_id,

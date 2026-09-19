@@ -7482,7 +7482,7 @@ async def auto_approve_clips(
                 conflict(f"clip {clip.id}: text cards cannot be auto-approved")
             if (clip.status != ClipStatus.COMPLETED.value
                     or len(versions) != 1
-                    or not clip.selected_variant
+                    or clip.selected_variant != 1
                     or not clip.output_filename
                     or versions[0].get("filename") != clip.output_filename):
                 conflict(f"clip {clip.id}: silent exemption needs one selected render")
