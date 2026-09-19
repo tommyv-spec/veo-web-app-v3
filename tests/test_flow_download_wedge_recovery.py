@@ -63,6 +63,21 @@ def test_deep_scan_keeps_fresh_scan_urls_if_tile_detaches():
     assert fallback > marker
 
 
+def test_nested_download_handlers_propagate_all_disconnects():
+    loop = _method("_download_loop")
+    deep_error = loop.index("Deep scan download error for clip")
+    deep_handler = loop[deep_error - 180:deep_error]
+    assert "if self._is_cdp_disconnect(e):" in deep_handler
+    assert "raise" in deep_handler
+
+    variants = _method("_download_clip_variants")
+    outer = variants.rindex("Error downloading variant")
+    outer_handler = variants[outer - 220:outer]
+    assert "if self._is_cdp_disconnect(e):" in outer_handler
+    assert "raise" in outer_handler
+    assert 'any(x in err_str for x in' not in variants
+
+
 def test_replacement_uses_a_new_tab_and_proves_it_answers():
     body = _method("_replace_wedged_page")
     assert ".context.new_page()" in body

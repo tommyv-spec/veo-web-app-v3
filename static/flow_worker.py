@@ -19747,6 +19747,8 @@ class DownloadHelper:
                                 downloaded_count += 1
                                 print(f"[{self.account_name}] Deep scan: Clip {ci} downloaded!", flush=True)
                         except Exception as e:
+                            if self._is_cdp_disconnect(e):
+                                raise
                             print(f"[{self.account_name}] Deep scan download error for clip {ci}: {e}", flush=True)
                 
                 if missing_pending:
@@ -20285,8 +20287,7 @@ class DownloadHelper:
                 time.sleep(1)
                 
             except Exception as e:
-                err_str = str(e)
-                if any(x in err_str for x in ("browser has been closed", "Target page", "context or browser", "TargetClosedError")):
+                if self._is_cdp_disconnect(e):
                     raise  # Re-raise CDP disconnect to reconnect loop — don't swallow
                 print(f"[{self.account_name}] Error downloading variant {variant_name}: {e}", flush=True)
         
