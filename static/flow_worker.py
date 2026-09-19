@@ -24658,6 +24658,29 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
     # (or any cycles carried over from the main-gen path) starts fresh.
     clear_auto_redo_cycle(clip_id)
 
+    # Bind only the media IDs created by THIS redo click before any recovery
+    # reads the slot. The main submission path already does this; redo did not,
+    # so stale bindings from an older completed attempt could be recovered and
+    # uploaded under the new attempt number. The binder purges the slot first
+    # and ignores submit responses captured before the current Generate click.
+    try:
+        _redo_expected = max(1, int(clip.get('flow_variants_count', 2) or 2))
+    except Exception:
+        _redo_expected = 2
+    try:
+        _redo_bound = _bind_pending_submits_for_page(
+            page, job_id, clip_index, clip_id=clip_id,
+            drain_timeout=40.0, expected_min=_redo_expected)
+        if not _redo_bound:
+            print(f"[REDO] ⚠ no current-submit media binding yet for clip "
+                  f"{clip_index+1}; late-bind/listing recovery will keep waiting",
+                  flush=True)
+    except Exception as _redo_bind_err:
+        if DownloadHelper._is_cdp_disconnect(_redo_bind_err):
+            raise
+        print(f"[REDO] current-submit binding failed (will use late-bind): "
+              f"{str(_redo_bind_err)[:120]}", flush=True)
+
     # Check for immediate failure — pass job_id so the redo DETECTS unusual-activity
     # (account block) exactly like the main process. Without job_id the redo could
     # never return abort_unusual_activity and mis-marked an account block as a
@@ -24834,6 +24857,8 @@ def _process_redo_clip_impl(page, clip, download_queue, cache, http_dl_queue=Non
                     _v995_reload(page, wait_until='domcontentloaded', timeout=30000)
                     time.sleep(4)
                 except Exception as _listing_err:
+                    if DownloadHelper._is_cdp_disconnect(_listing_err):
+                        raise
                     print(f"[REDO] media-listing refresh failed (will retry): "
                           f"{str(_listing_err)[:120]}", flush=True)
                 _urls_found = bool(_recover_pending_clip_downloads(

@@ -149,3 +149,24 @@ def test_redo_recovers_bound_media_before_using_download_tab():
 def test_bound_media_recovery_preserves_generation_attempt():
     body = _method("_recover_pending_clip_downloads")
     assert "'generation_attempt': _c.get('generation_attempt', 1)" in body
+
+
+def test_redo_rebinds_current_submit_before_media_recovery():
+    body = _method("_process_redo_clip_impl")
+    submit = body.index("if not rebuild_clip(")
+    rebind = body.index("_bind_pending_submits_for_page(", submit)
+    failure_check = body.index("immediate_failure = check_recent_clip_failure", rebind)
+    recovery = body.index("_recover_pending_clip_downloads(", failure_check)
+    assert submit < rebind < failure_check < recovery
+    call = body[rebind:rebind + 500]
+    assert "expected_min=_redo_expected" in call
+    assert "preserve_existing=True" not in call
+
+
+def test_redo_listing_refresh_propagates_browser_disconnects():
+    body = _method("_process_redo_clip_impl")
+    marker = body.index("redo: refreshing Flow media listing")
+    handler = body.index("except Exception as _listing_err:", marker)
+    tail = body[handler:handler + 500]
+    assert "DownloadHelper._is_cdp_disconnect(_listing_err)" in tail
+    assert "raise" in tail
