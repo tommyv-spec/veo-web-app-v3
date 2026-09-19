@@ -299,6 +299,116 @@ def test_new_parent_choice_invalidates_and_requeues_child_outputs(monkeypatch):
     ).count() == 0
 
 
+def _stale_child_with_two_parents(db, root, *, second_parent_chosen):
+    child = _generated(db, root)
+    first = ip.ImageNode(
+        id=2, user_id="u1", kind="upload", status="ready",
+        chosen_variant_id=201,
+    )
+    second = ip.ImageNode(
+        id=3, user_id="u1", kind="upload", status="ready",
+        chosen_variant_id=301 if second_parent_chosen else None,
+    )
+    db.add_all([
+        first,
+        second,
+        ip.ImageVariant(
+            id=201, node_id=2, variant_index=1,
+            image_path="nodes/2/first.png", source="manual",
+        ),
+        ip.ImageVariant(
+            id=202, node_id=2, variant_index=2,
+            image_path="nodes/2/second.png", source="manual",
+        ),
+        ip.ImageVariant(
+            id=301, node_id=3, variant_index=1,
+            image_path="nodes/3/first.png", source="manual",
+        ),
+        ip.ImageEdge(
+            parent_node_id=2, child_node_id=1, role="character", slot_order=0,
+        ),
+        ip.ImageEdge(
+            parent_node_id=3, child_node_id=1, role="product", slot_order=1,
+        ),
+    ])
+    db.commit()
+    child.completed_contract_hash = ip._generation_contract_hash(
+        db, child, "banana"
+    )
+    child.cg_completed_contract_hash = ip._generation_contract_hash(
+        db, child, "chatgpt"
+    )
+    db.commit()
+    first.chosen_variant_id = 202
+    db.commit()
+    return child
+
+
+def test_stale_child_invalidation_commits_when_second_parent_is_unchosen(
+    monkeypatch,
+):
+    db = _session()
+    engine = db.get_bind()
+    root = _root("stale-child-second-parent-unchosen")
+    monkeypatch.setattr(ip, "images_root", lambda: root)
+    _stale_child_with_two_parents(db, root, second_parent_chosen=False)
+    cleanup_row_counts = []
+
+    def observe_committed_cleanup(*args, **kwargs):
+        check = sessionmaker(bind=engine)()
+        cleanup_row_counts.append(check.query(ip.ImageVariant).filter(
+            ip.ImageVariant.node_id == 1
+        ).count())
+        check.close()
+
+    monkeypatch.setattr(ip, "_storage_delete", observe_committed_cleanup)
+
+    ip._promote_ready_children(db, 2)
+    db.rollback()
+    db.close()
+
+    check = sessionmaker(bind=engine)()
+    child = check.query(ip.ImageNode).filter(ip.ImageNode.id == 1).one()
+    assert child.status == "draft"
+    assert child.cg_status is None
+    assert check.query(ip.ImageVariant).filter(
+        ip.ImageVariant.node_id == child.id
+    ).count() == 0
+    assert cleanup_row_counts and set(cleanup_row_counts) == {0}
+    assert not (root / "nodes/1/banana.png").exists()
+    assert not (root / "nodes/1/chatgpt.png").exists()
+
+
+def test_stale_child_invalidation_survives_queue_write_failure_and_rollback(
+    monkeypatch,
+):
+    db = _session()
+    engine = db.get_bind()
+    root = _root("stale-child-queue-write-failure")
+    monkeypatch.setattr(ip, "images_root", lambda: root)
+    _stale_child_with_two_parents(db, root, second_parent_chosen=True)
+    monkeypatch.setattr(ip, "_storage_delete", lambda *args, **kwargs: None)
+
+    def fail_write(*args, **kwargs):
+        raise OSError("queue unavailable")
+
+    monkeypatch.setattr(ip, "write_generation_job", fail_write)
+    ip._promote_ready_children(db, 2)
+    db.rollback()
+    db.close()
+
+    check = sessionmaker(bind=engine)()
+    child = check.query(ip.ImageNode).filter(ip.ImageNode.id == 1).one()
+    assert child.status == "draft"
+    assert child.cg_status is None
+    assert child.error_message == "Queue failed: queue unavailable"
+    assert check.query(ip.ImageVariant).filter(
+        ip.ImageVariant.node_id == child.id
+    ).count() == 0
+    assert not (root / "nodes/1/banana.png").exists()
+    assert not (root / "nodes/1/chatgpt.png").exists()
+
+
 def test_upload_source_nodes_are_outside_the_dual_render_gate():
     db = _session()
     upload = ip.ImageNode(id=9, user_id="u1", kind="upload", status="ready")

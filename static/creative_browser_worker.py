@@ -1975,8 +1975,9 @@ def run_gemini(
 def configure_chatgpt(args) -> Path:
     chat_backend.set_browser_mode("firefox" if args.firefox else "chrome")
     chat_backend.CHROME_HEADLESS = bool(args.headless)
-    chat_backend.REPAIR_DETECTION_ENABLED = bool(args.firefox and args.headless)
+    chat_backend.REPAIR_DETECTION_ENABLED = bool(args.firefox)
     chat_backend.LOGIN_REPAIR_OCCURRED = False
+    chat_backend.SESSION_LAUNCH_COUNT = 0
     args._chatgpt_repair_started_ns = time.time_ns()
     if args.firefox:
         os.environ["FIREFOX_HEADLESS"] = "1" if args.headless else "0"

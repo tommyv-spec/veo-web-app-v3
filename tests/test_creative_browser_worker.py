@@ -553,6 +553,109 @@ def test_chrome_headless_setting_reaches_the_real_backend_launch(monkeypatch):
     assert captured["headless"] is True
 
 
+def test_second_firefox_launch_reports_reseed_or_bridge_repair(monkeypatch):
+    root = _local_case(f"firefox-repair-launch-{time.time_ns()}")
+
+    class Context:
+        pages = []
+
+        def new_page(self):
+            return object()
+
+    monkeypatch.setattr(worker.chat_backend, "FIREFOX_MODE", True)
+    monkeypatch.setattr(worker.chat_backend, "USER_DATA_DIR", None)
+    monkeypatch.setattr(worker.chat_backend, "PROFILE_DIR", str(root / "profile"))
+    monkeypatch.setattr(worker.chat_backend, "REPAIR_DETECTION_ENABLED", True)
+    monkeypatch.setattr(worker.chat_backend, "LOGIN_REPAIR_OCCURRED", False)
+    monkeypatch.setattr(worker.chat_backend, "SESSION_LAUNCH_COUNT", 0)
+    monkeypatch.setattr(worker.chat_backend, "inject_cookies", lambda context: None)
+    monkeypatch.setenv("FIREFOX_HEADLESS", "1")
+    monkeypatch.setattr(
+        worker.chat_backend._bd,
+        "launch_context",
+        lambda playwright, mode, **kwargs: Context(),
+    )
+
+    worker.chat_backend.launch(object())
+    assert worker.chat_backend.LOGIN_REPAIR_OCCURRED is False
+    worker.chat_backend.launch(object())
+    assert worker.chat_backend.LOGIN_REPAIR_OCCURRED is True
+
+
+def test_verified_repair_with_existing_expired_cookies_is_persisted(monkeypatch):
+    root = _local_case(f"persist-expired-cookie-repair-{time.time_ns()}")
+    run_profile = root / "run"
+    durable = root / "durable"
+    run_profile.mkdir(exist_ok=True)
+    durable.mkdir(exist_ok=True)
+    (run_profile / "cookies.sqlite").write_bytes(b"repaired session")
+    (durable / "cookies.sqlite").write_bytes(b"expired session")
+    args = SimpleNamespace(
+        resume_url=None,
+        resume_before_count=0,
+        email="owner@example.com",
+        model=None,
+        quality="best",
+        thinking=None,
+        answer_timeout=5,
+    )
+    persisted = []
+    cleaned = []
+
+    def configure(current_args):
+        current_args._chatgpt_durable_profile = durable
+        current_args._chatgpt_repair_started_ns = time.time_ns()
+        current_args._chatgpt_run_had_session_before_launch = True
+        worker.chat_backend.LOGIN_REPAIR_OCCURRED = False
+        return run_profile
+
+    class PlaywrightManager:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *args):
+            return False
+
+    class Context:
+        def close(self):
+            pass
+
+    class Adapter:
+        def verify_account(self, page, email):
+            worker.chat_backend.LOGIN_REPAIR_OCCURRED = True
+
+    monkeypatch.setattr(worker, "configure_chatgpt", configure)
+    monkeypatch.setattr(
+        worker.chat_worker,
+        "_import_playwright",
+        lambda: (lambda: PlaywrightManager(), False),
+    )
+    monkeypatch.setattr(
+        worker.chat_worker,
+        "launch_logged_in",
+        lambda playwright, email: (Context(), object()),
+    )
+    monkeypatch.setattr(worker, "ChatGPTAdapter", Adapter)
+    monkeypatch.setattr(
+        worker,
+        "run_turn",
+        lambda *args, **kwargs: ("answer", "dom", {}, "https://chatgpt.com/c/1"),
+    )
+    monkeypatch.setattr(
+        worker,
+        "_persist_chatgpt_profile",
+        lambda run, saved, **kwargs: persisted.append((run, saved)) or True,
+    )
+    monkeypatch.setattr(
+        worker, "_cleanup_run_profile", lambda path: cleaned.append(path)
+    )
+
+    worker.run_chatgpt(args, {"message": "prompt"}, [], {})
+
+    assert persisted == [(run_profile, durable)]
+    assert cleaned == [run_profile]
+
+
 def test_submit_probe_failure_is_only_diagnostic(monkeypatch):
     monkeypatch.setattr(
         worker,

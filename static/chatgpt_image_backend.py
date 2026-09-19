@@ -69,6 +69,7 @@ CHROME_HEADLESS = os.environ.get("CHATGPT_CHROME_HEADLESS", "0").strip().lower()
 # without copying every normal authenticated clone back over the durable profile.
 REPAIR_DETECTION_ENABLED = False
 LOGIN_REPAIR_OCCURRED = False
+SESSION_LAUNCH_COUNT = 0
 CHATGPT_URL = "https://chatgpt.com/"
 # Plaintext cookies captured via netlog (ABE-immune). Injected on every launch so
 # login survives App-Bound Encryption (copied v20 cookies never decrypt). Re-run
@@ -228,13 +229,13 @@ def _import_playwright():
 
 
 def launch(p):
-    global LOGIN_REPAIR_OCCURRED
-    if (
-        FIREFOX_MODE
-        and REPAIR_DETECTION_ENABLED
-        and os.environ.get("FIREFOX_HEADLESS", "1").strip().lower()
-        in {"0", "false", "no", "off"}
-    ):
+    global LOGIN_REPAIR_OCCURRED, SESSION_LAUNCH_COUNT
+    SESSION_LAUNCH_COUNT += 1
+    # launch_logged_in makes exactly one launch for a valid saved session.
+    # Every later Firefox launch belongs to its reseed/Chrome-bridge/visible
+    # repair ladder. The creative caller still requires exact authenticated
+    # account proof before it treats this attempted repair as successful.
+    if FIREFOX_MODE and REPAIR_DETECTION_ENABLED and SESSION_LAUNCH_COUNT > 1:
         LOGIN_REPAIR_OCCURRED = True
     args = list(CHROME_ARGS)
     if USER_DATA_DIR and FIREFOX_MODE:
