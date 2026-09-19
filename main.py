@@ -7480,12 +7480,15 @@ async def auto_approve_clips(
                 conflict(f"clip {clip.id}: silent exemption has dialogue")
             if str(clip.scene_type or "").strip().lower() == "text_card":
                 conflict(f"clip {clip.id}: text cards cannot be auto-approved")
+            selected = clip.selected_variant
             if (clip.status != ClipStatus.COMPLETED.value
-                    or len(versions) != 1
-                    or clip.selected_variant != 1
+                    or not versions
+                    or not isinstance(selected, int)
+                    or selected < 1
+                    or selected > len(versions)
                     or not clip.output_filename
-                    or versions[0].get("filename") != clip.output_filename):
-                conflict(f"clip {clip.id}: silent exemption needs one selected render")
+                    or versions[selected - 1].get("filename") != clip.output_filename):
+                conflict(f"clip {clip.id}: silent exemption needs a valid selected render")
             continue
         decision = clip_qc.auto_approval_decision(live[clip.id])
         if decision.get("action") != "approve":

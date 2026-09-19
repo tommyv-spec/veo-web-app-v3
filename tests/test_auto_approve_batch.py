@@ -115,7 +115,7 @@ def test_batch_approves_two_clips_in_one_mutation():
 
 def test_batch_accepts_explicit_structurally_silent_clip_without_qc():
     db, job_id, claims, ids = _setup()
-    silent_id = _silent_clip(db, job_id)
+    silent_id = _silent_clip(db, job_id, versions=2, selected_variant=1)
     result = asyncio.run(main.auto_approve_clips(
         job_id=job_id,
         request=main.AutoApproveClipsRequest(
@@ -130,8 +130,8 @@ def test_batch_accepts_explicit_structurally_silent_clip_without_qc():
 
 @pytest.mark.parametrize("dialogue,versions,selected_variant", [
     ("spoken", 1, 1),
-    ("", 2, 1),
-    ("", 1, 2),
+    ("", 2, 3),
+    ("", 2, 2),
 ])
 def test_silent_exemption_rejects_dialogue_or_ambiguous_versions(
         dialogue, versions, selected_variant):
