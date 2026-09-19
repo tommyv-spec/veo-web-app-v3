@@ -22,14 +22,23 @@ def test_dead_refresh_returns_failure_instead_of_continuing():
     assert "return False" in body[wedge:wedge + 450]
 
 
-def test_download_loop_replaces_dead_page_before_locator_count():
+def test_download_loop_replaces_dead_page_before_tile_scan():
     body = _method("_download_loop")
     scan = body.index("CHECK idx 0, 1, 2, 3, 4, 5")
     guarded = body[scan - 1800:]
-    first_count = guarded.index("container.count()")
+    first_probe = guarded.index("_locator_attached(container)")
     guard = guarded.index('wait_for_function("1", timeout=3000)')
     replacement = guarded.index("_replace_wedged_page(project_url)", guard)
-    assert guard < replacement < first_count
+    assert guard < replacement < first_probe
+
+
+def test_download_scans_use_only_bounded_locator_probes():
+    helper = _method("_locator_attached")
+    assert 'wait_for(state="attached", timeout=timeout_ms)' in helper
+    assert "except Exception:" in helper
+    assert "container.count()" not in _method("_scan_all_containers")
+    assert "container.count()" not in _method("_download_loop")
+    assert "video_check.count()" not in _method("_download_loop")
 
 
 def test_replacement_uses_a_new_tab_and_proves_it_answers():

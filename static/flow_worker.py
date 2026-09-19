@@ -18218,6 +18218,15 @@ class DownloadHelper:
             "websocket", "pipe closed", "session closed",
         ))
 
+    @staticmethod
+    def _locator_attached(locator, timeout_ms=1000):
+        """Return whether a locator exists without an unbounded renderer call."""
+        try:
+            locator.first.wait_for(state="attached", timeout=timeout_ms)
+            return True
+        except Exception:                                   # noqa: BLE001
+            return False
+
     def process_download(self, job_data):
         """Download all clips for a job.
 
@@ -18710,18 +18719,9 @@ class DownloadHelper:
         results = []
         consecutive_missing = 0
         
-        # v975 — this loop was the stall, found 2026-09-17 by the greenlet
-        # locator in _v978_parked_greenlet_stacks: the worker was parked in
-        # `container.count()` on line ~18562, not in check_and_dismiss_popup
-        # and not in page.reload(), which is where three earlier fixes went.
-        # Nothing here sets a default timeout, so every count() inherits
-        # Playwright built-in 30s, and the loop makes up to two per index
-        # over max_index+1 indexes. 16 indexes x 30s is 480s -- which is
-        # exactly the ~485s every one of the six watchdog kills measured.
-        #
-        # Two changes, both small: bound each probe, and stamp activity() per
-        # index so a scan that IS progressing never looks silent to v978 and
-        # the label localises to a container number instead of the whole scan.
+        # v975/v1009.5 — count() has no call-level timeout and can park on a
+        # wedged renderer. Probe attachment with a hard timeout instead, and
+        # stamp activity() per index so a live scan never looks silent.
         try:
             self.page.set_default_timeout(4000)
         except Exception:                                   # noqa: BLE001
@@ -18731,11 +18731,11 @@ class DownloadHelper:
                 activity("scan container %d/%d" % (idx, max_index))
                 # Check if container exists in DOM at all
                 container = self.page.locator(f"div[data-index='{idx}']")
-                if container.count() == 0:
+                if not self._locator_attached(container):
                     # Try scrolling down to force virtual scroll to render it
                     self.page.mouse.wheel(0, 400)
                     time.sleep(0.3)
-                    if container.count() == 0:
+                    if not self._locator_attached(container):
                         consecutive_missing += 1
                         if consecutive_missing >= 3:
                             break  # No more containers
@@ -19450,14 +19450,14 @@ class DownloadHelper:
                 
                 # Scroll to container and read it
                 container = self.page.locator(f"div[data-index='{idx}']")
-                if container.count() == 0:
+                if not self._locator_attached(container):
                     # Try scrolling down to render it
                     for _ in range(3):
                         self.page.mouse.wheel(0, 500)
                         time.sleep(0.3)
-                        if container.count() > 0:
+                        if self._locator_attached(container):
                             break
-                    if container.count() == 0:
+                    if not self._locator_attached(container):
                         continue
                 
                 try:
@@ -19573,7 +19573,7 @@ class DownloadHelper:
                 # Handle video ready → DOWNLOAD
                 if hv:
                     video_check = container.locator("video")
-                    if video_check.count() == 0:
+                    if not self._locator_attached(video_check):
                         print(f"[{self.account_name}] Video at idx={idx} vanished, skipping", flush=True)
                         continue
                     
@@ -19695,7 +19695,8 @@ class DownloadHelper:
                         print(f"[{self.account_name}] Deep scan: Found clip {ci} at idx={cinfo['dataIndex']}!", flush=True)
                         container = self.page.locator(f"div[data-index='{cinfo['dataIndex']}']")
                         scan_urls = cinfo.get('videoUrls', [])
-                        if container.count() == 0:
+                        container_attached = self._locator_attached(container)
+                        if not container_attached:
                             if scan_urls:
                                 # Container was virtualized away by the time we got back to it,
                                 # but we already extracted the video URLs during the scan phase
@@ -19713,7 +19714,7 @@ class DownloadHelper:
                             # Re-extract video URLs from LIVE container if still in DOM,
                             # otherwise fall back to URLs captured during scan phase.
                             try:
-                                if container.count() > 0:
+                                if container_attached:
                                     deep_scan_urls = container.evaluate("""el => {
                                         const urls = [];
                                         const videos = el.querySelectorAll('video');
