@@ -120,3 +120,13 @@ def test_disconnect_classifier_is_used_by_both_outer_download_handlers():
     assert "if self._is_cdp_disconnect(e):" in dynamic
     assert '"browser has been closed"' not in inner
     assert '"browser has been closed"' not in dynamic
+
+
+def test_new_project_click_never_reports_home_as_a_project():
+    body = _method("_fa_or_dom_new_project_click")
+    no_project = body.index("clicked New project but no /project/<uuid>")
+    refusal = body.index('raise RuntimeError("New project click did not open a Flow project")')
+    assert refusal > no_project
+    recovery = body.index("project DOM is late; reloading Flow once")
+    activity_probe = body.index('activity("waiting for late new-project DOM")')
+    assert recovery < activity_probe < refusal

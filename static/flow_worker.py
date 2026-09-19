@@ -2918,6 +2918,29 @@ def _fa_or_dom_new_project_click(page, dom_label="New project button", context="
             if _pid:
                 break
             time.sleep(1.0)
+        # Measured on Account2 Firefox 2026-09-19: the click created the
+        # project, but its in-place composer did not hydrate during the first
+        # 30 seconds. Reloading Flow surfaced that same composer. Do this once
+        # before calling the click a failure; keep the watchdog informed.
+        if not _pid:
+            print(f"[{context}] [flow_api] project DOM is late; reloading Flow once "
+                  "before refusing the click", flush=True)
+            try:
+                page.goto(FLOW_ORIGIN, wait_until="domcontentloaded", timeout=60000)
+                _recovery_deadline = time.time() + 90
+                while time.time() < _recovery_deadline:
+                    activity("waiting for late new-project DOM")
+                    _m = re.search(r"/project/([0-9a-f-]{36})", page.url or "")
+                    if _m:
+                        _pid = _m.group(1)
+                        break
+                    _pid = _v962_project_id_from_dom(page)
+                    if _pid:
+                        break
+                    time.sleep(1.0)
+            except Exception as _late_exc:
+                print(f"[{context}] [flow_api] late project recovery failed: "
+                      f"{str(_late_exc)[:100]}", flush=True)
         if _pid and "/project/" not in (page.url or ""):
             print(f"[{context}] [flow_api] [v962.6] project {_pid} rendered in place "
                   f"(url stayed {(page.url or '')[:40]}) — navigating to its canonical URL", flush=True)
@@ -2931,6 +2954,7 @@ def _fa_or_dom_new_project_click(page, dom_label="New project button", context="
         elif not _pid:
             print(f"[{context}] [flow_api] [v962.2] clicked New project but no /project/<uuid> URL and no "
                   f"project page in the DOM within 30s (url={(page.url or '')[:80]})", flush=True)
+            raise RuntimeError("New project click did not open a Flow project")
         return False
     # Fallback: existing DOM click
     try:
