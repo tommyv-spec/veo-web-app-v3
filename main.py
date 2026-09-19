@@ -7493,13 +7493,24 @@ async def auto_approve_clips(
                 and isinstance(selected, int)
                 and matching[0].get("variant", 1) == selected
             )
+            selected_by_attempt_position = False
+            if len(matching) == 1 and isinstance(selected, int):
+                chosen_attempt = matching[0].get("attempt", 1)
+                attempt_versions = [v for v in versions
+                                    if v.get("attempt", 1) == chosen_attempt]
+                selected_by_attempt_position = (
+                    1 <= selected <= len(attempt_versions)
+                    and attempt_versions[selected - 1].get("filename")
+                    == clip.output_filename
+                )
             if (clip.status != ClipStatus.COMPLETED.value
                     or not versions
                     or not isinstance(selected, int)
                     or selected < 1
                     or not clip.output_filename
                     or len(matching) != 1
-                    or not (selected_by_position or selected_by_attempt_variant)):
+                    or not (selected_by_position or selected_by_attempt_variant
+                            or selected_by_attempt_position)):
                 conflict(f"clip {clip.id}: silent exemption needs a valid selected render")
             continue
         decision = clip_qc.auto_approval_decision(live[clip.id])

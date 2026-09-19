@@ -131,14 +131,16 @@ def test_batch_accepts_explicit_structurally_silent_clip_without_qc():
     assert sum("auto-approved by QC batch" in message for message in messages) == 2
 
 
-def test_batch_accepts_flow_redo_selected_with_per_attempt_variant_number():
+@pytest.mark.parametrize("redo_variant", [1, 2])
+def test_batch_accepts_flow_redo_selection_conventions(redo_variant):
     db, job_id, claims, _ = _setup()
     silent_id = _silent_clip(db, job_id)
     clip = db.query(Clip).filter(Clip.id == silent_id).one()
     clip.versions_json = json.dumps([
         {"attempt": 1, "variant": 1, "version_key": "1.1",
          "filename": "silent-old.mp4"},
-        {"attempt": 2, "variant": 1, "version_key": "2.1",
+        {"attempt": 2, "variant": redo_variant,
+         "version_key": f"2.{redo_variant}",
          "filename": "silent-redo.mp4"},
     ])
     clip.selected_variant = 1
