@@ -23947,7 +23947,23 @@ def rebuild_clip(page, start_frame_path, end_frame_path, prompt, is_first_clip=F
         
         # Click Generate button
         human_delay(0.5, 1.5)
-        human_click_element(page, page.locator("button:has(i:text('arrow_forward'))").first, "Generate button", timeout=30000)
+        _rebuild_generate_btn = page.locator("button:has(i:text('arrow_forward'))").first
+        # rebuild_clip is the redo submit path. Open the same clean response
+        # window as click_generate_button immediately before the real click;
+        # otherwise its binder can accept a late response from the prior clip.
+        try:
+            page._v700j_last_click_at = time.time()
+            _rebuild_label = getattr(page, '_v700_submit_buffer_key', '') or ''
+            if _rebuild_label.startswith('acct:'):
+                _rebuild_label = _rebuild_label[len('acct:'):]
+            _rebuild_drained = _drain_submit_responses(_rebuild_label)
+            if _rebuild_drained:
+                print(f"[v700j] discarded {len(_rebuild_drained)} stale "
+                      "submit-response(s) before rebuild Generate-click",
+                      flush=True)
+        except Exception:
+            page._v700j_last_click_at = time.time()
+        human_click_element(page, _rebuild_generate_btn, "Generate button", timeout=30000)
         print(f"{context} ✓ Clicked Generate", flush=True)
         human_delay(1, 2)
         

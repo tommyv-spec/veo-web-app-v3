@@ -170,3 +170,12 @@ def test_redo_listing_refresh_propagates_browser_disconnects():
     tail = body[handler:handler + 500]
     assert "DownloadHelper._is_cdp_disconnect(_listing_err)" in tail
     assert "raise" in tail
+
+
+def test_rebuild_clip_opens_a_fresh_submit_response_window_at_click():
+    body = _method("rebuild_clip")
+    button = body.index("_rebuild_generate_btn = page.locator(")
+    stamp = body.index("page._v700j_last_click_at = time.time()", button)
+    drain = body.index("_drain_submit_responses(", stamp)
+    click = body.index("human_click_element(page, _rebuild_generate_btn", drain)
+    assert button < stamp < drain < click
