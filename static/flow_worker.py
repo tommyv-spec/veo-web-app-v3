@@ -18224,7 +18224,9 @@ class DownloadHelper:
         try:
             locator.first.wait_for(state="attached", timeout=timeout_ms)
             return True
-        except Exception:                                   # noqa: BLE001
+        except Exception as exc:                            # noqa: BLE001
+            if DownloadHelper._is_cdp_disconnect(exc):
+                raise
             return False
 
     def process_download(self, job_data):
@@ -19732,8 +19734,12 @@ class DownloadHelper:
                                     # container gone — scan_urls were extracted while it was in viewport,
                                     # but only use them if container was just virtualized (within same cycle)
                                     deep_scan_urls = scan_urls
-                            except:
-                                deep_scan_urls = []
+                            except Exception as exc:
+                                if self._is_cdp_disconnect(exc):
+                                    raise
+                                # The tile can disappear between the bounded probe and
+                                # evaluate(). Keep the URLs captured during this scan.
+                                deep_scan_urls = scan_urls
                             result = self._download_clip_variants(container, matched, job_id, temp_dir, downloaded_videos, pre_extracted_urls=deep_scan_urls, downloaded_urls=downloaded_urls)
                             if result:
                                 downloaded_clip_indices.add(ci)
@@ -20043,13 +20049,14 @@ class DownloadHelper:
         
         time.sleep(1)
         
-        # Find all video elements in this container
+        # Find all video elements in this container. Locator.count() has no
+        # call-level timeout, so probe a small, bounded variant range instead.
         videos = container.locator("video")
-        video_count = videos.count()
-        
-        # If we have pre-extracted URLs from scan phase, use count from there
-        if pre_extracted_urls and len(pre_extracted_urls) > 0:
-            video_count = max(video_count, len(pre_extracted_urls))
+        video_count = len(pre_extracted_urls or [])
+        for probe_idx in range(video_count, max(video_count, 8)):
+            if not self._locator_attached(videos.nth(probe_idx)):
+                break
+            video_count = probe_idx + 1
         
         if video_count == 0:
             print(f"[{self.account_name}] No videos found for clip {clip_index+1}", flush=True)
@@ -20118,7 +20125,7 @@ class DownloadHelper:
                         if not video_url:
                             try:
                                 source_elem = video_elem.locator("source")
-                                if source_elem.count() > 0:
+                                if self._locator_attached(source_elem):
                                     video_url = source_elem.first.get_attribute("src")
                                     if video_url and video_url.startswith("blob:"):
                                         video_url = None
@@ -20231,20 +20238,20 @@ class DownloadHelper:
                         variant_containers = container.locator("div.sc-d90fd836-2.dLxTam")
                         download_btn = None
                         
-                        if v_idx < variant_containers.count():
-                            vc = variant_containers.nth(v_idx)
+                        vc = variant_containers.nth(v_idx)
+                        if self._locator_attached(vc):
                             download_btn = vc.locator("button[aria-label='download']")
-                            if download_btn.count() == 0:
+                            if not self._locator_attached(download_btn):
                                 download_btn = vc.locator("button:has(i:text('download'))")
                         
-                        if not download_btn or download_btn.count() == 0:
+                        if not download_btn or not self._locator_attached(download_btn):
                             all_btns = container.locator("button[aria-label='download']")
-                            if all_btns.count() == 0:
+                            if not self._locator_attached(all_btns):
                                 all_btns = container.locator("button:has(i:text('download'))")
-                            if v_idx < all_btns.count():
-                                download_btn = all_btns.nth(v_idx)
+                            candidate_btn = all_btns.nth(v_idx)
+                            download_btn = candidate_btn if self._locator_attached(candidate_btn) else None
                         
-                        if download_btn and download_btn.count() > 0:
+                        if download_btn and self._locator_attached(download_btn):
                             download_btn.first.click(force=True)
                             time.sleep(1)
                             
@@ -20258,6 +20265,8 @@ class DownloadHelper:
                             print(f"[{self.account_name}] No download button for variant {variant_name}", flush=True)
                             continue
                     except Exception as ui_err:
+                        if self._is_cdp_disconnect(ui_err):
+                            raise
                         print(f"[{self.account_name}] UI download failed: {ui_err}", flush=True)
                         continue
                 

@@ -2,6 +2,7 @@
 
 import ast
 from pathlib import Path
+import textwrap
 
 
 WORKER = Path(__file__).resolve().parents[1] / "static" / "flow_worker.py"
@@ -35,10 +36,31 @@ def test_download_loop_replaces_dead_page_before_tile_scan():
 def test_download_scans_use_only_bounded_locator_probes():
     helper = _method("_locator_attached")
     assert 'wait_for(state="attached", timeout=timeout_ms)' in helper
-    assert "except Exception:" in helper
+    assert "if DownloadHelper._is_cdp_disconnect(exc):" in helper
+    assert "raise" in helper
     assert "container.count()" not in _method("_scan_all_containers")
     assert "container.count()" not in _method("_download_loop")
     assert "video_check.count()" not in _method("_download_loop")
+
+
+def test_variant_download_has_no_unbounded_locator_counts():
+    body = _method("_download_clip_variants")
+    tree = ast.parse(textwrap.dedent(body))
+    count_calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "count"
+    ]
+    assert not count_calls
+    assert "range(video_count, max(video_count, 8))" in body
+
+
+def test_deep_scan_keeps_fresh_scan_urls_if_tile_detaches():
+    body = _method("_download_loop")
+    marker = body.index("The tile can disappear between the bounded probe")
+    fallback = body.index("deep_scan_urls = scan_urls", marker)
+    assert fallback > marker
 
 
 def test_replacement_uses_a_new_tab_and_proves_it_answers():
