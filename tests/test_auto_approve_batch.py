@@ -20,7 +20,7 @@ from sqlalchemy.orm import sessionmaker
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import image_platform  # noqa: F401
 import main
-from models import Clip, ClipStatus, Job
+from models import Clip, ClipStatus, Job, JobLog
 
 
 HASH = "a" * 64
@@ -126,6 +126,33 @@ def test_batch_accepts_explicit_structurally_silent_clip_without_qc():
     assert result["approved_clip_ids"] == [*ids, silent_id]
     assert result["silent_clip_ids"] == [silent_id]
     assert {c.approval_status for c in db.query(Clip).all()} == {"approved"}
+    messages = [row.message for row in db.query(JobLog).order_by(JobLog.id).all()]
+    assert any("explicit silent-clip exemption" in message for message in messages)
+    assert sum("auto-approved by QC batch" in message for message in messages) == 2
+
+
+def test_batch_accepts_flow_redo_selected_with_per_attempt_variant_number():
+    db, job_id, claims, _ = _setup()
+    silent_id = _silent_clip(db, job_id)
+    clip = db.query(Clip).filter(Clip.id == silent_id).one()
+    clip.versions_json = json.dumps([
+        {"attempt": 1, "variant": 1, "version_key": "1.1",
+         "filename": "silent-old.mp4"},
+        {"attempt": 2, "variant": 1, "version_key": "2.1",
+         "filename": "silent-redo.mp4"},
+    ])
+    clip.selected_variant = 1
+    clip.output_filename = "silent-redo.mp4"
+    db.commit()
+    result = asyncio.run(main.auto_approve_clips(
+        job_id=job_id,
+        request=main.AutoApproveClipsRequest(
+            claims=claims, silent_clip_ids=[silent_id]),
+        db=db,
+        current_user=SimpleNamespace(id="u1"),
+    ))
+    assert silent_id in result["approved_clip_ids"]
+    assert clip.approval_status == "approved"
 
 
 @pytest.mark.parametrize("dialogue,versions,selected_variant", [

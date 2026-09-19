@@ -7481,13 +7481,25 @@ async def auto_approve_clips(
             if str(clip.scene_type or "").strip().lower() == "text_card":
                 conflict(f"clip {clip.id}: text cards cannot be auto-approved")
             selected = clip.selected_variant
+            matching = [v for v in versions
+                        if v.get("filename") == clip.output_filename]
+            selected_by_position = (
+                isinstance(selected, int)
+                and 1 <= selected <= len(versions)
+                and versions[selected - 1].get("filename") == clip.output_filename
+            )
+            selected_by_attempt_variant = (
+                len(matching) == 1
+                and isinstance(selected, int)
+                and matching[0].get("variant", 1) == selected
+            )
             if (clip.status != ClipStatus.COMPLETED.value
                     or not versions
                     or not isinstance(selected, int)
                     or selected < 1
-                    or selected > len(versions)
                     or not clip.output_filename
-                    or versions[selected - 1].get("filename") != clip.output_filename):
+                    or len(matching) != 1
+                    or not (selected_by_position or selected_by_attempt_variant)):
                 conflict(f"clip {clip.id}: silent exemption needs a valid selected render")
             continue
         decision = clip_qc.auto_approval_decision(live[clip.id])
@@ -7522,12 +7534,15 @@ async def auto_approve_clips(
     if lineup is not None:
         job.clip_order_json = json.dumps(lineup)
     for clip in pending:
+        message = (f"Clip {clip.clip_index + 1} approved by explicit silent-clip exemption"
+                   if clip.id in silent_ids else
+                   f"Clip {clip.clip_index + 1} auto-approved by QC batch")
         db.add(JobLog(
             job_id=job_id,
             level="INFO",
             category="approval",
             clip_index=clip.clip_index,
-            message=f"Clip {clip.clip_index + 1} auto-approved by QC batch",
+            message=message,
         ))
     db.commit()
     return {
