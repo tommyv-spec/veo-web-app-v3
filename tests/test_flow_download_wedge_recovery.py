@@ -77,6 +77,19 @@ def test_nested_download_handlers_propagate_all_disconnects():
     assert "raise" in outer_handler
     assert 'any(x in err_str for x in' not in variants
 
+    scan = _method("_scan_all_containers")
+    scan_error = scan.index("Scan error:")
+    scan_handler = scan[scan_error - 150:scan_error]
+    assert "if self._is_cdp_disconnect(e):" in scan_handler
+    assert "raise" in scan_handler
+
+    ready_error = loop.index("Error downloading clip")
+    ready_handler = loop[ready_error - 220:ready_error]
+    assert "if self._is_cdp_disconnect(e):" in ready_handler
+    assert "raise" in ready_handler
+    assert 'any(x in str(e) for x in' not in loop
+    assert '_is_cdp = any(' not in variants
+
 
 def test_replacement_uses_a_new_tab_and_proves_it_answers():
     body = _method("_replace_wedged_page")

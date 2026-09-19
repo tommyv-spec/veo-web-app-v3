@@ -18749,7 +18749,9 @@ class DownloadHelper:
                 try:
                     container.first.scroll_into_view_if_needed(timeout=2000)
                     time.sleep(0.2)  # Brief pause for render
-                except:
+                except Exception as exc:
+                    if self._is_cdp_disconnect(exc):
+                        raise
                     pass
                 
                 # NOW read the container's content via JS while it's visible
@@ -18809,6 +18811,8 @@ class DownloadHelper:
                     results.append(info)
             
         except Exception as e:
+            if self._is_cdp_disconnect(e):
+                raise
             print(f"[{self.account_name}] Scan error: {e}", flush=True)
         finally:
             # v975 — hand the page back at the worker default, whatever happened.
@@ -19465,7 +19469,9 @@ class DownloadHelper:
                 try:
                     container.first.scroll_into_view_if_needed(timeout=2000)
                     time.sleep(0.2)
-                except:
+                except Exception as exc:
+                    if self._is_cdp_disconnect(exc):
+                        raise
                     pass
                 
                 # Read container via JS
@@ -19598,7 +19604,9 @@ class DownloadHelper:
                                 }
                                 return urls;
                             }""")
-                        except:
+                        except Exception as exc:
+                            if self._is_cdp_disconnect(exc):
+                                raise
                             fresh_urls = []
                         # Cache URLs immediately — if Chrome dies mid-download, fallback session uses these
                         if fresh_urls:
@@ -19618,12 +19626,14 @@ class DownloadHelper:
                             pass
 
                     except Exception as e:
-                        if any(x in str(e) for x in ("browser has been closed", "Target page", "context or browser", "TargetClosedError")):
+                        if self._is_cdp_disconnect(e):
                             raise  # Propagate to reconnect loop
                         print(f"[{self.account_name}] Error downloading clip {ci}: {e}", flush=True)
                         try:
                             self.page.keyboard.press("Escape")
-                        except:
+                        except Exception as exc:
+                            if self._is_cdp_disconnect(exc):
+                                raise
                             pass
             
             if downloaded_this_cycle > 0:
@@ -20131,7 +20141,9 @@ class DownloadHelper:
                                     video_url = source_elem.first.get_attribute("src")
                                     if video_url and video_url.startswith("blob:"):
                                         video_url = None
-                            except:
+                            except Exception as exc:
+                                if self._is_cdp_disconnect(exc):
+                                    raise
                                 pass
                 
                 # Recreate temp_dir if it was wiped by cleanup after a golden restore
@@ -20194,9 +20206,7 @@ class DownloadHelper:
                                     raise Exception(f"HTTP {api_resp.status} {api_resp.status_text}")
                                 body = api_resp.body()
                             except Exception as _browser_err:
-                                _err_str = str(_browser_err)
-                                _is_cdp = any(x in _err_str for x in ("browser has been closed", "Target page", "context or browser", "TargetClosedError"))
-                                if _is_cdp:
+                                if self._is_cdp_disconnect(_browser_err):
                                     raise  # No session available, propagate to reconnect loop
                                 raise
                         file_size = len(body)
