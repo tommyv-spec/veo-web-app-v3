@@ -54,6 +54,11 @@ def _generated(db, root, *, batch_id=None, chatgpt_source="ai", cg_status="ready
             backend=backend,
         ))
     db.commit()
+    node.completed_contract_hash = ip._generation_contract_hash(db, node, "banana")
+    node.cg_completed_contract_hash = ip._generation_contract_hash(
+        db, node, "chatgpt"
+    )
+    db.commit()
     return node
 
 
@@ -164,6 +169,134 @@ def test_promote_rechecks_dual_outputs_instead_of_trusting_an_old_choice(
     assert exc.value.detail["missing"][0]["problems"] == [
         "chatgpt lane is failed"
     ]
+
+
+def test_choose_rejects_outputs_from_an_old_parent_choice(monkeypatch):
+    db = _session()
+    root = _root("stale-parent-choice")
+    monkeypatch.setattr(ip, "images_root", lambda: root)
+    node = _generated(db, root)
+    parent = ip.ImageNode(
+        id=2, user_id="u1", kind="upload", status="ready",
+        chosen_variant_id=201,
+    )
+    db.add_all([
+        parent,
+        ip.ImageVariant(
+            id=201, node_id=2, variant_index=1,
+            image_path="nodes/2/first.png", source="manual",
+        ),
+        ip.ImageVariant(
+            id=202, node_id=2, variant_index=2,
+            image_path="nodes/2/second.png", source="manual",
+        ),
+        ip.ImageEdge(
+            parent_node_id=2, child_node_id=1, role="character", slot_order=0,
+        ),
+    ])
+    db.commit()
+    node.completed_contract_hash = ip._generation_contract_hash(db, node, "banana")
+    node.cg_completed_contract_hash = ip._generation_contract_hash(
+        db, node, "chatgpt"
+    )
+    db.commit()
+
+    parent.chosen_variant_id = 202
+    db.commit()
+    with pytest.raises(HTTPException) as exc:
+        ip.choose_variant(
+            1,
+            ip.ChooseVariantRequest(variant_id=101),
+            db=db,
+            current_user=SimpleNamespace(id="u1"),
+        )
+
+    assert exc.value.status_code == 409
+    assert any(
+        "output contract is stale or unproven" in problem
+        for problem in exc.value.detail["problems"]
+    )
+
+
+def test_promote_rejects_outputs_from_old_dimensions(monkeypatch):
+    db = _session()
+    root = _root("stale-promote-dimensions")
+    monkeypatch.setattr(ip, "images_root", lambda: root)
+    batch = ip.ImageJobBatch(
+        id="batch-stale", user_id="u1", name="batch", total_scenes=1,
+    )
+    db.add(batch)
+    node = _generated(db, root, batch_id="batch-stale")
+    node.chosen_variant_id = 101
+    db.commit()
+
+    node.resolution = "4K"
+    db.commit()
+    with pytest.raises(HTTPException) as exc:
+        ip.promote_batch_to_video(
+            "batch-stale", db=db, current_user=SimpleNamespace(id="u1")
+        )
+
+    assert exc.value.status_code == 409
+    assert any(
+        "output contract is stale or unproven" in problem
+        for problem in exc.value.detail["missing"][0]["problems"]
+    )
+
+
+def test_new_parent_choice_invalidates_and_requeues_child_outputs(monkeypatch):
+    db = _session()
+    root = _root("parent-choice-requeues-child")
+    monkeypatch.setattr(ip, "images_root", lambda: root)
+    child = _generated(db, root)
+    for name in ("first.png", "second.png"):
+        path = root / "nodes" / "2" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(name.encode())
+    parent = ip.ImageNode(
+        id=2, user_id="u1", kind="upload", status="ready",
+        chosen_variant_id=201,
+    )
+    db.add_all([
+        parent,
+        ip.ImageVariant(
+            id=201, node_id=2, variant_index=1,
+            image_path="nodes/2/first.png", source="manual",
+        ),
+        ip.ImageVariant(
+            id=202, node_id=2, variant_index=2,
+            image_path="nodes/2/second.png", source="manual",
+        ),
+        ip.ImageEdge(
+            parent_node_id=2, child_node_id=1, role="character", slot_order=0,
+        ),
+    ])
+    db.commit()
+    child.completed_contract_hash = ip._generation_contract_hash(
+        db, child, "banana"
+    )
+    child.cg_completed_contract_hash = ip._generation_contract_hash(
+        db, child, "chatgpt"
+    )
+    db.commit()
+    monkeypatch.setattr(ip, "write_generation_job", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ip, "_storage_delete", lambda *args, **kwargs: None)
+
+    ip.choose_variant(
+        2,
+        ip.ChooseVariantRequest(variant_id=202),
+        db=db,
+        current_user=SimpleNamespace(id="u1"),
+    )
+
+    db.refresh(child)
+    assert child.status == "queued"
+    assert child.cg_status == "queued"
+    assert child.completed_contract_hash is None
+    assert child.cg_completed_contract_hash is None
+    assert db.query(ip.ImageVariant).filter(
+        ip.ImageVariant.node_id == child.id
+    ).count() == 0
 
 
 def test_upload_source_nodes_are_outside_the_dual_render_gate():

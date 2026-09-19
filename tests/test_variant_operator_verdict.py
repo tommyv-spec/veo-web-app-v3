@@ -15,6 +15,7 @@
 import inspect
 import json
 import types
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -43,13 +44,22 @@ def _node(db, node_id=1, user_id="u1", n_variants=2, status="ready"):
         cg_status="ready" if status == "ready" else None,
     )
     db.add(n)
+    root = Path(ip.images_root())
     for i in range(1, n_variants + 1):
+        relative = f"variant_operator_tests/{node_id}/variant_{i}.png"
+        image_path = root / relative
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(f"node-{node_id}-variant-{i}".encode())
         db.add(ip.ImageVariant(
             id=node_id * 100 + i, node_id=node_id, variant_index=i,
-            image_path=__file__,
+            image_path=relative,
             backend="chatgpt" if i == n_variants else "banana",
         ))
     db.commit()
+    if status == "ready":
+        n.completed_contract_hash = ip._generation_contract_hash(db, n, "banana")
+        n.cg_completed_contract_hash = ip._generation_contract_hash(db, n, "chatgpt")
+        db.commit()
     return n
 
 
@@ -417,6 +427,15 @@ def test_choice_source_is_in_both_migration_lists():
     assert "ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS choice_source" in postgres_half
 
 
+@pytest.mark.parametrize(
+    "col", ["completed_contract_hash", "cg_completed_contract_hash"]
+)
+def test_completed_contract_columns_are_in_both_migration_lists(col):
+    sqlite_half, postgres_half = _migration_halves()
+    assert f"ALTER TABLE image_nodes ADD COLUMN {col}" in sqlite_half
+    assert f"ALTER TABLE image_nodes ADD COLUMN IF NOT EXISTS {col}" in postgres_half
+
+
 @pytest.mark.parametrize("col", ["operator_verdict", "verdict_at"])
 def test_verdict_columns_are_in_the_postgres_migration_list(col):
     _, postgres_half = _migration_halves()
@@ -424,12 +443,15 @@ def test_verdict_columns_are_in_the_postgres_migration_list(col):
 
 
 def test_qc_auto_strict_snapshot_accepts_then_rejects_changed_parent_bytes(
-        monkeypatch, tmp_path):
+        monkeypatch):
     """The server rechecks the actual product parent before committing."""
     db = _session()
-    root = tmp_path / "images"
-    (root / "nodes" / "1").mkdir(parents=True)
-    (root / "nodes" / "50").mkdir(parents=True)
+    root = (
+        Path(__file__).resolve().parents[1]
+        / "data" / "variant_operator_qc_snapshot" / "images"
+    )
+    (root / "nodes" / "1").mkdir(parents=True, exist_ok=True)
+    (root / "nodes" / "50").mkdir(parents=True, exist_ok=True)
     candidate_a = root / "nodes" / "1" / "variant_1.png"
     candidate_b = root / "nodes" / "1" / "variant_2.png"
     parent_path = root / "nodes" / "50" / "variant_1.png"
@@ -457,6 +479,13 @@ def test_qc_auto_strict_snapshot_accepts_then_rejects_changed_parent_bytes(
     db.add_all([parent, parent_variant, child, child_a, child_b, edge])
     db.commit()
     db.refresh(child)
+    child.completed_contract_hash = ip._generation_contract_hash(
+        db, child, "banana"
+    )
+    child.cg_completed_contract_hash = ip._generation_contract_hash(
+        db, child, "chatgpt"
+    )
+    db.commit()
 
     node_payload = child.to_dict()
     edge_payload = node_payload["parents"]

@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -174,6 +176,39 @@ def test_wait_accepts_stable_answer_only_after_observing_run_end(monkeypatch):
     ).startswith("finished answer")
 
 
+def test_deferred_holding_text_cannot_hide_observed_run_state(monkeypatch):
+    clock = [0.0]
+
+    class Adapter:
+        name = "gemini"
+
+        def __init__(self):
+            self.poll = 0
+
+        def answer_count(self, page):
+            return 1
+
+        def answer_text(self, page):
+            if self.poll == 0:
+                return "I am working on it. Please wait."
+            return "finished answer " * 20
+
+        def is_running(self, page):
+            self.poll += 1
+            return self.poll == 1
+
+        def completion_state(self, page):
+            return None
+
+    monkeypatch.setattr(worker.time, "time", lambda: clock[0])
+    monkeypatch.setattr(
+        worker.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    assert worker.wait_for_answer(
+        object(), Adapter(), before_count=0, timeout_s=20
+    ).startswith("finished answer")
+
+
 def test_full_prompt_proof_refuses_a_same_prefix_truncation():
     prompt = "Read everything.\n" + ("evidence " * 100)
     worker.prove_full_prompt(prompt, prompt, "test")
@@ -231,7 +266,10 @@ def test_run_turn_verifies_all_attachments_before_send(monkeypatch):
 
         def extract(self, page):
             events.append("extract")
-            return "### Classification\nanswer", "fake"
+            return (
+                "### Classification\nanswer\n" + worker._nonce_line(self.turn_nonce),
+                "fake",
+            )
 
         def conversation_url(self, page):
             return "https://example.test/c/1"
@@ -256,11 +294,11 @@ def test_run_turn_verifies_all_attachments_before_send(monkeypatch):
         "wait",
         "extract",
     ]
-    assert result[1:] == (
-        "fake",
-        {"model": "resolved", "thinking": "high"},
-        "https://example.test/c/1",
-    )
+    assert result[1] == "fake"
+    assert result[2]["model"] == "resolved"
+    assert result[2]["thinking"] == "high"
+    assert result[2]["turn_nonce"]
+    assert result[3] == "https://example.test/c/1"
 
 
 def test_pending_checkpoint_can_restore_resume_settings():
@@ -553,7 +591,7 @@ def test_noop_copy_click_cannot_return_previous_job_clipboard(monkeypatch):
     monkeypatch.setattr(
         worker.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
     )
-    assert worker._click_copy_and_read(Page(), Button()) is None
+    assert worker._click_copy_and_read(Page(), Button(), "job-a") is None
 
 
 def test_copy_result_must_be_a_new_value_written_by_this_click(monkeypatch):
@@ -568,21 +606,99 @@ def test_copy_result_must_be_a_new_value_written_by_this_click(monkeypatch):
 
     class Button:
         def click(self, **kwargs):
-            page.clipboard = "current turn answer " * 20
+            page.clipboard = (
+                "current turn answer " * 20 + "\n" + worker._nonce_line("job-a")
+            )
 
-    assert worker._click_copy_and_read(page, Button()).startswith("current turn")
+    assert worker._click_copy_and_read(page, Button(), "job-a").startswith(
+        "current turn"
+    )
+
+
+def test_parallel_clipboard_answer_from_another_turn_is_rejected():
+    shared = {"clipboard": "old"}
+
+    class Page:
+        def evaluate(self, script, *args):
+            if args:
+                shared["clipboard"] = args[0]
+            return shared["clipboard"]
+
+    class Button:
+        def __init__(self, answer):
+            self.answer = answer
+
+        def click(self, **kwargs):
+            shared["clipboard"] = self.answer
+
+    answer_a = "job a answer " * 20 + "\n" + worker._nonce_line("job-a")
+    wrong_for_b = "other job answer " * 20 + "\n" + worker._nonce_line("job-a")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future_a = pool.submit(
+            worker._click_copy_and_read, Page(), Button(answer_a), "job-a"
+        )
+        future_b = pool.submit(
+            worker._click_copy_and_read, Page(), Button(wrong_for_b), "job-b"
+        )
+    assert future_a.result() == answer_a
+    assert future_b.result() is None
 
 
 def test_verified_login_profile_is_copied_back_to_reusable_profile():
-    root = _local_case("persist-repaired-login")
+    root = _local_case(f"persist-repaired-login-{time.time_ns()}")
     run_profile = root / "run"
     durable = root / "durable"
     run_profile.mkdir(exist_ok=True)
+    repair_started_ns = time.time_ns()
     (run_profile / "cookies.sqlite").write_bytes(b"verified session")
 
-    worker._persist_chatgpt_profile(run_profile, durable)
+    worker._persist_chatgpt_profile(
+        run_profile, durable, repair_started_ns=repair_started_ns
+    )
 
     assert (durable / "cookies.sqlite").read_bytes() == b"verified session"
+
+
+def test_profile_repair_race_keeps_the_freshest_login():
+    root = _local_case(f"persist-repair-race-{time.time_ns()}")
+    older = root / "older"
+    newer = root / "newer"
+    durable = root / "durable"
+    older.mkdir(exist_ok=True)
+    newer.mkdir(exist_ok=True)
+    older_started = time.time_ns()
+    (older / "cookies.sqlite").write_bytes(b"older login")
+    newer_started = time.time_ns()
+    (newer / "cookies.sqlite").write_bytes(b"newer login")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                worker._persist_chatgpt_profile,
+                older,
+                durable,
+                repair_started_ns=older_started,
+            ),
+            pool.submit(
+                worker._persist_chatgpt_profile,
+                newer,
+                durable,
+                repair_started_ns=newer_started,
+            ),
+        ]
+        [future.result() for future in futures]
+
+    assert (durable / "cookies.sqlite").read_bytes() == b"newer login"
+    assert worker._profile_repair_version(durable) == newer_started
+
+
+def test_normal_authenticated_clone_is_not_a_login_repair():
+    assert not worker._login_repair_occurred(
+        authenticated=True,
+        backend_reported_repair=False,
+        had_session_before_launch=True,
+        has_session_after_run=True,
+    )
 
 
 def test_run_turn_checkpoints_after_send_before_wait(monkeypatch):
@@ -610,7 +726,10 @@ def test_run_turn_checkpoints_after_send_before_wait(monkeypatch):
             events.append("send")
 
         def extract(self, page):
-            return "### Classification\nanswer", "fake"
+            return (
+                "### Classification\nanswer\n" + worker._nonce_line(self.turn_nonce),
+                "fake",
+            )
 
         def conversation_url(self, page):
             return "https://example.test/c/1"

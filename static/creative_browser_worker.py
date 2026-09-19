@@ -10,8 +10,11 @@ import os
 import re
 import shutil
 import sys
+import tempfile
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -78,6 +81,10 @@ DEFERRED_ANSWER_MARKERS = (
     "this may take some time",
     "deep think is working",
 )
+TURN_NONCE_LABEL = "CREATIVE_RUN_NONCE"
+_LOCAL_CLIPBOARD_LOCK = threading.Lock()
+_PROFILE_LOCKS_GUARD = threading.Lock()
+_PROFILE_LOCKS: dict[str, threading.Lock] = {}
 
 
 def log(message: str) -> None:
@@ -655,6 +662,84 @@ def _safe_screenshot(page, stem: str) -> Path | None:
     return None
 
 
+def _nonce_line(nonce: str) -> str:
+    return f"{TURN_NONCE_LABEL}: {nonce}"
+
+
+def _prompt_with_nonce(prompt: str, nonce: str) -> str:
+    return (
+        prompt.rstrip()
+        + "\n\n"
+        + "End the final answer with this exact line so the browser can bind "
+        + "the copied text to this turn:\n"
+        + _nonce_line(nonce)
+    )
+
+
+def _has_turn_nonce(text: str, nonce: str | None) -> bool:
+    if not nonce:
+        return False
+    return any(line.strip() == _nonce_line(nonce) for line in (text or "").splitlines())
+
+
+def _strip_turn_nonce(text: str, nonce: str) -> str:
+    wanted = _nonce_line(nonce)
+    return "\n".join(
+        line for line in (text or "").splitlines() if line.strip() != wanted
+    ).rstrip()
+
+
+@contextmanager
+def _machine_file_lock(
+    name: str, local_lock: threading.Lock, timeout_s: float = 20.0,
+):
+    lock_path = Path(tempfile.gettempdir()) / name
+    deadline = time.time() + timeout_s
+    with local_lock:
+        handle = lock_path.open("a+b")
+        try:
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            while True:
+                try:
+                    handle.seek(0)
+                    if os.name == "nt":
+                        import msvcrt
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except (OSError, BlockingIOError):
+                    if time.time() >= deadline:
+                        raise RuntimeError("timed out waiting for the machine clipboard lock")
+                    time.sleep(0.1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+@contextmanager
+def _machine_clipboard_lock(timeout_s: float = 20.0):
+    """Serialize clipboard writes across threads and worker processes."""
+    with _machine_file_lock(
+        "codex-creative-browser-clipboard.lock",
+        _LOCAL_CLIPBOARD_LOCK,
+        timeout_s,
+    ):
+        yield
+
+
 def _clear_clipboard_for_copy(page) -> str:
     """Write and verify a unique marker immediately before a Copy action."""
     marker = f"__creative_copy_{uuid.uuid4().hex}__"
@@ -681,11 +766,15 @@ def _read_fresh_clipboard(page, marker: str, timeout_s: float = 3.0) -> str | No
     return None
 
 
-def _click_copy_and_read(page, button) -> str | None:
+def _click_copy_and_read(page, button, turn_nonce: str) -> str | None:
     """Bind extraction to a successful current click, never prior clipboard data."""
-    marker = _clear_clipboard_for_copy(page)
-    button.click(timeout=8000)
-    return _read_fresh_clipboard(page, marker)
+    with _machine_clipboard_lock():
+        marker = _clear_clipboard_for_copy(page)
+        button.click(timeout=8000)
+        text = _read_fresh_clipboard(page, marker)
+        if not _has_turn_nonce(text or "", turn_nonce):
+            return None
+        return text
 
 
 def _active_chatgpt_model_label(page) -> str | None:
@@ -721,6 +810,11 @@ def wait_for_answer(page, adapter, before_count: int, timeout_s: int) -> str:
         text = adapter.answer_text(page) if count > before_count else ""
         stable = stable + 1 if text and text == last else 0
         last = text
+        # Sample the UI state before interpreting holding text. Gemini often
+        # shows that text for the entire run; skipping here used to hide the
+        # only positive evidence that generation actually started.
+        running = adapter.is_running(page)
+        saw_running = saw_running or running
         if text and is_deferred_answer(text):
             stable = 0
             if not deferred_logged:
@@ -728,8 +822,6 @@ def wait_for_answer(page, adapter, before_count: int, timeout_s: int) -> str:
                 deferred_logged = True
             time.sleep(5)
             continue
-        running = adapter.is_running(page)
-        saw_running = saw_running or running
         completion = adapter.completion_state(page)
         if len(text.strip()) >= 100:
             if completion is True:
@@ -747,6 +839,7 @@ class GeminiAdapter:
 
     def __init__(self) -> None:
         self._selected_names: list[str] = []
+        self.turn_nonce: str | None = None
 
     def new_chat(self, page) -> None:
         gemini_worker.new_chat(page)
@@ -898,11 +991,26 @@ class GeminiAdapter:
         return None
 
     def extract(self, page) -> tuple[str, str]:
+        for name, getter in (
+            ("html", lambda: gemini_worker._from_html(page)),
+            ("dom", lambda: gemini_worker._from_dom(page)),
+        ):
+            try:
+                text = getter()
+            except Exception as exc:
+                log(f"Gemini {name} extraction failed: {type(exc).__name__}")
+                continue
+            if (
+                text
+                and len(text.strip()) >= 100
+                and _has_turn_nonce(text, self.turn_nonce)
+            ):
+                return text, name
         copy_selectors = ",".join(gemini_worker.SELECTORS["copy"])
         try:
             buttons = page.locator(copy_selectors)
             if buttons.count():
-                text = _click_copy_and_read(page, buttons.last)
+                text = _click_copy_and_read(page, buttons.last, self.turn_nonce or "")
                 if text and len(text.strip()) >= 100:
                     return text, "clipboard"
         except Exception as exc:
@@ -914,25 +1022,16 @@ class GeminiAdapter:
                 more.last.click(timeout=8000)
                 item = page.locator("[role=menuitem]:has-text('Copy')").first
                 if item.count():
-                    text = _click_copy_and_read(page, item)
+                    text = _click_copy_and_read(page, item, self.turn_nonce or "")
                     if text and len(text.strip()) >= 100:
                         return text, "clipboard"
                 else:
                     page.keyboard.press("Escape")
         except Exception as exc:
             log(f"Gemini more-menu extraction failed: {type(exc).__name__}")
-        for name, getter in (
-            ("html", lambda: gemini_worker._from_html(page)),
-            ("dom", lambda: gemini_worker._from_dom(page)),
-        ):
-            try:
-                text = getter()
-            except Exception as exc:
-                log(f"Gemini {name} extraction failed: {type(exc).__name__}")
-                continue
-            if text and len(text.strip()) >= 100:
-                return text, name
-        raise RuntimeError("Gemini answer finished but no extraction path returned text")
+        raise RuntimeError(
+            "Gemini answer finished but no extraction path returned this turn's nonce"
+        )
 
     def conversation_url(self, page) -> str:
         return page.url or ""
@@ -940,6 +1039,9 @@ class GeminiAdapter:
 
 class ChatGPTAdapter:
     name = "chatgpt"
+
+    def __init__(self) -> None:
+        self.turn_nonce: str | None = None
 
     def new_chat(self, page) -> None:
         home = chat_backend.CHATGPT_URL
@@ -1441,6 +1543,23 @@ class ChatGPTAdapter:
         return str(status).upper() == "COMPLETE"
 
     def extract(self, page) -> tuple[str, str]:
+        try:
+            text = page.evaluate(gemini_worker.HTML_TO_MD_JS, CHATGPT_ASSISTANT)
+            if (
+                text
+                and len(text.strip()) >= 100
+                and _has_turn_nonce(text, self.turn_nonce)
+            ):
+                return text, "html"
+        except Exception:
+            pass
+        text = self.answer_text(page)
+        if (
+            text
+            and len(text.strip()) >= 100
+            and _has_turn_nonce(text, self.turn_nonce)
+        ):
+            return text, "dom"
         selectors = (
             "button[data-testid='copy-turn-action-button']",
             "button[aria-label*='Copy' i]",
@@ -1450,21 +1569,14 @@ class ChatGPTAdapter:
                 buttons = page.locator(selector)
                 if not buttons.count():
                     continue
-                text = _click_copy_and_read(page, buttons.last)
+                text = _click_copy_and_read(page, buttons.last, self.turn_nonce or "")
                 if text and len(text.strip()) >= 100:
                     return text, "clipboard"
             except Exception:
                 pass
-        try:
-            text = page.evaluate(gemini_worker.HTML_TO_MD_JS, CHATGPT_ASSISTANT)
-            if text and len(text.strip()) >= 100:
-                return text, "html"
-        except Exception:
-            pass
-        text = self.answer_text(page)
-        if text and len(text.strip()) >= 100:
-            return text, "dom"
-        raise RuntimeError("ChatGPT answer finished but no extraction path returned text")
+        raise RuntimeError(
+            "ChatGPT answer finished but no extraction path returned this turn's nonce"
+        )
 
     def conversation_url(self, page) -> str:
         return page.url or ""
@@ -1490,7 +1602,11 @@ def run_turn(
     adapter.attach(page, paths)
     adapter.verify_attachments(page, paths)
     before_count = adapter.answer_count(page)
-    adapter.send(page, prompt)
+    turn_nonce = uuid.uuid4().hex
+    adapter.turn_nonce = turn_nonce
+    resolved_settings = dict(resolved_settings)
+    resolved_settings["turn_nonce"] = turn_nonce
+    adapter.send(page, _prompt_with_nonce(prompt, turn_nonce))
     if on_sent:
         last_url = ""
         url_deadline = time.time() + 20
@@ -1504,7 +1620,14 @@ def run_turn(
             time.sleep(0.5)
     wait_for_answer(page, adapter, before_count, timeout_s)
     answer, extraction = adapter.extract(page)
-    return answer, extraction, resolved_settings, adapter.conversation_url(page)
+    if not _has_turn_nonce(answer, turn_nonce):
+        raise RuntimeError("extracted answer does not belong to this browser turn")
+    return (
+        _strip_turn_nonce(answer, turn_nonce),
+        extraction,
+        resolved_settings,
+        adapter.conversation_url(page),
+    )
 
 
 def _conversation_identity(url: str, provider: str) -> tuple[str, str]:
@@ -1538,9 +1661,20 @@ def resume_turn(
     if actual_identity != requested_identity:
         raise RuntimeError("resume navigation did not stay on the checkpointed conversation")
     adapter.verify_account(page, expected_email)
+    turn_nonce = str(settings.get("turn_nonce") or "")
+    if not turn_nonce:
+        raise RuntimeError("resume checkpoint has no browser-turn nonce")
+    adapter.turn_nonce = turn_nonce
     wait_for_answer(page, adapter, before_count, timeout_s)
     answer, extraction = adapter.extract(page)
-    return answer, extraction, settings, adapter.conversation_url(page)
+    if not _has_turn_nonce(answer, turn_nonce):
+        raise RuntimeError("resumed answer does not belong to the checkpointed turn")
+    return (
+        _strip_turn_nonce(answer, turn_nonce),
+        extraction,
+        settings,
+        adapter.conversation_url(page),
+    )
 
 
 def existing_result_settings(
@@ -1633,22 +1767,102 @@ def _profile_session_files(profile: str | Path) -> list[Path]:
     )
 
 
-def _persist_chatgpt_profile(run_profile: Path, durable_profile: Path) -> None:
-    """Copy a verified run login back to its reusable profile and prove it."""
+def _profile_lock_for(durable_profile: Path) -> tuple[str, threading.Lock]:
+    key = hashlib.sha256(str(durable_profile.resolve()).casefold().encode()).hexdigest()
+    with _PROFILE_LOCKS_GUARD:
+        local = _PROFILE_LOCKS.setdefault(key, threading.Lock())
+    return f"codex-creative-profile-{key}.lock", local
+
+
+def _profile_repair_version(profile: Path) -> int:
+    marker = profile / ".creative_login_repair.json"
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        return int(data.get("repair_started_ns") or 0)
+    except (OSError, ValueError, TypeError):
+        return 0
+
+
+def _persist_chatgpt_profile(
+    run_profile: Path,
+    durable_profile: Path,
+    *,
+    repair_started_ns: int,
+) -> bool:
+    """Atomically publish one proven login repair unless a newer repair won."""
     session_files = _profile_session_files(run_profile)
     if not session_files:
         raise RuntimeError(
             "verified ChatGPT run exposed no reusable cookie store to persist"
         )
-    durable_profile.mkdir(parents=True, exist_ok=True)
-    _copy_profile(run_profile, durable_profile)
-    for source in session_files:
-        relative = source.relative_to(run_profile)
-        saved = durable_profile / relative
-        if not saved.is_file() or saved.stat().st_size != source.stat().st_size:
-            raise RuntimeError(
-                f"ChatGPT login repair did not persist {relative} to the reusable profile"
-            )
+    lock_name, local_lock = _profile_lock_for(durable_profile)
+    with _machine_file_lock(lock_name, local_lock, timeout_s=60):
+        existing_version = _profile_repair_version(durable_profile)
+        existing_session_files = _profile_session_files(durable_profile)
+        existing_mtime = max(
+            (path.stat().st_mtime_ns for path in existing_session_files),
+            default=0,
+        )
+        newer_exists = (
+            existing_version >= repair_started_ns
+            if existing_version
+            else existing_mtime > repair_started_ns
+        )
+        if newer_exists:
+            log("a newer ChatGPT profile repair already won; keeping it")
+            return False
+
+        parent = durable_profile.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        staging = parent / f".{durable_profile.name}.repair-{uuid.uuid4().hex}"
+        backup = parent / f".{durable_profile.name}.backup-{uuid.uuid4().hex}"
+        _copy_profile(run_profile, staging)
+        (staging / ".creative_login_repair.json").write_text(
+            json.dumps({
+                "repair_started_ns": int(repair_started_ns),
+                "published_at": datetime.now(timezone.utc).isoformat(),
+            }, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        staged_files = _profile_session_files(staging)
+        if not staged_files:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise RuntimeError("staged ChatGPT profile lost its cookie store")
+
+        moved_old = False
+        try:
+            if durable_profile.exists():
+                os.replace(durable_profile, backup)
+                moved_old = True
+            os.replace(staging, durable_profile)
+        except BaseException:
+            if moved_old and backup.exists() and not durable_profile.exists():
+                os.replace(backup, durable_profile)
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        finally:
+            if backup.exists() and durable_profile.exists():
+                shutil.rmtree(backup, ignore_errors=True)
+
+        for source in session_files:
+            relative = source.relative_to(run_profile)
+            saved = durable_profile / relative
+            if not saved.is_file() or saved.stat().st_size != source.stat().st_size:
+                raise RuntimeError(
+                    f"ChatGPT login repair did not persist {relative}"
+                )
+        return True
+
+
+def _login_repair_occurred(
+    *, authenticated: bool, backend_reported_repair: bool,
+    had_session_before_launch: bool, has_session_after_run: bool,
+) -> bool:
+    """Only a proven login repair may replace the reusable profile."""
+    return bool(authenticated) and (
+        bool(backend_reported_repair)
+        or (not bool(had_session_before_launch) and bool(has_session_after_run))
+    )
 
 
 def _cleanup_run_profile(path: str | Path | None) -> None:
@@ -1761,6 +1975,9 @@ def run_gemini(
 def configure_chatgpt(args) -> Path:
     chat_backend.set_browser_mode("firefox" if args.firefox else "chrome")
     chat_backend.CHROME_HEADLESS = bool(args.headless)
+    chat_backend.REPAIR_DETECTION_ENABLED = bool(args.firefox and args.headless)
+    chat_backend.LOGIN_REPAIR_OCCURRED = False
+    args._chatgpt_repair_started_ns = time.time_ns()
     if args.firefox:
         os.environ["FIREFOX_HEADLESS"] = "1" if args.headless else "0"
     prefix = ".chatgpt_profile_firefox_" if args.firefox else ".chatgpt_profile_"
@@ -1808,6 +2025,9 @@ def configure_chatgpt(args) -> Path:
     chat_backend.PROFILE_DIR = str(run_profile)
     chat_backend.COOKIES_FILE = str(run_profile / ".cookies_unused")
     args._chatgpt_durable_profile = durable_profile
+    args._chatgpt_run_had_session_before_launch = bool(
+        _profile_session_files(run_profile)
+    )
     log(f"ChatGPT uses private run profile {run_profile.name}")
     return run_profile
 
@@ -1859,12 +2079,25 @@ def run_chatgpt(
                 except Exception:
                     pass
     finally:
-        if authenticated:
+        repair_occurred = _login_repair_occurred(
+            authenticated=authenticated,
+            backend_reported_repair=bool(
+                getattr(chat_backend, "LOGIN_REPAIR_OCCURRED", False)
+            ),
+            had_session_before_launch=bool(
+                args._chatgpt_run_had_session_before_launch
+            ),
+            has_session_after_run=bool(_profile_session_files(run_profile)),
+        )
+        if repair_occurred:
             try:
-                _persist_chatgpt_profile(
-                    run_profile, Path(args._chatgpt_durable_profile)
+                published = _persist_chatgpt_profile(
+                    run_profile,
+                    Path(args._chatgpt_durable_profile),
+                    repair_started_ns=args._chatgpt_repair_started_ns,
                 )
-                log("saved verified ChatGPT session to the reusable profile")
+                if published:
+                    log("saved verified ChatGPT login repair to the reusable profile")
             except Exception as exc:
                 preserve_run_profile = True
                 log(

@@ -63,6 +63,12 @@ CHROME_CHANNEL = os.environ.get("WORKER_CHROME_CHANNEL", "chrome")
 CHROME_HEADLESS = os.environ.get("CHATGPT_CHROME_HEADLESS", "0").strip().lower() in {
     "1", "true", "yes", "on",
 }
+# The creative worker arms this only for a normally-headless Firefox run.
+# launch_logged_in temporarily switches that run headful solely for an actual
+# login repair; observing that transition lets the caller persist the repair
+# without copying every normal authenticated clone back over the durable profile.
+REPAIR_DETECTION_ENABLED = False
+LOGIN_REPAIR_OCCURRED = False
 CHATGPT_URL = "https://chatgpt.com/"
 # Plaintext cookies captured via netlog (ABE-immune). Injected on every launch so
 # login survives App-Bound Encryption (copied v20 cookies never decrypt). Re-run
@@ -222,6 +228,14 @@ def _import_playwright():
 
 
 def launch(p):
+    global LOGIN_REPAIR_OCCURRED
+    if (
+        FIREFOX_MODE
+        and REPAIR_DETECTION_ENABLED
+        and os.environ.get("FIREFOX_HEADLESS", "1").strip().lower()
+        in {"0", "false", "no", "off"}
+    ):
+        LOGIN_REPAIR_OCCURRED = True
     args = list(CHROME_ARGS)
     if USER_DATA_DIR and FIREFOX_MODE:
         # A Chromium data dir means nothing to Firefox — refusing beats
