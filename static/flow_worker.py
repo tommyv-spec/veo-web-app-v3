@@ -23953,7 +23953,14 @@ def rebuild_clip(page, start_frame_path, end_frame_path, prompt, is_first_clip=F
         
         # Click Generate button
         human_delay(0.5, 1.5)
-        _rebuild_generate_btn = page.locator("button:has(i:text('arrow_forward'))").first
+        # Flow's current host uses a Material button with an aria-label and no
+        # legacy <i> icon.  The normal submit path already branches here; redo
+        # must choose the same control before stamping its attribution window.
+        if _v962_on_new_host(page):
+            _rebuild_generate_btn = page.locator(_V962_GENERATE_BTN).first
+        else:
+            _rebuild_generate_btn = page.locator(
+                "button:has(i:text('arrow_forward'))").first
         # rebuild_clip is the redo submit path. Open the same clean response
         # window as click_generate_button immediately before the real click;
         # otherwise its binder can accept a late response from the prior clip.

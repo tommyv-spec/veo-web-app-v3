@@ -185,6 +185,16 @@ def test_rebuild_clip_opens_a_fresh_submit_response_window_at_click():
     assert button < stamp < drain < click
 
 
+def test_rebuild_clip_uses_the_current_host_generate_control():
+    body = _method("rebuild_clip")
+    branch = body.index("if _v962_on_new_host(page):")
+    current = body.index("page.locator(_V962_GENERATE_BTN).first", branch)
+    legacy_branch = body.index("else:", current)
+    legacy = body.index("button:has(i:text('arrow_forward'))", legacy_branch)
+    stamp = body.index("page._v700j_last_click_at = time.time()", legacy)
+    assert branch < current < legacy_branch < legacy < stamp
+
+
 def test_rebuild_clip_returns_false_when_physical_generate_click_fails():
     body = _method("rebuild_clip")
     click = body.index("_rebuild_click_ok = human_click_element(")
