@@ -2889,6 +2889,12 @@ def _fa_or_dom_new_project_click(page, dom_label="New project button", context="
     except Exception:
         _cur = ""
     if "flow.google.com" in _cur:
+        # A history.pushState home URL can still be the old project React tree.
+        # That tree exposes a New project control, but clicking it creates
+        # nothing (measured twice on Account2). Load the real home document
+        # first, matching the working user-launched UI path.
+        activity("loading real Flow home before New project")
+        page.goto(FLOW_ORIGIN, wait_until="domcontentloaded", timeout=60000)
         _btn = "button:has-text('New project'), button:has(i:text('add_2'))"
         try:
             page.locator(_btn).first.wait_for(state="visible", timeout=30000)

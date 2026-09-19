@@ -124,6 +124,10 @@ def test_disconnect_classifier_is_used_by_both_outer_download_handlers():
 
 def test_new_project_click_never_reports_home_as_a_project():
     body = _method("_fa_or_dom_new_project_click")
+    new_host = body.index('if "flow.google.com" in _cur:')
+    real_home = body.index("page.goto(FLOW_ORIGIN", new_host)
+    click = body.index("human_click_element(page, _btn", new_host)
+    assert new_host < real_home < click
     no_project = body.index("clicked New project but no /project/<uuid>")
     refusal = body.index('raise RuntimeError("New project click did not open a Flow project")')
     assert refusal > no_project
