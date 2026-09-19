@@ -597,6 +597,7 @@ class AutoApproveClipClaim(BaseModel):
 
 class AutoApproveClipsRequest(BaseModel):
     claims: List[AutoApproveClipClaim]
+    silent_clip_ids: List[int] = Field(default_factory=list)
 
 
 class RedoRequest(BaseModel):
@@ -7448,7 +7449,13 @@ async def auto_approve_clips(
     if not pending:
         conflict("no unapproved clips remain")
     claim_map = {c.clip_id: c for c in request.claims}
-    if set(claim_map) != {c.id for c in pending} or len(claim_map) != len(request.claims):
+    silent_ids = set(request.silent_clip_ids)
+    if len(silent_ids) != len(request.silent_clip_ids):
+        conflict("silent clip ids contain duplicates")
+    if set(claim_map) & silent_ids:
+        conflict("a clip cannot carry both QC evidence and a silent exemption")
+    if ((set(claim_map) | silent_ids) != {c.id for c in pending}
+            or len(claim_map) != len(request.claims)):
         conflict("claim ids do not match all unapproved clips")
     if any(c.approval_status == "rejected" for c in pending):
         conflict("rejected clips cannot be auto-approved")
@@ -7467,6 +7474,19 @@ async def auto_approve_clips(
             "scene_type": clip.scene_type,
             "render_method": clip.render_method, "qc": clip._safe_qc(),
         }
+        if clip.id in silent_ids:
+            if (str(clip.dialogue_text or "").strip()
+                    or str(clip.dialogue_text_b or "").strip()):
+                conflict(f"clip {clip.id}: silent exemption has dialogue")
+            if str(clip.scene_type or "").strip().lower() == "text_card":
+                conflict(f"clip {clip.id}: text cards cannot be auto-approved")
+            if (clip.status != ClipStatus.COMPLETED.value
+                    or len(versions) != 1
+                    or not clip.selected_variant
+                    or not clip.output_filename
+                    or versions[0].get("filename") != clip.output_filename):
+                conflict(f"clip {clip.id}: silent exemption needs one selected render")
+            continue
         decision = clip_qc.auto_approval_decision(live[clip.id])
         if decision.get("action") != "approve":
             conflict(f"clip {clip.id}: {decision.get('reason')}")
@@ -7487,7 +7507,8 @@ async def auto_approve_clips(
             lineup = None
     for clip in pending:
         versions = json.loads(clip.versions_json) if clip.versions_json else []
-        filename = claim_map[clip.id].filename
+        filename = (clip.output_filename if clip.id in silent_ids
+                    else claim_map[clip.id].filename)
         for version in versions:
             if version.get("filename") == filename:
                 version["approved"] = True
@@ -7506,7 +7527,12 @@ async def auto_approve_clips(
             message=f"Clip {clip.clip_index + 1} auto-approved by QC batch",
         ))
     db.commit()
-    return {"job_id": job_id, "approved_clip_ids": [c.id for c in pending], "status": "approved"}
+    return {
+        "job_id": job_id,
+        "approved_clip_ids": [c.id for c in pending],
+        "silent_clip_ids": sorted(silent_ids),
+        "status": "approved",
+    }
 
 
 @app.get("/api/jobs/{job_id}/clips/active", response_model=List[ClipResponse])

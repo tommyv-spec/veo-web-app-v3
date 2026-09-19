@@ -81,6 +81,23 @@ def _call(db, job_id, claims):
     ))
 
 
+def _silent_clip(db, job_id, index=2, *, dialogue="", versions=1):
+    rows = [
+        {"attempt": n + 1, "filename": f"silent-{index}-{n + 1}.mp4"}
+        for n in range(versions)
+    ]
+    row = Clip(
+        job_id=job_id, clip_index=index, dialogue_id=f"d{index}",
+        dialogue_text=dialogue, status=ClipStatus.COMPLETED.value,
+        approval_status="pending_review", scene_type="shot",
+        output_filename=rows[0]["filename"], selected_variant=1,
+        versions_json=json.dumps(rows), qc_json=None,
+    )
+    db.add(row)
+    db.commit()
+    return row.id
+
+
 def test_batch_approves_two_clips_in_one_mutation():
     db, job_id, claims, ids = _setup()
     real_commit = db.commit
@@ -93,6 +110,37 @@ def test_batch_approves_two_clips_in_one_mutation():
     assert result["approved_clip_ids"] == list(ids)
     assert {c.approval_status for c in db.query(Clip).all()} == {"approved"}
     assert len(commits) == 1
+
+
+def test_batch_accepts_explicit_structurally_silent_clip_without_qc():
+    db, job_id, claims, ids = _setup()
+    silent_id = _silent_clip(db, job_id)
+    result = asyncio.run(main.auto_approve_clips(
+        job_id=job_id,
+        request=main.AutoApproveClipsRequest(
+            claims=claims, silent_clip_ids=[silent_id]),
+        db=db,
+        current_user=SimpleNamespace(id="u1"),
+    ))
+    assert result["approved_clip_ids"] == [*ids, silent_id]
+    assert result["silent_clip_ids"] == [silent_id]
+    assert {c.approval_status for c in db.query(Clip).all()} == {"approved"}
+
+
+@pytest.mark.parametrize("dialogue,versions", [("spoken", 1), ("", 2)])
+def test_silent_exemption_rejects_dialogue_or_ambiguous_versions(dialogue, versions):
+    db, job_id, claims, _ = _setup()
+    silent_id = _silent_clip(db, job_id, dialogue=dialogue, versions=versions)
+    with pytest.raises(main.HTTPException) as exc:
+        asyncio.run(main.auto_approve_clips(
+            job_id=job_id,
+            request=main.AutoApproveClipsRequest(
+                claims=claims, silent_clip_ids=[silent_id]),
+            db=db,
+            current_user=SimpleNamespace(id="u1"),
+        ))
+    assert exc.value.status_code == 409
+    assert db.query(Clip).filter(Clip.id == silent_id).one().approval_status == "pending_review"
 
 
 @pytest.mark.parametrize("mutation", [
